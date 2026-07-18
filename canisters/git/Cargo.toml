@@ -7,8 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-# Path dep during development; switch to the git-tag form once ic-git stabilizes.
-ic-dev-kit-rs = { path = "../../../ic-dev-kit-rs", features = ["storage"] }
+ic-dev-kit-rs = { git = "https://github.com/DrJesseGlass/ic-dev-kit-rs", tag = "v0.3.0", features = ["storage"] }
 
 # Keep these pinned to the versions ic-dev-kit-rs uses.
 ic-cdk = "0.20"

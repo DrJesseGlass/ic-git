@@ -51,7 +51,8 @@ flowchart LR
 ```
 
 - **`git_canister`** (Rust, `ic-cdk` + `ic-stable-structures` +
-  [`ic-dev-kit-rs`](../ic-dev-kit-rs)): HTTP endpoints, pkt-line codec,
+  [`ic-dev-kit-rs`](https://github.com/DrJesseGlass/ic-dev-kit-rs)): HTTP
+  endpoints, pkt-line codec,
   packfile reader/writer, object store, refs, push auth, deploy trigger.
   Multi-repo: path prefix `/<repo>.git/...` keys everything.
   From the dev kit: `http` (request/response types, `upgrade_response()`,
@@ -59,7 +60,7 @@ flowchart LR
   API, persisted across upgrades), and later `large_objects` (chunked
   uploads, see the "Push size" section) and `telemetry`. Streamed clone
   responses use the dev kit's `StreamingStrategy`/`StreamingCallbackToken`
-  types (added on its `http-response-streamed` branch).
+  types (in the dev kit since v0.3.0).
 - **asset canister**: the stock certified-assets canister from the SDK
   (`dfx`'s frontend canister). `git_canister`'s principal is granted `Commit`
   permission so it can upload. Zero custom code here.
@@ -241,8 +242,8 @@ Mitigations, in deployment order:
 
 ## Implementation notes
 
-- **Crates**: `ic-dev-kit-rs` (path dep on `../ic-dev-kit-rs` during
-  development, git tag once stable), pinned to its versions: `ic-cdk 0.20`,
+- **Crates**: `ic-dev-kit-rs` (git tag, currently v0.3.0), pinned to its
+  versions: `ic-cdk 0.20`,
   `candid 0.10`, `ic-stable-structures 0.7`. Plus `ic-cdk-timers` (deploy
   queue), `flate2` (rust-backend/miniz_oxide - pure Rust, wasm-clean),
   `sha1`, `sha2`, `hex`.
