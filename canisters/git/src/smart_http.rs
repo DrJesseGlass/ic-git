@@ -103,7 +103,7 @@ pub fn advertisement(repo: &str, service: Service, head_target: &str) -> Vec<u8>
         ));
     } else {
         for (i, (name, oid)) in entries.iter().enumerate() {
-            let oid = hex::encode(oid.as_slice());
+            let oid = store::oid_hex(oid);
             let line = if i == 0 {
                 format!("{oid} {name}\0{caps}\n")
             } else {

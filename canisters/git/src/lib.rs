@@ -4,6 +4,7 @@
 //! refs + admin API) plus the info/refs advertisement, so `git ls-remote`
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
+mod object;
 mod pack;
 mod smart_http;
 mod store;
@@ -14,7 +15,7 @@ use ic_dev_kit_rs::http::{
     StreamingCallbackToken, StreamingStrategy,
 };
 use smart_http::Service;
-use store::{ObjectType, Oid};
+use store::ObjectType;
 
 // --- lifecycle --------------------------------------------------------------
 
@@ -118,7 +119,8 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
 }
 
-/// POST /<repo>.git/git-upload-pack: negotiation reply or streamed pack.
+/// POST /<repo>.git/git-upload-pack: maps pack.rs's semantic reply onto the
+/// HTTP envelope (status, content-type, streaming).
 fn upload_pack(repo: &str, body: &[u8]) -> HttpResponse {
     const RESULT_CT: &str = "application/x-git-upload-pack-result";
     if !store::repo_exists(repo) {
@@ -128,23 +130,23 @@ fn upload_pack(repo: &str, body: &[u8]) -> HttpResponse {
         Ok(req) => req,
         Err(e) => return git_response(400, "text/plain", format!("error: {e}\n").into_bytes()),
     };
-    if !req.done {
-        // No multi_ack advertised: keep NAKing until the client sends done.
-        return git_response(200, RESULT_CT, smart_http::pkt_line(b"NAK\n"));
-    }
-    match pack::response_body(&req) {
+    match pack::respond(&req) {
         Err(e) => git_response(500, "text/plain", format!("error: {e}\n").into_bytes()),
-        Ok(body) if body.len() <= pack::STREAM_CHUNK => git_response(200, RESULT_CT, body),
-        Ok(body) => {
-            let mut response = git_response(200, RESULT_CT, body[..pack::STREAM_CHUNK].to_vec());
-            response.streaming_strategy = Some(StreamingStrategy::Callback {
-                callback: StreamingCallback::new(
-                    ic_cdk::api::canister_self(),
-                    "http_request_streaming_callback".to_string(),
-                ),
-                token: pack::stream_token(&req, 1),
-            });
-            response
+        Ok(pack::UploadPackReply::Negotiating(body)) => git_response(200, RESULT_CT, body),
+        Ok(pack::UploadPackReply::Pack(body)) if body.len() <= pack::STREAM_CHUNK => {
+            git_response(200, RESULT_CT, body)
+        }
+        Ok(pack::UploadPackReply::Pack(mut body)) => {
+            body.truncate(pack::STREAM_CHUNK);
+            git_response(200, RESULT_CT, body).with_streaming_strategy(
+                StreamingStrategy::Callback {
+                    callback: StreamingCallback::new(
+                        ic_cdk::api::canister_self(),
+                        "http_request_streaming_callback".to_string(),
+                    ),
+                    token: pack::stream_token(&req, 1),
+                },
+            )
         }
     }
 }
@@ -183,36 +185,31 @@ fn create_repo(name: String) -> Result<(), String> {
 #[ic_cdk::update(guard = "auth::is_authorized")]
 fn put_object(object_type: String, content: Vec<u8>) -> Result<String, String> {
     let object_type = ObjectType::parse(&object_type)?;
-    Ok(hex::encode(store::put_object(object_type, &content).as_slice()))
+    Ok(store::oid_hex(&store::put_object(object_type, &content)))
 }
 
 /// Canonical (inflated) object bytes: "<type> <len>\0" + content.
 #[ic_cdk::query]
 fn get_object(oid_hex: String) -> Option<Vec<u8>> {
-    store::get_object(&parse_oid(&oid_hex).ok()?)
+    store::get_object(&store::parse_oid(&oid_hex).ok()?)
 }
 
 #[ic_cdk::update(guard = "auth::is_authorized")]
 fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String> {
-    store::set_ref(&repo, &refname, parse_oid(&oid_hex)?)
+    store::set_ref(&repo, &refname, store::parse_oid(&oid_hex)?)
 }
 
 #[ic_cdk::query]
 fn list_refs(repo: String) -> Vec<(String, String)> {
     store::list_refs(&repo)
         .into_iter()
-        .map(|(name, oid)| (name, hex::encode(oid.as_slice())))
+        .map(|(name, oid)| (name, store::oid_hex(&oid)))
         .collect()
 }
 
 #[ic_cdk::query]
 fn list_repos() -> Vec<String> {
     store::list_repos()
-}
-
-fn parse_oid(oid_hex: &str) -> Result<Oid, String> {
-    let bytes = hex::decode(oid_hex).map_err(|e| format!("bad oid: {e}"))?;
-    Oid::try_from(bytes.as_slice()).map_err(|_| "oid must be 20 bytes".to_string())
 }
 
 ic_cdk::export_candid!();

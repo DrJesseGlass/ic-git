@@ -9,6 +9,7 @@
 //! body rebuild per chunk; fine within the 5B-instruction query budget for
 //! packs up to tens of MiB, and optimizable later with a prefix-hash cache.
 
+use crate::object;
 use crate::smart_http::{parse_pkt_lines, pkt_line, FLUSH_PKT};
 use crate::store::{self, ObjectType, Oid};
 use ic_dev_kit_rs::http::{StreamingCallbackHttpResponse, StreamingCallbackToken};
@@ -52,14 +53,14 @@ pub fn parse_request(body: &[u8]) -> Result<UploadPackRequest, String> {
             }
             if let Some(rest) = line.strip_prefix("want ") {
                 let hex = rest.get(..40).ok_or("short want line")?;
-                req.wants.push(parse_hex_oid(hex)?);
+                req.wants.push(store::parse_oid(hex)?);
                 // Capabilities the client selected ride on the first want line.
                 if rest[40..].contains("side-band-64k") {
                     req.sideband = true;
                 }
             } else if let Some(rest) = line.strip_prefix("have ") {
                 req.haves
-                    .push(parse_hex_oid(rest.get(..40).ok_or("short have line")?)?);
+                    .push(store::parse_oid(rest.get(..40).ok_or("short have line")?)?);
             } else if line == "done" {
                 req.done = true;
             } else {
@@ -74,57 +75,31 @@ pub fn parse_request(body: &[u8]) -> Result<UploadPackRequest, String> {
     Ok(req)
 }
 
-fn parse_hex_oid(hex: &str) -> Result<Oid, String> {
-    let bytes = hex::decode(hex).map_err(|e| format!("bad oid: {e}"))?;
-    Oid::try_from(bytes.as_slice()).map_err(|_| "oid must be 20 bytes".to_string())
-}
-
 // --- closure walk -----------------------------------------------------------
 
-/// Child object ids referenced by an object.
+/// Child object ids referenced by a non-blob object.
 fn children(object_type: ObjectType, content: &[u8]) -> Result<Vec<Oid>, String> {
-    match object_type {
-        ObjectType::Blob => Ok(Vec::new()),
-        ObjectType::Commit | ObjectType::Tag => {
-            // Headers are ASCII lines up to the first empty line:
-            // commit: "tree <hex>", "parent <hex>"*; tag: "object <hex>".
-            let header_end = content
-                .windows(2)
-                .position(|w| w == b"\n\n")
-                .unwrap_or(content.len());
-            let mut out = Vec::new();
-            for line in content[..header_end].split(|&b| b == b'\n') {
-                let line = std::str::from_utf8(line).map_err(|_| "non-utf8 object header")?;
-                for prefix in ["tree ", "parent ", "object "] {
-                    if let Some(hex) = line.strip_prefix(prefix) {
-                        out.push(parse_hex_oid(hex.get(..40).ok_or("short header oid")?)?);
-                    }
-                }
-            }
-            Ok(out)
+    Ok(match object_type {
+        ObjectType::Blob => Vec::new(),
+        ObjectType::Commit => {
+            let refs = object::commit_refs(content)?;
+            let mut out = vec![refs.tree];
+            out.extend(refs.parents);
+            out
         }
-        ObjectType::Tree => {
-            // Entries: "<mode> <name>\0" + 20-byte sha, repeated.
-            let mut out = Vec::new();
-            let mut i = 0;
-            while i < content.len() {
-                let nul = content[i..]
-                    .iter()
-                    .position(|&b| b == 0)
-                    .ok_or("malformed tree entry")?
-                    + i;
-                let sha = content.get(nul + 1..nul + 21).ok_or("malformed tree sha")?;
-                out.push(Oid::try_from(sha).unwrap());
-                i = nul + 21;
-            }
-            Ok(out)
-        }
-    }
+        ObjectType::Tag => vec![object::tag_target(content)?],
+        ObjectType::Tree => object::tree_entries(content)?
+            .into_iter()
+            .map(|e| e.oid)
+            .collect(),
+    })
 }
 
 /// BFS over the object graph from `roots`, skipping anything in `stop`.
-/// `strict` errors on missing objects (wants must be fully present); the
-/// lenient form skips them (haves may reference history we never had).
+/// Blobs are never inflated - their type comes from the value prefix and they
+/// have no children. `strict` errors on missing objects (wants must be fully
+/// present); the lenient form skips them (haves may reference history we
+/// never had).
 fn reachable(
     roots: &[Oid],
     stop: &BTreeSet<Oid>,
@@ -137,17 +112,19 @@ fn reachable(
         if visited.contains(&oid) || stop.contains(&oid) {
             continue;
         }
-        let Some((object_type, content)) = store::get_object_parsed(&oid) else {
+        let Some(stored) = store::get_object_stored(&oid) else {
             if strict {
-                return Err(format!("missing object {}", hex::encode(oid.as_slice())));
+                return Err(format!("missing object {}", store::oid_hex(&oid)));
             }
             continue;
         };
         visited.insert(oid);
-        out.push((oid, object_type));
-        for child in children(object_type, &content)? {
-            if !visited.contains(&child) {
-                queue.push_back(child);
+        out.push((oid, stored.object_type));
+        if stored.object_type != ObjectType::Blob {
+            for child in children(stored.object_type, &stored.content())? {
+                if !visited.contains(&child) {
+                    queue.push_back(child);
+                }
             }
         }
     }
@@ -155,21 +132,19 @@ fn reachable(
 }
 
 /// Objects to pack: everything reachable from `wants` minus everything
-/// reachable from the `haves` we actually possess (the client has those).
+/// reachable from the haves we actually possess (the client has those; the
+/// lenient walk skips haves we never had).
 pub fn closure(wants: &[Oid], haves: &[Oid]) -> Result<Vec<(Oid, ObjectType)>, String> {
-    let known_haves: Vec<Oid> = haves
-        .iter()
-        .copied()
-        .filter(store::has_object)
-        .collect();
-    let have_set: BTreeSet<Oid> = reachable(&known_haves, &BTreeSet::new(), false)?
+    let have_set: BTreeSet<Oid> = reachable(haves, &BTreeSet::new(), false)?
         .into_iter()
         .map(|(oid, _)| oid)
         .collect();
     reachable(wants, &have_set, true)
 }
 
-// --- pack writer ------------------------------------------------------------
+// --- pack format ------------------------------------------------------------
+// (Milestone 3's pack indexer parses this same layout in reverse; keep its
+// decoder adjacent to these when it lands.)
 
 /// Pack entry header: type in bits 6-4 of the first byte, size in little-
 /// endian 4+7+7+... bit groups with MSB continuation.
@@ -192,10 +167,9 @@ pub fn build_pack(objects: &[(Oid, ObjectType)]) -> Vec<u8> {
     pack.extend_from_slice(&2u32.to_be_bytes());
     pack.extend_from_slice(&(objects.len() as u32).to_be_bytes());
     for (oid, _) in objects {
-        let (object_type, size, zlib) =
-            store::get_object_deflated(oid).expect("closure object exists");
-        push_entry_header(&mut pack, object_type, size as u64);
-        pack.extend_from_slice(&zlib);
+        let stored = store::get_object_stored(oid).expect("closure object exists");
+        push_entry_header(&mut pack, stored.object_type, stored.size as u64);
+        pack.extend_from_slice(stored.zlib());
     }
     let digest: [u8; 20] = Sha1::digest(&pack).into();
     pack.extend_from_slice(&digest);
@@ -204,19 +178,32 @@ pub fn build_pack(objects: &[(Oid, ObjectType)]) -> Vec<u8> {
 
 // --- response body & streaming ----------------------------------------------
 
-/// Full HTTP body for a `done` upload-pack request: NAK, then the pack
-/// (sideband-framed when the client asked for side-band-64k).
-pub fn response_body(req: &UploadPackRequest) -> Result<Vec<u8>, String> {
+pub enum UploadPackReply {
+    /// Negotiation continues; the client has not sent `done` yet. With no
+    /// multi_ack advertised, policy is to single-NAK every round.
+    Negotiating(Vec<u8>),
+    /// The full response body: NAK then the (possibly sideband-framed) pack.
+    Pack(Vec<u8>),
+}
+
+pub fn respond(req: &UploadPackRequest) -> Result<UploadPackReply, String> {
+    if !req.done {
+        return Ok(UploadPackReply::Negotiating(pkt_line(b"NAK\n")));
+    }
+    Ok(UploadPackReply::Pack(response_body(req)?))
+}
+
+fn response_body(req: &UploadPackRequest) -> Result<Vec<u8>, String> {
     let objects = closure(&req.wants, &req.haves)?;
     let pack = build_pack(&objects);
     let mut body = pkt_line(b"NAK\n");
     if req.sideband {
-        body.reserve(pack.len() + pack.len() / SIDEBAND_DATA * 24 + 32);
+        // Per frame: 4 hex length bytes + 1 band byte, written in place.
+        body.reserve(pack.len() + (pack.len() / SIDEBAND_DATA + 1) * 5 + FLUSH_PKT.len());
         for chunk in pack.chunks(SIDEBAND_DATA) {
-            let mut payload = Vec::with_capacity(chunk.len() + 1);
-            payload.push(1u8); // band 1: pack data
-            payload.extend_from_slice(chunk);
-            body.extend_from_slice(&pkt_line(&payload));
+            body.extend_from_slice(format!("{:04x}", chunk.len() + 5).as_bytes());
+            body.push(1); // band 1: pack data
+            body.extend_from_slice(chunk);
         }
         body.extend_from_slice(FLUSH_PKT);
     } else {
@@ -225,50 +212,60 @@ pub fn response_body(req: &UploadPackRequest) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
-/// Everything a callback needs to regenerate the body, JSON-packed into the
-/// token's `key` (the gateway round-trips the token verbatim; the fixed
-/// asset-canister token shape has no better slot, so `index` stays 0).
+/// The immutable request state a callback needs to regenerate the body,
+/// JSON-packed into the token's `key`; the chunk number rides in the token's
+/// own `index` field.
 #[derive(Serialize, Deserialize)]
 struct TokenState {
     w: Vec<String>,
     h: Vec<String>,
     sb: bool,
-    i: usize,
 }
 
-pub fn stream_token(req: &UploadPackRequest, next_chunk: usize) -> StreamingCallbackToken {
+pub fn stream_token(req: &UploadPackRequest, next_chunk: u64) -> StreamingCallbackToken {
     let state = TokenState {
-        w: req.wants.iter().map(|o| hex::encode(o.as_slice())).collect(),
-        h: req.haves.iter().map(|o| hex::encode(o.as_slice())).collect(),
+        w: req.wants.iter().map(store::oid_hex).collect(),
+        h: req.haves.iter().map(store::oid_hex).collect(),
         sb: req.sideband,
-        i: next_chunk,
     };
     StreamingCallbackToken {
         key: serde_json::to_string(&state).expect("token serializes"),
         content_encoding: "identity".to_string(),
-        index: candid::Nat::from(0u8),
+        index: candid::Nat::from(next_chunk),
         sha256: None,
     }
 }
 
 pub fn next_chunk(token: &StreamingCallbackToken) -> Result<StreamingCallbackHttpResponse, String> {
+    let index = u64::try_from(&token.index.0).map_err(|_| "bad token index")? as usize;
     let state: TokenState =
         serde_json::from_str(&token.key).map_err(|e| format!("bad token: {e}"))?;
     let req = UploadPackRequest {
-        wants: state.w.iter().map(|h| parse_hex_oid(h)).collect::<Result<_, _>>()?,
-        haves: state.h.iter().map(|h| parse_hex_oid(h)).collect::<Result<_, _>>()?,
+        wants: state
+            .w
+            .iter()
+            .map(|h| store::parse_oid(h))
+            .collect::<Result<_, _>>()?,
+        haves: state
+            .h
+            .iter()
+            .map(|h| store::parse_oid(h))
+            .collect::<Result<_, _>>()?,
         done: true,
         sideband: state.sb,
     };
     let body = response_body(&req)?;
-    let start = state.i * STREAM_CHUNK;
+    let start = index * STREAM_CHUNK;
     if start >= body.len() {
         return Err("token past end of body".into());
     }
     let end = (start + STREAM_CHUNK).min(body.len());
     Ok(StreamingCallbackHttpResponse {
         body: body[start..end].to_vec(),
-        token: (end < body.len()).then(|| stream_token(&req, state.i + 1)),
+        token: (end < body.len()).then(|| StreamingCallbackToken {
+            index: candid::Nat::from(index as u64 + 1),
+            ..token.clone()
+        }),
     })
 }
 
@@ -300,7 +297,7 @@ mod tests {
             ObjectType::Commit,
             format!(
                 "tree {}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n",
-                hex::encode(tree.as_slice())
+                store::oid_hex(&tree)
             )
             .as_bytes(),
         );

@@ -29,7 +29,7 @@ while read -r oid; do
         exit 1
     fi
     count=$((count + 1))
-done < <(git -C "$src" rev-list --objects --all | cut -d' ' -f1 | sort -u)
+done < <(git -C "$src" rev-list --objects --all | cut -d' ' -f1)
 echo "uploaded $count objects"
 
 git -C "$src" for-each-ref refs/heads refs/tags --format='%(refname) %(objectname)' \

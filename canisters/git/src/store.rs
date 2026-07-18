@@ -22,6 +22,15 @@ type Memory = VirtualMemory<DefaultMemoryImpl>;
 /// 20-byte SHA-1 object id.
 pub type Oid = Blob<20>;
 
+pub fn parse_oid(hex: &str) -> Result<Oid, String> {
+    let bytes = hex::decode(hex).map_err(|e| format!("bad oid: {e}"))?;
+    Oid::try_from(bytes.as_slice()).map_err(|_| "oid must be 20 bytes".to_string())
+}
+
+pub fn oid_hex(oid: &Oid) -> String {
+    hex::encode(oid.as_slice())
+}
+
 /// Git object type; discriminants are the packfile type codes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ObjectType {
@@ -97,10 +106,16 @@ thread_local! {
 
 // --- objects ----------------------------------------------------------------
 
+/// Canonical object header: "<type> <len>\0". The oid is the SHA-1 of this
+/// header followed by the content.
+fn canonical_header(object_type: ObjectType, len: usize) -> String {
+    format!("{} {len}\0", object_type.as_str())
+}
+
 /// Store a git object. Returns the oid (SHA-1 of the canonical form).
 pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
     let mut hasher = Sha1::new();
-    hasher.update(format!("{} {}\0", object_type.as_str(), content.len()).as_bytes());
+    hasher.update(canonical_header(object_type, content.len()).as_bytes());
     hasher.update(content);
     let digest: [u8; 20] = hasher.finalize().into();
     let oid = Oid::try_from(digest.as_slice()).unwrap();
@@ -118,30 +133,51 @@ pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
     oid
 }
 
-/// Fetch an object as (type, content).
-pub fn get_object_parsed(oid: &Oid) -> Option<(ObjectType, Vec<u8>)> {
-    let (object_type, size, zlib) = get_object_deflated(oid)?;
-    let mut content = Vec::with_capacity(size as usize);
-    ZlibDecoder::new(zlib.as_slice())
-        .read_to_end(&mut content)
-        .expect("stored object is valid zlib");
-    Some((object_type, content))
+/// A stored object as read from stable memory - type and inflated size are
+/// parsed; the zlib(content) stream is borrowed from the value, so serving it
+/// (e.g. as a pack entry) copies once and never recompresses.
+pub struct StoredObject {
+    pub object_type: ObjectType,
+    pub size: u32,
+    value: Vec<u8>,
 }
 
-/// Fetch an object's type, inflated size, and raw zlib(content) stream -
-/// pack-entry compatible, so the pack writer serves it without recompressing.
-pub fn get_object_deflated(oid: &Oid) -> Option<(ObjectType, u32, Vec<u8>)> {
+impl StoredObject {
+    /// The raw zlib(content) stream, pack-entry compatible.
+    pub fn zlib(&self) -> &[u8] {
+        &self.value[5..]
+    }
+
+    /// Inflate the content.
+    pub fn content(&self) -> Vec<u8> {
+        let mut content = Vec::with_capacity(self.size as usize);
+        ZlibDecoder::new(self.zlib())
+            .read_to_end(&mut content)
+            .expect("stored object is valid zlib");
+        content
+    }
+}
+
+pub fn get_object_stored(oid: &Oid) -> Option<StoredObject> {
     let value = OBJECTS.with(|o| o.borrow().get(oid))?;
-    let object_type =
-        ObjectType::from_pack_code(value[0]).expect("stored object has valid type code");
-    let size = u32::from_le_bytes(value[1..5].try_into().unwrap());
-    Some((object_type, size, value[5..].to_vec()))
+    Some(StoredObject {
+        object_type: ObjectType::from_pack_code(value[0])
+            .expect("stored object has valid type code"),
+        size: u32::from_le_bytes(value[1..5].try_into().unwrap()),
+        value,
+    })
+}
+
+/// Fetch an object as (type, content).
+pub fn get_object_parsed(oid: &Oid) -> Option<(ObjectType, Vec<u8>)> {
+    let stored = get_object_stored(oid)?;
+    Some((stored.object_type, stored.content()))
 }
 
 /// Fetch an object in canonical form: "<type> <len>\0" + content.
 pub fn get_object(oid: &Oid) -> Option<Vec<u8>> {
     let (object_type, content) = get_object_parsed(oid)?;
-    let header = format!("{} {}\0", object_type.as_str(), content.len());
+    let header = canonical_header(object_type, content.len());
     let mut canonical = Vec::with_capacity(header.len() + content.len());
     canonical.extend_from_slice(header.as_bytes());
     canonical.extend_from_slice(&content);
