@@ -22,6 +22,7 @@ use store::ObjectType;
 #[ic_cdk::init]
 fn init() {
     auth::init_with_caller();
+    store::init_schema_version();
 }
 
 #[ic_cdk::pre_upgrade]
@@ -31,6 +32,7 @@ fn pre_upgrade() {
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
+    store::check_schema_version();
     auth::init_from_saved(store::load_auth_snapshot());
 }
 

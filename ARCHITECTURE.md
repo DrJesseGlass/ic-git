@@ -82,6 +82,11 @@ tokens   : StableBTreeMap<[u8;32], TokenMeta> // sha256(push token) -> repo perm
 deploy_q : StableVec<DeployJob>               // pending deploys (see the Deploy section)
 ```
 
+A schema version stamped in the meta map guards the value encoding:
+post_upgrade traps (aborting the upgrade, keeping the old code serving) if
+stable data was written under a different layout, so format changes need an
+explicit migration and can never be misread mid-request.
+
 At 500 GiB stable memory and ~$5/GiB-year storage cost, capacity is not the
 issue; per-message throughput is.
 

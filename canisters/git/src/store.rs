@@ -266,6 +266,41 @@ pub fn load_auth_snapshot() -> Option<Vec<u8>> {
     META.with(|m| storage::load_bytes(m, "auth"))
 }
 
+// --- schema version ----------------------------------------------------------
+
+/// Encoding version of OBJECTS values ([pack type code][content len u32 LE]
+/// [zlib(content)] is schema 1). Bump on any layout change and add a
+/// migration in check_schema_version. Pre-release encodings were never
+/// deployed anywhere, so schema 1 is the first that can exist in stable
+/// memory; the old layouts cannot be sniffed apart anyway (byte 1 of a
+/// length-prefix-free value is the zlib magic 0x78, a valid length byte).
+const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_KEY: &str = "schema";
+
+pub fn init_schema_version() {
+    META.with(|m| storage::save_bytes(m, SCHEMA_KEY, SCHEMA_VERSION.to_le_bytes().to_vec()));
+}
+
+/// Run in post_upgrade: refuse to serve stable data written under a different
+/// encoding - trapping here aborts the upgrade and leaves the old code
+/// running, instead of misreading objects mid-request later.
+pub fn check_schema_version() {
+    let stored = META
+        .with(|m| storage::load_bytes(m, SCHEMA_KEY))
+        .map(|b| u32::from_le_bytes(b.try_into().expect("schema marker is 4 bytes")));
+    match stored {
+        Some(v) if v == SCHEMA_VERSION => {}
+        Some(v) => ic_cdk::trap(&format!(
+            "object store schema {v}, code expects {SCHEMA_VERSION}: migrate before upgrading"
+        )),
+        None if OBJECTS.with(|o| o.borrow().is_empty()) => init_schema_version(),
+        None => ic_cdk::trap(
+            "object store holds data without a schema marker (pre-release encoding): \
+             reinstall and reseed",
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
