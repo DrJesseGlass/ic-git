@@ -43,6 +43,10 @@ impl Service {
 /// The `0000` flush packet.
 pub const FLUSH_PKT: &[u8] = b"0000";
 
+/// The all-zero oid git uses for "no value" (empty-repo advertisement, ref
+/// creation/deletion in push commands).
+pub const ZERO_OID: &str = "0000000000000000000000000000000000000000";
+
 /// Encode one pkt-line: 4 hex length bytes (incl. the 4) + payload.
 pub fn pkt_line(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 4);
@@ -99,7 +103,7 @@ pub fn advertisement(repo: &str, service: Service, head_target: &str) -> Vec<u8>
     body.extend_from_slice(FLUSH_PKT);
     if entries.is_empty() {
         body.extend_from_slice(&pkt_line(
-            format!("{} capabilities^{{}}\0{caps}\n", "0".repeat(40)).as_bytes(),
+            format!("{ZERO_OID} capabilities^{{}}\0{caps}\n").as_bytes(),
         ));
     } else {
         for (i, (name, oid)) in entries.iter().enumerate() {

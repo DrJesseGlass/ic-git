@@ -91,11 +91,19 @@ At 500 GiB stable memory and ~$5/GiB-year storage cost, capacity is not the
 issue; per-message throughput is.
 
 RepoMeta carries the deploy config, read from `.ic-deploy.json` at the repo
-root on each main update (fall back to defaults):
+root on each main update (fall back to defaults). Two modes:
 
 ```json
 { "source_dir": "dist", "asset_canister": "<principal>", "branch": "main" }
 ```
+
+```json
+{ "wasm": "artifacts/canister.wasm.gz", "canister": "<principal>", "mode": "upgrade" }
+```
+
+Asset mode publishes a static site; wasm mode reads the blob from the pushed
+tree and upgrades the target canister via the management canister's
+`install_code` - merge-to-main deploys canister code, not just sites.
 
 ## Protocol: what we implement
 
@@ -193,8 +201,18 @@ instruction budget per deploy step is fresh.
    from a stored cursor (batch id + remaining paths). Failures leave the queue
    entry with an error for `deploy_status` query to report.
 
+Wasm mode replaces steps 2-3: read the configured wasm blob from the tree
+and call `install_code` (chunked install when the module exceeds
+inter-canister payload limits) with `mode = upgrade` on the target;
+`deploy_status` reports the installed module hash so reproducible builders
+can verify what is running. Building stays off-chain (rustc cannot run in a
+canister); reproducible builds + the reported hash make the off-chain step
+verifiable. Self-upgrading the git canister itself needs a small controller
+canister between pusher and target - out of scope for m4.
+
 Setup requirement: the asset canister must `grant_permission(Commit)` to the
-git canister's principal (one-time, done by `dfx` in the deploy script).
+git canister's principal; wasm-mode targets must have the git canister as a
+controller.
 
 ### Trust model (why raw-domain is not the weak point)
 
@@ -269,15 +287,68 @@ Mitigations, in deployment order:
    streaming pack writer. Seed objects via `tools/seed-repo.sh`; `git clone`,
    `git fetch`, and multi-chunk streamed packs verified against a local
    replica.
-3. **Push** - receive-pack: pack indexer with delta resolution (incl. thin
-   packs), ff-check, report-status. Round-trip: push then re-clone,
-   `git fsck` clean.
-4. **Deploy hook** - timer queue, tree walk, asset-canister batch upload,
-   `.ic-deploy.json`. Push to main -> site updates.
-5. **Auth + polish** - push tokens, multi-repo routing, `ic-push.sh` splitter,
-   cycles/limits docs.
-6. **(v2)** `git-remote-ic` helper: chunked, identity-signed push; private
-   repos; certified read responses.
+3. **Push** (done) - receive-pack: pack indexer with delta resolution
+   (OFS/REF deltas incl. thin packs), connectivity check, ff-check via
+   `object::commit_refs` ancestry, report-status, push tokens with 401
+   Basic-auth challenge. Verified: push, re-clone (`git fsck` clean),
+   incremental thin-pack push, bad-token 401, non-fast-forward rejection.
+4. **Deploy hook** - timer queue, tree walk (`object::tree_entries` already
+   preserves names+modes), `.ic-deploy.json` with two modes: asset-canister
+   batch upload (sites) and `install_code` (canister upgrades from wasm
+   blobs in the tree). Push to main -> site or canister updates.
+5. **Self-host** - push this repo's source to its own canister and make that
+   the canonical remote. The canister deploys static assets on merge; it
+   cannot build Rust on-chain, so upgrading the git canister itself stays an
+   off-chain step (clone from the canister, cargo build, dfx deploy - a
+   small CI script). The source pack is well under the 2 MiB ingress cap,
+   so stock `git push` suffices.
+6. **Visibility** - repo ownership + private/public (design below).
+7. **Billing** - per-repo cycles balances (design below).
+8. **(v2)** `git-remote-ic` helper: chunked, identity-signed push; certified
+   read responses; vetKD-encrypted private repos.
+
+## Visibility and billing (design sketch)
+
+**Ownership.** `create_repo` records `msg_caller()` as owner. Owners manage
+visibility, reader/writer token grants, and the repo's cycles balance.
+
+**Private repos.** A `visibility` flag per repo. Enforcement on every read
+surface:
+
+- Candid queries (`get_object`, `list_refs`, ...): check `msg_caller()`
+  against the owner/reader list - identity is free on candid calls.
+- Smart HTTP (`info/refs`, `upload-pack`): HTTP-gateway requests are
+  anonymous, so private repos require a read-scoped bearer token in the
+  Authorization header (hashed server-side, like push tokens).
+- Streaming callbacks: `http_request_streaming_callback` is a public query
+  and its token names arbitrary wants - unguarded, a forged token would
+  stream any private closure. Fix: bind an HMAC over the token state with a
+  canister secret (32 bytes from `raw_rand` at init, kept in the meta map);
+  the callback recomputes and rejects mismatches.
+
+Honesty note: this is access control, not confidentiality. Replica node
+operators can read canister memory; the boundary node sees tokens in
+cleartext at TLS termination. True at-rest privacy is vetKD envelope
+encryption in v2 - v1 private repos keep honest people and the public out,
+nothing stronger.
+
+**Billing.** The canister pays the subnet for storage/compute from one
+cycles pool; per-repo accounting is bookkeeping on top of it:
+
+- `deposit(repo)` update call accepting attached cycles
+  (`msg_cycles_accept`) into the repo's balance.
+- Exact-usage metering (the IC already meters precisely; we attribute):
+  storage rent charged periodically by a timer - per-repo stored bytes x
+  the subnet storage rate x elapsed time - and execution charged per
+  update call (push, deploy) from the call's actual instruction count
+  (`performance_counter`) x the subnet's per-instruction cycle price, plus
+  ingress costs. No markup beyond a small buffer for the canister's own
+  overhead; the goal is self-sustaining, not profitable.
+- Balance exhausted: writes and deploys freeze, reads stay up (queries cost
+  the canister approximately nothing). A grace window before freezing
+  avoids flapping on tiny balances.
+- v2: an ICP/ICRC-1 ledger front-end that converts to cycles via the CMC,
+  so users pay in tokens instead of raw cycles.
 
 ## Open questions
 

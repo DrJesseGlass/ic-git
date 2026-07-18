@@ -143,13 +143,16 @@ pub fn closure(wants: &[Oid], haves: &[Oid]) -> Result<Vec<(Oid, ObjectType)>, S
 }
 
 // --- pack format ------------------------------------------------------------
-// (Milestone 3's pack indexer parses this same layout in reverse; keep its
-// decoder adjacent to these when it lands.)
+// Encoder (upload-pack) and decoder (receive-pack) of the same wire layout,
+// kept adjacent so they cannot drift apart.
 
-/// Pack entry header: type in bits 6-4 of the first byte, size in little-
-/// endian 4+7+7+... bit groups with MSB continuation.
-fn push_entry_header(pack: &mut Vec<u8>, object_type: ObjectType, size: u64) {
-    let mut byte = ((object_type as u8) << 4) | (size & 0x0F) as u8;
+const OFS_DELTA: u8 = 6;
+const REF_DELTA: u8 = 7;
+
+/// Pack entry header: type code in bits 6-4 of the first byte, size in
+/// little-endian 4+7+7+... bit groups with MSB continuation.
+fn push_entry_header(pack: &mut Vec<u8>, type_code: u8, size: u64) {
+    let mut byte = (type_code << 4) | (size & 0x0F) as u8;
     let mut size = size >> 4;
     while size > 0 {
         pack.push(byte | 0x80);
@@ -157,6 +160,189 @@ fn push_entry_header(pack: &mut Vec<u8>, object_type: ObjectType, size: u64) {
         size >>= 7;
     }
     pack.push(byte);
+}
+
+/// Decode an entry header at `pos`: (type code, inflated size, next pos).
+/// For delta entries the size is the inflated size of the delta data.
+fn parse_entry_header(data: &[u8], mut pos: usize) -> Result<(u8, u64, usize), String> {
+    let mut byte = *data.get(pos).ok_or("truncated pack entry")?;
+    pos += 1;
+    let type_code = (byte >> 4) & 0x07;
+    let mut size = (byte & 0x0F) as u64;
+    let mut shift = 4;
+    while byte & 0x80 != 0 {
+        byte = *data.get(pos).ok_or("truncated size varint")?;
+        pos += 1;
+        size |= ((byte & 0x7F) as u64) << shift;
+        shift += 7;
+    }
+    Ok((type_code, size, pos))
+}
+
+/// OFS_DELTA base offset: big-endian 7-bit groups where each continuation
+/// adds an implicit +1 (git's "offset encoding").
+fn parse_ofs_offset(data: &[u8], mut pos: usize) -> Result<(u64, usize), String> {
+    let mut byte = *data.get(pos).ok_or("truncated ofs offset")?;
+    pos += 1;
+    let mut offset = (byte & 0x7F) as u64;
+    while byte & 0x80 != 0 {
+        byte = *data.get(pos).ok_or("truncated ofs offset")?;
+        pos += 1;
+        offset = ((offset + 1) << 7) | (byte & 0x7F) as u64;
+    }
+    Ok((offset, pos))
+}
+
+/// Little-endian 7-bit size varint used inside delta data.
+fn parse_delta_size(delta: &[u8], mut pos: usize) -> Result<(u64, usize), String> {
+    let mut size = 0u64;
+    let mut shift = 0;
+    loop {
+        let byte = *delta.get(pos).ok_or("truncated delta size")?;
+        pos += 1;
+        size |= ((byte & 0x7F) as u64) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            return Ok((size, pos));
+        }
+    }
+}
+
+/// Apply a git delta (copy/insert instruction stream) to `base`.
+pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
+    let (src_size, pos) = parse_delta_size(delta, 0)?;
+    if src_size as usize != base.len() {
+        return Err("delta source size mismatch".into());
+    }
+    let (dst_size, mut pos) = parse_delta_size(delta, pos)?;
+    let mut out = Vec::with_capacity(dst_size as usize);
+    while pos < delta.len() {
+        let op = delta[pos];
+        pos += 1;
+        if op & 0x80 != 0 {
+            // Copy from base: bits 0-3 select offset bytes, 4-6 size bytes.
+            let mut offset = 0u64;
+            let mut size = 0u64;
+            for i in 0..4 {
+                if op & (1 << i) != 0 {
+                    offset |= (*delta.get(pos).ok_or("truncated copy offset")? as u64) << (8 * i);
+                    pos += 1;
+                }
+            }
+            for i in 0..3 {
+                if op & (1 << (4 + i)) != 0 {
+                    size |= (*delta.get(pos).ok_or("truncated copy size")? as u64) << (8 * i);
+                    pos += 1;
+                }
+            }
+            if size == 0 {
+                size = 0x10000;
+            }
+            let start = offset as usize;
+            let end = start.checked_add(size as usize).ok_or("copy overflow")?;
+            out.extend_from_slice(base.get(start..end).ok_or("delta copy out of range")?);
+        } else if op != 0 {
+            // Insert literal bytes.
+            let n = op as usize;
+            out.extend_from_slice(delta.get(pos..pos + n).ok_or("delta insert out of range")?);
+            pos += n;
+        } else {
+            return Err("delta opcode 0".into());
+        }
+    }
+    if out.len() as u64 != dst_size {
+        return Err("delta target size mismatch".into());
+    }
+    Ok(out)
+}
+
+/// Inflate one zlib stream starting at `pos`; returns (content, bytes consumed).
+fn inflate_from(data: &[u8], pos: usize) -> Result<(Vec<u8>, usize), String> {
+    let mut decoder = flate2::read::ZlibDecoder::new(&data[pos..]);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out).map_err(|e| format!("pack zlib: {e}"))?;
+    Ok((out, decoder.total_in() as usize))
+}
+
+/// Parse a received pack, verify the trailer, resolve deltas (in-pack and
+/// thin-pack bases alike are read back from the store), and store every
+/// object. Returns the stored oids in pack order.
+pub fn ingest_pack(data: &[u8]) -> Result<Vec<Oid>, String> {
+    if data.len() < 32 || &data[..4] != b"PACK" {
+        return Err("bad pack header".into());
+    }
+    let version = u32::from_be_bytes(data[4..8].try_into().unwrap());
+    if version != 2 && version != 3 {
+        return Err(format!("unsupported pack version {version}"));
+    }
+    let count = u32::from_be_bytes(data[8..12].try_into().unwrap());
+    let content_end = data.len() - 20;
+    let digest: [u8; 20] = Sha1::digest(&data[..content_end]).into();
+    if digest.as_slice() != &data[content_end..] {
+        return Err("pack checksum mismatch".into());
+    }
+
+    let mut pos = 12;
+    // Entry start offset -> oid, for OFS_DELTA base resolution. Delta bases
+    // are read back from the store rather than pinned in heap: every earlier
+    // entry has already been persisted by the time a delta references it.
+    let mut by_offset: std::collections::BTreeMap<usize, Oid> = std::collections::BTreeMap::new();
+    let mut oids = Vec::with_capacity(count as usize);
+
+    for _ in 0..count {
+        let entry_start = pos;
+        let (type_code, size, p) = parse_entry_header(data, pos)?;
+        pos = p;
+        let oid = match type_code {
+            1..=4 => {
+                let (content, consumed) = inflate_from(data, pos)?;
+                if content.len() as u64 != size {
+                    return Err("entry size mismatch".into());
+                }
+                // The wire zlib stream is exactly what the store persists;
+                // reuse it instead of re-deflating the content.
+                let object_type = ObjectType::from_pack_code(type_code).unwrap();
+                let oid = store::put_object_zlib(object_type, &content, &data[pos..pos + consumed]);
+                pos += consumed;
+                oid
+            }
+            OFS_DELTA | REF_DELTA => {
+                let base_oid = if type_code == OFS_DELTA {
+                    let (offset, p) = parse_ofs_offset(data, pos)?;
+                    pos = p;
+                    let base_start = entry_start
+                        .checked_sub(offset as usize)
+                        .ok_or("ofs delta offset out of range")?;
+                    *by_offset
+                        .get(&base_start)
+                        .ok_or("ofs delta base not found")?
+                } else {
+                    let oid =
+                        Oid::try_from(data.get(pos..pos + 20).ok_or("truncated ref delta base")?)
+                            .unwrap();
+                    pos += 20;
+                    oid
+                };
+                let (delta, consumed) = inflate_from(data, pos)?;
+                pos += consumed;
+                if delta.len() as u64 != size {
+                    return Err("delta size mismatch".into());
+                }
+                // In-pack bases were stored above; thin packs reference bases
+                // only the server has. The store covers both.
+                let (base_type, base) = store::get_object_parsed(&base_oid)
+                    .ok_or_else(|| format!("delta base {} missing", store::oid_hex(&base_oid)))?;
+                store::put_object(base_type, &apply_delta(&base, &delta)?)
+            }
+            t => return Err(format!("unsupported pack entry type {t}")),
+        };
+        by_offset.insert(entry_start, oid);
+        oids.push(oid);
+    }
+    if pos != content_end {
+        return Err("pack length mismatch".into());
+    }
+    Ok(oids)
 }
 
 /// A version-2 packfile with no deltas: stored zlib streams are emitted
@@ -168,7 +354,7 @@ pub fn build_pack(objects: &[(Oid, ObjectType)]) -> Vec<u8> {
     pack.extend_from_slice(&(objects.len() as u32).to_be_bytes());
     for (oid, _) in objects {
         let stored = store::get_object_stored(oid).expect("closure object exists");
-        push_entry_header(&mut pack, stored.object_type, stored.size as u64);
+        push_entry_header(&mut pack, stored.object_type as u8, stored.size as u64);
         pack.extend_from_slice(stored.zlib());
     }
     let digest: [u8; 20] = Sha1::digest(&pack).into();
@@ -276,14 +462,84 @@ mod tests {
     #[test]
     fn entry_header_varint() {
         let mut small = Vec::new();
-        push_entry_header(&mut small, ObjectType::Blob, 5);
+        push_entry_header(&mut small, ObjectType::Blob as u8, 5);
         assert_eq!(small, vec![0b0011_0101]); // type 3, size 5, no continuation
 
         let mut large = Vec::new();
-        push_entry_header(&mut large, ObjectType::Commit, 0b1010_0111_1100); // 2684
-        // low 4 bits (0b1100) + type 1 + MSB; then 7 bits 0b010_0111 + MSB
-        // (the remaining group 0b1010_0111 exceeds 7 bits); then final 0b1.
+        // 2684: low 4 bits (0b1100) + type 1 + MSB; then 7 bits 0b010_0111 +
+        // MSB (the remaining group 0b1010_0111 exceeds 7 bits); then final 0b1.
+        push_entry_header(&mut large, ObjectType::Commit as u8, 0b1010_0111_1100);
         assert_eq!(large, vec![0b1001_1100, 0b1010_0111, 0b0000_0001]);
+    }
+
+    #[test]
+    fn delta_copy_and_insert() {
+        let base = b"hello world";
+        // src size 11, dst size 16; copy(offset 0, size 5) + insert " there" +
+        // copy(offset 5, size 6) -> "hello there world"... sizes: 5+6+6 = 17.
+        let mut delta = vec![11, 17];
+        delta.push(0b1001_0001); // copy: offset byte 0 present, size byte 0 present
+        delta.extend_from_slice(&[0, 5]);
+        delta.push(6); // insert 6 literal bytes
+        delta.extend_from_slice(b" there");
+        delta.push(0b1001_0001);
+        delta.extend_from_slice(&[5, 6]);
+        assert_eq!(apply_delta(base, &delta).unwrap(), b"hello there world");
+
+        assert!(apply_delta(b"wrong len", &delta).is_err());
+    }
+
+    #[test]
+    fn ingest_round_trips_built_pack() {
+        // Build objects, pack them with our writer, wipe nothing (the store
+        // is content-addressed so re-ingest is idempotent), ingest, compare.
+        let blob = store::put_object(ObjectType::Blob, b"round trip");
+        let mut tree = Vec::new();
+        tree.extend_from_slice(b"100644 f\0");
+        tree.extend_from_slice(blob.as_slice());
+        let tree = store::put_object(ObjectType::Tree, &tree);
+        let pack = build_pack(&[(blob, ObjectType::Blob), (tree, ObjectType::Tree)]);
+
+        let oids = ingest_pack(&pack).unwrap();
+        assert_eq!(oids, vec![blob, tree]);
+
+        // Corrupt the trailer: must be rejected.
+        let mut bad = pack.clone();
+        let n = bad.len();
+        bad[n - 1] ^= 0xFF;
+        assert!(ingest_pack(&bad).unwrap_err().contains("checksum"));
+    }
+
+    #[test]
+    fn ingest_resolves_ref_delta_against_store() {
+        let base_content = b"the quick brown fox jumps over the lazy dog";
+        let base = store::put_object(ObjectType::Blob, base_content);
+
+        // Delta: copy the whole base, then append "!".
+        let mut delta = vec![base_content.len() as u8, base_content.len() as u8 + 1];
+        delta.push(0b1001_0001);
+        delta.extend_from_slice(&[0, base_content.len() as u8]);
+        delta.push(1);
+        delta.push(b'!');
+
+        // Hand-build a one-entry thin pack: REF_DELTA against the stored base.
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        pack.extend_from_slice(&2u32.to_be_bytes());
+        pack.extend_from_slice(&1u32.to_be_bytes());
+        push_entry_header(&mut pack, REF_DELTA, delta.len() as u64);
+        pack.extend_from_slice(base.as_slice());
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, &delta).unwrap();
+        pack.extend_from_slice(&enc.finish().unwrap());
+        let digest: [u8; 20] = Sha1::digest(&pack).into();
+        pack.extend_from_slice(&digest);
+
+        let oids = ingest_pack(&pack).unwrap();
+        assert_eq!(oids.len(), 1);
+        let (t, content) = store::get_object_parsed(&oids[0]).unwrap();
+        assert_eq!(t, ObjectType::Blob); // delta inherits the base's type
+        assert_eq!(content, b"the quick brown fox jumps over the lazy dog!");
     }
 
     #[test]

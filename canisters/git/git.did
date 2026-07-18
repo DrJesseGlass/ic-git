@@ -47,6 +47,8 @@ service : {
   create_repo : (text) -> (Result);
   put_object : (text, blob) -> (ResultText);
   set_ref : (text, text, text) -> (Result);
+  create_push_token : (text) -> (ResultText);
+  revoke_push_token : (text) -> (bool);
 
   // public reads
   get_object : (text) -> (opt blob) query;
