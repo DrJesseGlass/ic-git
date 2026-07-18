@@ -57,9 +57,9 @@ flowchart LR
   From the dev kit: `http` (request/response types, `upgrade_response()`,
   routing helpers), `auth` (principal allowlist guarding the candid admin
   API, persisted across upgrades), and later `large_objects` (chunked
-  uploads, see the "Push size" section) and `telemetry`. Gap to add upstream: the dev
-  kit's `HttpResponse` has no `streaming_strategy` field yet - required for
-  milestone 2's streamed clone responses.
+  uploads, see the "Push size" section) and `telemetry`. Streamed clone
+  responses use the dev kit's `StreamingStrategy`/`StreamingCallbackToken`
+  types (added on its `http-response-streamed` branch).
 - **asset canister**: the stock certified-assets canister from the SDK
   (`dfx`'s frontend canister). `git_canister`'s principal is granted `Commit`
   permission so it can upload. Zero custom code here.
@@ -74,7 +74,7 @@ Everything content-addressed and loose - no server-side packs, no GC needed
 because objects are immutable and refs only add reachability.
 
 ```
-objects  : StableBTreeMap<[u8;20], Vec<u8>>   // SHA-1 -> zlib-deflated "type len\0" + body
+objects  : StableBTreeMap<[u8;20], Vec<u8>>   // SHA-1 -> [pack type code][content len u32 LE][zlib(content)]
 refs     : StableBTreeMap<(RepoId, String), [u8;20]>   // "refs/heads/main" -> oid
 repos    : StableBTreeMap<RepoId, RepoMeta>   // HEAD symref, deploy config, created_at
 tokens   : StableBTreeMap<[u8;32], TokenMeta> // sha256(push token) -> repo perms
@@ -107,10 +107,13 @@ is well under limits; the *response* streams.
 
 Advertised capabilities, deliberately tiny:
 `report-status delete-refs ofs-delta agent=ic-git/0.1` on receive-pack;
-`multi_ack_detailed no-done ofs-delta agent=ic-git/0.1` on upload-pack.
-We do **not** advertise `shallow`, `filter`, or `side-band-64k`... actually we
-**do** want `side-band-64k` on upload-pack (progress + data mux is how every
-real server streams packs; git handles it natively).
+`side-band-64k ofs-delta agent=ic-git/0.1` on upload-pack.
+No `multi_ack`/`no-done`: the server single-NAKs every negotiation round
+until the client sends `done`, then packs. Correct and simple; the cost is
+that incremental fetches receive a full pack (the client never learns which
+commits are common, so it reports "no common commits" and takes everything).
+Revisit with `multi_ack_detailed` if fetch traffic ever matters. No
+`shallow` or `filter` either.
 
 ### Clone/fetch path (query, streaming)
 
@@ -118,18 +121,23 @@ real server streams packs; git handles it natively).
    the closure of commits + trees + blobs + tags. Plain BFS over the object
    store; no bitmaps in v1.
 2. Emit a packfile with **no deltas**: header, then each object as
-   `type+size varint` + zlib-deflated body (we store bodies already deflated -
-   recompression is avoidable by storing raw zlib streams compatible with pack
-   entries), trailing SHA-1.
+   `type+size varint` + its stored zlib stream verbatim (the store's value
+   format is `[pack type code][content len u32][zlib(content)]`, so no
+   recompression and no inflation on the emit path), trailing SHA-1.
 3. Serve via the HTTP gateway streaming strategy: the first response carries
-   the first ~1.5 MiB and a callback token `{repo, pack_id, offset}`; the
-   gateway keeps calling `http_request_streaming_callback` until done. Pack
-   state between callbacks is recomputed deterministically from the token
-   (object list is re-derived or cached in a bounded LRU in heap - heap cache
-   is fine to lose on upgrade).
+   the first 1.5 MiB and a callback token holding `{wants, haves, sideband,
+   chunk index}` (JSON in the token's `key`); the gateway keeps calling
+   `http_request_streaming_callback` until done. Each callback
+   deterministically regenerates the full body and slices its chunk: objects
+   are immutable and the wants are pinned in the token, so the bytes are
+   identical on every call - no cross-callback state, and a push landing
+   mid-clone cannot corrupt the stream.
 
-Cost: clones of a repo with tens of thousands of objects fit comfortably in
-the 5 B-instruction query budget per chunk since each chunk only inflates ~2 MiB.
+Cost: a full body rebuild per chunk (BFS closure + memcpy of stored zlib
+streams; nothing is inflated except commit/tree metadata during the walk).
+Comfortable within the 5 B-instruction query budget for packs up to tens of
+MiB; if bigger repos matter later, cache pack prefixes and their running
+SHA-1 keyed by the token.
 
 ### Push path (update)
 
@@ -249,10 +257,12 @@ Mitigations, in deployment order:
 
 ## Milestones
 
-1. **Skeleton + store** - canister with candid admin API: put/get object,
-   set ref, list refs. Unit tests with `pocket-ic`.
-2. **Clone** - pkt-line codec, ref advertisement, upload-pack with streaming
-   pack writer. Seed objects via admin API; `git clone` from raw URL works.
+1. **Skeleton + store** (done) - canister with candid admin API: put/get
+   object, set ref, list refs.
+2. **Clone** (done) - pkt-line codec, ref advertisement, upload-pack with
+   streaming pack writer. Seed objects via `tools/seed-repo.sh`; `git clone`,
+   `git fetch`, and multi-chunk streamed packs verified against a local
+   replica.
 3. **Push** - receive-pack: pack indexer with delta resolution (incl. thin
    packs), ff-check, report-status. Round-trip: push then re-clone,
    `git fsck` clean.
@@ -268,8 +278,7 @@ Mitigations, in deployment order:
 - ~~Store object bodies as pack-entry-compatible zlib streams to make the pack
   writer zero-copy?~~ Resolved: object values are `[pack type code] +
   zlib(content)`, so the pack writer serves stored streams verbatim.
-- Negotiation completeness: `multi_ack_detailed` has fiddly edge cases; v1
-  could legally always send a full pack (correct, wasteful) and refine.
-- Per-chunk streaming determinism: cache the computed object list keyed by
-  `pack_id`, or make the walk order deterministic and recompute per callback?
-  (Recompute is simpler and query-cheap; start there.)
+- ~~Negotiation completeness~~ Resolved for now: no `multi_ack`, always NAK
+  until `done`, full pack. Refine only if incremental-fetch traffic matters.
+- ~~Per-chunk streaming determinism~~ Resolved: recompute per callback from
+  the token; determinism follows from object immutability.

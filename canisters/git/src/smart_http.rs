@@ -31,9 +31,10 @@ impl Service {
 
     fn caps(self) -> &'static str {
         match self {
-            Service::UploadPack => {
-                "multi_ack_detailed no-done side-band-64k ofs-delta agent=ic-git/0.1"
-            }
+            // No multi_ack/no-done: the server single-NAKs every negotiation
+            // round until the client sends done, then packs. Simple and
+            // correct; occasionally wasteful for incremental fetches.
+            Service::UploadPack => "side-band-64k ofs-delta agent=ic-git/0.1",
             Service::ReceivePack => "report-status delete-refs ofs-delta agent=ic-git/0.1",
         }
     }

@@ -71,7 +71,9 @@ thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
-    /// oid -> [pack type code] + zlib(content)
+    /// oid -> [pack type code][content len u32 LE][zlib(content)]
+    /// The length prefix lets the pack writer emit the entry size header
+    /// without inflating the object.
     static OBJECTS: RefCell<StableBTreeMap<Oid, Vec<u8>, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_OBJECTS))),
     );
@@ -105,8 +107,9 @@ pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
     // contains_key is a keys-only probe; on a duplicate it skips the deflate,
     // which dominates the cost of the extra traversal on the miss path.
     if !OBJECTS.with(|o| o.borrow().contains_key(&oid)) {
-        let mut value = Vec::with_capacity(1 + content.len() / 2);
+        let mut value = Vec::with_capacity(5 + content.len() / 2);
         value.push(object_type as u8);
+        value.extend_from_slice(&(content.len() as u32).to_le_bytes());
         let mut enc = ZlibEncoder::new(value, Compression::default());
         enc.write_all(content).expect("in-memory write");
         let value = enc.finish().expect("in-memory finish");
@@ -117,21 +120,22 @@ pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
 
 /// Fetch an object as (type, content).
 pub fn get_object_parsed(oid: &Oid) -> Option<(ObjectType, Vec<u8>)> {
-    let (object_type, zlib) = get_object_deflated(oid)?;
-    let mut content = Vec::with_capacity(zlib.len() * 4);
+    let (object_type, size, zlib) = get_object_deflated(oid)?;
+    let mut content = Vec::with_capacity(size as usize);
     ZlibDecoder::new(zlib.as_slice())
         .read_to_end(&mut content)
         .expect("stored object is valid zlib");
     Some((object_type, content))
 }
 
-/// Fetch an object's type and raw zlib(content) stream - pack-entry
-/// compatible, so the milestone-2 pack writer serves it without recompressing.
-pub fn get_object_deflated(oid: &Oid) -> Option<(ObjectType, Vec<u8>)> {
+/// Fetch an object's type, inflated size, and raw zlib(content) stream -
+/// pack-entry compatible, so the pack writer serves it without recompressing.
+pub fn get_object_deflated(oid: &Oid) -> Option<(ObjectType, u32, Vec<u8>)> {
     let value = OBJECTS.with(|o| o.borrow().get(oid))?;
     let object_type =
         ObjectType::from_pack_code(value[0]).expect("stored object has valid type code");
-    Some((object_type, value[1..].to_vec()))
+    let size = u32::from_le_bytes(value[1..5].try_into().unwrap());
+    Some((object_type, size, value[5..].to_vec()))
 }
 
 /// Fetch an object in canonical form: "<type> <len>\0" + content.

@@ -4,11 +4,15 @@
 //! refs + admin API) plus the info/refs advertisement, so `git ls-remote`
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
+mod pack;
 mod smart_http;
 mod store;
 
 use ic_dev_kit_rs::auth;
-use ic_dev_kit_rs::http::{self, HttpRequest, HttpResponse};
+use ic_dev_kit_rs::http::{
+    self, HttpRequest, HttpResponse, StreamingCallback, StreamingCallbackHttpResponse,
+    StreamingCallbackToken, StreamingStrategy,
+};
 use smart_http::Service;
 use store::{ObjectType, Oid};
 
@@ -101,11 +105,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
             service: Service::ReceivePack,
             ..
         } => http::upgrade_response(),
-        Route::Rpc { .. } => git_response(
-            501,
-            "text/plain",
-            b"ic-git: upload-pack not implemented yet (milestone 2)\n".to_vec(),
-        ),
+        Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
         Route::Index => {
             let repos = store::list_repos().join("\n");
             git_response(
@@ -115,6 +115,45 @@ fn http_request(req: HttpRequest) -> HttpResponse {
             )
         }
         Route::NotFound => git_response(404, "text/plain", b"not found\n".to_vec()),
+    }
+}
+
+/// POST /<repo>.git/git-upload-pack: negotiation reply or streamed pack.
+fn upload_pack(repo: &str, body: &[u8]) -> HttpResponse {
+    const RESULT_CT: &str = "application/x-git-upload-pack-result";
+    if !store::repo_exists(repo) {
+        return git_response(404, "text/plain", b"no such repo\n".to_vec());
+    }
+    let req = match pack::parse_request(body) {
+        Ok(req) => req,
+        Err(e) => return git_response(400, "text/plain", format!("error: {e}\n").into_bytes()),
+    };
+    if !req.done {
+        // No multi_ack advertised: keep NAKing until the client sends done.
+        return git_response(200, RESULT_CT, smart_http::pkt_line(b"NAK\n"));
+    }
+    match pack::response_body(&req) {
+        Err(e) => git_response(500, "text/plain", format!("error: {e}\n").into_bytes()),
+        Ok(body) if body.len() <= pack::STREAM_CHUNK => git_response(200, RESULT_CT, body),
+        Ok(body) => {
+            let mut response = git_response(200, RESULT_CT, body[..pack::STREAM_CHUNK].to_vec());
+            response.streaming_strategy = Some(StreamingStrategy::Callback {
+                callback: StreamingCallback::new(
+                    ic_cdk::api::canister_self(),
+                    "http_request_streaming_callback".to_string(),
+                ),
+                token: pack::stream_token(&req, 1),
+            });
+            response
+        }
+    }
+}
+
+#[ic_cdk::query]
+fn http_request_streaming_callback(token: StreamingCallbackToken) -> StreamingCallbackHttpResponse {
+    match pack::next_chunk(&token) {
+        Ok(chunk) => chunk,
+        Err(e) => ic_cdk::trap(&format!("streaming callback: {e}")),
     }
 }
 
