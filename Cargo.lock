@@ -256,6 +256,7 @@ dependencies = [
  "ic-dev-kit-rs",
  "ic-stable-structures",
  "serde",
+ "serde_json",
  "sha1",
 ]
 
@@ -313,7 +314,8 @@ dependencies = [
 
 [[package]]
 name = "ic-dev-kit-rs"
-version = "0.2.0"
+version = "0.3.0"
+source = "git+https://github.com/DrJesseGlass/ic-dev-kit-rs?tag=v0.3.0#18e1d5407c6b365b27ab5c262cde9110cbcf65e0"
 dependencies = [
  "async-trait",
  "candid",
