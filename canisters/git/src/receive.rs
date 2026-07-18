@@ -87,6 +87,17 @@ fn check_command(repo: &str, cmd: &Command) -> Result<(), String> {
     // current tips bound the walk to what this push introduced.
     let tips: Vec<Oid> = store::list_refs(repo).into_iter().map(|(_, o)| o).collect();
     pack::closure(&[new], &tips).map_err(|e| format!("missing objects: {e}"))?;
+    // Branch tips must be commits (git refuses e.g. `push <blob>:refs/heads/x`;
+    // an advertised head that isn't a commit breaks clone/fetch clients).
+    if cmd.refname.starts_with("refs/heads/") {
+        let tip = store::get_object_stored(&new).expect("connectivity checked");
+        if tip.object_type != ObjectType::Commit {
+            return Err(format!(
+                "branch tip must be a commit, not a {}",
+                tip.object_type.as_str()
+            ));
+        }
+    }
     if let Some(old) = cmd.old {
         if !is_ancestor(&old, &new) {
             return Err("non-fast-forward".into());
@@ -144,4 +155,29 @@ pub fn handle(repo: &str, body: &[u8]) -> Vec<u8> {
     }
     report.extend_from_slice(FLUSH_PKT);
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_tip_must_be_commit() {
+        store::create_repo("tip-check").unwrap();
+        let blob = store::put_object(ObjectType::Blob, b"not a commit");
+        let cmd = Command {
+            old: None,
+            new: Some(blob),
+            refname: "refs/heads/main".to_string(),
+        };
+        let err = check_command("tip-check", &cmd).unwrap_err();
+        assert!(err.contains("must be a commit"), "{err}");
+
+        // Non-branch refs may point at any object type.
+        let cmd = Command {
+            refname: "refs/tags/raw".to_string(),
+            ..cmd
+        };
+        assert!(check_command("tip-check", &cmd).is_ok());
+    }
 }
