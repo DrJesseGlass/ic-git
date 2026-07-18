@@ -1,0 +1,34 @@
+type HeaderField = record { text; text };
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec HeaderField;
+  body : blob;
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec HeaderField;
+  body : blob;
+  upgrade : opt bool;
+};
+
+type Result = variant { Ok; Err : text };
+type ResultText = variant { Ok : text; Err : text };
+
+service : {
+  // git smart-HTTP surface (called by the HTTP gateway)
+  http_request : (HttpRequest) -> (HttpResponse) query;
+  http_request_update : (HttpRequest) -> (HttpResponse);
+
+  // admin API (authorized principals only)
+  create_repo : (text) -> (Result);
+  put_object : (text, blob) -> (ResultText);
+  set_ref : (text, text, text) -> (Result);
+
+  // public reads
+  get_object : (text) -> (opt blob) query;
+  list_refs : (text) -> (vec record { text; text }) query;
+  list_repos : () -> (vec text) query;
+}

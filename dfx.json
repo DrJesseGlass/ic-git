@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "canisters": {
+    "git": {
+      "type": "rust",
+      "package": "git_canister",
+      "candid": "canisters/git/git.did"
+    },
+    "www": {
+      "type": "assets",
+      "source": ["site"]
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env"
+}

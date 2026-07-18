@@ -1,0 +1,21 @@
+[package]
+name = "git_canister"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# Path dep during development; switch to the git-tag form once ic-git stabilizes.
+ic-dev-kit-rs = { path = "../../../ic-dev-kit-rs" }
+
+# Keep these pinned to the versions ic-dev-kit-rs uses.
+ic-cdk = "0.20"
+candid = "0.10"
+ic-stable-structures = "0.7"
+
+serde = { version = "1", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+sha1 = "0.10"
+hex = "0.4"
