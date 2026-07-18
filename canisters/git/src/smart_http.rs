@@ -1,19 +1,53 @@
-//! Git smart-HTTP protocol pieces: pkt-line codec and ref advertisement.
+//! Git smart-HTTP protocol pieces: pkt-line codec, service definitions, and
+//! ref advertisement.
 //!
 //! Reference: git's Documentation/gitprotocol-http.txt and gitprotocol-pack.txt.
 
 use crate::store;
 
-/// Encode one pkt-line: 4 hex length bytes (incl. the 4) + payload.
-pub fn pkt_line(payload: &[u8]) -> Vec<u8> {
-    let mut out = format!("{:04x}", payload.len() + 4).into_bytes();
-    out.extend_from_slice(payload);
-    out
+/// The two smart-HTTP services. Parsed once at the routing boundary; the
+/// service name, capabilities, and content-types all derive from this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Service {
+    UploadPack,
+    ReceivePack,
+}
+
+impl Service {
+    pub fn name(self) -> &'static str {
+        match self {
+            Service::UploadPack => "git-upload-pack",
+            Service::ReceivePack => "git-receive-pack",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "git-upload-pack" => Some(Service::UploadPack),
+            "git-receive-pack" => Some(Service::ReceivePack),
+            _ => None,
+        }
+    }
+
+    fn caps(self) -> &'static str {
+        match self {
+            Service::UploadPack => {
+                "multi_ack_detailed no-done side-band-64k ofs-delta agent=ic-git/0.1"
+            }
+            Service::ReceivePack => "report-status delete-refs ofs-delta agent=ic-git/0.1",
+        }
+    }
 }
 
 /// The `0000` flush packet.
-pub fn flush_pkt() -> &'static [u8] {
-    b"0000"
+pub const FLUSH_PKT: &[u8] = b"0000";
+
+/// Encode one pkt-line: 4 hex length bytes (incl. the 4) + payload.
+pub fn pkt_line(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    out.extend_from_slice(format!("{:04x}", payload.len() + 4).as_bytes());
+    out.extend_from_slice(payload);
+    out
 }
 
 /// Parse pkt-lines from a buffer. Flush packets appear as empty slices.
@@ -41,58 +75,43 @@ pub fn parse_pkt_lines(buf: &[u8]) -> Result<(Vec<Vec<u8>>, usize), String> {
     Ok((lines, pos))
 }
 
-const UPLOAD_PACK_CAPS: &str = "multi_ack_detailed no-done side-band-64k ofs-delta agent=ic-git/0.1";
-const RECEIVE_PACK_CAPS: &str = "report-status delete-refs ofs-delta agent=ic-git/0.1";
-
 /// Body of `GET /<repo>.git/info/refs?service=<service>`.
 ///
 /// Smart-HTTP advertisement: a `# service=` header pkt, a flush, then refs
-/// sorted by name with capabilities appended to the first line. An empty repo
-/// advertises the zero-id `capabilities^{}` line so clients still learn caps.
-pub fn advertisement(repo: &str, service: &str) -> Vec<u8> {
-    let caps = match service {
-        "git-upload-pack" => UPLOAD_PACK_CAPS,
-        _ => RECEIVE_PACK_CAPS,
-    };
+/// sorted by name with capabilities appended to the first line. HEAD
+/// (resolved through `head_target`) leads when its target exists; an empty
+/// repo advertises the zero-id `capabilities^{}` line so clients still learn
+/// caps.
+pub fn advertisement(repo: &str, service: Service, head_target: &str) -> Vec<u8> {
+    let mut caps = service.caps().to_string();
+    let mut entries = store::list_refs(repo);
+    if let Some(oid) = entries
+        .iter()
+        .find(|(name, _)| name == head_target)
+        .map(|(_, oid)| *oid)
+    {
+        caps.push_str(&format!(" symref=HEAD:{head_target}"));
+        entries.insert(0, ("HEAD".to_string(), oid));
+    }
 
-    let mut body = pkt_line(format!("# service={service}\n").as_bytes());
-    body.extend_from_slice(flush_pkt());
-
-    let refs: Vec<(String, String)> = store::list_refs(repo)
-        .into_iter()
-        .map(|(name, oid)| (name, hex::encode(oid.as_slice())))
-        .collect();
-
-    // HEAD first (points at the symref target's oid), then refs sorted by name.
-    let head = store::head_target(repo).and_then(|target| {
-        refs.iter()
-            .find(|(name, _)| *name == target)
-            .map(|(_, oid)| (format!("HEAD\0{caps} symref=HEAD:{target}"), oid.clone()))
-    });
-
-    let mut lines: Vec<(String, String)> = Vec::new();
-    match head {
-        Some((head_line, oid)) => {
-            lines.push((head_line, oid));
-            lines.extend(refs.into_iter().map(|(n, o)| (n, o)));
-        }
-        None => {
-            if let Some((first, rest)) = refs.split_first() {
-                lines.push((format!("{}\0{caps}", first.0), first.1.clone()));
-                lines.extend(rest.iter().cloned());
+    let mut body = pkt_line(format!("# service={}\n", service.name()).as_bytes());
+    body.extend_from_slice(FLUSH_PKT);
+    if entries.is_empty() {
+        body.extend_from_slice(&pkt_line(
+            format!("{} capabilities^{{}}\0{caps}\n", "0".repeat(40)).as_bytes(),
+        ));
+    } else {
+        for (i, (name, oid)) in entries.iter().enumerate() {
+            let oid = hex::encode(oid.as_slice());
+            let line = if i == 0 {
+                format!("{oid} {name}\0{caps}\n")
             } else {
-                lines.push((
-                    format!("capabilities^{{}}\0{caps}"),
-                    "0".repeat(40),
-                ));
-            }
+                format!("{oid} {name}\n")
+            };
+            body.extend_from_slice(&pkt_line(line.as_bytes()));
         }
     }
-
-    for (name, oid) in lines {
-        body.extend_from_slice(&pkt_line(format!("{oid} {name}\n").as_bytes()));
-    }
-    body.extend_from_slice(flush_pkt());
+    body.extend_from_slice(FLUSH_PKT);
     body
 }
 
@@ -102,7 +121,7 @@ mod tests {
 
     #[test]
     fn pkt_line_roundtrip() {
-        let encoded = [pkt_line(b"hello\n"), flush_pkt().to_vec()].concat();
+        let encoded = [pkt_line(b"hello\n"), FLUSH_PKT.to_vec()].concat();
         let (lines, consumed) = parse_pkt_lines(&encoded).unwrap();
         assert_eq!(consumed, encoded.len());
         assert_eq!(lines, vec![b"hello\n".to_vec(), Vec::new()]);

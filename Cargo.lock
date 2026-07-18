@@ -318,6 +318,7 @@ dependencies = [
  "async-trait",
  "candid",
  "ic-cdk",
+ "ic-stable-structures",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

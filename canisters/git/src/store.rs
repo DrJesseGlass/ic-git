@@ -1,12 +1,15 @@
 //! Stable-memory object store, refs, and repo metadata.
 //!
 //! Objects are global (content-addressed, shared across repos); refs and repo
-//! metadata are namespaced by repo name. Object bodies are stored
-//! zlib-deflated in canonical git form: `"<type> <len>\0" + content`.
+//! metadata are namespaced by repo name. Object values are stored as a 1-byte
+//! packfile type code followed by zlib(content) - the same zlib stream a pack
+//! entry carries, so the milestone-2 pack writer can serve objects without
+//! recompressing.
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use ic_dev_kit_rs::storage;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::storable::Blob;
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap};
@@ -19,6 +22,46 @@ type Memory = VirtualMemory<DefaultMemoryImpl>;
 /// 20-byte SHA-1 object id.
 pub type Oid = Blob<20>;
 
+/// Git object type; discriminants are the packfile type codes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ObjectType {
+    Commit = 1,
+    Tree = 2,
+    Blob = 3,
+    Tag = 4,
+}
+
+impl ObjectType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObjectType::Commit => "commit",
+            ObjectType::Tree => "tree",
+            ObjectType::Blob => "blob",
+            ObjectType::Tag => "tag",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "commit" => Ok(ObjectType::Commit),
+            "tree" => Ok(ObjectType::Tree),
+            "blob" => Ok(ObjectType::Blob),
+            "tag" => Ok(ObjectType::Tag),
+            _ => Err(format!("invalid object type: {s}")),
+        }
+    }
+
+    pub fn from_pack_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(ObjectType::Commit),
+            2 => Some(ObjectType::Tree),
+            3 => Some(ObjectType::Blob),
+            4 => Some(ObjectType::Tag),
+            _ => None,
+        }
+    }
+}
+
 const MEM_OBJECTS: MemoryId = MemoryId::new(0);
 const MEM_REFS: MemoryId = MemoryId::new(1);
 const MEM_REPOS: MemoryId = MemoryId::new(2);
@@ -28,7 +71,7 @@ thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
-    /// oid -> zlib-deflated canonical object bytes
+    /// oid -> [pack type code] + zlib(content)
     static OBJECTS: RefCell<StableBTreeMap<Oid, Vec<u8>, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_OBJECTS))),
     );
@@ -43,7 +86,8 @@ thread_local! {
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_REPOS))),
     );
 
-    /// Small key/value bucket for canister-level state (auth snapshot, ...).
+    /// Small key/value bucket for canister-level state (auth snapshot, ...),
+    /// accessed through the dev kit's storage helpers.
     static META: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_META))),
     );
@@ -51,32 +95,53 @@ thread_local! {
 
 // --- objects ----------------------------------------------------------------
 
-const OBJECT_TYPES: [&str; 4] = ["blob", "tree", "commit", "tag"];
-
-/// Store a git object from its type and content. Returns the oid.
-pub fn put_object(object_type: &str, content: &[u8]) -> Result<Oid, String> {
-    if !OBJECT_TYPES.contains(&object_type) {
-        return Err(format!("invalid object type: {object_type}"));
-    }
-    let mut canonical = format!("{object_type} {}\0", content.len()).into_bytes();
-    canonical.extend_from_slice(content);
-    put_canonical_object(&canonical)
-}
-
-/// Store canonical object bytes (`"<type> <len>\0" + content`). Returns the oid.
-pub fn put_canonical_object(canonical: &[u8]) -> Result<Oid, String> {
-    let digest: [u8; 20] = Sha1::digest(canonical).into();
+/// Store a git object. Returns the oid (SHA-1 of the canonical form).
+pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
+    let mut hasher = Sha1::new();
+    hasher.update(format!("{} {}\0", object_type.as_str(), content.len()).as_bytes());
+    hasher.update(content);
+    let digest: [u8; 20] = hasher.finalize().into();
     let oid = Oid::try_from(digest.as_slice()).unwrap();
+    // contains_key is a keys-only probe; on a duplicate it skips the deflate,
+    // which dominates the cost of the extra traversal on the miss path.
     if !OBJECTS.with(|o| o.borrow().contains_key(&oid)) {
-        OBJECTS.with(|o| o.borrow_mut().insert(oid, deflate(canonical)));
+        let mut value = Vec::with_capacity(1 + content.len() / 2);
+        value.push(object_type as u8);
+        let mut enc = ZlibEncoder::new(value, Compression::default());
+        enc.write_all(content).expect("in-memory write");
+        let value = enc.finish().expect("in-memory finish");
+        OBJECTS.with(|o| o.borrow_mut().insert(oid, value));
     }
-    Ok(oid)
+    oid
 }
 
-/// Fetch an object as canonical (inflated) bytes.
+/// Fetch an object as (type, content).
+pub fn get_object_parsed(oid: &Oid) -> Option<(ObjectType, Vec<u8>)> {
+    let (object_type, zlib) = get_object_deflated(oid)?;
+    let mut content = Vec::with_capacity(zlib.len() * 4);
+    ZlibDecoder::new(zlib.as_slice())
+        .read_to_end(&mut content)
+        .expect("stored object is valid zlib");
+    Some((object_type, content))
+}
+
+/// Fetch an object's type and raw zlib(content) stream - pack-entry
+/// compatible, so the milestone-2 pack writer serves it without recompressing.
+pub fn get_object_deflated(oid: &Oid) -> Option<(ObjectType, Vec<u8>)> {
+    let value = OBJECTS.with(|o| o.borrow().get(oid))?;
+    let object_type =
+        ObjectType::from_pack_code(value[0]).expect("stored object has valid type code");
+    Some((object_type, value[1..].to_vec()))
+}
+
+/// Fetch an object in canonical form: "<type> <len>\0" + content.
 pub fn get_object(oid: &Oid) -> Option<Vec<u8>> {
-    let compressed = OBJECTS.with(|o| o.borrow().get(oid))?;
-    Some(inflate(&compressed).expect("stored object is valid zlib"))
+    let (object_type, content) = get_object_parsed(oid)?;
+    let header = format!("{} {}\0", object_type.as_str(), content.len());
+    let mut canonical = Vec::with_capacity(header.len() + content.len());
+    canonical.extend_from_slice(header.as_bytes());
+    canonical.extend_from_slice(&content);
+    Some(canonical)
 }
 
 pub fn has_object(oid: &Oid) -> bool {
@@ -96,10 +161,11 @@ pub fn create_repo(name: &str) -> Result<(), String> {
     }
     REPOS.with(|r| {
         let mut repos = r.borrow_mut();
-        if repos.contains_key(&name.to_string()) {
+        let key = name.to_string();
+        if repos.contains_key(&key) {
             return Err(format!("repo '{name}' already exists"));
         }
-        repos.insert(name.to_string(), "refs/heads/main".to_string());
+        repos.insert(key, "refs/heads/main".to_string());
         Ok(())
     })
 }
@@ -150,28 +216,31 @@ pub fn list_refs(repo: &str) -> Vec<(String, Oid)> {
     })
 }
 
-// --- canister-level state ---------------------------------------------------
+// --- canister-level state ----------------------------------------------------
 
 pub fn save_auth_snapshot(bytes: Vec<u8>) {
-    META.with(|m| m.borrow_mut().insert("auth".to_string(), bytes));
+    META.with(|m| storage::save_bytes(m, "auth", bytes));
 }
 
 pub fn load_auth_snapshot() -> Option<Vec<u8>> {
-    META.with(|m| m.borrow().get(&"auth".to_string()))
+    META.with(|m| storage::load_bytes(m, "auth"))
 }
 
-// --- zlib helpers -----------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn deflate(data: &[u8]) -> Vec<u8> {
-    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(data).expect("in-memory write");
-    enc.finish().expect("in-memory finish")
-}
+    #[test]
+    fn object_roundtrip_and_oid() {
+        let oid = put_object(ObjectType::Blob, b"hello");
+        let canonical = get_object(&oid).unwrap();
+        assert_eq!(canonical, b"blob 5\0hello");
+        // The oid is the SHA-1 of the canonical form we reconstruct.
+        let digest: [u8; 20] = Sha1::digest(&canonical).into();
+        assert_eq!(digest.as_slice(), oid.as_slice());
 
-fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    ZlibDecoder::new(data)
-        .read_to_end(&mut out)
-        .map_err(|e| format!("zlib: {e}"))?;
-    Ok(out)
+        let (object_type, content) = get_object_parsed(&oid).unwrap();
+        assert_eq!(object_type, ObjectType::Blob);
+        assert_eq!(content, b"hello");
+    }
 }

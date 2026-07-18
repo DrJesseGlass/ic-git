@@ -265,8 +265,9 @@ Mitigations, in deployment order:
 
 ## Open questions
 
-- Store object bodies as pack-entry-compatible zlib streams to make the pack
-  writer zero-copy? (Saves recompression on every clone - probably yes.)
+- ~~Store object bodies as pack-entry-compatible zlib streams to make the pack
+  writer zero-copy?~~ Resolved: object values are `[pack type code] +
+  zlib(content)`, so the pack writer serves stored streams verbatim.
 - Negotiation completeness: `multi_ack_detailed` has fiddly edge cases; v1
   could legally always send a full pack (correct, wasteful) and refine.
 - Per-chunk streaming determinism: cache the computed object list keyed by

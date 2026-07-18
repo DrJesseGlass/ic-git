@@ -9,7 +9,8 @@ mod store;
 
 use ic_dev_kit_rs::auth;
 use ic_dev_kit_rs::http::{self, HttpRequest, HttpResponse};
-use store::Oid;
+use smart_http::Service;
+use store::{ObjectType, Oid};
 
 // --- lifecycle --------------------------------------------------------------
 
@@ -32,11 +33,10 @@ fn post_upgrade() {
 
 enum Route {
     /// GET /<repo>.git/info/refs?service=<service>
-    InfoRefs { repo: String, service: String },
-    /// POST /<repo>.git/git-upload-pack (query: read-only)
-    UploadPack { repo: String },
-    /// POST /<repo>.git/git-receive-pack (update: mutates)
-    ReceivePack { repo: String },
+    InfoRefs { repo: String, service: Service },
+    /// POST /<repo>.git/<service> (upload-pack is a query; receive-pack
+    /// mutates and upgrades to http_request_update)
+    Rpc { repo: String, service: Service },
     Index,
     NotFound,
 }
@@ -52,24 +52,20 @@ fn route(req: &HttpRequest) -> Route {
     else {
         return Route::NotFound;
     };
+    let repo = repo.to_string();
     match (req.method.as_str(), rest) {
         ("GET", "info/refs") => {
-            let service = ["git-upload-pack", "git-receive-pack"]
-                .into_iter()
-                .find(|s| req.url.contains(&format!("service={s}")));
+            let service = http::extract_query_params(&req.url)
+                .get("service")
+                .and_then(|s| Service::from_name(s));
             match service {
-                Some(s) => Route::InfoRefs {
-                    repo: repo.to_string(),
-                    service: s.to_string(),
-                },
+                Some(service) => Route::InfoRefs { repo, service },
                 None => Route::NotFound, // dumb-protocol clients: unsupported
             }
         }
-        ("POST", "git-upload-pack") => Route::UploadPack {
-            repo: repo.to_string(),
-        },
-        ("POST", "git-receive-pack") => Route::ReceivePack {
-            repo: repo.to_string(),
+        ("POST", rpc) => match Service::from_name(rpc) {
+            Some(service) => Route::Rpc { repo, service },
+            None => Route::NotFound,
         },
         _ => Route::NotFound,
     }
@@ -84,32 +80,39 @@ fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) -> HttpResp
         ],
         body,
         upgrade: None,
+        streaming_strategy: None,
     }
 }
 
 #[ic_cdk::query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     match route(&req) {
-        Route::InfoRefs { repo, service } => {
-            if !store::repo_exists(&repo) {
-                return git_response(404, "text/plain", b"no such repo\n".to_vec());
-            }
-            git_response(
+        // head_target doubles as the repo-existence probe: one REPOS read.
+        Route::InfoRefs { repo, service } => match store::head_target(&repo) {
+            None => git_response(404, "text/plain", b"no such repo\n".to_vec()),
+            Some(head) => git_response(
                 200,
-                &format!("application/x-{service}-advertisement"),
-                smart_http::advertisement(&repo, &service),
-            )
-        }
-        Route::UploadPack { .. } => git_response(
+                &format!("application/x-{}-advertisement", service.name()),
+                smart_http::advertisement(&repo, service, &head),
+            ),
+        },
+        // Mutating: hand off to http_request_update via the gateway.
+        Route::Rpc {
+            service: Service::ReceivePack,
+            ..
+        } => http::upgrade_response(),
+        Route::Rpc { .. } => git_response(
             501,
             "text/plain",
             b"ic-git: upload-pack not implemented yet (milestone 2)\n".to_vec(),
         ),
-        // Mutating: hand off to http_request_update via the gateway.
-        Route::ReceivePack { .. } => http::upgrade_response(),
         Route::Index => {
             let repos = store::list_repos().join("\n");
-            git_response(200, "text/plain", format!("ic-git\n\nrepos:\n{repos}\n").into_bytes())
+            git_response(
+                200,
+                "text/plain",
+                format!("ic-git\n\nrepos:\n{repos}\n").into_bytes(),
+            )
         }
         Route::NotFound => git_response(404, "text/plain", b"not found\n".to_vec()),
     }
@@ -118,7 +121,10 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 #[ic_cdk::update]
 fn http_request_update(req: HttpRequest) -> HttpResponse {
     match route(&req) {
-        Route::ReceivePack { .. } => git_response(
+        Route::Rpc {
+            service: Service::ReceivePack,
+            ..
+        } => git_response(
             501,
             "text/plain",
             b"ic-git: receive-pack not implemented yet (milestone 3)\n".to_vec(),
@@ -137,7 +143,8 @@ fn create_repo(name: String) -> Result<(), String> {
 /// Store an object from (type, content); returns the hex oid.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 fn put_object(object_type: String, content: Vec<u8>) -> Result<String, String> {
-    store::put_object(&object_type, &content).map(|oid| hex::encode(oid.as_slice()))
+    let object_type = ObjectType::parse(&object_type)?;
+    Ok(hex::encode(store::put_object(object_type, &content).as_slice()))
 }
 
 /// Canonical (inflated) object bytes: "<type> <len>\0" + content.
