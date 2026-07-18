@@ -12,7 +12,6 @@ mod store;
 
 use base64::Engine;
 use ic_dev_kit_rs::auth;
-use sha2::{Digest, Sha256};
 use ic_dev_kit_rs::http::{
     self, HttpRequest, HttpResponse, StreamingCallback, StreamingCallbackHttpResponse,
     StreamingCallbackToken, StreamingStrategy,
@@ -96,10 +95,7 @@ fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) -> HttpResp
 
 /// The repo a Basic-auth push token authorizes, if the header carries one.
 fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
-    let value = headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-        .map(|(_, v)| v.as_str())?;
+    let value = http::get_header(headers, "authorization")?;
     let b64 = value.strip_prefix("Basic ")?;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
@@ -107,7 +103,7 @@ fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
     let creds = String::from_utf8(decoded).ok()?;
     // Username is ignored; the password slot carries the token.
     let token = creds.split_once(':').map(|(_, p)| p).unwrap_or(&creds);
-    store::push_token_repo(&hex::encode(Sha256::digest(token.as_bytes())))
+    store::push_token_repo(token)
 }
 
 fn push_authorized(repo: &str, headers: &[(String, String)]) -> bool {
@@ -119,7 +115,10 @@ fn unauthorized() -> HttpResponse {
     HttpResponse {
         status_code: 401,
         headers: vec![
-            ("WWW-Authenticate".to_string(), "Basic realm=\"ic-git\"".to_string()),
+            (
+                "WWW-Authenticate".to_string(),
+                "Basic realm=\"ic-git\"".to_string(),
+            ),
             ("Content-Type".to_string(), "text/plain".to_string()),
         ],
         body: b"push token required\n".to_vec(),
@@ -263,13 +262,13 @@ async fn create_push_token(repo: String) -> Result<String, String> {
     )
     .await?;
     let token = hex::encode(&bytes[..16]);
-    store::add_push_token(&repo, &hex::encode(Sha256::digest(token.as_bytes())));
+    store::add_push_token(&repo, &token);
     Ok(token)
 }
 
 #[ic_cdk::update(guard = "auth::is_authorized")]
 fn revoke_push_token(token: String) -> bool {
-    store::revoke_push_token(&hex::encode(Sha256::digest(token.as_bytes())))
+    store::revoke_push_token(&token)
 }
 
 #[ic_cdk::query]

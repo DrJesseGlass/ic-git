@@ -149,10 +149,10 @@ pub fn closure(wants: &[Oid], haves: &[Oid]) -> Result<Vec<(Oid, ObjectType)>, S
 const OFS_DELTA: u8 = 6;
 const REF_DELTA: u8 = 7;
 
-/// Pack entry header: type in bits 6-4 of the first byte, size in little-
-/// endian 4+7+7+... bit groups with MSB continuation.
-fn push_entry_header(pack: &mut Vec<u8>, object_type: ObjectType, size: u64) {
-    let mut byte = ((object_type as u8) << 4) | (size & 0x0F) as u8;
+/// Pack entry header: type code in bits 6-4 of the first byte, size in
+/// little-endian 4+7+7+... bit groups with MSB continuation.
+fn push_entry_header(pack: &mut Vec<u8>, type_code: u8, size: u64) {
+    let mut byte = (type_code << 4) | (size & 0x0F) as u8;
     let mut size = size >> 4;
     while size > 0 {
         pack.push(byte | 0x80);
@@ -264,9 +264,9 @@ fn inflate_from(data: &[u8], pos: usize) -> Result<(Vec<u8>, usize), String> {
     Ok((out, decoder.total_in() as usize))
 }
 
-/// Parse a received pack, resolve deltas (in-pack via OFS/REF, thin-pack
-/// bases via the store), verify the trailer, and store every object.
-/// Returns the stored oids in pack order.
+/// Parse a received pack, verify the trailer, resolve deltas (in-pack and
+/// thin-pack bases alike are read back from the store), and store every
+/// object. Returns the stored oids in pack order.
 pub fn ingest_pack(data: &[u8]) -> Result<Vec<Oid>, String> {
     if data.len() < 32 || &data[..4] != b"PACK" {
         return Err("bad pack header".into());
@@ -283,68 +283,60 @@ pub fn ingest_pack(data: &[u8]) -> Result<Vec<Oid>, String> {
     }
 
     let mut pos = 12;
-    // Entry start offset -> oid, for OFS_DELTA bases; resolved contents for
-    // both delta kinds (a <=2 MiB ingress pack inflates comfortably in heap).
+    // Entry start offset -> oid, for OFS_DELTA base resolution. Delta bases
+    // are read back from the store rather than pinned in heap: every earlier
+    // entry has already been persisted by the time a delta references it.
     let mut by_offset: std::collections::BTreeMap<usize, Oid> = std::collections::BTreeMap::new();
-    let mut resolved: std::collections::BTreeMap<Oid, (ObjectType, Vec<u8>)> =
-        std::collections::BTreeMap::new();
     let mut oids = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
         let entry_start = pos;
         let (type_code, size, p) = parse_entry_header(data, pos)?;
         pos = p;
-        let (object_type, content) = match type_code {
+        let oid = match type_code {
             1..=4 => {
                 let (content, consumed) = inflate_from(data, pos)?;
-                pos += consumed;
                 if content.len() as u64 != size {
                     return Err("entry size mismatch".into());
                 }
-                (ObjectType::from_pack_code(type_code).unwrap(), content)
-            }
-            OFS_DELTA => {
-                let (offset, p) = parse_ofs_offset(data, pos)?;
-                pos = p;
-                let base_start = entry_start
-                    .checked_sub(offset as usize)
-                    .ok_or("ofs delta offset out of range")?;
-                let base_oid = by_offset
-                    .get(&base_start)
-                    .ok_or("ofs delta base not found")?;
-                let (delta, consumed) = inflate_from(data, pos)?;
+                // The wire zlib stream is exactly what the store persists;
+                // reuse it instead of re-deflating the content.
+                let object_type = ObjectType::from_pack_code(type_code).unwrap();
+                let oid = store::put_object_zlib(object_type, &content, &data[pos..pos + consumed]);
                 pos += consumed;
-                if delta.len() as u64 != size {
-                    return Err("delta size mismatch".into());
-                }
-                let (base_type, base) = resolved.get(base_oid).ok_or("ofs base unresolved")?;
-                (*base_type, apply_delta(base, &delta)?)
+                oid
             }
-            REF_DELTA => {
-                let base_oid = Oid::try_from(
-                    data.get(pos..pos + 20).ok_or("truncated ref delta base")?,
-                )
-                .unwrap();
-                pos += 20;
-                let (delta, consumed) = inflate_from(data, pos)?;
-                pos += consumed;
-                if delta.len() as u64 != size {
-                    return Err("delta size mismatch".into());
-                }
-                // Thin packs reference bases only the server has.
-                let (base_type, base) = match resolved.get(&base_oid) {
-                    Some((t, c)) => (*t, c.clone()),
-                    None => store::get_object_parsed(&base_oid).ok_or_else(|| {
-                        format!("ref delta base {} missing", store::oid_hex(&base_oid))
-                    })?,
+            OFS_DELTA | REF_DELTA => {
+                let base_oid = if type_code == OFS_DELTA {
+                    let (offset, p) = parse_ofs_offset(data, pos)?;
+                    pos = p;
+                    let base_start = entry_start
+                        .checked_sub(offset as usize)
+                        .ok_or("ofs delta offset out of range")?;
+                    *by_offset
+                        .get(&base_start)
+                        .ok_or("ofs delta base not found")?
+                } else {
+                    let oid =
+                        Oid::try_from(data.get(pos..pos + 20).ok_or("truncated ref delta base")?)
+                            .unwrap();
+                    pos += 20;
+                    oid
                 };
-                (base_type, apply_delta(&base, &delta)?)
+                let (delta, consumed) = inflate_from(data, pos)?;
+                pos += consumed;
+                if delta.len() as u64 != size {
+                    return Err("delta size mismatch".into());
+                }
+                // In-pack bases were stored above; thin packs reference bases
+                // only the server has. The store covers both.
+                let (base_type, base) = store::get_object_parsed(&base_oid)
+                    .ok_or_else(|| format!("delta base {} missing", store::oid_hex(&base_oid)))?;
+                store::put_object(base_type, &apply_delta(&base, &delta)?)
             }
             t => return Err(format!("unsupported pack entry type {t}")),
         };
-        let oid = store::put_object(object_type, &content);
         by_offset.insert(entry_start, oid);
-        resolved.insert(oid, (object_type, content));
         oids.push(oid);
     }
     if pos != content_end {
@@ -362,7 +354,7 @@ pub fn build_pack(objects: &[(Oid, ObjectType)]) -> Vec<u8> {
     pack.extend_from_slice(&(objects.len() as u32).to_be_bytes());
     for (oid, _) in objects {
         let stored = store::get_object_stored(oid).expect("closure object exists");
-        push_entry_header(&mut pack, stored.object_type, stored.size as u64);
+        push_entry_header(&mut pack, stored.object_type as u8, stored.size as u64);
         pack.extend_from_slice(stored.zlib());
     }
     let digest: [u8; 20] = Sha1::digest(&pack).into();
@@ -470,13 +462,13 @@ mod tests {
     #[test]
     fn entry_header_varint() {
         let mut small = Vec::new();
-        push_entry_header(&mut small, ObjectType::Blob, 5);
+        push_entry_header(&mut small, ObjectType::Blob as u8, 5);
         assert_eq!(small, vec![0b0011_0101]); // type 3, size 5, no continuation
 
         let mut large = Vec::new();
-        push_entry_header(&mut large, ObjectType::Commit, 0b1010_0111_1100); // 2684
-        // low 4 bits (0b1100) + type 1 + MSB; then 7 bits 0b010_0111 + MSB
-        // (the remaining group 0b1010_0111 exceeds 7 bits); then final 0b1.
+        // 2684: low 4 bits (0b1100) + type 1 + MSB; then 7 bits 0b010_0111 +
+        // MSB (the remaining group 0b1010_0111 exceeds 7 bits); then final 0b1.
+        push_entry_header(&mut large, ObjectType::Commit as u8, 0b1010_0111_1100);
         assert_eq!(large, vec![0b1001_1100, 0b1010_0111, 0b0000_0001]);
     }
 
@@ -535,16 +527,7 @@ mod tests {
         pack.extend_from_slice(b"PACK");
         pack.extend_from_slice(&2u32.to_be_bytes());
         pack.extend_from_slice(&1u32.to_be_bytes());
-        // Entry header for REF_DELTA (type 7), size = delta.len().
-        let size = delta.len() as u64;
-        let mut byte = (REF_DELTA << 4) | (size & 0x0F) as u8;
-        let mut rest = size >> 4;
-        while rest > 0 {
-            pack.push(byte | 0x80);
-            byte = (rest & 0x7F) as u8;
-            rest >>= 7;
-        }
-        pack.push(byte);
+        push_entry_header(&mut pack, REF_DELTA, delta.len() as u64);
         pack.extend_from_slice(base.as_slice());
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut enc, &delta).unwrap();

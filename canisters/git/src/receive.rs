@@ -9,11 +9,9 @@
 
 use crate::object;
 use crate::pack;
-use crate::smart_http::{parse_pkt_lines, pkt_line, FLUSH_PKT};
+use crate::smart_http::{parse_pkt_lines, pkt_line, FLUSH_PKT, ZERO_OID};
 use crate::store::{self, ObjectType, Oid};
 use std::collections::BTreeSet;
-
-const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 
 struct Command {
     old: Option<Oid>,
@@ -30,7 +28,10 @@ fn parse_commands(body: &[u8]) -> Result<(Vec<Command>, usize), String> {
         }
         let line = std::str::from_utf8(line).map_err(|_| "non-utf8 command")?;
         // Capabilities ride after NUL on the first command line.
-        let line = line.split('\0').next().unwrap_or(line).trim_end();
+        let line = line
+            .split_once('\0')
+            .map_or(line, |(cmd, _caps)| cmd)
+            .trim_end();
         let mut parts = line.splitn(3, ' ');
         let (old, new, refname) = (
             parts.next().ok_or("short command")?,
@@ -109,35 +110,36 @@ pub fn handle(repo: &str, body: &[u8]) -> Vec<u8> {
 
     // A push of pure deletes/no-ops carries no pack.
     let pack_bytes = &body[pack_start..];
-    let unpack = if pack_bytes.is_empty() {
-        Ok(())
-    } else {
-        pack::ingest_pack(pack_bytes).map(|_| ())
-    };
-
-    match &unpack {
-        Ok(()) => report.extend_from_slice(&pkt_line(b"unpack ok\n")),
-        Err(e) => report.extend_from_slice(&pkt_line(format!("unpack {e}\n").as_bytes())),
+    if !pack_bytes.is_empty() {
+        if let Err(e) = pack::ingest_pack(pack_bytes) {
+            report.extend_from_slice(&pkt_line(format!("unpack {e}\n").as_bytes()));
+            for cmd in &commands {
+                report.extend_from_slice(&pkt_line(
+                    format!("ng {} unpacker error\n", cmd.refname).as_bytes(),
+                ));
+            }
+            report.extend_from_slice(FLUSH_PKT);
+            return report;
+        }
     }
 
+    report.extend_from_slice(&pkt_line(b"unpack ok\n"));
     for cmd in &commands {
-        let result = match &unpack {
-            Err(_) => Err("unpacker error".to_string()),
-            Ok(()) => check_command(repo, cmd).map(|()| match cmd.new {
-                Some(new) => {
-                    store::set_ref(repo, &cmd.refname, new).expect("checked command applies");
-                }
-                None => store::delete_ref(repo, &cmd.refname),
-            }),
-        };
-        match result {
+        match check_command(repo, cmd) {
             Ok(()) => {
+                match cmd.new {
+                    Some(new) => {
+                        store::set_ref(repo, &cmd.refname, new).expect("checked command applies")
+                    }
+                    None => store::delete_ref(repo, &cmd.refname),
+                }
                 // TODO(m4): if cmd.refname is the deploy branch, enqueue a
                 // DeployJob here and arm the zero-delay timer.
                 report.extend_from_slice(&pkt_line(format!("ok {}\n", cmd.refname).as_bytes()));
             }
-            Err(e) => report
-                .extend_from_slice(&pkt_line(format!("ng {} {e}\n", cmd.refname).as_bytes())),
+            Err(e) => {
+                report.extend_from_slice(&pkt_line(format!("ng {} {e}\n", cmd.refname).as_bytes()))
+            }
         }
     }
     report.extend_from_slice(FLUSH_PKT);

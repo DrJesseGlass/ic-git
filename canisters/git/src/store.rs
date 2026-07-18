@@ -14,6 +14,7 @@ use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemor
 use ic_stable_structures::storable::Blob;
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::cell::RefCell;
 use std::io::{Read, Write};
 
@@ -118,13 +119,18 @@ fn canonical_header(object_type: ObjectType, len: usize) -> String {
     format!("{} {len}\0", object_type.as_str())
 }
 
-/// Store a git object. Returns the oid (SHA-1 of the canonical form).
-pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
+/// The oid of an object: SHA-1 of its canonical form.
+fn compute_oid(object_type: ObjectType, content: &[u8]) -> Oid {
     let mut hasher = Sha1::new();
     hasher.update(canonical_header(object_type, content.len()).as_bytes());
     hasher.update(content);
     let digest: [u8; 20] = hasher.finalize().into();
-    let oid = Oid::try_from(digest.as_slice()).unwrap();
+    Oid::try_from(digest.as_slice()).unwrap()
+}
+
+/// Store a git object. Returns the oid (SHA-1 of the canonical form).
+pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
+    let oid = compute_oid(object_type, content);
     // contains_key is a keys-only probe; on a duplicate it skips the deflate,
     // which dominates the cost of the extra traversal on the miss path.
     if !OBJECTS.with(|o| o.borrow().contains_key(&oid)) {
@@ -134,6 +140,21 @@ pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
         let mut enc = ZlibEncoder::new(value, Compression::default());
         enc.write_all(content).expect("in-memory write");
         let value = enc.finish().expect("in-memory finish");
+        OBJECTS.with(|o| o.borrow_mut().insert(oid, value));
+    }
+    oid
+}
+
+/// Store a git object whose zlib(content) stream is already at hand (a
+/// non-delta pack entry): the stream is persisted verbatim, skipping the
+/// deflate that dominates put_object. `zlib` must inflate to `content`.
+pub fn put_object_zlib(object_type: ObjectType, content: &[u8], zlib: &[u8]) -> Oid {
+    let oid = compute_oid(object_type, content);
+    if !OBJECTS.with(|o| o.borrow().contains_key(&oid)) {
+        let mut value = Vec::with_capacity(5 + zlib.len());
+        value.push(object_type as u8);
+        value.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        value.extend_from_slice(zlib);
         OBJECTS.with(|o| o.borrow_mut().insert(oid, value));
     }
     oid
@@ -256,20 +277,22 @@ pub fn delete_ref(repo: &str, refname: &str) {
 
 // --- push tokens -------------------------------------------------------------
 
-pub fn add_push_token(repo: &str, token_hash_hex: &str) {
-    TOKENS.with(|t| {
-        t.borrow_mut()
-            .insert(token_hash_hex.to_string(), repo.to_string())
-    });
+/// TOKENS key for a plaintext token; tokens are never stored in the clear.
+fn token_key(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+pub fn add_push_token(repo: &str, token: &str) {
+    TOKENS.with(|t| t.borrow_mut().insert(token_key(token), repo.to_string()));
 }
 
 /// The repo a presented token authorizes, if any.
-pub fn push_token_repo(token_hash_hex: &str) -> Option<String> {
-    TOKENS.with(|t| t.borrow().get(&token_hash_hex.to_string()))
+pub fn push_token_repo(token: &str) -> Option<String> {
+    TOKENS.with(|t| t.borrow().get(&token_key(token)))
 }
 
-pub fn revoke_push_token(token_hash_hex: &str) -> bool {
-    TOKENS.with(|t| t.borrow_mut().remove(&token_hash_hex.to_string()).is_some())
+pub fn revoke_push_token(token: &str) -> bool {
+    TOKENS.with(|t| t.borrow_mut().remove(&token_key(token)).is_some())
 }
 
 /// All refs of a repo, sorted by refname (git requires sorted advertisement).
