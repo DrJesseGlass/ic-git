@@ -7,11 +7,11 @@ asset-canister deploy triggered by every push to `main`.
 Design: [ARCHITECTURE.md](ARCHITECTURE.md). Built on
 [ic-dev-kit-rs](https://github.com/DrJesseGlass/ic-dev-kit-rs).
 
-**Status: milestone 2.** `git clone`, `git ls-remote`, and `git fetch`/`pull`
-work with a stock git client, including multi-chunk streamed packs for
-larger repos. `push` (m3) and deploy-on-main (m4) are stubs; until m3 lands,
-`tools/seed-repo.sh` uploads a local repo's objects and refs via the admin
-API.
+**Status: milestone 3.** `git clone`, `ls-remote`, `fetch`/`pull`, and
+`git push` (token-authenticated, with thin-pack delta resolution,
+connectivity and fast-forward checks) all work with a stock git client.
+Deploy-on-main (m4) is next. `tools/seed-repo.sh` remains as a bulk-import
+convenience.
 
 ## Quick start (local)
 
@@ -19,11 +19,12 @@ API.
 dfx start --clean --background
 dfx deploy git
 
-# Seed any local git repo into the canister (push arrives in milestone 3)
-tools/seed-repo.sh /path/to/some/repo hello
+dfx canister call git create_repo '("hello")'
+TOKEN=$(dfx canister call git create_push_token '("hello")' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
 
 # Stock git against the local HTTP gateway (note `.raw.` - the non-raw
 # gateway enforces response certification and returns 503):
+git push "http://ic:$TOKEN@$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git" main
 git clone "http://$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git"
 ```
 

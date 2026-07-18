@@ -6,10 +6,13 @@
 
 mod object;
 mod pack;
+mod receive;
 mod smart_http;
 mod store;
 
+use base64::Engine;
 use ic_dev_kit_rs::auth;
+use sha2::{Digest, Sha256};
 use ic_dev_kit_rs::http::{
     self, HttpRequest, HttpResponse, StreamingCallback, StreamingCallbackHttpResponse,
     StreamingCallbackToken, StreamingStrategy,
@@ -91,12 +94,49 @@ fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) -> HttpResp
     }
 }
 
+/// The repo a Basic-auth push token authorizes, if the header carries one.
+fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
+    let value = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .map(|(_, v)| v.as_str())?;
+    let b64 = value.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .ok()?;
+    let creds = String::from_utf8(decoded).ok()?;
+    // Username is ignored; the password slot carries the token.
+    let token = creds.split_once(':').map(|(_, p)| p).unwrap_or(&creds);
+    store::push_token_repo(&hex::encode(Sha256::digest(token.as_bytes())))
+}
+
+fn push_authorized(repo: &str, headers: &[(String, String)]) -> bool {
+    push_token_repo(headers).as_deref() == Some(repo)
+}
+
+/// 401 challenge that makes git retry with credentials.
+fn unauthorized() -> HttpResponse {
+    HttpResponse {
+        status_code: 401,
+        headers: vec![
+            ("WWW-Authenticate".to_string(), "Basic realm=\"ic-git\"".to_string()),
+            ("Content-Type".to_string(), "text/plain".to_string()),
+        ],
+        body: b"push token required\n".to_vec(),
+        upgrade: None,
+        streaming_strategy: None,
+    }
+}
+
 #[ic_cdk::query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     match route(&req) {
         // head_target doubles as the repo-existence probe: one REPOS read.
         Route::InfoRefs { repo, service } => match store::head_target(&repo) {
             None => git_response(404, "text/plain", b"no such repo\n".to_vec()),
+            Some(_) if service == Service::ReceivePack && !push_authorized(&repo, &req.headers) => {
+                unauthorized()
+            }
             Some(head) => git_response(
                 200,
                 &format!("application/x-{}-advertisement", service.name()),
@@ -166,12 +206,20 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
     match route(&req) {
         Route::Rpc {
             service: Service::ReceivePack,
-            ..
-        } => git_response(
-            501,
-            "text/plain",
-            b"ic-git: receive-pack not implemented yet (milestone 3)\n".to_vec(),
-        ),
+            repo,
+        } => {
+            if !store::repo_exists(&repo) {
+                return git_response(404, "text/plain", b"no such repo\n".to_vec());
+            }
+            if !push_authorized(&repo, &req.headers) {
+                return unauthorized();
+            }
+            git_response(
+                200,
+                "application/x-git-receive-pack-result",
+                receive::handle(&repo, &req.body),
+            )
+        }
         _ => git_response(404, "text/plain", b"not found\n".to_vec()),
     }
 }
@@ -199,6 +247,29 @@ fn get_object(oid_hex: String) -> Option<Vec<u8>> {
 #[ic_cdk::update(guard = "auth::is_authorized")]
 fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String> {
     store::set_ref(&repo, &refname, store::parse_oid(&oid_hex)?)
+}
+
+/// Mint a push token for a repo. Returned once, in the clear; only its
+/// sha256 is stored. Use as the password in the remote URL:
+/// https://ic:<token>@<canister>.raw.icp0.io/<repo>.git
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn create_push_token(repo: String) -> Result<String, String> {
+    if !store::repo_exists(&repo) {
+        return Err(format!("no such repo: {repo}"));
+    }
+    let bytes: Vec<u8> = ic_dev_kit_rs::intercanister::call_no_args(
+        candid::Principal::management_canister(),
+        "raw_rand",
+    )
+    .await?;
+    let token = hex::encode(&bytes[..16]);
+    store::add_push_token(&repo, &hex::encode(Sha256::digest(token.as_bytes())));
+    Ok(token)
+}
+
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn revoke_push_token(token: String) -> bool {
+    store::revoke_push_token(&hex::encode(Sha256::digest(token.as_bytes())))
 }
 
 #[ic_cdk::query]

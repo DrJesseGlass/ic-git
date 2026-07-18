@@ -75,6 +75,7 @@ const MEM_OBJECTS: MemoryId = MemoryId::new(0);
 const MEM_REFS: MemoryId = MemoryId::new(1);
 const MEM_REPOS: MemoryId = MemoryId::new(2);
 const MEM_META: MemoryId = MemoryId::new(3);
+const MEM_TOKENS: MemoryId = MemoryId::new(4);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -101,6 +102,11 @@ thread_local! {
     /// accessed through the dev kit's storage helpers.
     static META: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_META))),
+    );
+
+    /// hex(sha256(push token)) -> repo name the token may push to.
+    static TOKENS: RefCell<StableBTreeMap<String, String, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_TOKENS))),
     );
 }
 
@@ -242,6 +248,28 @@ pub fn set_ref(repo: &str, refname: &str, oid: Oid) -> Result<(), String> {
 
 pub fn get_ref(repo: &str, refname: &str) -> Option<Oid> {
     REFS.with(|r| r.borrow().get(&ref_key(repo, refname)))
+}
+
+pub fn delete_ref(repo: &str, refname: &str) {
+    REFS.with(|r| r.borrow_mut().remove(&ref_key(repo, refname)));
+}
+
+// --- push tokens -------------------------------------------------------------
+
+pub fn add_push_token(repo: &str, token_hash_hex: &str) {
+    TOKENS.with(|t| {
+        t.borrow_mut()
+            .insert(token_hash_hex.to_string(), repo.to_string())
+    });
+}
+
+/// The repo a presented token authorizes, if any.
+pub fn push_token_repo(token_hash_hex: &str) -> Option<String> {
+    TOKENS.with(|t| t.borrow().get(&token_hash_hex.to_string()))
+}
+
+pub fn revoke_push_token(token_hash_hex: &str) -> bool {
+    TOKENS.with(|t| t.borrow_mut().remove(&token_hash_hex.to_string()).is_some())
 }
 
 /// All refs of a repo, sorted by refname (git requires sorted advertisement).
