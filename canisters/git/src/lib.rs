@@ -4,6 +4,11 @@
 //! refs + admin API) plus the info/refs advertisement, so `git ls-remote`
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
+mod compile;
+mod deploy;
+mod fleet;
+mod interp;
+mod lang;
 mod object;
 mod pack;
 mod receive;
@@ -36,6 +41,9 @@ fn pre_upgrade() {
 fn post_upgrade() {
     store::check_schema_version();
     auth::init_from_saved(store::load_auth_snapshot());
+    // Timers do not survive upgrades; re-arm the drain timer if the queue
+    // (which does survive, in stable memory) still holds pending deploys.
+    deploy::resume_pending();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -213,10 +221,18 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             if !push_authorized(&repo, &req.headers) {
                 return unauthorized();
             }
+            let outcome = receive::handle(&repo, &req.body);
+            // m4: if the push moved the deploy branch and a deploy is
+            // configured, enqueue a job and return immediately. The compile +
+            // validate + install_code runs from a timer, off the push path
+            // (see deploy::enqueue). Outcome is readable via get_deploy_status.
+            if let Some(commit) = outcome.deploy_commit {
+                deploy::enqueue(&repo, commit);
+            }
             git_response(
                 200,
                 "application/x-git-receive-pack-result",
-                receive::handle(&repo, &req.body),
+                outcome.report,
             )
         }
         _ => git_response(404, "text/plain", b"not found\n".to_vec()),
@@ -282,6 +298,291 @@ fn list_refs(repo: String) -> Vec<(String, String)> {
 #[ic_cdk::query]
 fn list_repos() -> Vec<String> {
     store::list_repos()
+}
+
+// --- on-chain build spike (Track B rung R0; see ROADMAP.md) -----------------
+
+/// Compile WebAssembly text (WAT) to a wasm binary, in-canister. The smallest
+/// real compiler that proves the source -> artifact pipeline on-chain.
+#[ic_cdk::query]
+fn compile_wat(text: String) -> Result<Vec<u8>, String> {
+    compile::compile_wat(&text)
+}
+
+/// Same compile, but returns size + sha256 instead of the bytes -- convenient
+/// to inspect over `dfx canister call`.
+#[ic_cdk::query]
+fn compile_wat_info(text: String) -> Result<compile::CompileInfo, String> {
+    compile::compile_wat_info(&text)
+}
+
+// --- on-chain build: R1 minimal language (see ROADMAP.md) -------------------
+
+/// Compile R1 language source to a wasm binary, in-canister. Unlike compile_wat
+/// (an assembler), this is a real compiler: lexer + parser + wasm codegen.
+#[ic_cdk::query]
+fn compile_lang(text: String) -> Result<Vec<u8>, String> {
+    lang::compile_checked(&text)
+}
+
+/// Compile R1 source, returning size + sha256 instead of the bytes.
+#[ic_cdk::query]
+fn compile_lang_info(text: String) -> Result<compile::CompileInfo, String> {
+    let wasm = lang::compile_checked(&text)?;
+    Ok(compile::info_of(&wasm))
+}
+
+// --- R2: instruction metering, ceiling measurement, resumable compile -------
+
+/// Run `f` and report the wasm instructions it consumed alongside its result.
+fn metered<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    let start = ic_cdk::api::instruction_counter();
+    let result = f();
+    (result, ic_cdk::api::instruction_counter() - start)
+}
+
+#[derive(candid::CandidType)]
+struct MeteredCompile {
+    wasm_len: u64,
+    sha256_hex: String,
+    instructions: u64,
+}
+
+#[derive(candid::CandidType)]
+struct MeasureResult {
+    funcs: u32,
+    wasm_len: u64,
+    instructions: u64,
+}
+
+#[derive(candid::CandidType)]
+struct JobProgress {
+    done: bool,
+    done_funcs: u32,
+    total_funcs: u32,
+    instructions: u64,
+}
+
+/// Compile R1 source and report how many wasm instructions the compile itself
+/// cost. An update call so the measurement gets the full ~40B budget.
+#[ic_cdk::update]
+fn compile_lang_metered(text: String) -> Result<MeteredCompile, String> {
+    let (wasm, instructions) = metered(|| lang::compile_checked(&text));
+    let info = compile::info_of(&wasm?);
+    Ok(MeteredCompile {
+        wasm_len: info.wasm_len,
+        sha256_hex: info.sha256_hex,
+        instructions,
+    })
+}
+
+/// Compile a generated `funcs`-function program in one call and report the
+/// instruction cost -- used to chart the single-message compile ceiling.
+#[ic_cdk::update]
+fn measure_compile(funcs: u32) -> Result<MeasureResult, String> {
+    if funcs == 0 {
+        return Err("funcs must be >= 1".into());
+    }
+    let src = lang::synthetic_program(funcs);
+    let (wasm, instructions) = metered(|| lang::compile_checked(&src));
+    Ok(MeasureResult {
+        funcs,
+        wasm_len: wasm?.len() as u64,
+        instructions,
+    })
+}
+
+/// Start a resumable compile; returns a job id. Codegen happens in later steps.
+#[ic_cdk::update]
+fn compile_job_start(text: String) -> Result<u64, String> {
+    lang::job::start(&text)
+}
+
+/// Codegen up to `batch` more functions of a job, reporting progress + cost.
+#[ic_cdk::update]
+fn compile_job_step(id: u64, batch: u32) -> Result<JobProgress, String> {
+    let (progress, instructions) = metered(|| lang::job::step(id, batch as usize));
+    let (done, done_funcs, total_funcs) = progress?;
+    Ok(JobProgress {
+        done,
+        done_funcs: done_funcs as u32,
+        total_funcs: total_funcs as u32,
+        instructions,
+    })
+}
+
+/// Finish a fully-stepped job: assemble, validate, and return the wasm bytes.
+#[ic_cdk::update]
+fn compile_job_take(id: u64) -> Result<Vec<u8>, String> {
+    lang::job::take(id)
+}
+
+// --- R3: separate compilation across modules --------------------------------
+
+/// Compile one module in isolation to a portable object (serde-encoded). The
+/// object records the module's exports and the imports it expects, with call
+/// sites left as unresolved relocations. This is the unit R4 will distribute:
+/// one module per canister.
+#[ic_cdk::query]
+fn compile_module(source: String) -> Result<Vec<u8>, String> {
+    let obj = lang::link::compile_module(&source)?;
+    serde_json::to_vec(&obj).map_err(|e| e.to_string())
+}
+
+/// Link separately-compiled module objects (as returned by compile_module) into
+/// one validated wasm binary, resolving cross-module calls.
+#[ic_cdk::query]
+fn link_module_objects(objects: Vec<Vec<u8>>) -> Result<Vec<u8>, String> {
+    let objs: Result<Vec<_>, String> = objects
+        .iter()
+        .map(|b| serde_json::from_slice(b).map_err(|e| e.to_string()))
+        .collect();
+    lang::link::link(&objs?)
+}
+
+/// Convenience: separately compile each source, then link -- the whole R3
+/// pipeline in one call. Returns size + sha256 of the linked wasm.
+#[ic_cdk::query]
+fn compile_and_link_info(sources: Vec<String>) -> Result<compile::CompileInfo, String> {
+    let objs: Result<Vec<_>, String> = sources
+        .iter()
+        .map(|s| lang::link::compile_module(s))
+        .collect();
+    let wasm = lang::link::link(&objs?)?;
+    Ok(compile::info_of(&wasm))
+}
+
+// --- R4: distribute compilation across a worker fleet -----------------------
+
+#[derive(candid::CandidType)]
+struct DistributeReport {
+    wasm_len: u64,
+    sha256_hex: String,
+    module_count: u32,
+    worker_count: u32,
+}
+
+/// Register the compiler worker pool (canisters exposing `compile_module`).
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_compiler_workers(workers: Vec<candid::Principal>) -> Result<(), String> {
+    fleet::set_workers(&workers);
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_compiler_workers() -> Vec<candid::Principal> {
+    fleet::get_workers()
+}
+
+/// Distribute each module's compile across the worker fleet (concurrently),
+/// then link the results into one wasm binary.
+#[ic_cdk::update]
+async fn compile_distributed(sources: Vec<String>) -> Result<Vec<u8>, String> {
+    fleet::compile_distributed(&fleet::get_workers(), sources).await
+}
+
+/// Same as compile_distributed, reporting size/sha256 plus how many modules
+/// were fanned out across how many workers.
+#[ic_cdk::update]
+async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeReport, String> {
+    let module_count = sources.len() as u32;
+    let workers = fleet::get_workers();
+    let worker_count = workers.len() as u32;
+    let wasm = fleet::compile_distributed(&workers, sources).await?;
+    let info = compile::info_of(&wasm);
+    Ok(DistributeReport {
+        wasm_len: info.wasm_len,
+        sha256_hex: info.sha256_hex,
+        module_count,
+        worker_count,
+    })
+}
+
+// --- deploy-on-push (first slice of m4; see ARCHITECTURE.md / ROADMAP.md) ----
+
+/// Configure compile-and-deploy for a repo: on push to the deploy branch, the
+/// source at `source_path` (.wat or .lang) is compiled and installed into
+/// `target`. The git canister must be a controller of `target`. Install mode
+/// defaults to upgrade; change it with set_deploy_mode.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
+    deploy::set_config(&repo, target, source_path)
+}
+
+/// Set a repo's install mode: "upgrade" (default; preserves target state) or
+/// "reinstall" (wipes target state).
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
+    deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
+}
+
+/// Run the configured deploy now against the repo's current deploy-branch tip,
+/// without waiting for a push. Returns the outcome.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
+    deploy::run_current(&repo).await
+}
+
+#[ic_cdk::query]
+fn get_deploy_config(repo: String) -> Option<deploy::DeployConfig> {
+    deploy::get_config(&repo)
+}
+
+#[ic_cdk::query]
+fn get_deploy_status(repo: String) -> Option<deploy::DeployStatus> {
+    deploy::get_status(&repo)
+}
+
+/// Append-only provenance log for a repo: each deploy's binding of on-chain
+/// commit to deployed wasm hash. Immutable record, independently re-verifiable
+/// by reproducibly rebuilding the commit.
+#[ic_cdk::query]
+fn get_deploy_history(repo: String) -> Vec<deploy::DeployRecord> {
+    deploy::get_history(&repo)
+}
+
+/// Number of deploy jobs waiting in the timer-driven queue.
+#[ic_cdk::query]
+fn deploy_queue_len() -> u64 {
+    deploy::queue_len() as u64
+}
+
+// --- R6 spike: interpret a wasm32-wasip1 module in-canister ------------------
+
+#[derive(candid::CandidType)]
+struct RunReport {
+    output: String,
+    output_len: u64,
+    exit_code: i32,
+    instructions: u64,
+}
+
+fn run_and_measure(wasm: &[u8]) -> Result<RunReport, String> {
+    let (r, instructions) = metered(|| interp::run_wasip1(wasm));
+    let r = r?;
+    Ok(RunReport {
+        output: String::from_utf8_lossy(&r.output).into_owned(),
+        output_len: r.output.len() as u64,
+        exit_code: r.exit_code,
+        instructions,
+    })
+}
+
+/// Interpret a wasm32-wasip1 module (as bytes) with wasmi + a minimal WASI host,
+/// returning captured stdout/stderr, exit code, and the instruction cost of the
+/// interpretation. This is the harness rustc.wasm will eventually run in.
+#[ic_cdk::update]
+fn run_wasm(module: Vec<u8>) -> Result<RunReport, String> {
+    run_and_measure(&module)
+}
+
+/// Self-contained demo: compile WAT (R0) to a wasip1 module in-canister, then
+/// interpret it (R6) -- source -> wasm -> interpreted-run, all on-chain, with
+/// the interpretation cost measured.
+#[ic_cdk::update]
+fn run_wat(text: String) -> Result<RunReport, String> {
+    let wasm = compile::compile_wat_checked(&text)?;
+    run_and_measure(&wasm)
 }
 
 ic_cdk::export_candid!();

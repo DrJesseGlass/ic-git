@@ -9,6 +9,26 @@
     "www": {
       "type": "assets",
       "source": ["site"]
+    },
+    "wasm_target": {
+      "type": "custom",
+      "wasm": "target/wasm32-unknown-unknown/release/git_canister.wasm",
+      "candid": "canisters/git/git.did"
+    },
+    "worker_1": {
+      "type": "custom",
+      "wasm": "target/wasm32-unknown-unknown/release/git_canister.wasm",
+      "candid": "canisters/git/git.did"
+    },
+    "worker_2": {
+      "type": "custom",
+      "wasm": "target/wasm32-unknown-unknown/release/git_canister.wasm",
+      "candid": "canisters/git/git.did"
+    },
+    "worker_3": {
+      "type": "custom",
+      "wasm": "target/wasm32-unknown-unknown/release/git_canister.wasm",
+      "candid": "canisters/git/git.did"
     }
   },
   "defaults": {

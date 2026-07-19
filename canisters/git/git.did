@@ -36,6 +36,68 @@ type HttpResponse = record {
 
 type Result = variant { Ok; Err : text };
 type ResultText = variant { Ok : text; Err : text };
+type ResultBlob = variant { Ok : blob; Err : text };
+
+type CompileInfo = record { wasm_len : nat64; sha256_hex : text };
+type ResultCompileInfo = variant { Ok : CompileInfo; Err : text };
+
+type MeteredCompile = record {
+  wasm_len : nat64;
+  sha256_hex : text;
+  instructions : nat64;
+};
+type ResultMetered = variant { Ok : MeteredCompile; Err : text };
+type MeasureResult = record { funcs : nat32; wasm_len : nat64; instructions : nat64 };
+type ResultMeasure = variant { Ok : MeasureResult; Err : text };
+type JobProgress = record {
+  done : bool;
+  done_funcs : nat32;
+  total_funcs : nat32;
+  instructions : nat64;
+};
+type ResultJob = variant { Ok : JobProgress; Err : text };
+type ResultNat64 = variant { Ok : nat64; Err : text };
+
+type DistributeReport = record {
+  wasm_len : nat64;
+  sha256_hex : text;
+  module_count : nat32;
+  worker_count : nat32;
+};
+type ResultDistribute = variant { Ok : DistributeReport; Err : text };
+
+type RunReport = record {
+  output : text;
+  output_len : nat64;
+  exit_code : int32;
+  instructions : nat64;
+};
+type ResultRun = variant { Ok : RunReport; Err : text };
+
+type DeployMode = variant { upgrade; reinstall };
+type DeployConfig = record {
+  target : text;
+  source_path : text;
+  mode : DeployMode;
+};
+type DeployStatus = record {
+  commit : text;
+  ok : bool;
+  message : text;
+  wasm_len : nat64;
+  wasm_sha256 : text;
+};
+type ResultDeployStatus = variant { Ok : DeployStatus; Err : text };
+
+type DeployRecord = record {
+  commit : text;
+  source_path : text;
+  wasm_sha256 : text;
+  wasm_len : nat64;
+  ok : bool;
+  message : text;
+  at_ns : nat64;
+};
 
 service : {
   // git smart-HTTP surface (called by the HTTP gateway)
@@ -54,4 +116,43 @@ service : {
   get_object : (text) -> (opt blob) query;
   list_refs : (text) -> (vec record { text; text }) query;
   list_repos : () -> (vec text) query;
+
+  // on-chain build: R0 WAT assembler
+  compile_wat : (text) -> (ResultBlob) query;
+  compile_wat_info : (text) -> (ResultCompileInfo) query;
+
+  // on-chain build: R1 minimal language compiler
+  compile_lang : (text) -> (ResultBlob) query;
+  compile_lang_info : (text) -> (ResultCompileInfo) query;
+
+  // R2: metering, ceiling measurement, resumable compile
+  compile_lang_metered : (text) -> (ResultMetered);
+  measure_compile : (nat32) -> (ResultMeasure);
+  compile_job_start : (text) -> (ResultNat64);
+  compile_job_step : (nat64, nat32) -> (ResultJob);
+  compile_job_take : (nat64) -> (ResultBlob);
+
+  // R3: separate compilation across modules
+  compile_module : (text) -> (ResultBlob) query;
+  link_module_objects : (vec blob) -> (ResultBlob) query;
+  compile_and_link_info : (vec text) -> (ResultCompileInfo) query;
+
+  // deploy-on-push (m4)
+  set_wasm_deploy : (text, text, text) -> (Result);
+  set_deploy_mode : (text, text) -> (Result);
+  deploy_now : (text) -> (ResultDeployStatus);
+  get_deploy_config : (text) -> (opt DeployConfig) query;
+  get_deploy_status : (text) -> (opt DeployStatus) query;
+  get_deploy_history : (text) -> (vec DeployRecord) query;
+  deploy_queue_len : () -> (nat64) query;
+
+  // R4: distribute compilation across a worker fleet
+  set_compiler_workers : (vec principal) -> (Result);
+  get_compiler_workers : () -> (vec principal) query;
+  compile_distributed : (vec text) -> (ResultBlob);
+  compile_distributed_info : (vec text) -> (ResultDistribute);
+
+  // R6 spike: interpret a wasm32-wasip1 module in-canister (the rustc.wasm host)
+  run_wasm : (blob) -> (ResultRun);
+  run_wat : (text) -> (ResultRun);
 }

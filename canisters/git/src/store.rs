@@ -317,6 +317,20 @@ pub fn load_auth_snapshot() -> Option<Vec<u8>> {
     META.with(|m| storage::load_bytes(m, "auth"))
 }
 
+// JSON-encoded values other modules (deploy, fleet) keep in the META bucket.
+// The caller owns the key, including its namespace prefix, which keeps these
+// out of the way of the auth/schema markers.
+
+pub fn meta_set_json<T: serde::Serialize>(key: &str, value: &T) {
+    if let Ok(bytes) = serde_json::to_vec(value) {
+        META.with(|m| storage::save_bytes(m, key, bytes));
+    }
+}
+
+pub fn meta_get_json<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    META.with(|m| storage::load_bytes(m, key)).and_then(|b| serde_json::from_slice(&b).ok())
+}
+
 // --- schema version ----------------------------------------------------------
 
 /// Encoding version of OBJECTS values ([pack type code][content len u32 LE]
