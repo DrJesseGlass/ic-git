@@ -32,6 +32,6 @@ wat = "1"
 wasmparser = "0.253"
 # Track B, rung R1: emit wasm directly from our own compiler (no LLVM).
 wasm-encoder = "0.253"
-
-[dev-dependencies]
-wasmi = "1.1.0"
+# Track B, rung R6: interpret a wasm32-wasip1 module (eventually rustc.wasm)
+# held as data in stable memory. Pure Rust, builds to wasm32-unknown-unknown.
+wasmi = "1"

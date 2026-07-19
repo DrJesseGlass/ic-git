@@ -357,6 +357,15 @@ pub fn get_workers() -> Option<Vec<u8>> {
     META.with(|m| storage::load_bytes(m, "compiler_workers"))
 }
 
+/// Per-repo append-only deploy provenance log (commit -> deployed wasm hash).
+pub fn set_deploy_log(repo: &str, bytes: Vec<u8>) {
+    META.with(|m| storage::save_bytes(m, &format!("deploy_log:{repo}"), bytes));
+}
+
+pub fn get_deploy_log(repo: &str) -> Option<Vec<u8>> {
+    META.with(|m| storage::load_bytes(m, &format!("deploy_log:{repo}")))
+}
+
 // --- schema version ----------------------------------------------------------
 
 /// Encoding version of OBJECTS values ([pack type code][content len u32 LE]

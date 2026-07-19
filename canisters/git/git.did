@@ -66,6 +66,14 @@ type DistributeReport = record {
 };
 type ResultDistribute = variant { Ok : DistributeReport; Err : text };
 
+type RunReport = record {
+  output : text;
+  output_len : nat64;
+  exit_code : int32;
+  instructions : nat64;
+};
+type ResultRun = variant { Ok : RunReport; Err : text };
+
 type DeployMode = variant { upgrade; reinstall };
 type DeployConfig = record {
   target : text;
@@ -80,6 +88,16 @@ type DeployStatus = record {
   wasm_sha256 : text;
 };
 type ResultDeployStatus = variant { Ok : DeployStatus; Err : text };
+
+type DeployRecord = record {
+  commit : text;
+  source_path : text;
+  wasm_sha256 : text;
+  wasm_len : nat64;
+  ok : bool;
+  message : text;
+  at_ns : nat64;
+};
 
 service : {
   // git smart-HTTP surface (called by the HTTP gateway)
@@ -125,6 +143,7 @@ service : {
   deploy_now : (text) -> (ResultDeployStatus);
   get_deploy_config : (text) -> (opt DeployConfig) query;
   get_deploy_status : (text) -> (opt DeployStatus) query;
+  get_deploy_history : (text) -> (vec DeployRecord) query;
   deploy_queue_len : () -> (nat64) query;
 
   // R4: distribute compilation across a worker fleet
@@ -132,4 +151,8 @@ service : {
   get_compiler_workers : () -> (vec principal) query;
   compile_distributed : (vec text) -> (ResultBlob);
   compile_distributed_info : (vec text) -> (ResultDistribute);
+
+  // R6 spike: interpret a wasm32-wasip1 module in-canister (the rustc.wasm host)
+  run_wasm : (blob) -> (ResultRun);
+  run_wat : (text) -> (ResultRun);
 }

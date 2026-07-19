@@ -7,6 +7,7 @@
 mod compile;
 mod deploy;
 mod fleet;
+mod interp;
 mod lang;
 mod object;
 mod pack;
@@ -534,10 +535,57 @@ fn get_deploy_status(repo: String) -> Option<deploy::DeployStatus> {
     deploy::get_status(&repo)
 }
 
+/// Append-only provenance log for a repo: each deploy's binding of on-chain
+/// commit to deployed wasm hash. Immutable record, independently re-verifiable
+/// by reproducibly rebuilding the commit.
+#[ic_cdk::query]
+fn get_deploy_history(repo: String) -> Vec<deploy::DeployRecord> {
+    deploy::get_history(&repo)
+}
+
 /// Number of deploy jobs waiting in the timer-driven queue.
 #[ic_cdk::query]
 fn deploy_queue_len() -> u64 {
     deploy::queue_len() as u64
+}
+
+// --- R6 spike: interpret a wasm32-wasip1 module in-canister ------------------
+
+#[derive(candid::CandidType)]
+struct RunReport {
+    output: String,
+    output_len: u64,
+    exit_code: i32,
+    instructions: u64,
+}
+
+fn run_and_measure(wasm: &[u8]) -> Result<RunReport, String> {
+    let start = ic_cdk::api::instruction_counter();
+    let r = interp::run_wasip1(wasm)?;
+    let instructions = ic_cdk::api::instruction_counter() - start;
+    Ok(RunReport {
+        output: String::from_utf8_lossy(&r.output).into_owned(),
+        output_len: r.output.len() as u64,
+        exit_code: r.exit_code,
+        instructions,
+    })
+}
+
+/// Interpret a wasm32-wasip1 module (as bytes) with wasmi + a minimal WASI host,
+/// returning captured stdout/stderr, exit code, and the instruction cost of the
+/// interpretation. This is the harness rustc.wasm will eventually run in.
+#[ic_cdk::update]
+fn run_wasm(module: Vec<u8>) -> Result<RunReport, String> {
+    run_and_measure(&module)
+}
+
+/// Self-contained demo: compile WAT (R0) to a wasip1 module in-canister, then
+/// interpret it (R6) -- source -> wasm -> interpreted-run, all on-chain, with
+/// the interpretation cost measured.
+#[ic_cdk::update]
+fn run_wat(text: String) -> Result<RunReport, String> {
+    let wasm = compile::compile_wat_checked(&text)?;
+    run_and_measure(&wasm)
 }
 
 ic_cdk::export_candid!();

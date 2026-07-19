@@ -80,8 +80,11 @@ pub fn set_config(repo: &str, target: String, source_path: String) -> Result<(),
     if source_path.is_empty() {
         return Err("source_path is empty".into());
     }
-    if !(source_path.ends_with(".wat") || source_path.ends_with(".lang")) {
-        return Err("source_path must end in .wat or .lang".into());
+    if !(source_path.ends_with(".wat")
+        || source_path.ends_with(".lang")
+        || source_path.ends_with(".wasm"))
+    {
+        return Err("source_path must end in .wat, .lang, or .wasm".into());
     }
     let mode = get_config(repo).map(|c| c.mode).unwrap_or_default();
     let cfg = DeployConfig {
@@ -115,6 +118,57 @@ pub fn get_status(repo: &str) -> Option<DeployStatus> {
 fn put_status(repo: &str, st: &DeployStatus) {
     if let Ok(bytes) = serde_json::to_vec(st) {
         store::set_deploy_status(repo, bytes);
+    }
+}
+
+/// One entry in a repo's append-only deploy provenance log: the binding of an
+/// on-chain commit to the wasm hash that was deployed from it. Because the
+/// commit oid content-addresses the exact source tree and the wasm hash is
+/// recorded here, this is a tamper-proof record of "commit C produced binary H"
+/// that anyone can re-verify by reproducibly rebuilding commit C.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct DeployRecord {
+    pub commit: String,
+    pub source_path: String,
+    pub wasm_sha256: String,
+    pub wasm_len: u64,
+    pub ok: bool,
+    pub message: String,
+    /// IC time (nanoseconds since the epoch) when the deploy was recorded.
+    pub at_ns: u64,
+}
+
+/// Keep the most recent N records per repo to bound stable-memory growth.
+const MAX_LOG: usize = 200;
+
+fn history(repo: &str) -> Vec<DeployRecord> {
+    store::get_deploy_log(repo)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn get_history(repo: &str) -> Vec<DeployRecord> {
+    history(repo)
+}
+
+/// Append the binding for this deploy to the provenance log.
+fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
+    let mut log = history(repo);
+    log.push(DeployRecord {
+        commit: st.commit.clone(),
+        source_path: cfg.source_path.clone(),
+        wasm_sha256: st.wasm_sha256.clone(),
+        wasm_len: st.wasm_len,
+        ok: st.ok,
+        message: st.message.clone(),
+        at_ns: ic_cdk::api::time(),
+    });
+    if log.len() > MAX_LOG {
+        let drop = log.len() - MAX_LOG;
+        log.drain(0..drop);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&log) {
+        store::set_deploy_log(repo, bytes);
     }
 }
 
@@ -335,6 +389,20 @@ fn compile_source(path: &str, src: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Turn the committed source blob into deployable wasm. A `.wasm` file is a
+/// prebuilt artifact (build locally with real rustc, commit the wasm) -- it is
+/// validated and used as-is. `.wat`/`.lang` are compiled on-chain. Either way
+/// the result is validated before it can be installed.
+fn produce_wasm(path: &str, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if path.ends_with(".wasm") {
+        compile::validate_wasm(&bytes)?;
+        Ok(bytes)
+    } else {
+        let src = String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8"))?;
+        compile_source(path, &src)
+    }
+}
+
 /// Compile the configured WAT from the commit's tree, validate it, and install
 /// it into the target canister. Records and returns the outcome; never traps.
 pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
@@ -370,19 +438,12 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
             return st;
         }
     };
-    let src = match String::from_utf8(src_bytes) {
-        Ok(s) => s,
-        Err(_) => {
-            st.message = format!("{} is not valid UTF-8", cfg.source_path);
-            put_status(repo, &st);
-            return st;
-        }
-    };
-    let wasm = match compile_source(&cfg.source_path, &src) {
+    let wasm = match produce_wasm(&cfg.source_path, src_bytes) {
         Ok(w) => w,
         Err(e) => {
-            st.message = format!("compile/validate failed: {e}");
+            st.message = format!("build {}: {e}", cfg.source_path);
             put_status(repo, &st);
+            record(repo, &cfg, &st);
             return st;
         }
     };
@@ -397,6 +458,7 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
         Err(e) => st.message = format!("install_code failed: {e}"),
     }
     put_status(repo, &st);
+    record(repo, &cfg, &st);
     st
 }
 
