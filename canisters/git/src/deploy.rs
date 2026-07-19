@@ -14,6 +14,7 @@ use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 /// What to build and where to install it, per repo.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -62,6 +63,82 @@ pub fn get_status(repo: &str) -> Option<DeployStatus> {
 fn put_status(repo: &str, st: &DeployStatus) {
     if let Ok(bytes) = serde_json::to_vec(st) {
         store::set_deploy_status(repo, bytes);
+    }
+}
+
+// --- deploy queue (timer-driven; see ARCHITECTURE.md) ------------------------
+// Pushes enqueue a job and return immediately; the deploy runs from a
+// zero-delay timer, off the push path, so the push response is not blocked on
+// compile + install_code. The queue lives in stable memory (survives upgrades);
+// the timer does not, so post_upgrade re-arms it via `resume_pending`.
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DeployJob {
+    repo: String,
+    /// Commit that triggered the deploy, as a hex oid.
+    commit: String,
+}
+
+fn queue_load() -> Vec<DeployJob> {
+    store::get_deploy_queue()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn queue_save(jobs: &[DeployJob]) {
+    if let Ok(bytes) = serde_json::to_vec(jobs) {
+        store::set_deploy_queue(bytes);
+    }
+}
+
+/// Number of jobs waiting in the queue.
+pub fn queue_len() -> usize {
+    queue_load().len()
+}
+
+/// Append a deploy job and arm the drain timer. Returns immediately.
+pub fn enqueue(repo: &str, commit: Oid) {
+    let mut jobs = queue_load();
+    jobs.push(DeployJob {
+        repo: repo.to_string(),
+        commit: store::oid_hex(&commit),
+    });
+    queue_save(&jobs);
+    arm_timer();
+}
+
+/// Re-arm the drain timer if jobs are pending. Called from post_upgrade, since
+/// timers do not survive upgrades.
+pub fn resume_pending() {
+    if !queue_load().is_empty() {
+        arm_timer();
+    }
+}
+
+/// Arm a zero-delay timer to drain one job. Safe to call redundantly: a timer
+/// that fires on an empty queue is a no-op. In ic-cdk-timers 1.0 the timer
+/// drives the future directly (its only await is the install_code call).
+pub fn arm_timer() {
+    ic_cdk_timers::set_timer(Duration::ZERO, drain_one());
+}
+
+/// Pop the front job, run it, and re-arm if more remain. The job is removed
+/// (and the removal persisted) before running, so a job can never loop forever;
+/// `run` records its own outcome and is written never to trap.
+async fn drain_one() {
+    let mut jobs = queue_load();
+    if jobs.is_empty() {
+        return;
+    }
+    let job = jobs.remove(0);
+    let more_remain = !jobs.is_empty();
+    queue_save(&jobs);
+
+    if let Ok(commit) = store::parse_oid(&job.commit) {
+        run(&job.repo, commit).await;
+    }
+    if more_remain {
+        arm_timer();
     }
 }
 

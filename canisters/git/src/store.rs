@@ -337,6 +337,17 @@ pub fn get_deploy_status(repo: &str) -> Option<Vec<u8>> {
     META.with(|m| storage::load_bytes(m, &format!("deploy_status:{repo}")))
 }
 
+/// The pending-deploy queue, a single opaque blob (the deploy module owns the
+/// encoding). Kept in stable META so queued jobs survive canister upgrades;
+/// timers do not, so post_upgrade re-arms the drain timer if this is non-empty.
+pub fn set_deploy_queue(bytes: Vec<u8>) {
+    META.with(|m| storage::save_bytes(m, "deploy_queue", bytes));
+}
+
+pub fn get_deploy_queue() -> Option<Vec<u8>> {
+    META.with(|m| storage::load_bytes(m, "deploy_queue"))
+}
+
 // --- schema version ----------------------------------------------------------
 
 /// Encoding version of OBJECTS values ([pack type code][content len u32 LE]

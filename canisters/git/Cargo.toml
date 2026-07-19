@@ -11,6 +11,7 @@ ic-dev-kit-rs = { git = "https://github.com/DrJesseGlass/ic-dev-kit-rs", tag = "
 
 # Keep these pinned to the versions ic-dev-kit-rs uses.
 ic-cdk = "0.20"
+ic-cdk-timers = "1"
 candid = "0.10"
 ic-stable-structures = "0.7"
 

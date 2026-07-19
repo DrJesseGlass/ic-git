@@ -38,6 +38,9 @@ fn pre_upgrade() {
 fn post_upgrade() {
     store::check_schema_version();
     auth::init_from_saved(store::load_auth_snapshot());
+    // Timers do not survive upgrades; re-arm the drain timer if the queue
+    // (which does survive, in stable memory) still holds pending deploys.
+    deploy::resume_pending();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -203,7 +206,7 @@ fn http_request_streaming_callback(token: StreamingCallbackToken) -> StreamingCa
 }
 
 #[ic_cdk::update]
-async fn http_request_update(req: HttpRequest) -> HttpResponse {
+fn http_request_update(req: HttpRequest) -> HttpResponse {
     match route(&req) {
         Route::Rpc {
             service: Service::ReceivePack,
@@ -216,12 +219,12 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
                 return unauthorized();
             }
             let outcome = receive::handle(&repo, &req.body);
-            // First slice of m4: if the push moved the deploy branch and a
-            // deploy is configured, compile + validate + install inline. The
-            // deploy never fails the push (the ref is already applied); its
-            // outcome is recorded and readable via get_deploy_status.
+            // m4: if the push moved the deploy branch and a deploy is
+            // configured, enqueue a job and return immediately. The compile +
+            // validate + install_code runs from a timer, off the push path
+            // (see deploy::enqueue). Outcome is readable via get_deploy_status.
             if let Some(commit) = outcome.deploy_commit {
-                deploy::run(&repo, commit).await;
+                deploy::enqueue(&repo, commit);
             }
             git_response(
                 200,
@@ -340,6 +343,12 @@ fn get_deploy_config(repo: String) -> Option<deploy::DeployConfig> {
 #[ic_cdk::query]
 fn get_deploy_status(repo: String) -> Option<deploy::DeployStatus> {
     deploy::get_status(&repo)
+}
+
+/// Number of deploy jobs waiting in the timer-driven queue.
+#[ic_cdk::query]
+fn deploy_queue_len() -> u64 {
+    deploy::queue_len() as u64
 }
 
 ic_cdk::export_candid!();

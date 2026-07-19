@@ -78,4 +78,5 @@ service : {
   deploy_now : (text) -> (ResultDeployStatus);
   get_deploy_config : (text) -> (opt DeployConfig) query;
   get_deploy_status : (text) -> (opt DeployStatus) query;
+  deploy_queue_len : () -> (nat64) query;
 }
