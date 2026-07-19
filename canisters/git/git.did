@@ -36,6 +36,10 @@ type HttpResponse = record {
 
 type Result = variant { Ok; Err : text };
 type ResultText = variant { Ok : text; Err : text };
+type ResultBlob = variant { Ok : blob; Err : text };
+
+type CompileInfo = record { wasm_len : nat64; sha256_hex : text };
+type ResultCompileInfo = variant { Ok : CompileInfo; Err : text };
 
 service : {
   // git smart-HTTP surface (called by the HTTP gateway)
@@ -54,4 +58,8 @@ service : {
   get_object : (text) -> (opt blob) query;
   list_refs : (text) -> (vec record { text; text }) query;
   list_repos : () -> (vec text) query;
+
+  // on-chain build spike (Track B rung R0)
+  compile_wat : (text) -> (ResultBlob) query;
+  compile_wat_info : (text) -> (ResultCompileInfo) query;
 }

@@ -4,6 +4,7 @@
 //! refs + admin API) plus the info/refs advertisement, so `git ls-remote`
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
+mod compile;
 mod object;
 mod pack;
 mod receive;
@@ -282,6 +283,22 @@ fn list_refs(repo: String) -> Vec<(String, String)> {
 #[ic_cdk::query]
 fn list_repos() -> Vec<String> {
     store::list_repos()
+}
+
+// --- on-chain build spike (Track B rung R0; see ROADMAP.md) -----------------
+
+/// Compile WebAssembly text (WAT) to a wasm binary, in-canister. The smallest
+/// real compiler that proves the source -> artifact pipeline on-chain.
+#[ic_cdk::query]
+fn compile_wat(text: String) -> Result<Vec<u8>, String> {
+    compile::compile_wat(&text)
+}
+
+/// Same compile, but returns size + sha256 instead of the bytes -- convenient
+/// to inspect over `dfx canister call`.
+#[ic_cdk::query]
+fn compile_wat_info(text: String) -> Result<compile::CompileInfo, String> {
+    compile::compile_wat_info(&text)
 }
 
 ic_cdk::export_candid!();
