@@ -54,20 +54,26 @@ pub fn run_wasip1(module_bytes: &[u8]) -> Result<RunResult, String> {
                 let mut captured = Vec::new();
                 let mut total: u32 = 0;
                 {
+                    // Guest pointers are unsigned wasm32 addresses arriving as
+                    // i32 bit-patterns; bounds-check in u64 so a huge pointer
+                    // (e.g. -1 = 0xffff_ffff) cannot wrap 32-bit usize math
+                    // past the check and panic the slice below.
                     let data = mem.data(&caller);
-                    for i in 0..iovs_len.max(0) {
-                        let rec = iovs as usize + i as usize * 8;
-                        if rec + 8 > data.len() {
+                    let mem_len = data.len() as u64;
+                    for i in 0..iovs_len.max(0) as u64 {
+                        let rec = iovs as u32 as u64 + i * 8;
+                        if rec + 8 > mem_len {
                             return ERRNO_FAULT;
                         }
+                        let rec = rec as usize;
                         let ptr =
-                            u32::from_le_bytes(data[rec..rec + 4].try_into().unwrap()) as usize;
+                            u32::from_le_bytes(data[rec..rec + 4].try_into().unwrap()) as u64;
                         let len =
-                            u32::from_le_bytes(data[rec + 4..rec + 8].try_into().unwrap()) as usize;
-                        if ptr + len > data.len() {
+                            u32::from_le_bytes(data[rec + 4..rec + 8].try_into().unwrap()) as u64;
+                        if ptr + len > mem_len {
                             return ERRNO_FAULT;
                         }
-                        captured.extend_from_slice(&data[ptr..ptr + len]);
+                        captured.extend_from_slice(&data[ptr as usize..(ptr + len) as usize]);
                         total = total.wrapping_add(len as u32);
                     }
                 }
@@ -76,7 +82,7 @@ pub fn run_wasip1(module_bytes: &[u8]) -> Result<RunResult, String> {
                     _ => return ERRNO_BADF,
                 }
                 if mem
-                    .write(&mut caller, nwritten as usize, &total.to_le_bytes())
+                    .write(&mut caller, nwritten as u32 as usize, &total.to_le_bytes())
                     .is_err()
                 {
                     return ERRNO_FAULT;
@@ -158,6 +164,33 @@ mod tests {
         let r = run_wasip1(&wat::parse_str(wat).unwrap()).unwrap();
         assert_eq!(r.exit_code, 42);
         assert!(r.output.is_empty());
+    }
+
+    #[test]
+    fn out_of_bounds_fd_write_pointers_yield_fault_not_panic() {
+        // iovs = -1 (pointer 0xffff_ffff) and an iovec whose buf+len exceeds
+        // memory: both must come back as ERRNO_FAULT (21), not a host panic.
+        let wat = r#"
+            (module
+              (import "wasi_snapshot_preview1" "fd_write"
+                (func $fd_write (param i32 i32 i32 i32) (result i32)))
+              (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+              (memory (export "memory") 1)
+              (func (export "_start")
+                ;; iovs pointer itself out of bounds
+                (if (i32.ne (call $fd_write (i32.const 1) (i32.const -1) (i32.const 1) (i32.const 8))
+                            (i32.const 21))
+                  (then (call $exit (i32.const 1))))
+                ;; iovec buffer out of bounds: buf = 0xffffff00, len = 0x200
+                (i32.store (i32.const 0) (i32.const 0xffffff00))
+                (i32.store (i32.const 4) (i32.const 0x200))
+                (if (i32.ne (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 8))
+                            (i32.const 21))
+                  (then (call $exit (i32.const 2))))))
+        "#;
+        let r = run_wasip1(&wat::parse_str(wat).unwrap()).unwrap();
+        assert_eq!(r.exit_code, 0, "host rejected bad pointers cleanly");
+        assert!(r.output.is_empty(), "nothing was captured");
     }
 
     #[test]
