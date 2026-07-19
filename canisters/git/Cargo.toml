@@ -22,6 +22,8 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 
-# Track B, rung R0 (see ROADMAP.md): on-chain WAT -> wasm assembler. Pure
-# Rust, no filesystem/threads, targets wasm32-unknown-unknown.
+# Track B, rung R0 (see ROADMAP.md): on-chain WAT -> wasm assembler plus a
+# validation pass. Both pure Rust, no filesystem/threads, target
+# wasm32-unknown-unknown. wasmparser is already in-tree via wat/wast.
 wat = "1"
+wasmparser = "0.253"

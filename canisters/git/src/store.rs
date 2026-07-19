@@ -317,6 +317,26 @@ pub fn load_auth_snapshot() -> Option<Vec<u8>> {
     META.with(|m| storage::load_bytes(m, "auth"))
 }
 
+// Per-repo deploy config and last-deploy status, stored as opaque bytes in the
+// META bucket (the deploy module owns the encoding). Namespaced keys keep them
+// out of the way of the auth/schema markers.
+
+pub fn set_deploy_config(repo: &str, bytes: Vec<u8>) {
+    META.with(|m| storage::save_bytes(m, &format!("deploy:{repo}"), bytes));
+}
+
+pub fn get_deploy_config(repo: &str) -> Option<Vec<u8>> {
+    META.with(|m| storage::load_bytes(m, &format!("deploy:{repo}")))
+}
+
+pub fn set_deploy_status(repo: &str, bytes: Vec<u8>) {
+    META.with(|m| storage::save_bytes(m, &format!("deploy_status:{repo}"), bytes));
+}
+
+pub fn get_deploy_status(repo: &str) -> Option<Vec<u8>> {
+    META.with(|m| storage::load_bytes(m, &format!("deploy_status:{repo}")))
+}
+
 // --- schema version ----------------------------------------------------------
 
 /// Encoding version of OBJECTS values ([pack type code][content len u32 LE]

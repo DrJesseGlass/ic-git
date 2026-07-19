@@ -106,16 +106,24 @@ fn check_command(repo: &str, cmd: &Command) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle an authenticated receive-pack request; returns the report-status
-/// body.
-pub fn handle(repo: &str, body: &[u8]) -> Vec<u8> {
+/// Result of a receive-pack request: the report-status body to return, plus
+/// the commit to deploy if the push moved the repo's deploy branch (its HEAD
+/// symref target) and a deploy config exists. The caller runs the deploy.
+pub struct Outcome {
+    pub report: Vec<u8>,
+    pub deploy_commit: Option<Oid>,
+}
+
+/// Handle an authenticated receive-pack request.
+pub fn handle(repo: &str, body: &[u8]) -> Outcome {
     let mut report = Vec::new();
+    let mut deploy_commit = None;
     let (commands, pack_start) = match parse_commands(body) {
         Ok(parsed) => parsed,
         Err(e) => {
             report.extend_from_slice(&pkt_line(format!("unpack {e}\n").as_bytes()));
             report.extend_from_slice(FLUSH_PKT);
-            return report;
+            return Outcome { report, deploy_commit };
         }
     };
 
@@ -130,9 +138,12 @@ pub fn handle(repo: &str, body: &[u8]) -> Vec<u8> {
                 ));
             }
             report.extend_from_slice(FLUSH_PKT);
-            return report;
+            return Outcome { report, deploy_commit };
         }
     }
+
+    // The deploy branch is the repo's HEAD symref target (e.g. refs/heads/main).
+    let deploy_branch = store::head_target(repo);
 
     report.extend_from_slice(&pkt_line(b"unpack ok\n"));
     for cmd in &commands {
@@ -140,12 +151,18 @@ pub fn handle(repo: &str, body: &[u8]) -> Vec<u8> {
             Ok(()) => {
                 match cmd.new {
                     Some(new) => {
-                        store::set_ref(repo, &cmd.refname, new).expect("checked command applies")
+                        store::set_ref(repo, &cmd.refname, new).expect("checked command applies");
+                        // If this push moved the deploy branch and a deploy is
+                        // configured, hand the tip back for the caller to build
+                        // and install (first slice of m4).
+                        if deploy_branch.as_deref() == Some(cmd.refname.as_str())
+                            && store::get_deploy_config(repo).is_some()
+                        {
+                            deploy_commit = Some(new);
+                        }
                     }
                     None => store::delete_ref(repo, &cmd.refname),
                 }
-                // TODO(m4): if cmd.refname is the deploy branch, enqueue a
-                // DeployJob here and arm the zero-delay timer.
                 report.extend_from_slice(&pkt_line(format!("ok {}\n", cmd.refname).as_bytes()));
             }
             Err(e) => {
@@ -154,7 +171,7 @@ pub fn handle(repo: &str, body: &[u8]) -> Vec<u8> {
         }
     }
     report.extend_from_slice(FLUSH_PKT);
-    report
+    Outcome { report, deploy_commit }
 }
 
 #[cfg(test)]

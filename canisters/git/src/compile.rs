@@ -26,13 +26,35 @@ pub struct CompileInfo {
 /// Compile WAT source to a wasm binary. Pure and deterministic: the same
 /// input always yields byte-identical output, which is what makes it safe to
 /// run under consensus (every replica re-executes and must agree).
+///
+/// Note this is an *assembler*: it translates text to bytes but does not
+/// type-check. Use `compile_wat_checked` (or call `validate_wasm` yourself)
+/// before deploying, so semantically-invalid modules are rejected.
 pub fn compile_wat(text: &str) -> Result<Vec<u8>, String> {
     wat::parse_str(text).map_err(|e| e.to_string())
 }
 
-/// Compile and summarize, without shipping the bytes back to the caller.
-pub fn compile_wat_info(text: &str) -> Result<CompileInfo, String> {
+/// Full wasm validation: structure, types, and the parts the assembler does
+/// not check. This is the gate a module must pass before it is deployable.
+pub fn validate_wasm(wasm: &[u8]) -> Result<(), String> {
+    wasmparser::Validator::new()
+        .validate_all(wasm)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Assemble WAT and validate the result. Returns deployable wasm or an error.
+pub fn compile_wat_checked(text: &str) -> Result<Vec<u8>, String> {
     let wasm = compile_wat(text)?;
+    validate_wasm(&wasm)?;
+    Ok(wasm)
+}
+
+/// Compile, validate, and summarize -- without shipping the bytes back. Fails
+/// if the module would not be deployable, so the summary reflects a module you
+/// could actually install.
+pub fn compile_wat_info(text: &str) -> Result<CompileInfo, String> {
+    let wasm = compile_wat_checked(text)?;
     Ok(CompileInfo {
         wasm_len: wasm.len() as u64,
         sha256_hex: hex::encode(Sha256::digest(&wasm)),
@@ -84,15 +106,33 @@ mod tests {
         assert!(!err.is_empty(), "error message should be populated");
     }
 
+    // A type-invalid module: `i32.add` with no operands on the stack.
+    const TYPE_INVALID_WAT: &str = "(module (func $bad (result i32) i32.add))";
+
     #[test]
     fn wat_is_an_assembler_not_a_validator() {
         // Finding (Day 1 spike): `wat` translates text to bytes but does NOT
-        // type-check. `i32.add` with no operands is semantically invalid yet
-        // still assembles -- rejecting it needs a separate validation pass
-        // (wasmparser::validate, also pure Rust). Rung R0+ will add that.
-        let wasm = compile_wat("(module (func $bad (result i32) i32.add))")
+        // type-check. This module is semantically invalid yet still assembles.
+        let wasm = compile_wat(TYPE_INVALID_WAT)
             .expect("assembler accepts type-invalid but syntactically-valid input");
         assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn validation_rejects_what_the_assembler_accepts() {
+        // The validation pass catches what the assembler does not.
+        let wasm = compile_wat(TYPE_INVALID_WAT).unwrap();
+        assert!(validate_wasm(&wasm).is_err(), "type-invalid module must fail validation");
+        assert!(
+            compile_wat_checked(TYPE_INVALID_WAT).is_err(),
+            "checked compile must reject a type-invalid module"
+        );
+    }
+
+    #[test]
+    fn valid_module_passes_validation() {
+        let wasm = compile_wat_checked(ADD_WAT).expect("valid module compiles and validates");
+        assert!(validate_wasm(&wasm).is_ok());
     }
 
     #[test]

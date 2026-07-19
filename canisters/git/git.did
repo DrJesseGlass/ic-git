@@ -41,6 +41,16 @@ type ResultBlob = variant { Ok : blob; Err : text };
 type CompileInfo = record { wasm_len : nat64; sha256_hex : text };
 type ResultCompileInfo = variant { Ok : CompileInfo; Err : text };
 
+type DeployConfig = record { target : text; wat_path : text };
+type DeployStatus = record {
+  commit : text;
+  ok : bool;
+  message : text;
+  wasm_len : nat64;
+  wasm_sha256 : text;
+};
+type ResultDeployStatus = variant { Ok : DeployStatus; Err : text };
+
 service : {
   // git smart-HTTP surface (called by the HTTP gateway)
   http_request : (HttpRequest) -> (HttpResponse) query;
@@ -62,4 +72,10 @@ service : {
   // on-chain build spike (Track B rung R0)
   compile_wat : (text) -> (ResultBlob) query;
   compile_wat_info : (text) -> (ResultCompileInfo) query;
+
+  // deploy-on-push (first slice of m4)
+  set_wasm_deploy : (text, text, text) -> (Result);
+  deploy_now : (text) -> (ResultDeployStatus);
+  get_deploy_config : (text) -> (opt DeployConfig) query;
+  get_deploy_status : (text) -> (opt DeployStatus) query;
 }

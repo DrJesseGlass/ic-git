@@ -5,6 +5,7 @@
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
 mod compile;
+mod deploy;
 mod object;
 mod pack;
 mod receive;
@@ -202,7 +203,7 @@ fn http_request_streaming_callback(token: StreamingCallbackToken) -> StreamingCa
 }
 
 #[ic_cdk::update]
-fn http_request_update(req: HttpRequest) -> HttpResponse {
+async fn http_request_update(req: HttpRequest) -> HttpResponse {
     match route(&req) {
         Route::Rpc {
             service: Service::ReceivePack,
@@ -214,10 +215,18 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             if !push_authorized(&repo, &req.headers) {
                 return unauthorized();
             }
+            let outcome = receive::handle(&repo, &req.body);
+            // First slice of m4: if the push moved the deploy branch and a
+            // deploy is configured, compile + validate + install inline. The
+            // deploy never fails the push (the ref is already applied); its
+            // outcome is recorded and readable via get_deploy_status.
+            if let Some(commit) = outcome.deploy_commit {
+                deploy::run(&repo, commit).await;
+            }
             git_response(
                 200,
                 "application/x-git-receive-pack-result",
-                receive::handle(&repo, &req.body),
+                outcome.report,
             )
         }
         _ => git_response(404, "text/plain", b"not found\n".to_vec()),
@@ -299,6 +308,38 @@ fn compile_wat(text: String) -> Result<Vec<u8>, String> {
 #[ic_cdk::query]
 fn compile_wat_info(text: String) -> Result<compile::CompileInfo, String> {
     compile::compile_wat_info(&text)
+}
+
+// --- deploy-on-push (first slice of m4; see ARCHITECTURE.md / ROADMAP.md) ----
+
+/// Configure compile-and-deploy for a repo: on push to the deploy branch, the
+/// WAT at `wat_path` is compiled and installed into `target`. The git canister
+/// must be a controller of `target`.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_wasm_deploy(repo: String, target: String, wat_path: String) -> Result<(), String> {
+    if !store::repo_exists(&repo) {
+        return Err(format!("no such repo: {repo}"));
+    }
+    deploy::set_config(&repo, &deploy::DeployConfig { target, wat_path })
+}
+
+/// Run the configured deploy now against the repo's current deploy-branch tip,
+/// without waiting for a push. Returns the outcome.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
+    let branch = store::head_target(&repo).ok_or(format!("no such repo: {repo}"))?;
+    let tip = store::get_ref(&repo, &branch).ok_or("deploy branch has no commits")?;
+    Ok(deploy::run(&repo, tip).await)
+}
+
+#[ic_cdk::query]
+fn get_deploy_config(repo: String) -> Option<deploy::DeployConfig> {
+    deploy::get_config(&repo)
+}
+
+#[ic_cdk::query]
+fn get_deploy_status(repo: String) -> Option<deploy::DeployStatus> {
+    deploy::get_status(&repo)
 }
 
 ic_cdk::export_candid!();
