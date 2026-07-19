@@ -16,15 +16,46 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+/// How to install the compiled wasm into the target.
+///
+/// `Upgrade` preserves the target's stable memory (the default -- safe for
+/// stateful targets); `Reinstall` wipes all state. The very first deploy to an
+/// empty target always uses plain install regardless, since upgrade requires an
+/// existing module.
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub enum DeployMode {
+    #[default]
+    #[serde(rename = "upgrade")]
+    Upgrade,
+    #[serde(rename = "reinstall")]
+    Reinstall,
+}
+
+impl DeployMode {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "upgrade" => Ok(Self::Upgrade),
+            "reinstall" => Ok(Self::Reinstall),
+            _ => Err(format!("mode must be 'upgrade' or 'reinstall', got '{s}'")),
+        }
+    }
+}
+
 /// What to build and where to install it, per repo.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct DeployConfig {
     /// Target canister principal (text form) to install the compiled wasm into.
     /// The git canister must be one of its controllers.
     pub target: String,
-    /// Path to the WAT source within the repo tree, e.g. "main.wat" or
-    /// "build/app.wat".
-    pub wat_path: String,
+    /// Path to the source within the repo tree. The compiler is chosen by
+    /// extension: `.wat` (R0 assembler) or `.lang` (R1 language). Aliased from
+    /// the old `wat_path` field so existing configs still load.
+    #[serde(alias = "wat_path")]
+    pub source_path: String,
+    /// Install mode; defaults to Upgrade for configs written before this field
+    /// existed.
+    #[serde(default)]
+    pub mode: DeployMode,
 }
 
 /// Outcome of the most recent deploy attempt for a repo.
@@ -42,12 +73,33 @@ pub struct DeployStatus {
     pub wasm_sha256: String,
 }
 
-pub fn set_config(repo: &str, cfg: &DeployConfig) -> Result<(), String> {
-    Principal::from_text(&cfg.target).map_err(|e| format!("bad target principal: {e}"))?;
-    if cfg.wat_path.is_empty() {
-        return Err("wat_path is empty".into());
+/// Set (or replace) a repo's deploy config, preserving any previously-chosen
+/// install mode.
+pub fn set_config(repo: &str, target: String, source_path: String) -> Result<(), String> {
+    Principal::from_text(&target).map_err(|e| format!("bad target principal: {e}"))?;
+    if source_path.is_empty() {
+        return Err("source_path is empty".into());
     }
-    let bytes = serde_json::to_vec(cfg).map_err(|e| e.to_string())?;
+    if !(source_path.ends_with(".wat") || source_path.ends_with(".lang")) {
+        return Err("source_path must end in .wat or .lang".into());
+    }
+    let mode = get_config(repo).map(|c| c.mode).unwrap_or_default();
+    let cfg = DeployConfig {
+        target,
+        source_path,
+        mode,
+    };
+    let bytes = serde_json::to_vec(&cfg).map_err(|e| e.to_string())?;
+    store::set_deploy_config(repo, bytes);
+    Ok(())
+}
+
+/// Change a repo's install mode (upgrade vs reinstall) without touching the
+/// rest of its config.
+pub fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
+    let mut cfg = get_config(repo).ok_or("no deploy config for repo")?;
+    cfg.mode = mode;
+    let bytes = serde_json::to_vec(&cfg).map_err(|e| e.to_string())?;
     store::set_deploy_config(repo, bytes);
     Ok(())
 }
@@ -189,6 +241,22 @@ enum CanisterInstallMode {
     Install,
     #[serde(rename = "reinstall")]
     Reinstall,
+    #[serde(rename = "upgrade")]
+    Upgrade(Option<UpgradeArgs>),
+}
+
+#[derive(CandidType, Deserialize)]
+struct UpgradeArgs {
+    skip_pre_upgrade: Option<bool>,
+    wasm_memory_persistence: Option<WasmMemoryPersistence>,
+}
+
+#[derive(CandidType, Deserialize)]
+enum WasmMemoryPersistence {
+    #[serde(rename = "keep")]
+    Keep,
+    #[serde(rename = "replace")]
+    Replace,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -199,12 +267,49 @@ struct InstallCodeArgument {
     arg: Vec<u8>,
 }
 
-async fn install(target: Principal, wasm: Vec<u8>) -> Result<(), String> {
-    // reinstall works whether or not the target already has a module, and
-    // always yields exactly the module we built. State is discarded -- fine for
-    // the trivial modules this rung deploys; upgrade mode comes later.
+#[derive(CandidType)]
+struct CanisterIdRecord {
+    canister_id: Principal,
+}
+
+// Only the field we need; candid ignores the rest of canister_status's reply.
+#[derive(CandidType, Deserialize)]
+struct StatusReply {
+    module_hash: Option<Vec<u8>>,
+}
+
+/// Whether the target already has a module installed. Requires the git canister
+/// to be a controller of `target` (it must be, to install into it).
+async fn target_has_module(target: Principal) -> Result<bool, String> {
+    let reply: StatusReply = intercanister::call(
+        Principal::management_canister(),
+        "canister_status",
+        (CanisterIdRecord {
+            canister_id: target,
+        },),
+    )
+    .await?;
+    Ok(reply.module_hash.is_some())
+}
+
+/// Install `wasm` into `target`. An empty target always gets a plain install;
+/// a target that already has a module gets `mode` (Upgrade preserves stable
+/// memory, Reinstall discards it). Returns the mode label actually used.
+async fn install(
+    target: Principal,
+    wasm: Vec<u8>,
+    mode: DeployMode,
+) -> Result<&'static str, String> {
+    let (install_mode, label) = if !target_has_module(target).await? {
+        (CanisterInstallMode::Install, "install")
+    } else {
+        match mode {
+            DeployMode::Upgrade => (CanisterInstallMode::Upgrade(None), "upgrade"),
+            DeployMode::Reinstall => (CanisterInstallMode::Reinstall, "reinstall"),
+        }
+    };
     let arg = InstallCodeArgument {
-        mode: CanisterInstallMode::Reinstall,
+        mode: install_mode,
         canister_id: target,
         wasm_module: wasm,
         arg: vec![],
@@ -214,7 +319,20 @@ async fn install(target: Principal, wasm: Vec<u8>) -> Result<(), String> {
         "install_code",
         (arg,),
     )
-    .await
+    .await?;
+    Ok(label)
+}
+
+/// Compile source by extension: `.wat` via the R0 assembler, `.lang` via the R1
+/// language compiler. Both validate before returning.
+fn compile_source(path: &str, src: &str) -> Result<Vec<u8>, String> {
+    if path.ends_with(".wat") {
+        compile::compile_wat_checked(src)
+    } else if path.ends_with(".lang") {
+        crate::lang::compile_checked(src)
+    } else {
+        Err(format!("unknown source type for '{path}' (expected .wat or .lang)"))
+    }
 }
 
 /// Compile the configured WAT from the commit's tree, validate it, and install
@@ -244,23 +362,23 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
             return st;
         }
     };
-    let wat_bytes = match blob_at_path(&commit_oid, &cfg.wat_path) {
+    let src_bytes = match blob_at_path(&commit_oid, &cfg.source_path) {
         Ok(b) => b,
         Err(e) => {
-            st.message = format!("resolve {}: {e}", cfg.wat_path);
+            st.message = format!("resolve {}: {e}", cfg.source_path);
             put_status(repo, &st);
             return st;
         }
     };
-    let wat = match String::from_utf8(wat_bytes) {
+    let src = match String::from_utf8(src_bytes) {
         Ok(s) => s,
         Err(_) => {
-            st.message = format!("{} is not valid UTF-8", cfg.wat_path);
+            st.message = format!("{} is not valid UTF-8", cfg.source_path);
             put_status(repo, &st);
             return st;
         }
     };
-    let wasm = match compile::compile_wat_checked(&wat) {
+    let wasm = match compile_source(&cfg.source_path, &src) {
         Ok(w) => w,
         Err(e) => {
             st.message = format!("compile/validate failed: {e}");
@@ -271,10 +389,10 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
     st.wasm_len = wasm.len() as u64;
     st.wasm_sha256 = hex::encode(Sha256::digest(&wasm));
 
-    match install(target, wasm).await {
-        Ok(()) => {
+    match install(target, wasm, cfg.mode).await {
+        Ok(label) => {
             st.ok = true;
-            st.message = format!("installed to {}", cfg.target);
+            st.message = format!("{label} to {}", cfg.target);
         }
         Err(e) => st.message = format!("install_code failed: {e}"),
     }

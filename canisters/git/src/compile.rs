@@ -50,15 +50,20 @@ pub fn compile_wat_checked(text: &str) -> Result<Vec<u8>, String> {
     Ok(wasm)
 }
 
+/// Summarize a wasm binary (length + sha256). Shared by the WAT and language
+/// compile-info endpoints.
+pub fn info_of(wasm: &[u8]) -> CompileInfo {
+    CompileInfo {
+        wasm_len: wasm.len() as u64,
+        sha256_hex: hex::encode(Sha256::digest(wasm)),
+    }
+}
+
 /// Compile, validate, and summarize -- without shipping the bytes back. Fails
 /// if the module would not be deployable, so the summary reflects a module you
 /// could actually install.
 pub fn compile_wat_info(text: &str) -> Result<CompileInfo, String> {
-    let wasm = compile_wat_checked(text)?;
-    Ok(CompileInfo {
-        wasm_len: wasm.len() as u64,
-        sha256_hex: hex::encode(Sha256::digest(&wasm)),
-    })
+    Ok(info_of(&compile_wat_checked(text)?))
 }
 
 #[cfg(test)]

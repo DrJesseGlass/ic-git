@@ -41,7 +41,12 @@ type ResultBlob = variant { Ok : blob; Err : text };
 type CompileInfo = record { wasm_len : nat64; sha256_hex : text };
 type ResultCompileInfo = variant { Ok : CompileInfo; Err : text };
 
-type DeployConfig = record { target : text; wat_path : text };
+type DeployMode = variant { upgrade; reinstall };
+type DeployConfig = record {
+  target : text;
+  source_path : text;
+  mode : DeployMode;
+};
 type DeployStatus = record {
   commit : text;
   ok : bool;
@@ -69,12 +74,17 @@ service : {
   list_refs : (text) -> (vec record { text; text }) query;
   list_repos : () -> (vec text) query;
 
-  // on-chain build spike (Track B rung R0)
+  // on-chain build: R0 WAT assembler
   compile_wat : (text) -> (ResultBlob) query;
   compile_wat_info : (text) -> (ResultCompileInfo) query;
 
-  // deploy-on-push (first slice of m4)
+  // on-chain build: R1 minimal language compiler
+  compile_lang : (text) -> (ResultBlob) query;
+  compile_lang_info : (text) -> (ResultCompileInfo) query;
+
+  // deploy-on-push (m4)
   set_wasm_deploy : (text, text, text) -> (Result);
+  set_deploy_mode : (text, text) -> (Result);
   deploy_now : (text) -> (ResultDeployStatus);
   get_deploy_config : (text) -> (opt DeployConfig) query;
   get_deploy_status : (text) -> (opt DeployStatus) query;

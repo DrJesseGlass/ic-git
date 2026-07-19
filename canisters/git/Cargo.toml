@@ -28,3 +28,8 @@ base64 = "0.22"
 # wasm32-unknown-unknown. wasmparser is already in-tree via wat/wast.
 wat = "1"
 wasmparser = "0.253"
+# Track B, rung R1: emit wasm directly from our own compiler (no LLVM).
+wasm-encoder = "0.253"
+
+[dev-dependencies]
+wasmi = "1.1.0"

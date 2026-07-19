@@ -6,6 +6,7 @@
 
 mod compile;
 mod deploy;
+mod lang;
 mod object;
 mod pack;
 mod receive;
@@ -313,17 +314,41 @@ fn compile_wat_info(text: String) -> Result<compile::CompileInfo, String> {
     compile::compile_wat_info(&text)
 }
 
+// --- on-chain build: R1 minimal language (see ROADMAP.md) -------------------
+
+/// Compile R1 language source to a wasm binary, in-canister. Unlike compile_wat
+/// (an assembler), this is a real compiler: lexer + parser + wasm codegen.
+#[ic_cdk::query]
+fn compile_lang(text: String) -> Result<Vec<u8>, String> {
+    lang::compile_checked(&text)
+}
+
+/// Compile R1 source, returning size + sha256 instead of the bytes.
+#[ic_cdk::query]
+fn compile_lang_info(text: String) -> Result<compile::CompileInfo, String> {
+    let wasm = lang::compile_checked(&text)?;
+    Ok(compile::info_of(&wasm))
+}
+
 // --- deploy-on-push (first slice of m4; see ARCHITECTURE.md / ROADMAP.md) ----
 
 /// Configure compile-and-deploy for a repo: on push to the deploy branch, the
-/// WAT at `wat_path` is compiled and installed into `target`. The git canister
-/// must be a controller of `target`.
+/// source at `source_path` (.wat or .lang) is compiled and installed into
+/// `target`. The git canister must be a controller of `target`. Install mode
+/// defaults to upgrade; change it with set_deploy_mode.
 #[ic_cdk::update(guard = "auth::is_authorized")]
-fn set_wasm_deploy(repo: String, target: String, wat_path: String) -> Result<(), String> {
+fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
     if !store::repo_exists(&repo) {
         return Err(format!("no such repo: {repo}"));
     }
-    deploy::set_config(&repo, &deploy::DeployConfig { target, wat_path })
+    deploy::set_config(&repo, target, source_path)
+}
+
+/// Set a repo's install mode: "upgrade" (default; preserves target state) or
+/// "reinstall" (wipes target state).
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
+    deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
 }
 
 /// Run the configured deploy now against the repo's current deploy-branch tip,
