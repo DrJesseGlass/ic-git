@@ -41,6 +41,23 @@ type ResultBlob = variant { Ok : blob; Err : text };
 type CompileInfo = record { wasm_len : nat64; sha256_hex : text };
 type ResultCompileInfo = variant { Ok : CompileInfo; Err : text };
 
+type MeteredCompile = record {
+  wasm_len : nat64;
+  sha256_hex : text;
+  instructions : nat64;
+};
+type ResultMetered = variant { Ok : MeteredCompile; Err : text };
+type MeasureResult = record { funcs : nat32; wasm_len : nat64; instructions : nat64 };
+type ResultMeasure = variant { Ok : MeasureResult; Err : text };
+type JobProgress = record {
+  done : bool;
+  done_funcs : nat32;
+  total_funcs : nat32;
+  instructions : nat64;
+};
+type ResultJob = variant { Ok : JobProgress; Err : text };
+type ResultNat64 = variant { Ok : nat64; Err : text };
+
 type DeployMode = variant { upgrade; reinstall };
 type DeployConfig = record {
   target : text;
@@ -81,6 +98,18 @@ service : {
   // on-chain build: R1 minimal language compiler
   compile_lang : (text) -> (ResultBlob) query;
   compile_lang_info : (text) -> (ResultCompileInfo) query;
+
+  // R2: metering, ceiling measurement, resumable compile
+  compile_lang_metered : (text) -> (ResultMetered);
+  measure_compile : (nat32) -> (ResultMeasure);
+  compile_job_start : (text) -> (ResultNat64);
+  compile_job_step : (nat64, nat32) -> (ResultJob);
+  compile_job_take : (nat64) -> (ResultBlob);
+
+  // R3: separate compilation across modules
+  compile_module : (text) -> (ResultBlob) query;
+  link_module_objects : (vec blob) -> (ResultBlob) query;
+  compile_and_link_info : (vec text) -> (ResultCompileInfo) query;
 
   // deploy-on-push (m4)
   set_wasm_deploy : (text, text, text) -> (Result);

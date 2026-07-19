@@ -330,6 +330,124 @@ fn compile_lang_info(text: String) -> Result<compile::CompileInfo, String> {
     Ok(compile::info_of(&wasm))
 }
 
+// --- R2: instruction metering, ceiling measurement, resumable compile -------
+
+#[derive(candid::CandidType)]
+struct MeteredCompile {
+    wasm_len: u64,
+    sha256_hex: String,
+    instructions: u64,
+}
+
+#[derive(candid::CandidType)]
+struct MeasureResult {
+    funcs: u32,
+    wasm_len: u64,
+    instructions: u64,
+}
+
+#[derive(candid::CandidType)]
+struct JobProgress {
+    done: bool,
+    done_funcs: u32,
+    total_funcs: u32,
+    instructions: u64,
+}
+
+/// Compile R1 source and report how many wasm instructions the compile itself
+/// cost. An update call so the measurement gets the full ~40B budget.
+#[ic_cdk::update]
+fn compile_lang_metered(text: String) -> Result<MeteredCompile, String> {
+    let start = ic_cdk::api::instruction_counter();
+    let wasm = lang::compile_checked(&text)?;
+    let instructions = ic_cdk::api::instruction_counter() - start;
+    let info = compile::info_of(&wasm);
+    Ok(MeteredCompile {
+        wasm_len: info.wasm_len,
+        sha256_hex: info.sha256_hex,
+        instructions,
+    })
+}
+
+/// Compile a generated `funcs`-function program in one call and report the
+/// instruction cost -- used to chart the single-message compile ceiling.
+#[ic_cdk::update]
+fn measure_compile(funcs: u32) -> Result<MeasureResult, String> {
+    if funcs == 0 {
+        return Err("funcs must be >= 1".into());
+    }
+    let src = lang::synthetic_program(funcs);
+    let start = ic_cdk::api::instruction_counter();
+    let wasm = lang::compile_checked(&src)?;
+    let instructions = ic_cdk::api::instruction_counter() - start;
+    Ok(MeasureResult {
+        funcs,
+        wasm_len: wasm.len() as u64,
+        instructions,
+    })
+}
+
+/// Start a resumable compile; returns a job id. Codegen happens in later steps.
+#[ic_cdk::update]
+fn compile_job_start(text: String) -> Result<u64, String> {
+    lang::job::start(&text)
+}
+
+/// Codegen up to `batch` more functions of a job, reporting progress + cost.
+#[ic_cdk::update]
+fn compile_job_step(id: u64, batch: u32) -> Result<JobProgress, String> {
+    let start = ic_cdk::api::instruction_counter();
+    let (done, done_funcs, total_funcs) = lang::job::step(id, batch as usize)?;
+    let instructions = ic_cdk::api::instruction_counter() - start;
+    Ok(JobProgress {
+        done,
+        done_funcs: done_funcs as u32,
+        total_funcs: total_funcs as u32,
+        instructions,
+    })
+}
+
+/// Finish a fully-stepped job: assemble, validate, and return the wasm bytes.
+#[ic_cdk::update]
+fn compile_job_take(id: u64) -> Result<Vec<u8>, String> {
+    lang::job::take(id)
+}
+
+// --- R3: separate compilation across modules --------------------------------
+
+/// Compile one module in isolation to a portable object (serde-encoded). The
+/// object records the module's exports and the imports it expects, with call
+/// sites left as unresolved relocations. This is the unit R4 will distribute:
+/// one module per canister.
+#[ic_cdk::query]
+fn compile_module(source: String) -> Result<Vec<u8>, String> {
+    let obj = lang::link::compile_module(&source)?;
+    serde_json::to_vec(&obj).map_err(|e| e.to_string())
+}
+
+/// Link separately-compiled module objects (as returned by compile_module) into
+/// one validated wasm binary, resolving cross-module calls.
+#[ic_cdk::query]
+fn link_module_objects(objects: Vec<Vec<u8>>) -> Result<Vec<u8>, String> {
+    let objs: Result<Vec<_>, String> = objects
+        .iter()
+        .map(|b| serde_json::from_slice(b).map_err(|e| e.to_string()))
+        .collect();
+    lang::link::link(&objs?)
+}
+
+/// Convenience: separately compile each source, then link -- the whole R3
+/// pipeline in one call. Returns size + sha256 of the linked wasm.
+#[ic_cdk::query]
+fn compile_and_link_info(sources: Vec<String>) -> Result<compile::CompileInfo, String> {
+    let objs: Result<Vec<_>, String> = sources
+        .iter()
+        .map(|s| lang::link::compile_module(s))
+        .collect();
+    let wasm = lang::link::link(&objs?)?;
+    Ok(compile::info_of(&wasm))
+}
+
 // --- deploy-on-push (first slice of m4; see ARCHITECTURE.md / ROADMAP.md) ----
 
 /// Configure compile-and-deploy for a repo: on push to the deploy branch, the
