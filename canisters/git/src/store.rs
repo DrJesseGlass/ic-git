@@ -348,6 +348,15 @@ pub fn get_deploy_queue() -> Option<Vec<u8>> {
     META.with(|m| storage::load_bytes(m, "deploy_queue"))
 }
 
+/// The compiler worker pool (R4), encoded by the fleet module.
+pub fn set_workers(bytes: Vec<u8>) {
+    META.with(|m| storage::save_bytes(m, "compiler_workers", bytes));
+}
+
+pub fn get_workers() -> Option<Vec<u8>> {
+    META.with(|m| storage::load_bytes(m, "compiler_workers"))
+}
+
 // --- schema version ----------------------------------------------------------
 
 /// Encoding version of OBJECTS values ([pack type code][content len u32 LE]

@@ -6,6 +6,7 @@
 
 mod compile;
 mod deploy;
+mod fleet;
 mod lang;
 mod object;
 mod pack;
@@ -446,6 +447,51 @@ fn compile_and_link_info(sources: Vec<String>) -> Result<compile::CompileInfo, S
         .collect();
     let wasm = lang::link::link(&objs?)?;
     Ok(compile::info_of(&wasm))
+}
+
+// --- R4: distribute compilation across a worker fleet -----------------------
+
+#[derive(candid::CandidType)]
+struct DistributeReport {
+    wasm_len: u64,
+    sha256_hex: String,
+    module_count: u32,
+    worker_count: u32,
+}
+
+/// Register the compiler worker pool (canisters exposing `compile_module`).
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_compiler_workers(workers: Vec<candid::Principal>) -> Result<(), String> {
+    fleet::set_workers(&workers);
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_compiler_workers() -> Vec<candid::Principal> {
+    fleet::get_workers()
+}
+
+/// Distribute each module's compile across the worker fleet (concurrently),
+/// then link the results into one wasm binary.
+#[ic_cdk::update]
+async fn compile_distributed(sources: Vec<String>) -> Result<Vec<u8>, String> {
+    fleet::compile_distributed(sources).await
+}
+
+/// Same as compile_distributed, reporting size/sha256 plus how many modules
+/// were fanned out across how many workers.
+#[ic_cdk::update]
+async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeReport, String> {
+    let module_count = sources.len() as u32;
+    let worker_count = fleet::get_workers().len() as u32;
+    let wasm = fleet::compile_distributed(sources).await?;
+    let info = compile::info_of(&wasm);
+    Ok(DistributeReport {
+        wasm_len: info.wasm_len,
+        sha256_hex: info.sha256_hex,
+        module_count,
+        worker_count,
+    })
 }
 
 // --- deploy-on-push (first slice of m4; see ARCHITECTURE.md / ROADMAP.md) ----

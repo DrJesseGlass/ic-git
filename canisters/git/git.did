@@ -58,6 +58,14 @@ type JobProgress = record {
 type ResultJob = variant { Ok : JobProgress; Err : text };
 type ResultNat64 = variant { Ok : nat64; Err : text };
 
+type DistributeReport = record {
+  wasm_len : nat64;
+  sha256_hex : text;
+  module_count : nat32;
+  worker_count : nat32;
+};
+type ResultDistribute = variant { Ok : DistributeReport; Err : text };
+
 type DeployMode = variant { upgrade; reinstall };
 type DeployConfig = record {
   target : text;
@@ -118,4 +126,10 @@ service : {
   get_deploy_config : (text) -> (opt DeployConfig) query;
   get_deploy_status : (text) -> (opt DeployStatus) query;
   deploy_queue_len : () -> (nat64) query;
+
+  // R4: distribute compilation across a worker fleet
+  set_compiler_workers : (vec principal) -> (Result);
+  get_compiler_workers : () -> (vec principal) query;
+  compile_distributed : (vec text) -> (ResultBlob);
+  compile_distributed_info : (vec text) -> (ResultDistribute);
 }
