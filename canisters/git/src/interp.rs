@@ -109,7 +109,8 @@ pub fn run_wasip1(module_bytes: &[u8]) -> Result<RunResult, String> {
     let inputs: [wasmi::Val; 0] = [];
     let mut outputs: [wasmi::Val; 0] = [];
     let outcome = start.call(&mut store, &inputs, &mut outputs);
-    let output = store.data().output.clone();
+    // Move the captured output out; rustc's can be large, don't copy it.
+    let output = std::mem::take(&mut store.data_mut().output);
     match outcome {
         Ok(()) => Ok(RunResult {
             output,

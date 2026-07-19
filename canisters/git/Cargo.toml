@@ -22,7 +22,7 @@ futures = "0.3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 sha1 = "0.10"
 sha2 = "0.10"
-hex = "0.4"
+hex = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 
 # Track B, rung R0 (see ROADMAP.md): on-chain WAT -> wasm assembler plus a

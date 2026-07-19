@@ -1,19 +1,18 @@
 //! Deploy path -- first slice of milestone 4 (see ../../../ARCHITECTURE.md and
-//! ROADMAP.md). On a push to the deploy branch, read a WAT file out of the
-//! pushed commit's tree, compile and validate it on-chain, and install the
-//! resulting wasm into a target canister via the management canister's
+//! ROADMAP.md). On a push to the deploy branch, read the configured source out
+//! of the pushed commit's tree, build (or validate) it on-chain, and install
+//! the resulting wasm into a target canister via the management canister's
 //! `install_code`.
 //!
 //! This closes the loop the ROADMAP calls for: `git push` -> compile -> deploy,
-//! entirely on-chain. It runs inline on the push's update call for now; the
-//! ARCHITECTURE's timer-driven queue can move it off the push path later.
+//! entirely on-chain. Pushes enqueue a job; the deploy itself runs from a
+//! timer-driven queue, off the push path.
 
 use crate::store::{self, ObjectType, Oid};
 use crate::{compile, object};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 /// How to install the compiled wasm into the target.
@@ -73,27 +72,76 @@ pub struct DeployStatus {
     pub wasm_sha256: String,
 }
 
+/// What builds the configured source, chosen by file extension. The single
+/// place the extension list lives: `set_config` validates by parsing it, `run`
+/// dispatches on it.
+enum SourceKind {
+    /// R0 assembler.
+    Wat,
+    /// R1 language compiler.
+    Lang,
+    /// A prebuilt artifact (build locally with real rustc, commit the wasm),
+    /// validated and used as-is.
+    Wasm,
+}
+
+impl SourceKind {
+    fn from_path(path: &str) -> Result<Self, String> {
+        if path.ends_with(".wat") {
+            Ok(Self::Wat)
+        } else if path.ends_with(".lang") {
+            Ok(Self::Lang)
+        } else if path.ends_with(".wasm") {
+            Ok(Self::Wasm)
+        } else {
+            Err("source_path must end in .wat, .lang, or .wasm".into())
+        }
+    }
+
+    /// Turn the committed source blob into deployable wasm. Either way the
+    /// result is validated before it can be installed.
+    fn build(self, path: &str, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+        let source = |bytes: Vec<u8>| {
+            String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8"))
+        };
+        match self {
+            Self::Wat => compile::compile_wat_checked(&source(bytes)?),
+            Self::Lang => crate::lang::compile_checked(&source(bytes)?),
+            Self::Wasm => {
+                compile::validate_wasm(&bytes)?;
+                Ok(bytes)
+            }
+        }
+    }
+}
+
+// META keys for this module's persisted state (JSON via store::meta_*_json).
+fn config_key(repo: &str) -> String {
+    format!("deploy:{repo}")
+}
+fn status_key(repo: &str) -> String {
+    format!("deploy_status:{repo}")
+}
+fn log_key(repo: &str) -> String {
+    format!("deploy_log:{repo}")
+}
+const QUEUE_KEY: &str = "deploy_queue";
+
 /// Set (or replace) a repo's deploy config, preserving any previously-chosen
 /// install mode.
 pub fn set_config(repo: &str, target: String, source_path: String) -> Result<(), String> {
+    if !store::repo_exists(repo) {
+        return Err(format!("no such repo: {repo}"));
+    }
     Principal::from_text(&target).map_err(|e| format!("bad target principal: {e}"))?;
-    if source_path.is_empty() {
-        return Err("source_path is empty".into());
-    }
-    if !(source_path.ends_with(".wat")
-        || source_path.ends_with(".lang")
-        || source_path.ends_with(".wasm"))
-    {
-        return Err("source_path must end in .wat, .lang, or .wasm".into());
-    }
+    SourceKind::from_path(&source_path)?;
     let mode = get_config(repo).map(|c| c.mode).unwrap_or_default();
     let cfg = DeployConfig {
         target,
         source_path,
         mode,
     };
-    let bytes = serde_json::to_vec(&cfg).map_err(|e| e.to_string())?;
-    store::set_deploy_config(repo, bytes);
+    store::meta_set_json(&config_key(repo), &cfg);
     Ok(())
 }
 
@@ -102,23 +150,20 @@ pub fn set_config(repo: &str, target: String, source_path: String) -> Result<(),
 pub fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
     let mut cfg = get_config(repo).ok_or("no deploy config for repo")?;
     cfg.mode = mode;
-    let bytes = serde_json::to_vec(&cfg).map_err(|e| e.to_string())?;
-    store::set_deploy_config(repo, bytes);
+    store::meta_set_json(&config_key(repo), &cfg);
     Ok(())
 }
 
 pub fn get_config(repo: &str) -> Option<DeployConfig> {
-    store::get_deploy_config(repo).and_then(|b| serde_json::from_slice(&b).ok())
+    store::meta_get_json(&config_key(repo))
 }
 
 pub fn get_status(repo: &str) -> Option<DeployStatus> {
-    store::get_deploy_status(repo).and_then(|b| serde_json::from_slice(&b).ok())
+    store::meta_get_json(&status_key(repo))
 }
 
 fn put_status(repo: &str, st: &DeployStatus) {
-    if let Ok(bytes) = serde_json::to_vec(st) {
-        store::set_deploy_status(repo, bytes);
-    }
+    store::meta_set_json(&status_key(repo), st);
 }
 
 /// One entry in a repo's append-only deploy provenance log: the binding of an
@@ -141,19 +186,13 @@ pub struct DeployRecord {
 /// Keep the most recent N records per repo to bound stable-memory growth.
 const MAX_LOG: usize = 200;
 
-fn history(repo: &str) -> Vec<DeployRecord> {
-    store::get_deploy_log(repo)
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
-}
-
 pub fn get_history(repo: &str) -> Vec<DeployRecord> {
-    history(repo)
+    store::meta_get_json(&log_key(repo)).unwrap_or_default()
 }
 
 /// Append the binding for this deploy to the provenance log.
 fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
-    let mut log = history(repo);
+    let mut log = get_history(repo);
     log.push(DeployRecord {
         commit: st.commit.clone(),
         source_path: cfg.source_path.clone(),
@@ -167,9 +206,7 @@ fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
         let drop = log.len() - MAX_LOG;
         log.drain(0..drop);
     }
-    if let Ok(bytes) = serde_json::to_vec(&log) {
-        store::set_deploy_log(repo, bytes);
-    }
+    store::meta_set_json(&log_key(repo), &log);
 }
 
 // --- deploy queue (timer-driven; see ARCHITECTURE.md) ------------------------
@@ -186,15 +223,11 @@ struct DeployJob {
 }
 
 fn queue_load() -> Vec<DeployJob> {
-    store::get_deploy_queue()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    store::meta_get_json(QUEUE_KEY).unwrap_or_default()
 }
 
 fn queue_save(jobs: &[DeployJob]) {
-    if let Ok(bytes) = serde_json::to_vec(jobs) {
-        store::set_deploy_queue(bytes);
-    }
+    store::meta_set_json(QUEUE_KEY, &jobs);
 }
 
 /// Number of jobs waiting in the queue.
@@ -224,7 +257,7 @@ pub fn resume_pending() {
 /// Arm a zero-delay timer to drain one job. Safe to call redundantly: a timer
 /// that fires on an empty queue is a no-op. In ic-cdk-timers 1.0 the timer
 /// drives the future directly (its only await is the install_code call).
-pub fn arm_timer() {
+fn arm_timer() {
     ic_cdk_timers::set_timer(Duration::ZERO, drain_one());
 }
 
@@ -256,30 +289,32 @@ fn blob_at_path(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
     }
     let mut tree_oid = object::commit_refs(&content)?.tree;
 
-    let comps: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if comps.is_empty() {
-        return Err("empty path".into());
-    }
-    for (i, comp) in comps.iter().enumerate() {
-        let (tty, tcontent) = store::get_object_parsed(&tree_oid).ok_or("tree object missing")?;
+    // Look up `comp` in the tree at `tree_oid`.
+    let lookup = |tree_oid: &Oid, comp: &str| -> Result<Oid, String> {
+        let (tty, tcontent) = store::get_object_parsed(tree_oid).ok_or("tree object missing")?;
         if tty != ObjectType::Tree {
             return Err(format!("path component '{comp}' is not a directory"));
         }
-        let entry = object::tree_entries(&tcontent)?
+        Ok(object::tree_entries(&tcontent)?
             .into_iter()
             .find(|e| e.name == comp.as_bytes())
-            .ok_or_else(|| format!("path not found: {comp}"))?;
-        if i + 1 == comps.len() {
-            let (bty, bcontent) =
-                store::get_object_parsed(&entry.oid).ok_or("blob object missing")?;
-            if bty != ObjectType::Blob {
-                return Err(format!("'{comp}' is not a file"));
-            }
-            return Ok(bcontent);
-        }
-        tree_oid = entry.oid;
+            .ok_or_else(|| format!("path not found: {comp}"))?
+            .oid)
+    };
+
+    let comps: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let Some((file, dirs)) = comps.split_last() else {
+        return Err("empty path".into());
+    };
+    for comp in dirs {
+        tree_oid = lookup(&tree_oid, comp)?;
     }
-    unreachable!("loop returns on the last component")
+    let blob_oid = lookup(&tree_oid, file)?;
+    let (bty, bcontent) = store::get_object_parsed(&blob_oid).ok_or("blob object missing")?;
+    if bty != ObjectType::Blob {
+        return Err(format!("'{file}' is not a file"));
+    }
+    Ok(bcontent)
 }
 
 // --- management canister install_code ---------------------------------------
@@ -377,34 +412,33 @@ async fn install(
     Ok(label)
 }
 
-/// Compile source by extension: `.wat` via the R0 assembler, `.lang` via the R1
-/// language compiler. Both validate before returning.
-fn compile_source(path: &str, src: &str) -> Result<Vec<u8>, String> {
-    if path.ends_with(".wat") {
-        compile::compile_wat_checked(src)
-    } else if path.ends_with(".lang") {
-        crate::lang::compile_checked(src)
-    } else {
-        Err(format!("unknown source type for '{path}' (expected .wat or .lang)"))
-    }
+/// The fallible steps of a deploy: resolve the source blob, build it, install
+/// it. Fills in `st`'s wasm summary as soon as the build succeeds, so failed
+/// installs still record what was built. Returns the success message.
+async fn attempt(
+    cfg: &DeployConfig,
+    commit_oid: &Oid,
+    st: &mut DeployStatus,
+) -> Result<String, String> {
+    let target =
+        Principal::from_text(&cfg.target).map_err(|e| format!("bad target principal: {e}"))?;
+    let src_bytes = blob_at_path(commit_oid, &cfg.source_path)
+        .map_err(|e| format!("resolve {}: {e}", cfg.source_path))?;
+    let wasm = SourceKind::from_path(&cfg.source_path)
+        .and_then(|kind| kind.build(&cfg.source_path, src_bytes))
+        .map_err(|e| format!("build {}: {e}", cfg.source_path))?;
+    let info = compile::info_of(&wasm);
+    st.wasm_len = info.wasm_len;
+    st.wasm_sha256 = info.sha256_hex;
+    let label = install(target, wasm, cfg.mode)
+        .await
+        .map_err(|e| format!("install_code failed: {e}"))?;
+    Ok(format!("{label} to {}", cfg.target))
 }
 
-/// Turn the committed source blob into deployable wasm. A `.wasm` file is a
-/// prebuilt artifact (build locally with real rustc, commit the wasm) -- it is
-/// validated and used as-is. `.wat`/`.lang` are compiled on-chain. Either way
-/// the result is validated before it can be installed.
-fn produce_wasm(path: &str, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-    if path.ends_with(".wasm") {
-        compile::validate_wasm(&bytes)?;
-        Ok(bytes)
-    } else {
-        let src = String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8"))?;
-        compile_source(path, &src)
-    }
-}
-
-/// Compile the configured WAT from the commit's tree, validate it, and install
-/// it into the target canister. Records and returns the outcome; never traps.
+/// Build the configured source from the commit's tree, validate it, and install
+/// it into the target canister. Persists the status and appends the outcome --
+/// success or failure -- to the provenance log, exactly once. Never traps.
 pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
     let mut st = DeployStatus {
         commit: store::oid_hex(&commit_oid),
@@ -413,53 +447,36 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
         wasm_len: 0,
         wasm_sha256: String::new(),
     };
-
-    let cfg = match get_config(repo) {
-        Some(c) => c,
-        None => {
-            st.message = "no deploy config for repo".into();
-            put_status(repo, &st);
-            return st;
-        }
+    let Some(cfg) = get_config(repo) else {
+        // Nothing to record against: the log is keyed to a config's source.
+        st.message = "no deploy config for repo".into();
+        put_status(repo, &st);
+        return st;
     };
-    let target = match Principal::from_text(&cfg.target) {
-        Ok(p) => p,
-        Err(e) => {
-            st.message = format!("bad target principal: {e}");
-            put_status(repo, &st);
-            return st;
-        }
-    };
-    let src_bytes = match blob_at_path(&commit_oid, &cfg.source_path) {
-        Ok(b) => b,
-        Err(e) => {
-            st.message = format!("resolve {}: {e}", cfg.source_path);
-            put_status(repo, &st);
-            return st;
-        }
-    };
-    let wasm = match produce_wasm(&cfg.source_path, src_bytes) {
-        Ok(w) => w,
-        Err(e) => {
-            st.message = format!("build {}: {e}", cfg.source_path);
-            put_status(repo, &st);
-            record(repo, &cfg, &st);
-            return st;
-        }
-    };
-    st.wasm_len = wasm.len() as u64;
-    st.wasm_sha256 = hex::encode(Sha256::digest(&wasm));
-
-    match install(target, wasm, cfg.mode).await {
-        Ok(label) => {
+    match attempt(&cfg, &commit_oid, &mut st).await {
+        Ok(message) => {
             st.ok = true;
-            st.message = format!("{label} to {}", cfg.target);
+            st.message = message;
         }
-        Err(e) => st.message = format!("install_code failed: {e}"),
+        Err(e) => st.message = e,
     }
     put_status(repo, &st);
     record(repo, &cfg, &st);
     st
+}
+
+/// The branch whose pushes trigger deploys: the repo's HEAD symref target
+/// (e.g. refs/heads/main). None if the repo does not exist.
+pub fn deploy_branch(repo: &str) -> Option<String> {
+    store::head_target(repo)
+}
+
+/// Run the configured deploy against the repo's current deploy-branch tip,
+/// without waiting for a push.
+pub async fn run_current(repo: &str) -> Result<DeployStatus, String> {
+    let branch = deploy_branch(repo).ok_or(format!("no such repo: {repo}"))?;
+    let tip = store::get_ref(repo, &branch).ok_or("deploy branch has no commits")?;
+    Ok(run(repo, tip).await)
 }
 
 #[cfg(test)]

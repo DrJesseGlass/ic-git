@@ -7,6 +7,7 @@
 //! the ones that pass. The reply is a report-status body; auth happens in
 //! lib.rs before this module is reached.
 
+use crate::deploy;
 use crate::object;
 use crate::pack;
 use crate::smart_http::{parse_pkt_lines, pkt_line, FLUSH_PKT, ZERO_OID};
@@ -142,8 +143,9 @@ pub fn handle(repo: &str, body: &[u8]) -> Outcome {
         }
     }
 
-    // The deploy branch is the repo's HEAD symref target (e.g. refs/heads/main).
-    let deploy_branch = store::head_target(repo);
+    // Hoisted out of the command loop: both are loop-invariant stable reads.
+    let deploy_branch = deploy::deploy_branch(repo);
+    let deploy_configured = deploy::get_config(repo).is_some();
 
     report.extend_from_slice(&pkt_line(b"unpack ok\n"));
     for cmd in &commands {
@@ -155,8 +157,8 @@ pub fn handle(repo: &str, body: &[u8]) -> Outcome {
                         // If this push moved the deploy branch and a deploy is
                         // configured, hand the tip back for the caller to build
                         // and install (first slice of m4).
-                        if deploy_branch.as_deref() == Some(cmd.refname.as_str())
-                            && store::get_deploy_config(repo).is_some()
+                        if deploy_configured
+                            && deploy_branch.as_deref() == Some(cmd.refname.as_str())
                         {
                             deploy_commit = Some(new);
                         }

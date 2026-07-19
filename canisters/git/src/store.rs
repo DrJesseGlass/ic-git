@@ -317,53 +317,18 @@ pub fn load_auth_snapshot() -> Option<Vec<u8>> {
     META.with(|m| storage::load_bytes(m, "auth"))
 }
 
-// Per-repo deploy config and last-deploy status, stored as opaque bytes in the
-// META bucket (the deploy module owns the encoding). Namespaced keys keep them
+// JSON-encoded values other modules (deploy, fleet) keep in the META bucket.
+// The caller owns the key, including its namespace prefix, which keeps these
 // out of the way of the auth/schema markers.
 
-pub fn set_deploy_config(repo: &str, bytes: Vec<u8>) {
-    META.with(|m| storage::save_bytes(m, &format!("deploy:{repo}"), bytes));
+pub fn meta_set_json<T: serde::Serialize>(key: &str, value: &T) {
+    if let Ok(bytes) = serde_json::to_vec(value) {
+        META.with(|m| storage::save_bytes(m, key, bytes));
+    }
 }
 
-pub fn get_deploy_config(repo: &str) -> Option<Vec<u8>> {
-    META.with(|m| storage::load_bytes(m, &format!("deploy:{repo}")))
-}
-
-pub fn set_deploy_status(repo: &str, bytes: Vec<u8>) {
-    META.with(|m| storage::save_bytes(m, &format!("deploy_status:{repo}"), bytes));
-}
-
-pub fn get_deploy_status(repo: &str) -> Option<Vec<u8>> {
-    META.with(|m| storage::load_bytes(m, &format!("deploy_status:{repo}")))
-}
-
-/// The pending-deploy queue, a single opaque blob (the deploy module owns the
-/// encoding). Kept in stable META so queued jobs survive canister upgrades;
-/// timers do not, so post_upgrade re-arms the drain timer if this is non-empty.
-pub fn set_deploy_queue(bytes: Vec<u8>) {
-    META.with(|m| storage::save_bytes(m, "deploy_queue", bytes));
-}
-
-pub fn get_deploy_queue() -> Option<Vec<u8>> {
-    META.with(|m| storage::load_bytes(m, "deploy_queue"))
-}
-
-/// The compiler worker pool (R4), encoded by the fleet module.
-pub fn set_workers(bytes: Vec<u8>) {
-    META.with(|m| storage::save_bytes(m, "compiler_workers", bytes));
-}
-
-pub fn get_workers() -> Option<Vec<u8>> {
-    META.with(|m| storage::load_bytes(m, "compiler_workers"))
-}
-
-/// Per-repo append-only deploy provenance log (commit -> deployed wasm hash).
-pub fn set_deploy_log(repo: &str, bytes: Vec<u8>) {
-    META.with(|m| storage::save_bytes(m, &format!("deploy_log:{repo}"), bytes));
-}
-
-pub fn get_deploy_log(repo: &str) -> Option<Vec<u8>> {
-    META.with(|m| storage::load_bytes(m, &format!("deploy_log:{repo}")))
+pub fn meta_get_json<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    META.with(|m| storage::load_bytes(m, key)).and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 // --- schema version ----------------------------------------------------------

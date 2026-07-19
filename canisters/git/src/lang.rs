@@ -1,13 +1,17 @@
-//! R1 (see ROADMAP.md): a minimal real language compiled to wasm in-canister.
+//! R1-R3 (see ROADMAP.md): a minimal real language compiled to wasm in-canister.
 //!
 //! Unlike R0's WAT assembler, this is an actual compiler -- lexer, parser, and
-//! code generator -- for a small language that is *not* already wasm. It emits
-//! wasm directly via `wasm-encoder` (no LLVM), which is the approach the
-//! ROADMAP takes toward richer languages: own the compiler, target wasm.
+//! code generator -- for a small language that is *not* already wasm. There is
+//! one backend: every module compiles in isolation to a `link::ModuleObject`
+//! whose call sites are symbolic relocations, and `link::link` patches them
+//! once global function indices are assigned. A whole program is just the
+//! one-module link of itself, so the same emitter serves single-shot compiles
+//! (R1), resumable compiles (R2), and separate compilation (R3/R4).
 //!
-//! Grammar (one or more i32 function definitions):
+//! Grammar (zero or more imports, then one or more i32 function definitions):
 //!
-//!   program := func+
+//!   module  := use* func+
+//!   use     := "use" ident "(" int ")" ";"
 //!   func    := "fn" ident "(" params? ")" "=" expr ";"
 //!   params  := ident ("," ident)*
 //!   expr    := term (("+" | "-") term)*
@@ -15,15 +19,10 @@
 //!   factor  := "-" factor | primary
 //!   primary := int | ident | ident "(" args? ")" | "(" expr ")"
 //!
-//! All values are i32. Functions may call any function in the program (forward
-//! references allowed) and each is exported by its name. `//` starts a comment.
-//! Output is validated before it is returned.
-
-use std::collections::HashMap;
-use wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
-    TypeSection, ValType,
-};
+//! All values are i32. Functions may call any function in the module (forward
+//! references allowed) or any declared via `use name(arity);`, and each is
+//! exported by its name. `//` starts a comment. Output is validated before it
+//! is returned.
 
 // --- tokens -----------------------------------------------------------------
 
@@ -162,17 +161,6 @@ impl Parser {
         }
     }
 
-    fn program(&mut self) -> Result<Vec<Func>, String> {
-        let mut funcs = Vec::new();
-        while self.peek() != &Tok::Eof {
-            funcs.push(self.func()?);
-        }
-        if funcs.is_empty() {
-            return Err("program defines no functions".into());
-        }
-        Ok(funcs)
-    }
-
     fn func(&mut self) -> Result<Func, String> {
         self.eat(&Tok::Fn)?;
         let name = self.ident()?;
@@ -266,75 +254,13 @@ impl Parser {
     }
 }
 
-// --- codegen (emit wasm via wasm-encoder) -----------------------------------
-
-struct FnCtx<'a> {
-    params: &'a [String],
-    funcs: &'a HashMap<String, (u32, usize)>, // name -> (function index, arity)
-}
-
-fn emit(f: &mut Function, e: &Expr, ctx: &FnCtx) -> Result<(), String> {
-    match e {
-        Expr::Int(n) => {
-            f.instruction(&Instruction::I32Const(*n));
-        }
-        Expr::Var(name) => {
-            let idx = ctx
-                .params
-                .iter()
-                .position(|p| p == name)
-                .ok_or_else(|| format!("unknown variable: {name}"))?;
-            f.instruction(&Instruction::LocalGet(idx as u32));
-        }
-        Expr::Neg(inner) => {
-            f.instruction(&Instruction::I32Const(0));
-            emit(f, inner, ctx)?;
-            f.instruction(&Instruction::I32Sub);
-        }
-        Expr::Bin(op, l, r) => {
-            emit(f, l, ctx)?;
-            emit(f, r, ctx)?;
-            f.instruction(&match op {
-                BinOp::Add => Instruction::I32Add,
-                BinOp::Sub => Instruction::I32Sub,
-                BinOp::Mul => Instruction::I32Mul,
-                BinOp::Div => Instruction::I32DivS,
-            });
-        }
-        Expr::Call(name, args) => {
-            let (idx, arity) = ctx
-                .funcs
-                .get(name)
-                .ok_or_else(|| format!("unknown function: {name}"))?;
-            if args.len() != *arity {
-                return Err(format!(
-                    "{name} takes {arity} argument(s), got {}",
-                    args.len()
-                ));
-            }
-            for a in args {
-                emit(f, a, ctx)?;
-            }
-            f.instruction(&Instruction::Call(*idx));
-        }
-    }
-    Ok(())
-}
-
-/// Lex and parse source into the function list. Cheap relative to codegen,
-/// which is why the resumable job (R2) parses once, then codegens in batches.
-pub fn parse(src: &str) -> Result<Vec<Func>, String> {
-    let toks = lex(src)?;
-    Parser { toks, pos: 0 }.program()
-}
-
 /// A declared external function this module calls but does not define.
 struct Import {
     name: String,
     arity: usize,
 }
 
-/// A parsed module (R3): imports declared via `use name(arity);`, then funcs.
+/// A parsed module: imports declared via `use name(arity);`, then funcs.
 struct ParsedModule {
     imports: Vec<Import>,
     funcs: Vec<Func>,
@@ -369,77 +295,10 @@ fn parse_module(src: &str) -> Result<ParsedModule, String> {
     Ok(ParsedModule { imports, funcs })
 }
 
-/// Stepwise wasm builder. Built once from the full function list (so forward
-/// references resolve), then fed one function at a time. Holding it in heap
-/// between update calls is what makes a compile resumable across rounds (R2).
-pub(crate) struct Codegen {
-    index: HashMap<String, (u32, usize)>, // name -> (function index, arity)
-    types: TypeSection,
-    functions: FunctionSection,
-    exports: ExportSection,
-    codes: CodeSection,
-}
-
-impl Codegen {
-    /// Build the name table (all functions, for forward references) and empty
-    /// sections. Rejects duplicate function names.
-    pub(crate) fn new(funcs: &[Func]) -> Result<Self, String> {
-        let mut index = HashMap::new();
-        for (i, f) in funcs.iter().enumerate() {
-            if index
-                .insert(f.name.clone(), (i as u32, f.params.len()))
-                .is_some()
-            {
-                return Err(format!("duplicate function: {}", f.name));
-            }
-        }
-        Ok(Self {
-            index,
-            types: TypeSection::new(),
-            functions: FunctionSection::new(),
-            exports: ExportSection::new(),
-            codes: CodeSection::new(),
-        })
-    }
-
-    /// Codegen one function at position `i`.
-    pub(crate) fn emit_one(&mut self, i: usize, f: &Func) -> Result<(), String> {
-        self.types
-            .ty()
-            .function(vec![ValType::I32; f.params.len()], vec![ValType::I32]);
-        self.functions.function(i as u32);
-        self.exports.export(&f.name, ExportKind::Func, i as u32);
-
-        let mut body = Function::new(std::iter::empty()); // params are the only locals
-        let ctx = FnCtx {
-            params: &f.params,
-            funcs: &self.index,
-        };
-        emit(&mut body, &f.body, &ctx)?;
-        body.instruction(&Instruction::End);
-        self.codes.function(&body);
-        Ok(())
-    }
-
-    /// Assemble the accumulated sections into a wasm binary.
-    pub(crate) fn finish(self) -> Vec<u8> {
-        let mut module = Module::new();
-        module.section(&self.types);
-        module.section(&self.functions);
-        module.section(&self.exports);
-        module.section(&self.codes);
-        module.finish()
-    }
-}
-
-/// Compile source to a wasm binary. Pure and deterministic.
-pub fn compile(src: &str) -> Result<Vec<u8>, String> {
-    let funcs = parse(src)?;
-    let mut cg = Codegen::new(&funcs)?;
-    for (i, f) in funcs.iter().enumerate() {
-        cg.emit_one(i, f)?;
-    }
-    Ok(cg.finish())
+/// Compile a whole program (a single module) to validated deployable wasm:
+/// the one-module link of itself.
+pub fn compile_checked(src: &str) -> Result<Vec<u8>, String> {
+    link::link(&[link::compile_module(src)?])
 }
 
 /// Generate an n-function synthetic program for measuring compile cost:
@@ -454,44 +313,28 @@ pub fn synthetic_program(n: u32) -> String {
 }
 
 /// Resumable compilation (R2): parse once, then codegen a bounded batch of
-/// functions per call, holding the in-progress build in heap (which persists
-/// across update calls). This lets a program too large to compile in one
-/// message's instruction budget finish across several messages.
+/// functions per call, holding the in-progress `link::Compiler` in heap (which
+/// persists across update calls). This lets a program too large to compile in
+/// one message's instruction budget finish across several messages.
 pub mod job {
-    use super::{parse, Codegen, Func};
+    use super::link::{self, Compiler};
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
 
-    struct Job {
-        funcs: Vec<Func>,
-        cg: Codegen,
-        cursor: usize,
-    }
-
     thread_local! {
-        static JOBS: RefCell<HashMap<u64, Job>> = RefCell::new(HashMap::new());
+        static JOBS: RefCell<HashMap<u64, Compiler>> = RefCell::new(HashMap::new());
         static NEXT_ID: Cell<u64> = Cell::new(1);
     }
 
     /// Parse and prepare a job; returns its id. No codegen happens yet.
     pub fn start(src: &str) -> Result<u64, String> {
-        let funcs = parse(src)?;
-        let cg = Codegen::new(&funcs)?;
+        let c = Compiler::new(src)?;
         let id = NEXT_ID.with(|n| {
             let id = n.get();
             n.set(id + 1);
             id
         });
-        JOBS.with(|j| {
-            j.borrow_mut().insert(
-                id,
-                Job {
-                    funcs,
-                    cg,
-                    cursor: 0,
-                },
-            )
-        });
+        JOBS.with(|j| j.borrow_mut().insert(id, c));
         Ok(id)
     }
 
@@ -499,49 +342,34 @@ pub mod job {
     pub fn step(id: u64, batch: usize) -> Result<(bool, usize, usize), String> {
         JOBS.with(|j| {
             let mut jobs = j.borrow_mut();
-            let job = jobs.get_mut(&id).ok_or("no such compile job")?;
-            let Job {
-                funcs,
-                cg,
-                cursor,
-            } = job;
-            let total = funcs.len();
-            let end = (*cursor + batch).min(total);
-            for f in funcs.iter().take(end).skip(*cursor) {
-                // The name table already holds every function, so the position
-                // is the function's index in `funcs`.
-                let i = *cursor;
-                cg.emit_one(i, f)?;
-                *cursor += 1;
+            let c = jobs.get_mut(&id).ok_or("no such compile job")?;
+            for _ in 0..batch {
+                if !c.emit_next()? {
+                    break;
+                }
             }
-            Ok((*cursor >= total, *cursor, total))
+            Ok((c.emitted() == c.total(), c.emitted(), c.total()))
         })
     }
 
-    /// Finish a fully-codegen'd job: assemble, validate, and return the wasm.
-    /// Removes the job. Errors if it is not yet complete.
+    /// Finish a fully-codegen'd job: link (which validates) and return the
+    /// wasm. Removes the job. Errors -- leaving the job steppable -- if it is
+    /// not yet complete.
     pub fn take(id: u64) -> Result<Vec<u8>, String> {
-        let job = JOBS
-            .with(|j| j.borrow_mut().remove(&id))
-            .ok_or("no such compile job")?;
-        if job.cursor < job.funcs.len() {
-            // Put it back so the caller can keep stepping.
-            let cursor = job.cursor;
-            let total = job.funcs.len();
-            JOBS.with(|j| j.borrow_mut().insert(id, job));
-            return Err(format!("job not finished: {cursor}/{total} functions"));
-        }
-        let wasm = job.cg.finish();
-        crate::compile::validate_wasm(&wasm)?;
-        Ok(wasm)
+        JOBS.with(|j| {
+            let mut jobs = j.borrow_mut();
+            let c = jobs.get(&id).ok_or("no such compile job")?;
+            if c.emitted() < c.total() {
+                return Err(format!(
+                    "job not finished: {}/{} functions",
+                    c.emitted(),
+                    c.total()
+                ));
+            }
+            let c = jobs.remove(&id).expect("job checked present");
+            link::link(&[c.finish()?])
+        })
     }
-}
-
-/// Compile and validate. Returns deployable wasm or an error.
-pub fn compile_checked(src: &str) -> Result<Vec<u8>, String> {
-    let wasm = compile(src)?;
-    crate::compile::validate_wasm(&wasm)?;
-    Ok(wasm)
 }
 
 /// R3: separate compilation across modules.
@@ -549,12 +377,17 @@ pub fn compile_checked(src: &str) -> Result<Vec<u8>, String> {
 /// Each module compiles in isolation, knowing only the *interfaces* (name +
 /// arity) of functions it imports via `use`, never their bodies. Every call is
 /// emitted as a symbolic relocation -- a fixed 5-byte LEB128 slot the linker
-/// patches once it assigns global function indices. This is the seam R4 will
-/// distribute: run `compile_module` on many canisters, `link` on a coordinator.
+/// patches once it assigns global function indices. This is the seam R4
+/// distributes: run `compile_module` on many canisters, `link` on a
+/// coordinator.
 pub mod link {
-    use super::{parse_module, BinOp, Expr};
+    use super::{parse_module, BinOp, Expr, Func};
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use wasm_encoder::{
+        CodeSection, Encode, ExportKind, ExportSection, FunctionSection, Module, TypeSection,
+        ValType,
+    };
 
     /// A function signature: name and argument count.
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -578,7 +411,10 @@ pub mod link {
     struct FuncBody {
         arity: u32,
         /// wasm code: the expression's instructions followed by `end` (0x0b).
-        /// Call sites hold a 5-byte placeholder patched by the linker.
+        /// Call sites hold a 5-byte placeholder patched by the linker. Hex in
+        /// the serde form: JSON would otherwise encode each byte as a number,
+        /// ~4x the payload on the R4 coordinator<->worker hot path.
+        #[serde(with = "hex::serde")]
         code: Vec<u8>,
         relocs: Vec<Reloc>,
     }
@@ -589,35 +425,6 @@ pub mod link {
         offset: u32,
         /// Function name the call targets; resolved to a global index at link.
         name: String,
-    }
-
-    // --- LEB128 helpers -----------------------------------------------------
-
-    fn leb_u32(mut v: u32, out: &mut Vec<u8>) {
-        loop {
-            let mut byte = (v & 0x7f) as u8;
-            v >>= 7;
-            if v != 0 {
-                byte |= 0x80;
-            }
-            out.push(byte);
-            if v == 0 {
-                break;
-            }
-        }
-    }
-
-    fn leb_i32(mut v: i32, out: &mut Vec<u8>) {
-        loop {
-            let byte = (v & 0x7f) as u8;
-            v >>= 7; // arithmetic shift preserves sign
-            let sign = byte & 0x40;
-            if (v == 0 && sign == 0) || (v == -1 && sign != 0) {
-                out.push(byte);
-                break;
-            }
-            out.push(byte | 0x80);
-        }
     }
 
     /// Write a u32 as a fixed 5-byte (non-minimal) unsigned LEB128 into a slot.
@@ -643,7 +450,7 @@ pub mod link {
         match e {
             Expr::Int(n) => {
                 code.push(0x41); // i32.const
-                leb_i32(*n, code);
+                n.encode(code);
             }
             Expr::Var(name) => {
                 let idx = params
@@ -651,11 +458,11 @@ pub mod link {
                     .position(|p| p == name)
                     .ok_or_else(|| format!("unknown variable: {name}"))?;
                 code.push(0x20); // local.get
-                leb_u32(idx as u32, code);
+                (idx as u32).encode(code);
             }
             Expr::Neg(inner) => {
                 code.push(0x41);
-                leb_i32(0, code);
+                0i32.encode(code);
                 emit(inner, params, known, code, relocs)?;
                 code.push(0x6b); // i32.sub
             }
@@ -693,68 +500,114 @@ pub mod link {
         Ok(())
     }
 
-    /// Compile a module in isolation. Calls may target this module's own
-    /// functions or any declared via `use`; each is emitted as an unresolved
-    /// relocation. The module knows nothing of other modules' bodies.
-    pub fn compile_module(src: &str) -> Result<ModuleObject, String> {
-        let m = parse_module(src)?;
+    /// Stepwise module compiler: parse once (`new`), then codegen one function
+    /// per `emit_next` call. `compile_module` drives it to completion in one
+    /// go; the resumable job (R2) holds one in heap and steps it across update
+    /// calls. Progress is the number of bodies emitted -- no separate cursor.
+    pub struct Compiler {
+        funcs: Vec<Func>,
+        /// The names this module may call: its own functions plus its imports.
+        known: HashMap<String, u32>, // name -> arity
+        imports: Vec<Sig>,
+        exports: Vec<Sig>,
+        bodies: Vec<FuncBody>,
+    }
 
-        // The names this module may call: its own functions plus its imports.
-        let mut known: HashMap<String, u32> = HashMap::new();
-        for f in &m.funcs {
-            if known
-                .insert(f.name.clone(), f.params.len() as u32)
-                .is_some()
-            {
-                return Err(format!("duplicate function: {}", f.name));
+    impl Compiler {
+        /// Parse and build the name table (all functions, so forward references
+        /// resolve). Rejects duplicate names. No codegen happens yet.
+        pub fn new(src: &str) -> Result<Self, String> {
+            let m = parse_module(src)?;
+            let mut known: HashMap<String, u32> = HashMap::new();
+            for f in &m.funcs {
+                if known
+                    .insert(f.name.clone(), f.params.len() as u32)
+                    .is_some()
+                {
+                    return Err(format!("duplicate function: {}", f.name));
+                }
             }
-        }
-        for imp in &m.imports {
-            if known.insert(imp.name.clone(), imp.arity as u32).is_some() {
-                return Err(format!("import '{}' shadows a definition", imp.name));
+            for imp in &m.imports {
+                if known.insert(imp.name.clone(), imp.arity as u32).is_some() {
+                    return Err(format!("import '{}' shadows a definition", imp.name));
+                }
             }
+            let imports = m
+                .imports
+                .iter()
+                .map(|i| Sig {
+                    name: i.name.clone(),
+                    arity: i.arity as u32,
+                })
+                .collect();
+            Ok(Self {
+                funcs: m.funcs,
+                known,
+                imports,
+                exports: Vec::new(),
+                bodies: Vec::new(),
+            })
         }
 
-        let mut exports = Vec::new();
-        let mut bodies = Vec::new();
-        for f in &m.funcs {
+        pub fn total(&self) -> usize {
+            self.funcs.len()
+        }
+
+        /// Functions codegen'd so far.
+        pub fn emitted(&self) -> usize {
+            self.bodies.len()
+        }
+
+        /// Codegen the next not-yet-compiled function. Ok(false) once all are
+        /// done. On error nothing is recorded, so the call can be retried.
+        pub fn emit_next(&mut self) -> Result<bool, String> {
+            let Some(f) = self.funcs.get(self.bodies.len()) else {
+                return Ok(false);
+            };
             let mut code = Vec::new();
             let mut relocs = Vec::new();
-            emit(&f.body, &f.params, &known, &mut code, &mut relocs)?;
+            emit(&f.body, &f.params, &self.known, &mut code, &mut relocs)?;
             code.push(0x0b); // end
             let arity = f.params.len() as u32;
-            exports.push(Sig {
+            self.exports.push(Sig {
                 name: f.name.clone(),
                 arity,
             });
-            bodies.push(FuncBody {
+            self.bodies.push(FuncBody {
                 arity,
                 code,
                 relocs,
             });
+            Ok(true)
         }
-        let imports = m
-            .imports
-            .iter()
-            .map(|i| Sig {
-                name: i.name.clone(),
-                arity: i.arity as u32,
+
+        /// The finished object. Errors if functions remain uncompiled.
+        pub fn finish(self) -> Result<ModuleObject, String> {
+            if self.emitted() < self.total() {
+                return Err(format!(
+                    "compile unfinished: {}/{} functions",
+                    self.emitted(),
+                    self.total()
+                ));
+            }
+            Ok(ModuleObject {
+                exports: self.exports,
+                imports: self.imports,
+                bodies: self.bodies,
             })
-            .collect();
-        Ok(ModuleObject {
-            exports,
-            imports,
-            bodies,
-        })
+        }
+    }
+
+    /// Compile a module in isolation. Calls may target this module's own
+    /// functions or any declared via `use`; each is emitted as an unresolved
+    /// relocation. The module knows nothing of other modules' bodies.
+    pub fn compile_module(src: &str) -> Result<ModuleObject, String> {
+        let mut c = Compiler::new(src)?;
+        while c.emit_next()? {}
+        c.finish()
     }
 
     // --- link ---------------------------------------------------------------
-
-    fn section(id: u8, contents: &[u8], out: &mut Vec<u8>) {
-        out.push(id);
-        leb_u32(contents.len() as u32, out);
-        out.extend_from_slice(contents);
-    }
 
     /// Link separately-compiled objects into one wasm binary: assign a global
     /// index to every exported function, check every import resolves with a
@@ -807,65 +660,47 @@ pub mod link {
             .map(|(i, &a)| (a, i as u32))
             .collect();
 
-        // Type section.
-        let mut types = Vec::new();
-        leb_u32(arities.len() as u32, &mut types);
+        let mut types = TypeSection::new();
         for &a in &arities {
-            types.push(0x60); // func type
-            leb_u32(a, &mut types);
-            for _ in 0..a {
-                types.push(0x7f); // i32 param
-            }
-            leb_u32(1, &mut types); // one result
-            types.push(0x7f); // i32
+            types
+                .ty()
+                .function(vec![ValType::I32; a as usize], vec![ValType::I32]);
         }
-
-        // Function section.
-        let mut function = Vec::new();
-        leb_u32(funcs.len() as u32, &mut function);
+        let mut functions = FunctionSection::new();
         for b in &funcs {
-            leb_u32(type_of[&b.arity], &mut function);
+            functions.function(type_of[&b.arity]);
         }
-
-        // Export section (every function, by name).
+        // Every function is exported by name, in index (definition) order.
         let mut names: Vec<(&String, u32)> = symbols.iter().map(|(n, (i, _))| (n, *i)).collect();
-        names.sort_by_key(|(_, i)| *i); // deterministic order
-        let mut exports = Vec::new();
-        leb_u32(names.len() as u32, &mut exports);
+        names.sort_by_key(|(_, i)| *i);
+        let mut exports = ExportSection::new();
         for (name, index) in names {
-            leb_u32(name.len() as u32, &mut exports);
-            exports.extend_from_slice(name.as_bytes());
-            exports.push(0x00); // export kind: func
-            leb_u32(index, &mut exports);
+            exports.export(name, ExportKind::Func, index);
         }
-
-        // Code section: patch each body's relocations, then emit.
-        let mut code = Vec::new();
-        leb_u32(funcs.len() as u32, &mut code);
+        // Code: body = local decl vector (empty) + code, relocations patched
+        // in place before the raw body is added.
+        let mut codes = CodeSection::new();
         for b in &funcs {
-            let mut body_code = b.code.clone();
+            let mut body = Vec::with_capacity(1 + b.code.len());
+            body.push(0); // zero local declarations
+            body.extend_from_slice(&b.code);
             for r in &b.relocs {
                 let (index, _) = symbols
                     .get(&r.name)
                     .ok_or_else(|| format!("dangling relocation: {}", r.name))?;
-                let off = r.offset as usize;
-                patch_u32_5(*index, &mut body_code[off..off + 5]);
+                let off = 1 + r.offset as usize;
+                patch_u32_5(*index, &mut body[off..off + 5]);
             }
-            // Function body = local decl vector (empty) + code.
-            let mut body = Vec::new();
-            leb_u32(0, &mut body); // zero local declarations
-            body.extend_from_slice(&body_code);
-            leb_u32(body.len() as u32, &mut code);
-            code.extend_from_slice(&body);
+            codes.raw(&body);
         }
 
-        // Assemble module: magic + version + sections.
-        let mut wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-        section(1, &types, &mut wasm);
-        section(3, &function, &mut wasm);
-        section(7, &exports, &mut wasm);
-        section(10, &code, &mut wasm);
-
+        let mut module = Module::new();
+        module
+            .section(&types)
+            .section(&functions)
+            .section(&exports)
+            .section(&codes);
+        let wasm = module.finish();
         crate::compile::validate_wasm(&wasm)?;
         Ok(wasm)
     }
@@ -931,18 +766,24 @@ mod tests {
 
     #[test]
     fn errors_do_not_panic() {
-        assert!(compile("fn f() = 1 +;").is_err(), "parse error");
-        assert!(compile("fn f() = g();").is_err(), "unknown function");
-        assert!(compile("fn f() = x;").is_err(), "unknown variable");
-        assert!(compile("fn f(a) = a; fn f(b) = b;").is_err(), "duplicate fn");
-        assert!(compile("fn add(a,b)=a+b; fn g()=add(1);").is_err(), "arity");
-        assert!(compile("").is_err(), "empty program");
+        assert!(compile_checked("fn f() = 1 +;").is_err(), "parse error");
+        assert!(compile_checked("fn f() = g();").is_err(), "unknown function");
+        assert!(compile_checked("fn f() = x;").is_err(), "unknown variable");
+        assert!(
+            compile_checked("fn f(a) = a; fn f(b) = b;").is_err(),
+            "duplicate fn"
+        );
+        assert!(
+            compile_checked("fn add(a,b)=a+b; fn g()=add(1);").is_err(),
+            "arity"
+        );
+        assert!(compile_checked("").is_err(), "empty program");
     }
 
     #[test]
     fn resumable_job_equals_one_shot() {
         let src = synthetic_program(10);
-        let one_shot = compile(&src).unwrap();
+        let one_shot = compile_checked(&src).unwrap();
 
         let id = job::start(&src).unwrap();
         // Take before finishing must fail, not corrupt the job.

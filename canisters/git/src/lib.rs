@@ -334,6 +334,13 @@ fn compile_lang_info(text: String) -> Result<compile::CompileInfo, String> {
 
 // --- R2: instruction metering, ceiling measurement, resumable compile -------
 
+/// Run `f` and report the wasm instructions it consumed alongside its result.
+fn metered<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    let start = ic_cdk::api::instruction_counter();
+    let result = f();
+    (result, ic_cdk::api::instruction_counter() - start)
+}
+
 #[derive(candid::CandidType)]
 struct MeteredCompile {
     wasm_len: u64,
@@ -360,10 +367,8 @@ struct JobProgress {
 /// cost. An update call so the measurement gets the full ~40B budget.
 #[ic_cdk::update]
 fn compile_lang_metered(text: String) -> Result<MeteredCompile, String> {
-    let start = ic_cdk::api::instruction_counter();
-    let wasm = lang::compile_checked(&text)?;
-    let instructions = ic_cdk::api::instruction_counter() - start;
-    let info = compile::info_of(&wasm);
+    let (wasm, instructions) = metered(|| lang::compile_checked(&text));
+    let info = compile::info_of(&wasm?);
     Ok(MeteredCompile {
         wasm_len: info.wasm_len,
         sha256_hex: info.sha256_hex,
@@ -379,12 +384,10 @@ fn measure_compile(funcs: u32) -> Result<MeasureResult, String> {
         return Err("funcs must be >= 1".into());
     }
     let src = lang::synthetic_program(funcs);
-    let start = ic_cdk::api::instruction_counter();
-    let wasm = lang::compile_checked(&src)?;
-    let instructions = ic_cdk::api::instruction_counter() - start;
+    let (wasm, instructions) = metered(|| lang::compile_checked(&src));
     Ok(MeasureResult {
         funcs,
-        wasm_len: wasm.len() as u64,
+        wasm_len: wasm?.len() as u64,
         instructions,
     })
 }
@@ -398,9 +401,8 @@ fn compile_job_start(text: String) -> Result<u64, String> {
 /// Codegen up to `batch` more functions of a job, reporting progress + cost.
 #[ic_cdk::update]
 fn compile_job_step(id: u64, batch: u32) -> Result<JobProgress, String> {
-    let start = ic_cdk::api::instruction_counter();
-    let (done, done_funcs, total_funcs) = lang::job::step(id, batch as usize)?;
-    let instructions = ic_cdk::api::instruction_counter() - start;
+    let (progress, instructions) = metered(|| lang::job::step(id, batch as usize));
+    let (done, done_funcs, total_funcs) = progress?;
     Ok(JobProgress {
         done,
         done_funcs: done_funcs as u32,
@@ -476,7 +478,7 @@ fn get_compiler_workers() -> Vec<candid::Principal> {
 /// then link the results into one wasm binary.
 #[ic_cdk::update]
 async fn compile_distributed(sources: Vec<String>) -> Result<Vec<u8>, String> {
-    fleet::compile_distributed(sources).await
+    fleet::compile_distributed(&fleet::get_workers(), sources).await
 }
 
 /// Same as compile_distributed, reporting size/sha256 plus how many modules
@@ -484,8 +486,9 @@ async fn compile_distributed(sources: Vec<String>) -> Result<Vec<u8>, String> {
 #[ic_cdk::update]
 async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeReport, String> {
     let module_count = sources.len() as u32;
-    let worker_count = fleet::get_workers().len() as u32;
-    let wasm = fleet::compile_distributed(sources).await?;
+    let workers = fleet::get_workers();
+    let worker_count = workers.len() as u32;
+    let wasm = fleet::compile_distributed(&workers, sources).await?;
     let info = compile::info_of(&wasm);
     Ok(DistributeReport {
         wasm_len: info.wasm_len,
@@ -503,9 +506,6 @@ async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeRepo
 /// defaults to upgrade; change it with set_deploy_mode.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
-    if !store::repo_exists(&repo) {
-        return Err(format!("no such repo: {repo}"));
-    }
     deploy::set_config(&repo, target, source_path)
 }
 
@@ -520,9 +520,7 @@ fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
 /// without waiting for a push. Returns the outcome.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
-    let branch = store::head_target(&repo).ok_or(format!("no such repo: {repo}"))?;
-    let tip = store::get_ref(&repo, &branch).ok_or("deploy branch has no commits")?;
-    Ok(deploy::run(&repo, tip).await)
+    deploy::run_current(&repo).await
 }
 
 #[ic_cdk::query]
@@ -560,9 +558,8 @@ struct RunReport {
 }
 
 fn run_and_measure(wasm: &[u8]) -> Result<RunReport, String> {
-    let start = ic_cdk::api::instruction_counter();
-    let r = interp::run_wasip1(wasm)?;
-    let instructions = ic_cdk::api::instruction_counter() - start;
+    let (r, instructions) = metered(|| interp::run_wasip1(wasm));
+    let r = r?;
     Ok(RunReport {
         output: String::from_utf8_lossy(&r.output).into_owned(),
         output_len: r.output.len() as u64,

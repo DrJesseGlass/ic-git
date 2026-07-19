@@ -18,28 +18,33 @@ use candid::Principal;
 use futures::future::join_all;
 use ic_dev_kit_rs::intercanister;
 
+/// META key for the pool, stored as principal text (stable across candid
+/// versions and readable in a raw dump).
+const WORKERS_KEY: &str = "compiler_workers";
+
 /// Register the worker pool (principals of canisters exposing `compile_module`).
 pub fn set_workers(workers: &[Principal]) {
     let texts: Vec<String> = workers.iter().map(|p| p.to_text()).collect();
-    if let Ok(bytes) = serde_json::to_vec(&texts) {
-        store::set_workers(bytes);
-    }
+    store::meta_set_json(WORKERS_KEY, &texts);
 }
 
 /// The registered worker pool.
 pub fn get_workers() -> Vec<Principal> {
-    store::get_workers()
-        .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
+    store::meta_get_json::<Vec<String>>(WORKERS_KEY)
         .unwrap_or_default()
         .iter()
         .filter_map(|t| Principal::from_text(t).ok())
         .collect()
 }
 
-/// Compile each source on a worker (round-robin, all calls in flight at once),
-/// then link the collected objects into one validated wasm binary.
-pub async fn compile_distributed(sources: Vec<String>) -> Result<Vec<u8>, String> {
-    let workers = get_workers();
+/// Compile each source on one of `workers` (round-robin, all calls in flight
+/// at once), then link the collected objects into one validated wasm binary.
+/// Takes the pool as an argument so callers that also report on it load it
+/// from stable memory only once.
+pub async fn compile_distributed(
+    workers: &[Principal],
+    sources: Vec<String>,
+) -> Result<Vec<u8>, String> {
     if workers.is_empty() {
         return Err("no compiler workers registered; call set_compiler_workers".into());
     }
