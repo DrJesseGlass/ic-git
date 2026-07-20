@@ -99,6 +99,17 @@ type DeployRecord = record {
   at_ns : nat64;
 };
 
+type EvmDeployConfig = record {
+  source_path : text;
+  gas_limit : nat64;
+};
+type EvmDeployStatus = record {
+  commit : text;
+  ok : bool;
+  message : text;
+  contract_address : text;
+  tx_hash : text;
+};
 type EvmConfig = record {
   evm_rpc : text;
   key_name : text;
@@ -179,6 +190,11 @@ service : {
   get_deploy_status : (text) -> (opt DeployStatus) query;
   get_deploy_history : (text) -> (vec DeployRecord) query;
   deploy_queue_len : () -> (nat64) query;
+
+  // E2: push-to-EVM deploy config per repo
+  set_evm_deploy : (text, text, nat64) -> (Result);
+  get_evm_deploy_config : (text) -> (opt EvmDeployConfig) query;
+  get_evm_deploy_status : (text) -> (opt EvmDeployStatus) query;
 
   // Track A: EVM deployment (E0 signing spine, E1 CREATE)
   evm_set_config : (text, text, nat64, vec text) -> (Result);

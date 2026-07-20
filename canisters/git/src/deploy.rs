@@ -9,7 +9,7 @@
 //! timer-driven queue, off the push path.
 
 use crate::store::{self, ObjectType, Oid};
-use crate::{compile, object};
+use crate::{compile, evm, object};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -115,9 +115,42 @@ impl SourceKind {
     }
 }
 
+/// Track A, phase E2: what a push deploys to an EVM chain, per repo. The
+/// artifact is a committed hex file (creation bytecode) at `source_path` --
+/// build-locally-commit-the-artifact, same rung as the wasm path's `.wasm`
+/// SourceKind. The chain, key, and RPC provider come from the global
+/// evm::EvmConfig; this only names the artifact and its gas budget.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct EvmDeployConfig {
+    /// Path within the repo tree to the creation bytecode as hex text (.hex).
+    pub source_path: String,
+    /// Gas limit for the CREATE transaction.
+    pub gas_limit: u64,
+}
+
+/// Outcome of the most recent EVM deploy attempt for a repo.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct EvmDeployStatus {
+    /// Commit that triggered this deploy (hex oid).
+    pub commit: String,
+    pub ok: bool,
+    /// Human-readable result or error.
+    pub message: String,
+    /// Deterministic CREATE address ("" until a broadcast succeeds).
+    pub contract_address: String,
+    /// Transaction hash ("" until a broadcast succeeds).
+    pub tx_hash: String,
+}
+
 // META keys for this module's persisted state (JSON via store::meta_*_json).
 fn config_key(repo: &str) -> String {
     format!("deploy:{repo}")
+}
+fn evm_config_key(repo: &str) -> String {
+    format!("deploy_evm:{repo}")
+}
+fn evm_status_key(repo: &str) -> String {
+    format!("deploy_evm_status:{repo}")
 }
 fn status_key(repo: &str) -> String {
     format!("deploy_status:{repo}")
@@ -156,6 +189,40 @@ pub fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
 
 pub fn get_config(repo: &str) -> Option<DeployConfig> {
     store::meta_get_json(&config_key(repo))
+}
+
+/// Set (or replace) a repo's EVM deploy config. Requires the global EVM
+/// signing config to exist first: a target with no way to reach it is a
+/// misconfiguration better rejected here than discovered at push time.
+pub fn set_evm_config(repo: &str, source_path: String, gas_limit: u64) -> Result<(), String> {
+    if !store::repo_exists(repo) {
+        return Err(format!("no such repo: {repo}"));
+    }
+    if !source_path.ends_with(".hex") {
+        return Err("source_path must end in .hex (creation bytecode as hex text)".into());
+    }
+    if evm::get_config().is_none() {
+        return Err("no global EVM config; call evm_set_config first".into());
+    }
+    if gas_limit < 53_000 {
+        return Err("gas_limit below the 53k floor of any CREATE".into());
+    }
+    store::meta_set_json(
+        &evm_config_key(repo),
+        &EvmDeployConfig {
+            source_path,
+            gas_limit,
+        },
+    );
+    Ok(())
+}
+
+pub fn get_evm_config(repo: &str) -> Option<EvmDeployConfig> {
+    store::meta_get_json(&evm_config_key(repo))
+}
+
+pub fn get_evm_status(repo: &str) -> Option<EvmDeployStatus> {
+    store::meta_get_json(&evm_status_key(repo))
 }
 
 pub fn get_status(repo: &str) -> Option<DeployStatus> {
@@ -436,9 +503,57 @@ async fn attempt(
     Ok(format!("{label} to {}", cfg.target))
 }
 
-/// Build the configured source from the commit's tree, validate it, and install
-/// it into the target canister. Persists the status and appends the outcome --
-/// success or failure -- to the provenance log, exactly once. Never traps.
+/// The fallible steps of an EVM deploy: resolve the committed hex artifact,
+/// decode-check it, and hand it to evm::deploy_bytecode, which signs a CREATE
+/// with the commit oid threaded into the provenance record.
+async fn attempt_evm(
+    cfg: &EvmDeployConfig,
+    commit_oid: &Oid,
+) -> Result<crate::evm::TxOutcome, String> {
+    let src_bytes = blob_at_path(commit_oid, &cfg.source_path)
+        .map_err(|e| format!("resolve {}: {e}", cfg.source_path))?;
+    let hex_text = String::from_utf8(src_bytes)
+        .map_err(|_| format!("{} is not valid UTF-8", cfg.source_path))?;
+    evm::deploy_bytecode(
+        hex_text.trim().to_string(),
+        cfg.gas_limit,
+        store::oid_hex(commit_oid),
+    )
+    .await
+}
+
+/// Run a repo's configured EVM deploy and persist its status. Never traps.
+async fn run_evm(repo: &str, cfg: &EvmDeployConfig, commit_oid: &Oid) -> EvmDeployStatus {
+    let mut st = EvmDeployStatus {
+        commit: store::oid_hex(commit_oid),
+        ok: false,
+        message: String::new(),
+        contract_address: String::new(),
+        tx_hash: String::new(),
+    };
+    match attempt_evm(cfg, commit_oid).await {
+        Ok(out) => {
+            st.ok = true;
+            st.contract_address = out.contract_address.unwrap_or_default();
+            st.tx_hash = out.tx_hash;
+            st.message = format!("deployed to {} (chain via evm config)", st.contract_address);
+        }
+        Err(e) => st.message = e,
+    }
+    store::meta_set_json(&evm_status_key(repo), &st);
+    st
+}
+
+/// Whether a push to the deploy branch should enqueue a deploy: true when
+/// either the wasm-to-canister or the EVM target is configured.
+pub fn any_config(repo: &str) -> bool {
+    get_config(repo).is_some() || get_evm_config(repo).is_some()
+}
+
+/// Run every configured deploy leg for this commit -- wasm-to-canister,
+/// EVM CREATE, or both. Each leg persists its own status and provenance;
+/// the returned DeployStatus carries the wasm leg's summary plus the EVM
+/// leg's outcome folded into the message. Never traps.
 pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
     let mut st = DeployStatus {
         commit: store::oid_hex(&commit_oid),
@@ -447,21 +562,45 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
         wasm_len: 0,
         wasm_sha256: String::new(),
     };
-    let Some(cfg) = get_config(repo) else {
-        // Nothing to record against: the log is keyed to a config's source.
+    let wasm_cfg = get_config(repo);
+    let evm_cfg = get_evm_config(repo);
+    if wasm_cfg.is_none() && evm_cfg.is_none() {
+        // Nothing to record against: the logs are keyed to a config's source.
         st.message = "no deploy config for repo".into();
         put_status(repo, &st);
         return st;
-    };
-    match attempt(&cfg, &commit_oid, &mut st).await {
-        Ok(message) => {
-            st.ok = true;
-            st.message = message;
-        }
-        Err(e) => st.message = e,
     }
-    put_status(repo, &st);
-    record(repo, &cfg, &st);
+
+    match &wasm_cfg {
+        Some(cfg) => {
+            match attempt(cfg, &commit_oid, &mut st).await {
+                Ok(message) => {
+                    st.ok = true;
+                    st.message = message;
+                }
+                Err(e) => st.message = e,
+            }
+            put_status(repo, &st);
+            record(repo, cfg, &st);
+        }
+        // EVM-only repo: the wasm leg vacuously succeeds.
+        None => st.ok = true,
+    }
+
+    if let Some(cfg) = evm_cfg {
+        let evm_st = run_evm(repo, &cfg, &commit_oid).await;
+        let leg = if evm_st.ok {
+            format!("evm: {} ({})", evm_st.contract_address, evm_st.tx_hash)
+        } else {
+            format!("evm: {}", evm_st.message)
+        };
+        st.ok = st.ok && evm_st.ok;
+        st.message = if st.message.is_empty() {
+            leg
+        } else {
+            format!("{}; {leg}", st.message)
+        };
+    }
     st
 }
 

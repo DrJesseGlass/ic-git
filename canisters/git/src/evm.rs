@@ -667,6 +667,28 @@ fn rpc_principal(cfg: &EvmConfig) -> Result<Principal, String> {
     Principal::from_text(&cfg.evm_rpc).map_err(|e| format!("bad evm_rpc principal: {e}"))
 }
 
+/// Consensus strategy for reads: with several providers, accept agreement of
+/// all but one, so a single flaky provider (a failed outcall, a lagging node)
+/// cannot fail the whole call the way the default all-must-agree Equality
+/// strategy does. A single custom URL gets no strategy (nothing to vote).
+fn consensus(cfg: &EvmConfig) -> Option<RpcConfig> {
+    let n = if cfg.rpc_urls.is_empty() {
+        3 // the EVM RPC canister's default provider count per chain
+    } else {
+        cfg.rpc_urls.len()
+    };
+    if n < 2 {
+        return None;
+    }
+    Some(RpcConfig {
+        response_size_estimate: None,
+        response_consensus: Some(ConsensusStrategy::Threshold {
+            min: (n - 1) as u8,
+            total: Some(n as u8),
+        }),
+    })
+}
+
 async fn rpc_call<A, T>(cfg: &EvmConfig, method: &str, arg: A, what: &str) -> Result<T, String>
 where
     A: CandidType,
@@ -675,7 +697,7 @@ where
     let multi: MultiResult<T> = intercanister::call_with_payment(
         rpc_principal(cfg)?,
         method,
-        (services(cfg), None::<RpcConfig>, arg),
+        (services(cfg), consensus(cfg), arg),
         cfg.rpc_cycles,
     )
     .await?;

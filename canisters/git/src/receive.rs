@@ -145,7 +145,7 @@ pub fn handle(repo: &str, body: &[u8]) -> Outcome {
 
     // Hoisted out of the command loop: both are loop-invariant stable reads.
     let deploy_branch = deploy::deploy_branch(repo);
-    let deploy_configured = deploy::get_config(repo).is_some();
+    let deploy_configured = deploy::any_config(repo);
 
     report.extend_from_slice(&pkt_line(b"unpack ok\n"));
     for cmd in &commands {

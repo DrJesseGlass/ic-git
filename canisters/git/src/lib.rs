@@ -548,6 +548,27 @@ fn deploy_queue_len() -> u64 {
     deploy::queue_len() as u64
 }
 
+/// E2: configure push-to-EVM for a repo. On push to the deploy branch, the
+/// committed hex artifact at `source_path` (.hex, creation bytecode) is
+/// deployed as a CREATE transaction on the chain in the global EVM config,
+/// with the commit oid recorded in the provenance log. Coexists with
+/// set_wasm_deploy: a repo can deploy to a canister and an EVM chain from the
+/// same push.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(), String> {
+    deploy::set_evm_config(&repo, source_path, gas_limit)
+}
+
+#[ic_cdk::query]
+fn get_evm_deploy_config(repo: String) -> Option<deploy::EvmDeployConfig> {
+    deploy::get_evm_config(&repo)
+}
+
+#[ic_cdk::query]
+fn get_evm_deploy_status(repo: String) -> Option<deploy::EvmDeployStatus> {
+    deploy::get_evm_status(&repo)
+}
+
 // --- Track A: EVM deployment (phases E0/E1; see ROADMAP.md) ------------------
 
 /// Configure EVM signing and broadcast: the EVM RPC canister principal, the
