@@ -205,6 +205,11 @@ service : {
   evm_receipt : (text) -> (ResultReceipt);
   evm_deploy_history : () -> (vec EvmDeployRecord) query;
 
+  // ProvenanceRegistry: canister-attested repo -> (commit, bundleHash) on-chain
+  evm_set_registry : (text) -> (Result);
+  evm_get_registry : () -> (opt text) query;
+  evm_registry_publish : (text) -> (ResultTxOutcome);
+
   // R4: distribute compilation across a worker fleet
   set_compiler_workers : (vec principal) -> (Result);
   get_compiler_workers : () -> (vec principal) query;

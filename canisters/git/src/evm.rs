@@ -892,6 +892,70 @@ pub async fn deploy_bytecode(
     Ok(out)
 }
 
+// --- provenance registry (repo -> commit, bundleHash; see registry repo) -----
+// The registry is a canister-owned contract (ProvenanceRegistry.sol, deployed
+// through the E2 push path). Publishing binds a repo name to its deploy-branch
+// tip commit and artifact hash, on the chain wallets already watch. Writable
+// only by the canister's EOA, so an entry is the canister's own attestation.
+
+const REGISTRY_KEY: &str = "evm:registry";
+
+pub fn set_registry(address: String) -> Result<(), String> {
+    parse_address(&address)?;
+    store::meta_set_json(REGISTRY_KEY, &address);
+    Ok(())
+}
+
+pub fn get_registry() -> Option<String> {
+    store::meta_get_json(REGISTRY_KEY)
+}
+
+/// ABI-encode set(string repo, bytes20 commit, bytes32 bundleHash):
+/// selector, then three head words (string offset, bytes20 right-padded,
+/// bytes32), then the string tail (length word, data padded to a word).
+fn abi_encode_set(repo: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec<u8> {
+    let mut out = keccak256(b"set(string,bytes20,bytes32)")[..4].to_vec();
+    let mut word = [0u8; 32];
+    word[31] = 0x60; // string data starts after the 3-word head
+    out.extend_from_slice(&word);
+    word = [0u8; 32];
+    word[..20].copy_from_slice(commit); // bytesN is left-aligned
+    out.extend_from_slice(&word);
+    out.extend_from_slice(bundle);
+    word = [0u8; 32];
+    word[24..].copy_from_slice(&(repo.len() as u64).to_be_bytes());
+    out.extend_from_slice(&word);
+    out.extend_from_slice(repo.as_bytes());
+    out.extend(std::iter::repeat(0u8).take((32 - repo.len() % 32) % 32));
+    out
+}
+
+/// Publish a repo's current provenance to the registry: its deploy-branch tip
+/// commit and the sha256 of the artifact at its EVM deploy config's
+/// source_path. Returns the write transaction's outcome.
+pub async fn registry_publish(repo: &str) -> Result<TxOutcome, String> {
+    let cfg = require_config()?;
+    let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
+    let to = parse_address(&registry)?;
+
+    let branch = store::head_target(repo).ok_or(format!("no such repo: {repo}"))?;
+    let tip = store::get_ref(repo, &branch).ok_or("deploy branch has no commits")?;
+    let dcfg = crate::deploy::get_evm_config(repo)
+        .ok_or("repo has no EVM deploy config (nothing to hash)")?;
+    // Hash the decoded bytecode, not the hex text, so the registry entry
+    // equals the bytecode_sha256 already in evm_deploy_history.
+    let artifact = crate::deploy::artifact_at(&tip, &dcfg.source_path)?;
+    let hex_text = String::from_utf8(artifact)
+        .map_err(|_| format!("{} is not valid UTF-8", dcfg.source_path))?;
+    let raw = hex::decode(hex_text.trim().strip_prefix("0x").unwrap_or(hex_text.trim()))
+        .map_err(|e| format!("bad artifact hex: {e}"))?;
+    let bundle: [u8; 32] = sha2::Sha256::digest(&raw).into();
+
+    let commit: [u8; 20] = *tip.as_slice().first_chunk::<20>().ok_or("bad oid length")?;
+    let data = abi_encode_set(repo, &commit, &bundle);
+    send_tx(&cfg, Some(to), 0, data, 150_000).await
+}
+
 // --- receipt lookup ----------------------------------------------------------
 
 /// Flattened receipt summary; big integers rendered as decimal strings.
@@ -1052,6 +1116,26 @@ mod tests {
         // The signed body must extend the unsigned field list: same fields,
         // three more items, strictly longer.
         assert!(raw.len() > rlp::list(&tx.payload()).len() + 2);
+    }
+
+    #[test]
+    fn abi_set_layout() {
+        let commit = [0xaa; 20];
+        let bundle = [0xbb; 32];
+        let enc = abi_encode_set("evm-demo", &commit, &bundle);
+        // selector + 3 head words + length word + 1 padded data word
+        assert_eq!(enc.len(), 4 + 32 * 5);
+        assert_eq!(enc[4..36], {
+            let mut w = [0u8; 32];
+            w[31] = 0x60;
+            w
+        });
+        assert_eq!(&enc[36..56], &commit); // bytes20 left-aligned
+        assert_eq!(&enc[56..68], &[0u8; 12]); // right padding
+        assert_eq!(&enc[68..100], &bundle);
+        assert_eq!(enc[100..132].last(), Some(&8)); // len("evm-demo")
+        assert_eq!(&enc[132..140], b"evm-demo");
+        assert_eq!(&enc[140..164], &[0u8; 24]); // pad to word
     }
 
     #[test]

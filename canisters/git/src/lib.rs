@@ -627,6 +627,25 @@ fn evm_deploy_history() -> Vec<evm::EvmDeployRecord> {
     evm::get_history()
 }
 
+/// Point the canister at its deployed ProvenanceRegistry contract.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn evm_set_registry(address: String) -> Result<(), String> {
+    evm::set_registry(address)
+}
+
+#[ic_cdk::query]
+fn evm_get_registry() -> Option<String> {
+    evm::get_registry()
+}
+
+/// Write a repo's provenance to the on-chain registry: set(repo, tip commit,
+/// sha256 of its EVM artifact). The canister's EOA is the registry's owner, so
+/// this transaction is the canister's own attestation.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
+    evm::registry_publish(&repo).await
+}
+
 // --- R6 spike: interpret a wasm32-wasip1 module in-canister ------------------
 
 #[derive(candid::CandidType)]

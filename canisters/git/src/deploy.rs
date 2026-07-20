@@ -348,6 +348,12 @@ async fn drain_one() {
     }
 }
 
+/// Blob content at `path` within a commit's tree, for callers outside this
+/// module (the EVM registry publisher hashes the same artifact a deploy reads).
+pub fn artifact_at(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
+    blob_at_path(commit_oid, path)
+}
+
 /// Resolve a slash-separated path within a commit's tree to the blob content.
 fn blob_at_path(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
     let (ty, content) = store::get_object_parsed(commit_oid).ok_or("commit object missing")?;
