@@ -98,7 +98,9 @@ ic-git's claim: source, build trigger, serving, and attestation live in one
 auditable trust domain with no standing credentials, plus a checkpoint on
 the chain the user's wallet already watches. Honest caveats: the HTTP
 gateway (`icp0.io`) remains a trusted party for users who don't verify
-certification locally, and F2 requires a client that does not exist yet.
+certification locally, and the F2 client so far is a zero-dependency CLI
+(`tools/verify.mjs`: registry entry vs served bytes vs deployed code vs an
+independent `git clone`), not yet the in-wallet verifier of section 3.
 The registry makes the frontend *checkable*; F2 makes it *checked*.
 
 ## 3. Track C: the transaction reviewer (side project write-up)
