@@ -379,7 +379,8 @@ pub fn evm_artifact_hex(commit_oid: &Oid, path: &str) -> Result<String, String> 
 }
 
 /// Resolve a slash-separated path within a commit's tree to the blob content.
-fn blob_at_path(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
+/// Also the site module's file lookup (site.rs serves committed bundles).
+pub(crate) fn blob_at_path(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
     let (ty, content) = store::get_object_parsed(commit_oid).ok_or("commit object missing")?;
     if ty != ObjectType::Commit {
         return Err("ref tip is not a commit".into());

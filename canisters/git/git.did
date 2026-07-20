@@ -123,6 +123,7 @@ type TxOutcome = record {
   contract_address : opt text;
 };
 type ResultTxOutcome = variant { Ok : TxOutcome; Err : text };
+type SiteConfig = record { root : text };
 type ReceiptSummary = record {
   status : text;
   block_number : nat64;
@@ -197,6 +198,10 @@ service : {
   set_evm_deploy : (text, text, nat64) -> (Result);
   get_evm_deploy_config : (text) -> (opt EvmDeployConfig) query;
   get_evm_deploy_status : (text) -> (opt EvmDeployStatus) query;
+
+  // F0: verifiable frontend serving (GET /site/<repo>/<path>)
+  set_site : (text, text) -> (Result);
+  get_site : (text) -> (opt SiteConfig) query;
 
   // Track A: EVM deployment (E0 signing spine, E1 CREATE)
   evm_set_config : (text, text, nat64, vec text) -> (Result);

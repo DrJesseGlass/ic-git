@@ -13,6 +13,7 @@ mod lang;
 mod object;
 mod pack;
 mod receive;
+mod site;
 mod smart_http;
 mod store;
 
@@ -55,6 +56,8 @@ enum Route {
     /// POST /<repo>.git/<service> (upload-pack is a query; receive-pack
     /// mutates and upgrades to http_request_update)
     Rpc { repo: String, service: Service },
+    /// GET /site/<repo>/<path>: a committed static bundle (see site.rs).
+    Site { repo: String, path: String },
     Index,
     NotFound,
 }
@@ -63,6 +66,19 @@ fn route(req: &HttpRequest) -> Route {
     let path = http::extract_path(&req.url);
     if path == "/" {
         return Route::Index;
+    }
+    if let Some(rest) = path.strip_prefix("/site/") {
+        if req.method != "GET" {
+            return Route::NotFound;
+        }
+        let (repo, sub) = rest.split_once('/').unwrap_or((rest, ""));
+        if repo.is_empty() {
+            return Route::NotFound;
+        }
+        return Route::Site {
+            repo: repo.to_string(),
+            path: sub.to_string(),
+        };
     }
     let Some((repo, rest)) = path
         .strip_prefix('/')
@@ -157,6 +173,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
             ..
         } => http::upgrade_response(),
         Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
+        Route::Site { repo, path } => site::serve(&repo, &path),
         Route::Index => {
             let repos = store::list_repos().join("\n");
             git_response(
@@ -568,6 +585,21 @@ fn get_evm_deploy_config(repo: String) -> Option<deploy::EvmDeployConfig> {
 #[ic_cdk::query]
 fn get_evm_deploy_status(repo: String) -> Option<deploy::EvmDeployStatus> {
     deploy::get_evm_status(&repo)
+}
+
+// --- F0: verifiable frontend serving (see VISION.md section 2) ---------------
+
+/// Turn on bundle serving for a repo: GET /site/<repo>/<path> serves blobs
+/// from `root` (a directory in the repo tree; "" = repo root) at the
+/// deploy-branch tip, each response bound to its commit via X-Ic-Git-Commit.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_site(repo: String, root: String) -> Result<(), String> {
+    site::set_config(&repo, root)
+}
+
+#[ic_cdk::query]
+fn get_site(repo: String) -> Option<site::SiteConfig> {
+    site::get_config(&repo)
 }
 
 // --- Track A: EVM deployment (phases E0/E1; see ROADMAP.md) ------------------
