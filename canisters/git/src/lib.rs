@@ -6,6 +6,7 @@
 
 mod compile;
 mod deploy;
+mod evm;
 mod fleet;
 mod interp;
 mod lang;
@@ -545,6 +546,105 @@ fn get_deploy_history(repo: String) -> Vec<deploy::DeployRecord> {
 #[ic_cdk::query]
 fn deploy_queue_len() -> u64 {
     deploy::queue_len() as u64
+}
+
+/// E2: configure push-to-EVM for a repo. On push to the deploy branch, the
+/// committed hex artifact at `source_path` (.hex, creation bytecode) is
+/// deployed as a CREATE transaction on the chain in the global EVM config,
+/// with the commit oid recorded in the provenance log. Coexists with
+/// set_wasm_deploy: a repo can deploy to a canister and an EVM chain from the
+/// same push.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(), String> {
+    deploy::set_evm_config(&repo, source_path, gas_limit)
+}
+
+#[ic_cdk::query]
+fn get_evm_deploy_config(repo: String) -> Option<deploy::EvmDeployConfig> {
+    deploy::get_evm_config(&repo)
+}
+
+#[ic_cdk::query]
+fn get_evm_deploy_status(repo: String) -> Option<deploy::EvmDeployStatus> {
+    deploy::get_evm_status(&repo)
+}
+
+// --- Track A: EVM deployment (phases E0/E1; see ROADMAP.md) ------------------
+
+/// Configure EVM signing and broadcast: the EVM RPC canister principal, the
+/// threshold ECDSA key name (dfx_test_key locally, test_key_1/key_1 on ICP),
+/// the target chain id, and optional custom JSON-RPC URLs (required for chains
+/// without an EVM RPC preset, e.g. a local anvil or Base Sepolia).
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn evm_set_config(
+    evm_rpc: String,
+    key_name: String,
+    chain_id: u64,
+    rpc_urls: Vec<String>,
+) -> Result<(), String> {
+    evm::set_config(evm_rpc, key_name, chain_id, rpc_urls)
+}
+
+#[ic_cdk::query]
+fn evm_get_config() -> Option<evm::EvmConfig> {
+    evm::get_config()
+}
+
+/// The canister's own EOA (EIP-55). Derived from the threshold ECDSA public
+/// key on first call, cached after. Fund this address with native gas on the
+/// target chain; the canister pays for its own deploys.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn evm_address() -> Result<String, String> {
+    evm::address().await
+}
+
+/// E0 signing spine: send a plain value transfer from the canister EOA.
+/// `value_wei` is a decimal string. Returns the tx hash.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn evm_send(to: String, value_wei: String) -> Result<evm::TxOutcome, String> {
+    evm::send_value(to, value_wei).await
+}
+
+/// E1: deploy init bytecode as a CREATE transaction from the canister EOA.
+/// Returns the deterministic contract address immediately (no receipt wait);
+/// confirm with evm_receipt. Appends to the EVM provenance log.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutcome, String> {
+    evm::deploy_bytecode(String::new(), bytecode_hex, gas_limit, String::new()).await
+}
+
+/// Poll a transaction receipt. None while still pending.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn evm_receipt(tx_hash: String) -> Result<Option<evm::ReceiptSummary>, String> {
+    evm::receipt(tx_hash).await
+}
+
+/// Append-only EVM provenance log: (repo, commit, chain, address, tx,
+/// bytecode hash, ok) per deploy attempt. Repo and commit are empty for
+/// direct-hex deploys. An ok record means the broadcast was accepted;
+/// confirm mining via evm_receipt on the record's tx_hash.
+#[ic_cdk::query]
+fn evm_deploy_history() -> Vec<evm::EvmDeployRecord> {
+    evm::get_history()
+}
+
+/// Point the canister at its deployed ProvenanceRegistry contract.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn evm_set_registry(address: String) -> Result<(), String> {
+    evm::set_registry(address)
+}
+
+#[ic_cdk::query]
+fn evm_get_registry() -> Option<String> {
+    evm::get_registry()
+}
+
+/// Write a repo's provenance to the on-chain registry: set(repo, tip commit,
+/// sha256 of its EVM artifact). The canister's EOA is the registry's owner, so
+/// this transaction is the canister's own attestation.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
+    evm::registry_publish(&repo).await
 }
 
 // --- R6 spike: interpret a wasm32-wasip1 module in-canister ------------------
