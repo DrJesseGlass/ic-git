@@ -610,7 +610,7 @@ async fn evm_send(to: String, value_wei: String) -> Result<evm::TxOutcome, Strin
 /// confirm with evm_receipt. Appends to the EVM provenance log.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutcome, String> {
-    evm::deploy_bytecode(bytecode_hex, gas_limit, String::new()).await
+    evm::deploy_bytecode(String::new(), bytecode_hex, gas_limit, String::new()).await
 }
 
 /// Poll a transaction receipt. None while still pending.
@@ -619,9 +619,10 @@ async fn evm_receipt(tx_hash: String) -> Result<Option<evm::ReceiptSummary>, Str
     evm::receipt(tx_hash).await
 }
 
-/// Append-only EVM provenance log: (commit, chain, address, tx, bytecode hash)
-/// per deploy. The commit field is empty for direct-hex deploys until the E2
-/// git path supplies it.
+/// Append-only EVM provenance log: (repo, commit, chain, address, tx,
+/// bytecode hash, ok) per deploy attempt. Repo and commit are empty for
+/// direct-hex deploys. An ok record means the broadcast was accepted;
+/// confirm mining via evm_receipt on the record's tx_hash.
 #[ic_cdk::query]
 fn evm_deploy_history() -> Vec<evm::EvmDeployRecord> {
     evm::get_history()

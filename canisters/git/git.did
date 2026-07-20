@@ -134,6 +134,7 @@ type ReceiptSummary = record {
 };
 type ResultReceipt = variant { Ok : opt ReceiptSummary; Err : text };
 type EvmDeployRecord = record {
+  repo : text;
   commit : text;
   chain_id : nat64;
   contract_address : text;
@@ -141,6 +142,8 @@ type EvmDeployRecord = record {
   nonce : nat64;
   bytecode_sha256 : text;
   bytecode_len : nat64;
+  ok : bool;
+  message : text;
   at_ns : nat64;
 };
 

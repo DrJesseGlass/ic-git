@@ -13,10 +13,12 @@
 //! the v bit -- is small, and mirroring the EVM RPC candid by hand matches how
 //! deploy.rs already mirrors the management canister.
 //!
-//! Every successful deploy appends an [`EvmDeployRecord`] binding
-//! (commit, chain id, contract address, tx hash, bytecode hash) in stable
-//! memory: the provenance substrate any future source-verification story
-//! (metadata-hash checks, on-chain solc) sits on.
+//! Every deploy attempt appends an [`EvmDeployRecord`] binding
+//! (repo, commit, chain id, contract address, tx hash, bytecode hash) in
+//! stable memory: the provenance substrate any future source-verification
+//! story (metadata-hash checks, on-chain solc) sits on. A record attests
+//! broadcast acceptance; mined-and-succeeded is confirmed separately via
+//! its tx_hash (evm_receipt).
 
 use crate::store;
 use candid::{CandidType, Principal};
@@ -706,13 +708,15 @@ where
 
 // --- chain reads -------------------------------------------------------------
 
+/// Pending, not Latest: Latest counts only mined transactions, so a second
+/// deploy inside one block window would reuse the nonce of a still-pending tx.
 async fn nonce_of(cfg: &EvmConfig, address: &str) -> Result<u64, String> {
     let count: u128 = rpc_call(
         cfg,
         "eth_getTransactionCount",
         GetTransactionCountArgs {
             address: address.to_string(),
-            block: BlockTag::Latest,
+            block: BlockTag::Pending,
         },
         "eth_getTransactionCount",
     )
@@ -764,8 +768,41 @@ pub struct TxOutcome {
     pub contract_address: Option<String>,
 }
 
+thread_local! {
+    /// True while a send_tx is between its nonce read and its broadcast.
+    /// Update methods interleave at every await, so without this two
+    /// concurrent sends would sign the same nonce and one would lose with
+    /// NonceTooLow. Heap state: an upgrade clears it, along with the
+    /// in-flight call it was guarding.
+    static SEND_IN_FLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// (chain_id, EOA, next nonce) advanced on each accepted broadcast.
+    /// A provider's pending count can lag a just-accepted tx, so the chain
+    /// read alone is not enough; the max of both is used. Cleared on a
+    /// rejected broadcast (a dropped or replaced tx makes it overshoot) and
+    /// by upgrades (the Pending-tag chain read resumes coverage).
+    static NEXT_NONCE: std::cell::RefCell<Option<(u64, String, u64)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Releases the send lock on every exit path from send_tx.
+struct SendLock;
+impl SendLock {
+    fn acquire() -> Result<SendLock, String> {
+        if SEND_IN_FLIGHT.with(|f| f.replace(true)) {
+            return Err("another EVM transaction is in flight; retry shortly".into());
+        }
+        Ok(SendLock)
+    }
+}
+impl Drop for SendLock {
+    fn drop(&mut self) {
+        SEND_IN_FLIGHT.with(|f| f.set(false));
+    }
+}
+
 /// Build, sign, and broadcast one EIP-1559 transaction from the canister EOA.
-/// `to = None` deploys `data` as init bytecode (CREATE).
+/// `to = None` deploys `data` as init bytecode (CREATE). One at a time: a
+/// concurrent call fails fast rather than racing on the nonce.
 async fn send_tx(
     cfg: &EvmConfig,
     to: Option<[u8; 20]>,
@@ -773,10 +810,17 @@ async fn send_tx(
     data: Vec<u8>,
     gas_limit: u64,
 ) -> Result<TxOutcome, String> {
+    let _lock = SendLock::acquire()?;
     let pk = public_key(cfg).await?;
     let from = eoa_of_pubkey(&pk)?;
     let from_hex = checksum_address(&from);
-    let nonce = nonce_of(cfg, &from_hex).await?;
+    let chain_nonce = nonce_of(cfg, &from_hex).await?;
+    let nonce = NEXT_NONCE.with(|c| match c.borrow().as_ref() {
+        Some((chain, addr, next)) if *chain == cfg.chain_id && *addr == from_hex => {
+            chain_nonce.max(*next)
+        }
+        _ => chain_nonce,
+    });
     let (max_fee, tip) = fees(cfg).await?;
     let tx = Tx {
         chain_id: cfg.chain_id,
@@ -803,15 +847,23 @@ async fn send_tx(
     .await?;
     match status {
         // Some providers return the tx hash, some don't; ours is exact either way.
-        SendRawTransactionStatus::Ok(_) => Ok(TxOutcome {
-            tx_hash,
-            nonce,
-            contract_address: to
-                .is_none()
-                .then(|| checksum_address(&create_address(&from, nonce))),
-            from: from_hex,
-        }),
-        other => Err(format!("eth_sendRawTransaction: {other:?}")),
+        SendRawTransactionStatus::Ok(_) => {
+            NEXT_NONCE.with(|c| {
+                *c.borrow_mut() = Some((cfg.chain_id, from_hex.clone(), nonce + 1));
+            });
+            Ok(TxOutcome {
+                tx_hash,
+                nonce,
+                contract_address: to
+                    .is_none()
+                    .then(|| checksum_address(&create_address(&from, nonce))),
+                from: from_hex,
+            })
+        }
+        other => {
+            NEXT_NONCE.with(|c| *c.borrow_mut() = None);
+            Err(format!("eth_sendRawTransaction: {other:?}"))
+        }
     }
 }
 
@@ -827,13 +879,18 @@ pub async fn send_value(to: String, value_wei: String) -> Result<TxOutcome, Stri
 
 // --- E1: contract deployment with provenance ---------------------------------
 
-/// One deployment's provenance: the binding of what was deployed (bytecode
-/// hash, and the commit it came from once the git path lands in E2) to where
-/// it went (chain, address, tx). Append-only, in stable memory. Mirrors
-/// deploy.rs's DeployRecord -- this is the substrate any future
-/// source-verification story builds on.
+/// One deploy attempt's provenance: the binding of what was deployed (repo,
+/// commit, bytecode hash) to where it went (chain, address, tx). Append-only,
+/// in stable memory; failed attempts are recorded too (ok/message), mirroring
+/// deploy.rs's DeployRecord. An ok record attests that the broadcast was
+/// accepted into a mempool, not that the tx was mined or its constructor
+/// succeeded -- confirmation is a receipt poll away via tx_hash (evm_receipt).
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct EvmDeployRecord {
+    /// Repo whose push produced this deploy; empty for direct-hex deploys.
+    /// Defaults cover records written before this field existed.
+    #[serde(default)]
+    pub repo: String,
     /// Commit the bytecode came from (hex oid); empty for direct-hex deploys.
     pub commit: String,
     pub chain_id: u64,
@@ -842,10 +899,21 @@ pub struct EvmDeployRecord {
     pub nonce: u64,
     pub bytecode_sha256: String,
     pub bytecode_len: u64,
+    /// Whether the broadcast was accepted. Records predating this field were
+    /// only written on success, hence the true default.
+    #[serde(default = "default_record_ok")]
+    pub ok: bool,
+    #[serde(default)]
+    pub message: String,
     /// IC time (nanoseconds) when the deploy was recorded.
     pub at_ns: u64,
 }
 
+fn default_record_ok() -> bool {
+    true
+}
+
+/// Per-repo cap, so one chatty repo cannot evict another's history.
 const MAX_LOG: usize = 200;
 
 pub fn get_history() -> Vec<EvmDeployRecord> {
@@ -853,18 +921,29 @@ pub fn get_history() -> Vec<EvmDeployRecord> {
 }
 
 fn record(rec: EvmDeployRecord) {
+    let repo = rec.repo.clone();
     let mut log = get_history();
     log.push(rec);
-    if log.len() > MAX_LOG {
-        let drop = log.len() - MAX_LOG;
-        log.drain(0..drop);
+    let count = log.iter().filter(|r| r.repo == repo).count();
+    if count > MAX_LOG {
+        let mut to_drop = count - MAX_LOG;
+        log.retain(|r| {
+            if to_drop > 0 && r.repo == repo {
+                to_drop -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
     store::meta_set_json(LOG_KEY, &log);
 }
 
 /// Deploy init bytecode (hex, 0x-optional) as a CREATE transaction and record
-/// the provenance binding. `commit` is empty until the E2 git path supplies it.
+/// the provenance binding, success or failure. `repo` and `commit` are empty
+/// for direct-hex deploys outside the E2 git path.
 pub async fn deploy_bytecode(
+    repo: String,
     bytecode_hex: String,
     gas_limit: u64,
     commit: String,
@@ -878,18 +957,28 @@ pub async fn deploy_bytecode(
     }
     let sha256 = hex::encode(sha2::Sha256::digest(&bytecode));
     let len = bytecode.len() as u64;
-    let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await?;
+    let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
     record(EvmDeployRecord {
+        repo,
         commit,
         chain_id: cfg.chain_id,
-        contract_address: out.contract_address.clone().unwrap_or_default(),
-        tx_hash: out.tx_hash.clone(),
-        nonce: out.nonce,
+        contract_address: out
+            .as_ref()
+            .ok()
+            .and_then(|o| o.contract_address.clone())
+            .unwrap_or_default(),
+        tx_hash: out.as_ref().map(|o| o.tx_hash.clone()).unwrap_or_default(),
+        nonce: out.as_ref().map(|o| o.nonce).unwrap_or_default(),
         bytecode_sha256: sha256,
         bytecode_len: len,
+        ok: out.is_ok(),
+        message: match &out {
+            Ok(_) => "broadcast accepted; confirm via evm_receipt".into(),
+            Err(e) => e.clone(),
+        },
         at_ns: ic_cdk::api::time(),
     });
-    Ok(out)
+    out
 }
 
 // --- provenance registry (repo -> commit, bundleHash; see registry repo) -----
@@ -1116,6 +1205,45 @@ mod tests {
         // The signed body must extend the unsigned field list: same fields,
         // three more items, strictly longer.
         assert!(raw.len() > rlp::list(&tx.payload()).len() + 2);
+    }
+
+    /// Records written before repo/ok/message existed must still load, with
+    /// the success-only history of that era reflected in the defaults.
+    #[test]
+    fn old_deploy_records_still_load() {
+        let old = r#"{"commit":"abc","chain_id":11155111,"contract_address":"0x1",
+            "tx_hash":"0x2","nonce":3,"bytecode_sha256":"d","bytecode_len":4,"at_ns":5}"#;
+        let rec: EvmDeployRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(rec.repo, "");
+        assert!(rec.ok);
+        assert_eq!(rec.message, "");
+        assert_eq!(rec.nonce, 3);
+    }
+
+    #[test]
+    fn deploy_log_caps_per_repo() {
+        let rec = |repo: &str, nonce: u64| EvmDeployRecord {
+            repo: repo.into(),
+            commit: String::new(),
+            chain_id: 1,
+            contract_address: String::new(),
+            tx_hash: String::new(),
+            nonce,
+            bytecode_sha256: String::new(),
+            bytecode_len: 0,
+            ok: true,
+            message: String::new(),
+            at_ns: 0,
+        };
+        record(rec("quiet", 0));
+        for n in 0..(MAX_LOG as u64 + 5) {
+            record(rec("chatty", n));
+        }
+        let log = get_history();
+        let chatty: Vec<_> = log.iter().filter(|r| r.repo == "chatty").collect();
+        assert_eq!(chatty.len(), MAX_LOG);
+        assert_eq!(chatty[0].nonce, 5); // oldest five dropped
+        assert_eq!(log.iter().filter(|r| r.repo == "quiet").count(), 1);
     }
 
     #[test]

@@ -328,12 +328,25 @@ fn arm_timer() {
     ic_cdk_timers::set_timer(Duration::ZERO, drain_one());
 }
 
+thread_local! {
+    /// True while a drain chain is awaiting a deploy. Every push arms its own
+    /// timer, so two rapid pushes would otherwise run two concurrent chains
+    /// whose EVM legs race on the EOA nonce; a timer that fires while one is
+    /// active bails, and the active chain re-arms for the jobs that remain.
+    /// Heap state: an upgrade clears it and resume_pending re-arms.
+    static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Pop the front job, run it, and re-arm if more remain. The job is removed
 /// (and the removal persisted) before running, so a job can never loop forever;
 /// `run` records its own outcome and is written never to trap.
 async fn drain_one() {
+    if DRAINING.with(|f| f.replace(true)) {
+        return;
+    }
     let mut jobs = queue_load();
     if jobs.is_empty() {
+        DRAINING.with(|f| f.set(false));
         return;
     }
     let job = jobs.remove(0);
@@ -343,6 +356,7 @@ async fn drain_one() {
     if let Ok(commit) = store::parse_oid(&job.commit) {
         run(&job.repo, commit).await;
     }
+    DRAINING.with(|f| f.set(false));
     if more_remain {
         arm_timer();
     }
@@ -513,6 +527,7 @@ async fn attempt(
 /// decode-check it, and hand it to evm::deploy_bytecode, which signs a CREATE
 /// with the commit oid threaded into the provenance record.
 async fn attempt_evm(
+    repo: &str,
     cfg: &EvmDeployConfig,
     commit_oid: &Oid,
 ) -> Result<crate::evm::TxOutcome, String> {
@@ -521,6 +536,7 @@ async fn attempt_evm(
     let hex_text = String::from_utf8(src_bytes)
         .map_err(|_| format!("{} is not valid UTF-8", cfg.source_path))?;
     evm::deploy_bytecode(
+        repo.to_string(),
         hex_text.trim().to_string(),
         cfg.gas_limit,
         store::oid_hex(commit_oid),
@@ -537,7 +553,7 @@ async fn run_evm(repo: &str, cfg: &EvmDeployConfig, commit_oid: &Oid) -> EvmDepl
         contract_address: String::new(),
         tx_hash: String::new(),
     };
-    match attempt_evm(cfg, commit_oid).await {
+    match attempt_evm(repo, cfg, commit_oid).await {
         Ok(out) => {
             st.ok = true;
             st.contract_address = out.contract_address.unwrap_or_default();
@@ -606,6 +622,10 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
         } else {
             format!("{}; {leg}", st.message)
         };
+        // The wasm arm persisted before this fold, and the push path discards
+        // the return value: without this write, get_deploy_status would report
+        // ok even when the EVM leg failed.
+        put_status(repo, &st);
     }
     st
 }
