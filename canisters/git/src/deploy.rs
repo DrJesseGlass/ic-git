@@ -302,14 +302,19 @@ pub fn queue_len() -> usize {
     queue_load().len()
 }
 
-/// Append a deploy job and arm the drain timer. Returns immediately.
+/// Append a deploy job and arm the drain timer. Returns immediately. A job
+/// for the same (repo, commit) already waiting is not queued again: two
+/// pushes of one commit deploy once.
 pub fn enqueue(repo: &str, commit: Oid) {
     let mut jobs = queue_load();
-    jobs.push(DeployJob {
-        repo: repo.to_string(),
-        commit: store::oid_hex(&commit),
-    });
-    queue_save(&jobs);
+    let commit = store::oid_hex(&commit);
+    if !jobs.iter().any(|j| j.repo == repo && j.commit == commit) {
+        jobs.push(DeployJob {
+            repo: repo.to_string(),
+            commit,
+        });
+        queue_save(&jobs);
+    }
     arm_timer();
 }
 
@@ -353,7 +358,7 @@ async fn drain_one() {
     queue_save(&jobs);
 
     if let Ok(commit) = store::parse_oid(&job.commit) {
-        run(&job.repo, commit).await;
+        run(&job.repo, commit, false).await;
     }
     DRAINING.with(|f| f.set(false));
     // Re-read the queue rather than trusting the pre-run snapshot: a push
@@ -547,20 +552,54 @@ async fn attempt_evm(
 }
 
 /// Run a repo's configured EVM deploy and persist its status. Never traps.
-async fn run_evm(repo: &str, cfg: &EvmDeployConfig, commit_oid: &Oid) -> EvmDeployStatus {
+/// Unless `force`, a commit the provenance log already shows accepted (and
+/// not reverted) is skipped -- the guard against double-push and
+/// push-then-impatient-deploy_now duplicates. After a fresh broadcast, the
+/// repo's provenance is auto-published to the registry when one is set.
+async fn run_evm(
+    repo: &str,
+    cfg: &EvmDeployConfig,
+    commit_oid: &Oid,
+    force: bool,
+) -> EvmDeployStatus {
+    let commit = store::oid_hex(commit_oid);
     let mut st = EvmDeployStatus {
-        commit: store::oid_hex(commit_oid),
+        commit: commit.clone(),
         ok: false,
-        message: String::new(),
+        message: "deploying".into(),
         contract_address: String::new(),
         tx_hash: String::new(),
     };
+    if !force {
+        if let Some(prev) = evm::latest_deploy(repo, &commit) {
+            st.ok = true;
+            st.contract_address = prev.contract_address;
+            st.tx_hash = prev.tx_hash;
+            st.message = format!(
+                "already deployed at {} (tx {}); skipped (deploy_now redeploys)",
+                st.contract_address, st.tx_hash
+            );
+            store::meta_set_json(&evm_status_key(repo), &st);
+            return st;
+        }
+    }
+    store::meta_set_json(&evm_status_key(repo), &st);
     match attempt_evm(repo, cfg, commit_oid).await {
         Ok(out) => {
             st.ok = true;
             st.contract_address = out.contract_address.unwrap_or_default();
             st.tx_hash = out.tx_hash;
             st.message = format!("deployed to {} (chain via evm config)", st.contract_address);
+            if evm::get_registry().is_some() {
+                match evm::registry_publish(repo).await {
+                    Ok(reg) => {
+                        st.message = format!("{}; registry publish {}", st.message, reg.tx_hash)
+                    }
+                    Err(e) => {
+                        st.message = format!("{}; registry publish failed: {e}", st.message)
+                    }
+                }
+            }
         }
         Err(e) => st.message = e,
     }
@@ -577,8 +616,10 @@ pub fn any_config(repo: &str) -> bool {
 /// Run every configured deploy leg for this commit -- wasm-to-canister,
 /// EVM CREATE, or both. Each leg persists its own status and provenance;
 /// the returned DeployStatus carries the wasm leg's summary plus the EVM
-/// leg's outcome folded into the message. Never traps.
-pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
+/// leg's outcome folded into the message. Never traps. `force` redeploys a
+/// commit the EVM provenance log already shows accepted (deploy_now);
+/// the push path passes false and dedupes.
+pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     let mut st = DeployStatus {
         commit: store::oid_hex(&commit_oid),
         ok: false,
@@ -594,6 +635,12 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
         put_status(repo, &st);
         return st;
     }
+
+    // Visible from the first moment of the job, so a status poll during the
+    // (tens of seconds) deploy sees "deploying", not null or a stale result.
+    st.message = "deploying".into();
+    put_status(repo, &st);
+    st.message = String::new();
 
     match &wasm_cfg {
         Some(cfg) => {
@@ -612,7 +659,7 @@ pub async fn run(repo: &str, commit_oid: Oid) -> DeployStatus {
     }
 
     if let Some(cfg) = evm_cfg {
-        let evm_st = run_evm(repo, &cfg, &commit_oid).await;
+        let evm_st = run_evm(repo, &cfg, &commit_oid, force).await;
         let leg = if evm_st.ok {
             format!("evm: {} ({})", evm_st.contract_address, evm_st.tx_hash)
         } else {
@@ -639,11 +686,12 @@ pub fn deploy_branch(repo: &str) -> Option<String> {
 }
 
 /// Run the configured deploy against the repo's current deploy-branch tip,
-/// without waiting for a push.
+/// without waiting for a push. Always deploys, even if the tip commit is
+/// already in the provenance log -- the explicit-redeploy escape hatch.
 pub async fn run_current(repo: &str) -> Result<DeployStatus, String> {
     let branch = deploy_branch(repo).ok_or(format!("no such repo: {repo}"))?;
     let tip = store::get_ref(repo, &branch).ok_or("deploy branch has no commits")?;
-    Ok(run(repo, tip).await)
+    Ok(run(repo, tip, true).await)
 }
 
 #[cfg(test)]

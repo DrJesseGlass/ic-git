@@ -518,7 +518,8 @@ fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
 }
 
 /// Run the configured deploy now against the repo's current deploy-branch tip,
-/// without waiting for a push. Returns the outcome.
+/// without waiting for a push. Returns the outcome. Redeploys even when the
+/// tip commit is already in the EVM provenance log (the push path dedupes).
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
     deploy::run_current(&repo).await
@@ -613,7 +614,9 @@ async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutco
     evm::deploy_bytecode(String::new(), bytecode_hex, gas_limit, String::new()).await
 }
 
-/// Poll a transaction receipt. None while still pending.
+/// Poll a transaction receipt. None while still pending. A found receipt is
+/// folded into any matching deploy record's receipt_status, same as the
+/// automatic post-broadcast poll.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn evm_receipt(tx_hash: String) -> Result<Option<evm::ReceiptSummary>, String> {
     evm::receipt(tx_hash).await
@@ -622,7 +625,8 @@ async fn evm_receipt(tx_hash: String) -> Result<Option<evm::ReceiptSummary>, Str
 /// Append-only EVM provenance log: (repo, commit, chain, address, tx,
 /// bytecode hash, ok) per deploy attempt. Repo and commit are empty for
 /// direct-hex deploys. An ok record means the broadcast was accepted;
-/// confirm mining via evm_receipt on the record's tx_hash.
+/// receipt_status carries the mined outcome once the automatic receipt
+/// poll (or an evm_receipt call) has seen it.
 #[ic_cdk::query]
 fn evm_deploy_history() -> Vec<evm::EvmDeployRecord> {
     evm::get_history()

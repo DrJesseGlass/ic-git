@@ -51,10 +51,11 @@ Everything below is live and independently checkable, not planned:
   evidence, and the input any downstream verifier needs, and no
   block explorer provides it as an attestation rather than an observation.
 
-Remaining path (hardening, not architecture): auto-publish to the registry
-from the deploy queue on every successful deploy; write a "deploying" status
-at job start; dedupe repeated deploys of one commit; multi-provider reads
-once EVM RPC provider determinism improves.
+Remaining path (hardening, not architecture): multi-provider reads once EVM
+RPC provider determinism improves. Shipped since first writing: registry
+auto-publish from the deploy queue, "deploying" status at job start,
+same-commit deploy dedupe on the push path, and receipt-poll reconciliation
+of deploy records (receipt_status: broadcast-accepted vs mined).
 
 ## 2. Verifiable frontends: the path and the comparison
 

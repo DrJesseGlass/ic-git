@@ -142,6 +142,7 @@ type EvmDeployRecord = record {
   bytecode_len : nat64;
   ok : bool;
   message : text;
+  receipt_status : text;
   at_ns : nat64;
 };
 

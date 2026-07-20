@@ -897,6 +897,11 @@ pub struct EvmDeployRecord {
     pub ok: bool,
     #[serde(default)]
     pub message: String,
+    /// Mined outcome, folded in by the post-broadcast receipt poll (or any
+    /// evm_receipt call): "" until a receipt is seen, then "success",
+    /// "reverted", or "unknown".
+    #[serde(default)]
+    pub receipt_status: String,
     /// IC time (nanoseconds) when the deploy was recorded.
     pub at_ns: u64,
 }
@@ -910,6 +915,60 @@ const MAX_LOG: usize = 200;
 
 pub fn get_history() -> Vec<EvmDeployRecord> {
     store::meta_get_json(LOG_KEY).unwrap_or_default()
+}
+
+/// The most recent accepted, not-known-reverted deploy of (repo, commit).
+/// The push path skips a commit that already has one; deploy_now does not.
+pub fn latest_deploy(repo: &str, commit: &str) -> Option<EvmDeployRecord> {
+    get_history()
+        .into_iter()
+        .rev()
+        .find(|r| r.repo == repo && r.commit == commit && r.ok && r.receipt_status != "reverted")
+}
+
+/// Fold a mined receipt's outcome into every deploy record with this tx hash.
+fn mark_receipt(tx_hash: &str, status: &str) {
+    let mut log = get_history();
+    let mut changed = false;
+    for r in log
+        .iter_mut()
+        .filter(|r| r.tx_hash.eq_ignore_ascii_case(tx_hash))
+    {
+        if r.receipt_status != status {
+            r.receipt_status = status.to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        store::meta_set_json(LOG_KEY, &log);
+    }
+}
+
+/// Seconds between receipt polls; ~2-3 block times, so the first poll
+/// usually lands.
+const RECEIPT_POLL_SECS: u64 = 30;
+/// Give up after this many polls (5 minutes): a tx neither mined nor dropped
+/// by then keeps receipt_status "" and any later evm_receipt call reconciles.
+const RECEIPT_POLL_ATTEMPTS: u32 = 10;
+
+/// Arm the timer chain that closes the gap between broadcast-accepted (what
+/// a deploy record attests at write time) and mined: each poll asks for the
+/// receipt, and receipt() folds a found one into the record.
+fn schedule_receipt_poll(tx_hash: String, attempt: u32) {
+    ic_cdk_timers::set_timer(
+        std::time::Duration::from_secs(RECEIPT_POLL_SECS),
+        poll_receipt(tx_hash, attempt),
+    );
+}
+
+async fn poll_receipt(tx_hash: String, attempt: u32) {
+    match receipt(tx_hash.clone()).await {
+        Ok(Some(_)) => {}
+        Ok(None) | Err(_) if attempt + 1 < RECEIPT_POLL_ATTEMPTS => {
+            schedule_receipt_poll(tx_hash, attempt + 1);
+        }
+        _ => {}
+    }
 }
 
 fn record(rec: EvmDeployRecord) {
@@ -980,8 +1039,12 @@ pub async fn deploy_bytecode(
             Ok(_) => "broadcast accepted; confirm via evm_receipt".into(),
             Err(e) => e.clone(),
         },
+        receipt_status: String::new(),
         at_ns: ic_cdk::api::time(),
     });
+    if let Ok(o) = &out {
+        schedule_receipt_poll(o.tx_hash.clone(), 0);
+    }
     out
 }
 
@@ -1059,17 +1122,20 @@ pub struct ReceiptSummary {
     pub contract_address: Option<String>,
 }
 
-/// None while the transaction is still pending.
+/// None while the transaction is still pending. A found receipt is also
+/// folded into any deploy record with this tx hash (receipt_status), so a
+/// manual evm_receipt call reconciles the provenance log the same way the
+/// post-broadcast poll does.
 pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> {
     let cfg = require_config()?;
     let receipt: Option<TransactionReceipt> = rpc_call(
         &cfg,
         "eth_getTransactionReceipt",
-        tx_hash,
+        tx_hash.clone(),
         "eth_getTransactionReceipt",
     )
     .await?;
-    Ok(receipt.map(|r| ReceiptSummary {
+    let summary = receipt.map(|r| ReceiptSummary {
         status: match r.status {
             Some(1) => "success".into(),
             Some(_) => "reverted".into(),
@@ -1079,7 +1145,11 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
         gas_used: r.gas_used.to_string(),
         effective_gas_price: r.effective_gas_price.to_string(),
         contract_address: r.contract_address,
-    }))
+    });
+    if let Some(s) = &summary {
+        mark_receipt(&tx_hash, &s.status);
+    }
+    Ok(summary)
 }
 
 // --- tests -------------------------------------------------------------------
@@ -1218,6 +1288,7 @@ mod tests {
         assert_eq!(rec.repo, "");
         assert!(rec.ok);
         assert_eq!(rec.message, "");
+        assert_eq!(rec.receipt_status, "");
         assert_eq!(rec.nonce, 3);
     }
 
@@ -1234,6 +1305,7 @@ mod tests {
             bytecode_len: 0,
             ok: true,
             message: String::new(),
+            receipt_status: String::new(),
             at_ns: 0,
         };
         record(rec("quiet", 0));
@@ -1245,6 +1317,31 @@ mod tests {
         assert_eq!(chatty.len(), MAX_LOG);
         assert_eq!(chatty[0].nonce, 5); // oldest five dropped
         assert_eq!(log.iter().filter(|r| r.repo == "quiet").count(), 1);
+    }
+
+    /// A reverted receipt (folded case-insensitively by tx hash) must
+    /// disqualify a record from the push path's dedupe lookup.
+    #[test]
+    fn receipt_fold_disqualifies_dedupe() {
+        record(EvmDeployRecord {
+            repo: "r".into(),
+            commit: "c".into(),
+            chain_id: 1,
+            contract_address: String::new(),
+            tx_hash: "0xABCD".into(),
+            nonce: 0,
+            bytecode_sha256: String::new(),
+            bytecode_len: 0,
+            ok: true,
+            message: String::new(),
+            receipt_status: String::new(),
+            at_ns: 0,
+        });
+        assert!(latest_deploy("r", "c").is_some());
+        mark_receipt("0xabcd", "success");
+        assert!(latest_deploy("r", "c").is_some());
+        mark_receipt("0xABcd", "reverted");
+        assert!(latest_deploy("r", "c").is_none());
     }
 
     #[test]
