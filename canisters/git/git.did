@@ -99,6 +99,40 @@ type DeployRecord = record {
   at_ns : nat64;
 };
 
+type EvmConfig = record {
+  evm_rpc : text;
+  key_name : text;
+  chain_id : nat64;
+  rpc_urls : vec text;
+  sign_cycles : nat;
+  rpc_cycles : nat;
+};
+type TxOutcome = record {
+  tx_hash : text;
+  nonce : nat64;
+  from : text;
+  contract_address : opt text;
+};
+type ResultTxOutcome = variant { Ok : TxOutcome; Err : text };
+type ReceiptSummary = record {
+  status : text;
+  block_number : nat64;
+  gas_used : text;
+  effective_gas_price : text;
+  contract_address : opt text;
+};
+type ResultReceipt = variant { Ok : opt ReceiptSummary; Err : text };
+type EvmDeployRecord = record {
+  commit : text;
+  chain_id : nat64;
+  contract_address : text;
+  tx_hash : text;
+  nonce : nat64;
+  bytecode_sha256 : text;
+  bytecode_len : nat64;
+  at_ns : nat64;
+};
+
 service : {
   // git smart-HTTP surface (called by the HTTP gateway)
   http_request : (HttpRequest) -> (HttpResponse) query;
@@ -145,6 +179,15 @@ service : {
   get_deploy_status : (text) -> (opt DeployStatus) query;
   get_deploy_history : (text) -> (vec DeployRecord) query;
   deploy_queue_len : () -> (nat64) query;
+
+  // Track A: EVM deployment (E0 signing spine, E1 CREATE)
+  evm_set_config : (text, text, nat64, vec text) -> (Result);
+  evm_get_config : () -> (opt EvmConfig) query;
+  evm_address : () -> (ResultText);
+  evm_send : (text, text) -> (ResultTxOutcome);
+  evm_deploy : (text, nat64) -> (ResultTxOutcome);
+  evm_receipt : (text) -> (ResultReceipt);
+  evm_deploy_history : () -> (vec EvmDeployRecord) query;
 
   // R4: distribute compilation across a worker fleet
   set_compiler_workers : (vec principal) -> (Result);

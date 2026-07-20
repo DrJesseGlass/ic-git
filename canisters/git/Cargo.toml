@@ -35,3 +35,10 @@ wasm-encoder = "0.253"
 # Track B, rung R6: interpret a wasm32-wasip1 module (eventually rustc.wasm)
 # held as data in stable memory. Pure Rust, builds to wasm32-unknown-unknown.
 wasmi = "1"
+
+# Track A (see ROADMAP.md): sign EVM transactions with threshold ECDSA.
+# sha3 for keccak256; k256 (pure Rust, no getrandom without the rand feature)
+# to decompress the SEC1 pubkey into an EOA and to find the recovery id by
+# trial recovery. Both build cleanly to wasm32-unknown-unknown.
+sha3 = "0.10"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
