@@ -115,8 +115,6 @@ type EvmConfig = record {
   key_name : text;
   chain_id : nat64;
   rpc_urls : vec text;
-  sign_cycles : nat;
-  rpc_cycles : nat;
 };
 type TxOutcome = record {
   tx_hash : text;

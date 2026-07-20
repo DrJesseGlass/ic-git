@@ -241,9 +241,7 @@ async fn public_key(cfg: &EvmConfig) -> Result<Vec<u8>, String> {
     Ok(reply.public_key)
 }
 
-/// Sign a 32-byte hash. Returns the fixed 64-byte r||s signature. The attached
-/// cycles cover the signing fee (~26.15B on the fiduciary subnet); the surplus
-/// is refunded.
+/// Sign a 32-byte hash. Returns the fixed 64-byte r||s signature.
 async fn sign_hash(cfg: &EvmConfig, hash: [u8; 32]) -> Result<[u8; 64], String> {
     let reply: SignWithEcdsaReply = intercanister::call_with_payment(
         Principal::management_canister(),
@@ -253,7 +251,7 @@ async fn sign_hash(cfg: &EvmConfig, hash: [u8; 32]) -> Result<[u8; 64], String> 
             derivation_path: vec![],
             key_id: key_id(cfg),
         },),
-        cfg.sign_cycles,
+        SIGN_CYCLES,
     )
     .await?;
     reply
@@ -595,20 +593,13 @@ pub struct EvmConfig {
     /// without presets is reached.
     #[serde(default)]
     pub rpc_urls: Vec<String>,
-    /// Cycles attached to each sign_with_ecdsa call; surplus refunded.
-    #[serde(default = "default_sign_cycles")]
-    pub sign_cycles: u128,
-    /// Cycles attached to each EVM RPC call; surplus refunded.
-    #[serde(default = "default_rpc_cycles")]
-    pub rpc_cycles: u128,
 }
 
-fn default_sign_cycles() -> u128 {
-    30_000_000_000
-}
-fn default_rpc_cycles() -> u128 {
-    3_000_000_000
-}
+/// Cycles attached to each sign_with_ecdsa call (the fee is ~26.15B on the
+/// fiduciary subnet); surplus refunded.
+const SIGN_CYCLES: u128 = 30_000_000_000;
+/// Cycles attached to each EVM RPC call; surplus refunded.
+const RPC_CYCLES: u128 = 3_000_000_000;
 
 const CONFIG_KEY: &str = "evm:config";
 const LOG_KEY: &str = "evm:deploy_log";
@@ -630,8 +621,6 @@ pub fn set_config(
         key_name,
         chain_id,
         rpc_urls,
-        sign_cycles: default_sign_cycles(),
-        rpc_cycles: default_rpc_cycles(),
     };
     store::meta_set_json(CONFIG_KEY, &cfg);
     Ok(())
@@ -700,7 +689,7 @@ where
         rpc_principal(cfg)?,
         method,
         (services(cfg), consensus(cfg), arg),
-        cfg.rpc_cycles,
+        RPC_CYCLES,
     )
     .await?;
     multi.into_result(what)
@@ -814,14 +803,17 @@ async fn send_tx(
     let pk = public_key(cfg).await?;
     let from = eoa_of_pubkey(&pk)?;
     let from_hex = checksum_address(&from);
-    let chain_nonce = nonce_of(cfg, &from_hex).await?;
+    // Independent chain reads; joined to pay one outcall round trip, not two.
+    let (chain_nonce, fee_pair) =
+        futures::future::join(nonce_of(cfg, &from_hex), fees(cfg)).await;
+    let chain_nonce = chain_nonce?;
+    let (max_fee, tip) = fee_pair?;
     let nonce = NEXT_NONCE.with(|c| match c.borrow().as_ref() {
         Some((chain, addr, next)) if *chain == cfg.chain_id && *addr == from_hex => {
             chain_nonce.max(*next)
         }
         _ => chain_nonce,
     });
-    let (max_fee, tip) = fees(cfg).await?;
     let tx = Tx {
         chain_id: cfg.chain_id,
         nonce,
@@ -939,6 +931,20 @@ fn record(rec: EvmDeployRecord) {
     store::meta_set_json(LOG_KEY, &log);
 }
 
+/// Decode a hex artifact (0x-optional, surrounding whitespace tolerated) to
+/// creation bytecode. The single decode path: the deploy leg and the registry
+/// publisher must hash identical bytes, or the on-chain registry entry would
+/// diverge from the bytecode_sha256 in the deploy history.
+fn decode_bytecode_hex(text: &str) -> Result<Vec<u8>, String> {
+    let s = text.trim();
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(s).map_err(|e| format!("bad bytecode hex: {e}"))?;
+    if bytes.is_empty() {
+        return Err("empty bytecode".into());
+    }
+    Ok(bytes)
+}
+
 /// Deploy init bytecode (hex, 0x-optional) as a CREATE transaction and record
 /// the provenance binding, success or failure. `repo` and `commit` are empty
 /// for direct-hex deploys outside the E2 git path.
@@ -949,12 +955,10 @@ pub async fn deploy_bytecode(
     commit: String,
 ) -> Result<TxOutcome, String> {
     let cfg = require_config()?;
-    let hex_str = bytecode_hex.trim();
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytecode = hex::decode(hex_str).map_err(|e| format!("bad bytecode hex: {e}"))?;
-    if bytecode.is_empty() {
-        return Err("empty bytecode".into());
+    if gas_limit < 53_000 {
+        return Err("gas_limit below the 53k floor of any CREATE".into());
     }
+    let bytecode = decode_bytecode_hex(&bytecode_hex)?;
     let sha256 = hex::encode(sha2::Sha256::digest(&bytecode));
     let len = bytecode.len() as u64;
     let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
@@ -1033,11 +1037,8 @@ pub async fn registry_publish(repo: &str) -> Result<TxOutcome, String> {
         .ok_or("repo has no EVM deploy config (nothing to hash)")?;
     // Hash the decoded bytecode, not the hex text, so the registry entry
     // equals the bytecode_sha256 already in evm_deploy_history.
-    let artifact = crate::deploy::artifact_at(&tip, &dcfg.source_path)?;
-    let hex_text = String::from_utf8(artifact)
-        .map_err(|_| format!("{} is not valid UTF-8", dcfg.source_path))?;
-    let raw = hex::decode(hex_text.trim().strip_prefix("0x").unwrap_or(hex_text.trim()))
-        .map_err(|e| format!("bad artifact hex: {e}"))?;
+    let hex_text = crate::deploy::evm_artifact_hex(&tip, &dcfg.source_path)?;
+    let raw = decode_bytecode_hex(&hex_text)?;
     let bundle: [u8; 32] = sha2::Sha256::digest(&raw).into();
 
     let commit: [u8; 20] = *tip.as_slice().first_chunk::<20>().ok_or("bad oid length")?;

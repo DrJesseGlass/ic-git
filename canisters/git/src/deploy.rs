@@ -350,22 +350,27 @@ async fn drain_one() {
         return;
     }
     let job = jobs.remove(0);
-    let more_remain = !jobs.is_empty();
     queue_save(&jobs);
 
     if let Ok(commit) = store::parse_oid(&job.commit) {
         run(&job.repo, commit).await;
     }
     DRAINING.with(|f| f.set(false));
-    if more_remain {
+    // Re-read the queue rather than trusting the pre-run snapshot: a push
+    // that arrived during the await armed a timer that bailed on DRAINING
+    // above, so its job is ours to pick up.
+    if !queue_load().is_empty() {
         arm_timer();
     }
 }
 
-/// Blob content at `path` within a commit's tree, for callers outside this
-/// module (the EVM registry publisher hashes the same artifact a deploy reads).
-pub fn artifact_at(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
-    blob_at_path(commit_oid, path)
+/// The trimmed hex text of an EVM artifact at `path` within a commit's tree.
+/// The one resolution path shared by the deploy leg and the registry
+/// publisher, so both end up hashing the same bytes.
+pub fn evm_artifact_hex(commit_oid: &Oid, path: &str) -> Result<String, String> {
+    let bytes = blob_at_path(commit_oid, path).map_err(|e| format!("resolve {path}: {e}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8"))?;
+    Ok(text.trim().to_string())
 }
 
 /// Resolve a slash-separated path within a commit's tree to the blob content.
@@ -531,13 +536,10 @@ async fn attempt_evm(
     cfg: &EvmDeployConfig,
     commit_oid: &Oid,
 ) -> Result<crate::evm::TxOutcome, String> {
-    let src_bytes = blob_at_path(commit_oid, &cfg.source_path)
-        .map_err(|e| format!("resolve {}: {e}", cfg.source_path))?;
-    let hex_text = String::from_utf8(src_bytes)
-        .map_err(|_| format!("{} is not valid UTF-8", cfg.source_path))?;
+    let hex_text = evm_artifact_hex(commit_oid, &cfg.source_path)?;
     evm::deploy_bytecode(
         repo.to_string(),
-        hex_text.trim().to_string(),
+        hex_text,
         cfg.gas_limit,
         store::oid_hex(commit_oid),
     )
