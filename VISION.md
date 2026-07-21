@@ -51,10 +51,11 @@ Everything below is live and independently checkable, not planned:
   evidence, and the input any downstream verifier needs, and no
   block explorer provides it as an attestation rather than an observation.
 
-Remaining path (hardening, not architecture): auto-publish to the registry
-from the deploy queue on every successful deploy; write a "deploying" status
-at job start; dedupe repeated deploys of one commit; multi-provider reads
-once EVM RPC provider determinism improves.
+Remaining path (hardening, not architecture): multi-provider reads once EVM
+RPC provider determinism improves. Shipped since first writing: registry
+auto-publish from the deploy queue, "deploying" status at job start,
+same-commit deploy dedupe on the push path, and receipt-poll reconciliation
+of deploy records (receipt_status: broadcast-accepted vs mined).
 
 ## 2. Verifiable frontends: the path and the comparison
 
@@ -97,7 +98,9 @@ ic-git's claim: source, build trigger, serving, and attestation live in one
 auditable trust domain with no standing credentials, plus a checkpoint on
 the chain the user's wallet already watches. Honest caveats: the HTTP
 gateway (`icp0.io`) remains a trusted party for users who don't verify
-certification locally, and F2 requires a client that does not exist yet.
+certification locally, and the F2 client so far is a zero-dependency CLI
+(`tools/verify.mjs`: registry entry vs served bytes vs deployed code vs an
+independent `git clone`), not yet the in-wallet verifier of section 3.
 The registry makes the frontend *checkable*; F2 makes it *checked*.
 
 ## 3. Track C: the transaction reviewer (side project write-up)

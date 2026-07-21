@@ -76,6 +76,38 @@ pub fn tag_target(content: &[u8]) -> Result<Oid, String> {
     Err("tag without object".into())
 }
 
+/// Resolve a slash-separated path within a commit's tree to the object at
+/// that path: a blob's content, or a tree's raw entries ("" resolves to the
+/// root tree). One walk from the root; callers that need "directory ->
+/// index.html" semantics look inside the returned tree instead of re-walking.
+pub fn node_at_path(commit_oid: &Oid, path: &str) -> Result<(store::ObjectType, Vec<u8>), String> {
+    let (ty, content) = store::get_object_parsed(commit_oid).ok_or("commit object missing")?;
+    if ty != store::ObjectType::Commit {
+        return Err("ref tip is not a commit".into());
+    }
+    let mut oid = commit_refs(&content)?.tree;
+    for comp in path.split('/').filter(|s| !s.is_empty()) {
+        let (tty, tcontent) = store::get_object_parsed(&oid).ok_or("tree object missing")?;
+        if tty != store::ObjectType::Tree {
+            return Err(format!("path component '{comp}' is not a directory"));
+        }
+        oid = tree_entries(&tcontent)?
+            .into_iter()
+            .find(|e| e.name == comp.as_bytes())
+            .ok_or_else(|| format!("path not found: {comp}"))?
+            .oid;
+    }
+    store::get_object_parsed(&oid).ok_or_else(|| "object missing".into())
+}
+
+/// Resolve a slash-separated path within a commit's tree to blob content.
+pub fn blob_at_path(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
+    match node_at_path(commit_oid, path)? {
+        (store::ObjectType::Blob, content) => Ok(content),
+        _ => Err(format!("'{path}' is not a file")),
+    }
+}
+
 /// Header lines: everything up to the first empty line.
 fn header_lines(content: &[u8]) -> impl Iterator<Item = &[u8]> {
     let header_end = content
@@ -115,5 +147,42 @@ mod tests {
 
         let tag = format!("object {}\ntype commit\ntag v1\n\nmsg\n", store::oid_hex(&tree_oid));
         assert_eq!(tag_target(tag.as_bytes()).unwrap(), tree_oid);
+    }
+
+    /// Build blob -> subtree -> tree -> commit in the store, then resolve.
+    #[test]
+    fn resolves_nested_blob_path() {
+        let blob = store::put_object(ObjectType::Blob, b"(module)");
+
+        let mut subtree = Vec::new();
+        subtree.extend_from_slice(b"100644 app.wat\0");
+        subtree.extend_from_slice(blob.as_slice());
+        let subtree_oid = store::put_object(ObjectType::Tree, &subtree);
+
+        let mut tree = Vec::new();
+        tree.extend_from_slice(b"40000 build\0");
+        tree.extend_from_slice(subtree_oid.as_slice());
+        let tree_oid = store::put_object(ObjectType::Tree, &tree);
+
+        let commit = format!(
+            "tree {}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n",
+            store::oid_hex(&tree_oid)
+        );
+        let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
+
+        assert_eq!(blob_at_path(&commit_oid, "build/app.wat").unwrap(), b"(module)");
+        assert!(blob_at_path(&commit_oid, "build/missing.wat").is_err());
+        assert!(blob_at_path(&commit_oid, "nope").is_err());
+        // A file where a directory is expected.
+        assert!(blob_at_path(&commit_oid, "build/app.wat/x").is_err());
+        // "" resolves to the root tree; a directory path to its subtree.
+        assert!(matches!(
+            node_at_path(&commit_oid, "").unwrap(),
+            (ObjectType::Tree, _)
+        ));
+        assert!(matches!(
+            node_at_path(&commit_oid, "build").unwrap(),
+            (ObjectType::Tree, _)
+        ));
     }
 }
