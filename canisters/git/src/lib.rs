@@ -105,7 +105,7 @@ fn route(req: &HttpRequest) -> Route {
     }
 }
 
-fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
+pub(crate) fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
     HttpResponse {
         status_code,
         headers: vec![

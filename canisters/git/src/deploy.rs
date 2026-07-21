@@ -8,7 +8,7 @@
 //! entirely on-chain. Pushes enqueue a job; the deploy itself runs from a
 //! timer-driven queue, off the push path.
 
-use crate::store::{self, ObjectType, Oid};
+use crate::store::{self, Oid};
 use crate::{compile, evm, object};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
@@ -159,6 +159,10 @@ fn log_key(repo: &str) -> String {
     format!("deploy_log:{repo}")
 }
 const QUEUE_KEY: &str = "deploy_queue";
+/// Status message both legs write at job start, before their first await, so
+/// a poll during the (tens of seconds) deploy sees progress, not null or a
+/// stale result.
+const DEPLOYING: &str = "deploying";
 
 /// Set (or replace) a repo's deploy config, preserving any previously-chosen
 /// install mode.
@@ -303,8 +307,9 @@ pub fn queue_len() -> usize {
 }
 
 /// Append a deploy job and arm the drain timer. Returns immediately. A job
-/// for the same (repo, commit) already waiting is not queued again: two
-/// pushes of one commit deploy once.
+/// for the same (repo, commit) already waiting is not queued again -- this
+/// covers only the still-queued window; run_evm's provenance-log check is
+/// what dedupes a commit that already deployed.
 pub fn enqueue(repo: &str, commit: Oid) {
     let mut jobs = queue_load();
     let commit = store::oid_hex(&commit);
@@ -373,46 +378,10 @@ async fn drain_one() {
 /// The one resolution path shared by the deploy leg and the registry
 /// publisher, so both end up hashing the same bytes.
 pub fn evm_artifact_hex(commit_oid: &Oid, path: &str) -> Result<String, String> {
-    let bytes = blob_at_path(commit_oid, path).map_err(|e| format!("resolve {path}: {e}"))?;
+    let bytes =
+        object::blob_at_path(commit_oid, path).map_err(|e| format!("resolve {path}: {e}"))?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8"))?;
     Ok(text.trim().to_string())
-}
-
-/// Resolve a slash-separated path within a commit's tree to the blob content.
-/// Also the site module's file lookup (site.rs serves committed bundles).
-pub(crate) fn blob_at_path(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
-    let (ty, content) = store::get_object_parsed(commit_oid).ok_or("commit object missing")?;
-    if ty != ObjectType::Commit {
-        return Err("ref tip is not a commit".into());
-    }
-    let mut tree_oid = object::commit_refs(&content)?.tree;
-
-    // Look up `comp` in the tree at `tree_oid`.
-    let lookup = |tree_oid: &Oid, comp: &str| -> Result<Oid, String> {
-        let (tty, tcontent) = store::get_object_parsed(tree_oid).ok_or("tree object missing")?;
-        if tty != ObjectType::Tree {
-            return Err(format!("path component '{comp}' is not a directory"));
-        }
-        Ok(object::tree_entries(&tcontent)?
-            .into_iter()
-            .find(|e| e.name == comp.as_bytes())
-            .ok_or_else(|| format!("path not found: {comp}"))?
-            .oid)
-    };
-
-    let comps: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let Some((file, dirs)) = comps.split_last() else {
-        return Err("empty path".into());
-    };
-    for comp in dirs {
-        tree_oid = lookup(&tree_oid, comp)?;
-    }
-    let blob_oid = lookup(&tree_oid, file)?;
-    let (bty, bcontent) = store::get_object_parsed(&blob_oid).ok_or("blob object missing")?;
-    if bty != ObjectType::Blob {
-        return Err(format!("'{file}' is not a file"));
-    }
-    Ok(bcontent)
 }
 
 // --- management canister install_code ---------------------------------------
@@ -520,7 +489,7 @@ async fn attempt(
 ) -> Result<String, String> {
     let target =
         Principal::from_text(&cfg.target).map_err(|e| format!("bad target principal: {e}"))?;
-    let src_bytes = blob_at_path(commit_oid, &cfg.source_path)
+    let src_bytes = object::blob_at_path(commit_oid, &cfg.source_path)
         .map_err(|e| format!("resolve {}: {e}", cfg.source_path))?;
     let wasm = SourceKind::from_path(&cfg.source_path)
         .and_then(|kind| kind.build(&cfg.source_path, src_bytes))
@@ -567,7 +536,7 @@ async fn run_evm(
     let mut st = EvmDeployStatus {
         commit: commit.clone(),
         ok: false,
-        message: "deploying".into(),
+        message: DEPLOYING.into(),
         contract_address: String::new(),
         tx_hash: String::new(),
     };
@@ -637,11 +606,13 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         return st;
     }
 
-    // Visible from the first moment of the job, so a status poll during the
-    // (tens of seconds) deploy sees "deploying", not null or a stale result.
-    st.message = "deploying".into();
-    put_status(repo, &st);
-    st.message = String::new();
+    put_status(
+        repo,
+        &DeployStatus {
+            message: DEPLOYING.into(),
+            ..st.clone()
+        },
+    );
 
     match &wasm_cfg {
         Some(cfg) => {
@@ -695,35 +666,3 @@ pub async fn run_current(repo: &str) -> Result<DeployStatus, String> {
     Ok(run(repo, tip, true).await)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Build blob -> subtree -> tree -> commit in the store, then resolve.
-    #[test]
-    fn resolves_nested_blob_path() {
-        let blob = store::put_object(ObjectType::Blob, b"(module)");
-
-        let mut subtree = Vec::new();
-        subtree.extend_from_slice(b"100644 app.wat\0");
-        subtree.extend_from_slice(blob.as_slice());
-        let subtree_oid = store::put_object(ObjectType::Tree, &subtree);
-
-        let mut tree = Vec::new();
-        tree.extend_from_slice(b"40000 build\0");
-        tree.extend_from_slice(subtree_oid.as_slice());
-        let tree_oid = store::put_object(ObjectType::Tree, &tree);
-
-        let commit = format!(
-            "tree {}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n",
-            store::oid_hex(&tree_oid)
-        );
-        let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
-
-        assert_eq!(blob_at_path(&commit_oid, "build/app.wat").unwrap(), b"(module)");
-        assert!(blob_at_path(&commit_oid, "build/missing.wat").is_err());
-        assert!(blob_at_path(&commit_oid, "nope").is_err());
-        // A file where a directory is expected.
-        assert!(blob_at_path(&commit_oid, "build/app.wat/x").is_err());
-    }
-}

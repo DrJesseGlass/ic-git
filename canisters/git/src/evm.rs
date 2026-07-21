@@ -917,13 +917,19 @@ pub fn get_history() -> Vec<EvmDeployRecord> {
     store::meta_get_json(LOG_KEY).unwrap_or_default()
 }
 
+/// ReceiptSummary.status / EvmDeployRecord.receipt_status values. Defined
+/// once: latest_deploy's dedupe guard tests these strings, so a drifting
+/// literal would silently disable it.
+pub const RECEIPT_SUCCESS: &str = "success";
+pub const RECEIPT_REVERTED: &str = "reverted";
+pub const RECEIPT_UNKNOWN: &str = "unknown";
+
 /// The most recent accepted, not-known-reverted deploy of (repo, commit).
 /// The push path skips a commit that already has one; deploy_now does not.
 pub fn latest_deploy(repo: &str, commit: &str) -> Option<EvmDeployRecord> {
-    get_history()
-        .into_iter()
-        .rev()
-        .find(|r| r.repo == repo && r.commit == commit && r.ok && r.receipt_status != "reverted")
+    get_history().into_iter().rev().find(|r| {
+        r.repo == repo && r.commit == commit && r.ok && r.receipt_status != RECEIPT_REVERTED
+    })
 }
 
 /// Fold a mined receipt's outcome into every deploy record with this tx hash.
@@ -944,19 +950,22 @@ fn mark_receipt(tx_hash: &str, status: &str) {
     }
 }
 
-/// Seconds between receipt polls; ~2-3 block times, so the first poll
-/// usually lands.
-const RECEIPT_POLL_SECS: u64 = 30;
-/// Give up after this many polls (5 minutes): a tx neither mined nor dropped
-/// by then keeps receipt_status "" and any later evm_receipt call reconciles.
+/// First receipt poll after ~1-2 block times, doubling to a cap: a promptly
+/// mined tx reconciles on an early cheap poll, and a tx that never mines
+/// stops costing RPC cycles quickly. Coverage ~28 min across all attempts;
+/// a tx unresolved by then keeps receipt_status "" and any later
+/// evm_receipt call reconciles.
+const RECEIPT_POLL_BASE_SECS: u64 = 15;
+const RECEIPT_POLL_MAX_SECS: u64 = 240;
 const RECEIPT_POLL_ATTEMPTS: u32 = 10;
 
 /// Arm the timer chain that closes the gap between broadcast-accepted (what
 /// a deploy record attests at write time) and mined: each poll asks for the
 /// receipt, and receipt() folds a found one into the record.
 fn schedule_receipt_poll(tx_hash: String, attempt: u32) {
+    let secs = (RECEIPT_POLL_BASE_SECS << attempt).min(RECEIPT_POLL_MAX_SECS);
     ic_cdk_timers::set_timer(
-        std::time::Duration::from_secs(RECEIPT_POLL_SECS),
+        std::time::Duration::from_secs(secs),
         poll_receipt(tx_hash, attempt),
     );
 }
@@ -1137,9 +1146,9 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
     .await?;
     let summary = receipt.map(|r| ReceiptSummary {
         status: match r.status {
-            Some(1) => "success".into(),
-            Some(_) => "reverted".into(),
-            None => "unknown".into(),
+            Some(1) => RECEIPT_SUCCESS.into(),
+            Some(_) => RECEIPT_REVERTED.into(),
+            None => RECEIPT_UNKNOWN.into(),
         },
         block_number: r.block_number.try_into().unwrap_or(u64::MAX),
         gas_used: r.gas_used.to_string(),

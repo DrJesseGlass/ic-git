@@ -12,8 +12,8 @@
 //! .raw gateway, or verify by hash -- which is the F2 story anyway), and
 //! blobs above the single-response cap are rejected rather than streamed.
 
-use crate::deploy;
-use crate::store;
+use crate::object;
+use crate::store::{self, ObjectType};
 use candid::CandidType;
 use ic_dev_kit_rs::http::HttpResponse;
 use serde::{Deserialize, Serialize};
@@ -66,13 +66,7 @@ fn content_type(path: &str) -> &'static str {
 }
 
 fn plain(status_code: u16, msg: &str) -> HttpResponse {
-    HttpResponse {
-        status_code,
-        headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
-        body: msg.as_bytes().to_vec(),
-        upgrade: None,
-        streaming_strategy: None,
-    }
+    crate::git_response(status_code, "text/plain", msg.as_bytes().to_vec())
 }
 
 /// GET /site/<repo>/<path>. `path` may be "", carry a trailing slash
@@ -88,43 +82,38 @@ pub fn serve(repo: &str, path: &str) -> HttpResponse {
         return plain(404, "site branch has no commits\n");
     };
 
-    let full = |p: &str| {
-        if cfg.root.is_empty() {
-            p.to_string()
-        } else {
-            format!("{}/{p}", cfg.root)
-        }
-    };
-    // A directory-ish request (empty, trailing slash, or a tree rather than
-    // a blob) falls back to its index.html.
     let rel = path.trim_matches('/');
-    let candidates = if rel.is_empty() {
-        vec![full("index.html")]
-    } else {
-        vec![full(rel), full(&format!("{rel}/index.html"))]
+    let full = match (cfg.root.is_empty(), rel.is_empty()) {
+        (true, _) => rel.to_string(),
+        (false, true) => cfg.root.clone(),
+        (false, false) => format!("{}/{rel}", cfg.root),
     };
-    let Some((served, body)) = candidates
-        .iter()
-        .find_map(|c| deploy::blob_at_path(&tip, c).ok().map(|b| (c.clone(), b)))
-    else {
+    // One walk from the root: a blob serves directly; a directory (including
+    // "" for the bundle root) serves the index.html inside it.
+    let resolved = match object::node_at_path(&tip, &full) {
+        Ok((ObjectType::Blob, body)) => Some((full.clone(), body)),
+        Ok((ObjectType::Tree, tree)) => object::tree_entries(&tree)
+            .ok()
+            .and_then(|es| es.into_iter().find(|e| e.name == b"index.html"))
+            .and_then(|e| store::get_object_parsed(&e.oid))
+            .and_then(|(ty, body)| {
+                (ty == ObjectType::Blob).then(|| (format!("{full}/index.html"), body))
+            }),
+        _ => None,
+    };
+    let Some((served, body)) = resolved else {
         return plain(404, "not found in site bundle\n");
     };
     if body.len() > MAX_BODY {
         return plain(413, "file exceeds the single-response limit\n");
     }
-    HttpResponse {
-        status_code: 200,
-        headers: vec![
-            ("Content-Type".to_string(), content_type(&served).to_string()),
-            // The provenance binding a verifier checks against the registry.
-            ("X-Ic-Git-Repo".to_string(), repo.to_string()),
-            ("X-Ic-Git-Commit".to_string(), store::oid_hex(&tip)),
-            ("Cache-Control".to_string(), "no-cache".to_string()),
-        ],
-        body,
-        upgrade: None,
-        streaming_strategy: None,
-    }
+    let mut res = crate::git_response(200, content_type(&served), body);
+    // The provenance binding a verifier checks against the registry.
+    res.headers
+        .push(("X-Ic-Git-Repo".to_string(), repo.to_string()));
+    res.headers
+        .push(("X-Ic-Git-Commit".to_string(), store::oid_hex(&tip)));
+    res
 }
 
 #[cfg(test)]

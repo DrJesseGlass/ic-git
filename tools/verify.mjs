@@ -75,42 +75,26 @@ function encodeGet(repo) {
   );
 }
 
-async function ethCall(to, data) {
+async function rpc(method, params) {
   const res = await fetch(opts.rpc, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_call",
-      params: [{ to, data }, "latest"],
-    }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   const body = await res.json();
-  if (body.error) throw new Error(`eth_call: ${JSON.stringify(body.error)}`);
-  return body.result;
-}
-
-async function ethGetCode(address) {
-  const res = await fetch(opts.rpc, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_getCode",
-      params: [address, "latest"],
-    }),
-  });
-  const body = await res.json();
-  if (body.error) throw new Error(`eth_getCode: ${JSON.stringify(body.error)}`);
+  if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
   return body.result;
 }
 
 // --- gather ------------------------------------------------------------------
 
-// The registry's attestation.
-const ret = (await ethCall(opts.registry, encodeGet(repo))).slice(2);
+// The registry's attestation and the served artifact are independent reads;
+// fetch them concurrently.
+const [callRet, servedRes] = await Promise.all([
+  rpc("eth_call", [{ to: opts.registry, data: encodeGet(repo) }, "latest"]),
+  fetch(`${gateway}/site/${repo}/${path}`),
+]);
+const ret = callRet.slice(2);
 const registryCommit = ret.slice(0, 40); // bytes20, left-aligned in word 0
 const registryBundleHash = ret.slice(64, 128); // bytes32, word 1
 const updatedAt = parseInt(ret.slice(128, 192), 16); // uint64, word 2
@@ -123,7 +107,6 @@ console.log(`registry: bundleHash ${registryBundleHash}`);
 console.log(`registry: updatedAt ${new Date(updatedAt * 1000).toISOString()}`);
 
 // What the canister actually served.
-const servedRes = await fetch(`${gateway}/site/${repo}/${path}`);
 if (!servedRes.ok) {
   console.error(`fetch ${gateway}/site/${repo}/${path}: HTTP ${servedRes.status}`);
   process.exit(1);
@@ -135,11 +118,8 @@ console.log(`served: ${served.length} bytes, X-Ic-Git-Commit ${servedCommit}`);
 // --- checks ------------------------------------------------------------------
 
 // A. The served response claims exactly the attested commit.
-report(
-  servedCommit === registryCommit,
-  "A: served commit == registry commit",
-  servedCommit === registryCommit ? "" : `served ${servedCommit || "(none)"}`
-);
+const commitOk = servedCommit === registryCommit;
+report(commitOk, "A: served commit == registry commit", commitOk ? "" : `served ${servedCommit || "(none)"}`);
 
 // B. The artifact hashes to the attested bundleHash. A pure-hex text
 // artifact (the committed-bytecode pattern) is hashed decoded, matching how
@@ -149,16 +129,17 @@ const hexBody = text.startsWith("0x") ? text.slice(2) : text;
 const isHexText = /^[0-9a-fA-F]+$/.test(hexBody) && hexBody.length % 2 === 0;
 const hashed = isHexText ? Buffer.from(hexBody, "hex") : served;
 const artifactHash = sha256(hashed);
+const hashOk = artifactHash === registryBundleHash;
 report(
-  artifactHash === registryBundleHash,
+  hashOk,
   `B: sha256(${isHexText ? "hex-decoded" : "raw"} artifact) == registry bundleHash`,
-  artifactHash === registryBundleHash ? "" : `artifact ${artifactHash}`
+  hashOk ? "" : `artifact ${artifactHash}`
 );
 
 // C. Advisory: on-chain runtime code should be a trailing slice of the
 // attested creation bytecode.
 if (opts.contract) {
-  const code = (await ethGetCode(opts.contract)).slice(2).toLowerCase();
+  const code = (await rpc("eth_getCode", [opts.contract, "latest"])).slice(2).toLowerCase();
   const creation = hashed.toString("hex").toLowerCase();
   report(
     code.length > 0 && creation.endsWith(code),
