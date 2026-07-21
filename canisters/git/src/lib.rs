@@ -13,8 +13,10 @@ mod lang;
 mod object;
 mod pack;
 mod receive;
+mod rpc_common;
 mod site;
 mod smart_http;
+mod sol;
 mod store;
 
 use base64::Engine;
@@ -681,6 +683,56 @@ fn evm_get_registry() -> Option<String> {
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
     evm::registry_publish(&repo).await
+}
+
+// --- Track S: Solana signing spine (phase S0; see VISION.md section 4) -------
+
+/// Configure Solana signing and broadcast: the SOL RPC canister principal
+/// (mainnet: tghme-zyaaa-aaaar-qarca-cai), the threshold Schnorr key name
+/// (dfx_test_key locally, test_key_1/key_1 on ICP), the target cluster
+/// ("mainnet" / "devnet" / "testnet"), and optional custom JSON-RPC URLs.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn sol_set_config(
+    sol_rpc: String,
+    key_name: String,
+    cluster: String,
+    rpc_urls: Vec<String>,
+) -> Result<(), String> {
+    sol::set_config(sol_rpc, key_name, cluster, rpc_urls)
+}
+
+#[ic_cdk::query]
+fn sol_get_config() -> Option<sol::SolConfig> {
+    sol::get_config()
+}
+
+/// The canister's own Solana address (base58 of its threshold Ed25519 public
+/// key). Derived on first call, cached after. Fund it (devnet: airdrop) and
+/// the canister pays its own fees.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn sol_address() -> Result<String, String> {
+    sol::address().await
+}
+
+/// Lamport balance of the canister's own address (finalized commitment).
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn sol_balance() -> Result<u64, String> {
+    sol::balance().await
+}
+
+/// S0 signing spine: send a system transfer from the canister's address.
+/// Returns the transaction signature; confirm with sol_signature_status.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn sol_send(to: String, lamports: u64) -> Result<sol::SolTxOutcome, String> {
+    sol::send_lamports(to, lamports).await
+}
+
+/// Confirmation status of a transaction signature: null while the cluster
+/// does not know it, otherwise the confirmation level, slot, and whether the
+/// transaction succeeded on-chain. The sol analog of evm_receipt.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn sol_signature_status(signature: String) -> Result<Option<sol::SolSigStatus>, String> {
+    sol::signature_status(signature).await
 }
 
 // --- R6 spike: interpret a wasm32-wasip1 module in-canister ------------------

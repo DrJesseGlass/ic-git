@@ -20,6 +20,7 @@
 //! broadcast acceptance; mined-and-succeeded is confirmed separately via
 //! its tx_hash (evm_receipt).
 
+use crate::rpc_common::{all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, SIGN_CYCLES};
 use crate::store;
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
@@ -303,12 +304,6 @@ fn recover_parity(
 // the canister can actually return, so the error tree is mirrored completely.
 
 #[derive(CandidType, Deserialize, Debug, Clone)]
-struct HttpHeader {
-    value: String,
-    name: String,
-}
-
-#[derive(CandidType, Deserialize, Debug, Clone)]
 struct RpcApi {
     url: String,
     headers: Option<Vec<HttpHeader>>,
@@ -369,31 +364,6 @@ enum RpcService {
     Provider(u64),
 }
 
-#[derive(CandidType, Deserialize, Debug)]
-enum ConsensusStrategy {
-    Equality,
-    Threshold { min: u8, total: Option<u8> },
-}
-
-#[derive(CandidType, Deserialize, Debug)]
-struct RpcConfig {
-    #[serde(rename = "responseSizeEstimate")]
-    response_size_estimate: Option<u64>,
-    #[serde(rename = "responseConsensus")]
-    response_consensus: Option<ConsensusStrategy>,
-}
-
-#[derive(CandidType, Deserialize, Debug, Clone)]
-enum RejectionCode {
-    NoError,
-    SysFatal,
-    SysTransient,
-    DestinationInvalid,
-    CanisterReject,
-    CanisterError,
-    Unknown,
-}
-
 #[derive(CandidType, Deserialize, Debug, Clone)]
 enum ProviderError {
     TooFewCycles {
@@ -404,26 +374,6 @@ enum ProviderError {
     ProviderNotFound,
     NoPermission,
     InvalidRpcConfig(String),
-}
-
-#[derive(CandidType, Deserialize, Debug, Clone)]
-enum HttpOutcallError {
-    IcError {
-        code: RejectionCode,
-        message: String,
-    },
-    InvalidHttpJsonRpcResponse {
-        status: u16,
-        body: String,
-        #[serde(rename = "parsingError")]
-        parsing_error: Option<String>,
-    },
-}
-
-#[derive(CandidType, Deserialize, Debug, Clone)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
 }
 
 #[derive(CandidType, Deserialize, Debug, Clone)]
@@ -595,9 +545,6 @@ pub struct EvmConfig {
     pub rpc_urls: Vec<String>,
 }
 
-/// Cycles attached to each sign_with_ecdsa call (the fee is ~26.15B on the
-/// fiduciary subnet); surplus refunded.
-const SIGN_CYCLES: u128 = 30_000_000_000;
 /// Cycles attached to each EVM RPC call; surplus refunded.
 const RPC_CYCLES: u128 = 3_000_000_000;
 
@@ -658,28 +605,6 @@ fn rpc_principal(cfg: &EvmConfig) -> Result<Principal, String> {
     Principal::from_text(&cfg.evm_rpc).map_err(|e| format!("bad evm_rpc principal: {e}"))
 }
 
-/// Consensus strategy for reads: with several providers, accept agreement of
-/// all but one, so a single flaky provider (a failed outcall, a lagging node)
-/// cannot fail the whole call the way the default all-must-agree Equality
-/// strategy does. A single custom URL gets no strategy (nothing to vote).
-fn consensus(cfg: &EvmConfig) -> Option<RpcConfig> {
-    let n = if cfg.rpc_urls.is_empty() {
-        3 // the EVM RPC canister's default provider count per chain
-    } else {
-        cfg.rpc_urls.len()
-    };
-    if n < 2 {
-        return None;
-    }
-    Some(RpcConfig {
-        response_size_estimate: None,
-        response_consensus: Some(ConsensusStrategy::Threshold {
-            min: (n - 1) as u8,
-            total: Some(n as u8),
-        }),
-    })
-}
-
 async fn rpc_call<A, T>(cfg: &EvmConfig, method: &str, arg: A, what: &str) -> Result<T, String>
 where
     A: CandidType,
@@ -688,7 +613,7 @@ where
     let multi: MultiResult<T> = intercanister::call_with_payment(
         rpc_principal(cfg)?,
         method,
-        (services(cfg), consensus(cfg), arg),
+        (services(cfg), all_but_one(&cfg.rpc_urls), arg),
         RPC_CYCLES,
     )
     .await?;
