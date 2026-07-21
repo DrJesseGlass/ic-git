@@ -520,7 +520,12 @@ pub fn set_config(
     rpc_urls: Vec<String>,
 ) -> Result<(), String> {
     Principal::from_text(&sol_rpc).map_err(|e| format!("bad sol_rpc principal: {e}"))?;
-    parse_cluster(&cluster)?;
+    // The SOL RPC canister's supported-provider list has no testnet entries,
+    // so Default(Testnet) would fail every later call with UnsupportedCluster.
+    // Fail here, at config time, the way evm.rs rejects preset-less chains.
+    if matches!(parse_cluster(&cluster)?, SolanaCluster::Testnet) && rpc_urls.is_empty() {
+        return Err("the SOL RPC canister has no default testnet providers; provide rpc_urls".into());
+    }
     let cfg = SolConfig {
         sol_rpc,
         key_name,
@@ -839,6 +844,23 @@ mod tests {
         assert!(parse_cluster("mainnet").is_ok());
         assert!(parse_cluster("testnet").is_ok());
         assert!(parse_cluster("Devnet").is_err());
+    }
+
+    /// Testnet has no default providers on the SOL RPC canister; accepting it
+    /// without custom URLs would defer the failure to every later call.
+    #[test]
+    fn set_config_rejects_default_testnet() {
+        let rpc = "tghme-zyaaa-aaaar-qarca-cai".to_string();
+        let key = "test_key_1".to_string();
+        assert!(set_config(rpc.clone(), key.clone(), "testnet".into(), vec![]).is_err());
+        assert!(set_config(
+            rpc.clone(),
+            key.clone(),
+            "testnet".into(),
+            vec!["https://api.testnet.solana.com".into()]
+        )
+        .is_ok());
+        assert!(set_config(rpc, key, "devnet".into(), vec![]).is_ok());
     }
 
     #[test]
