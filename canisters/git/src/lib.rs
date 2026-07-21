@@ -13,6 +13,7 @@ mod lang;
 mod object;
 mod pack;
 mod receive;
+mod rpc_common;
 mod site;
 mod smart_http;
 mod sol;
@@ -727,11 +728,10 @@ async fn sol_send(to: String, lamports: u64) -> Result<sol::SolTxOutcome, String
 }
 
 /// Confirmation status of a transaction signature: null while the cluster
-/// does not know it, otherwise "processed"/"confirmed"/"finalized" with the
-/// slot, "failed:"-prefixed if the transaction errored. The sol analog of
-/// evm_receipt.
+/// does not know it, otherwise the confirmation level, slot, and whether the
+/// transaction succeeded on-chain. The sol analog of evm_receipt.
 #[ic_cdk::update(guard = "auth::is_authorized")]
-async fn sol_signature_status(signature: String) -> Result<Option<String>, String> {
+async fn sol_signature_status(signature: String) -> Result<Option<sol::SolSigStatus>, String> {
     sol::signature_status(signature).await
 }
 

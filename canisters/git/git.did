@@ -159,7 +159,12 @@ type SolTxOutcome = record {
   blockhash_slot : nat64;
 };
 type ResultSolTxOutcome = variant { Ok : SolTxOutcome; Err : text };
-type ResultOptText = variant { Ok : opt text; Err : text };
+type SolSigStatus = record {
+  level : text;
+  slot : nat64;
+  ok : bool;
+};
+type ResultSolSigStatus = variant { Ok : opt SolSigStatus; Err : text };
 
 service : {
   // git smart-HTTP surface (called by the HTTP gateway)
@@ -237,7 +242,7 @@ service : {
   sol_address : () -> (ResultText);
   sol_balance : () -> (ResultNat64);
   sol_send : (text, nat64) -> (ResultSolTxOutcome);
-  sol_signature_status : (text) -> (ResultOptText);
+  sol_signature_status : (text) -> (ResultSolSigStatus);
 
   // R4: distribute compilation across a worker fleet
   set_compiler_workers : (vec principal) -> (Result);

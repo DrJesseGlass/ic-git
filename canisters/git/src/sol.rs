@@ -24,6 +24,7 @@
 //!   pattern is `getSlot` (with its consensus rounding) then `getBlock` for
 //!   that slot's blockhash, which is what `recent_blockhash` does.
 
+use crate::rpc_common::{all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, SIGN_CYCLES};
 use crate::store;
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
@@ -31,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 // --- base58 ------------------------------------------------------------------
 
-pub mod base58 {
+mod base58 {
     const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
     pub fn encode(input: &[u8]) -> String {
@@ -164,10 +165,11 @@ fn assemble_transaction(signature: &[u8; 64], message: &[u8]) -> Vec<u8> {
 
 // --- threshold Ed25519 (management canister, hand-mirrored) ------------------
 
+/// Mirrored subset: only the algorithm this module signs with, the same way
+/// evm.rs's EcdsaCurve carries only secp256k1. Candid variant subtyping makes
+/// the narrower enum a valid argument encoding.
 #[derive(CandidType, Deserialize, Clone)]
 enum SchnorrAlgorithm {
-    #[serde(rename = "bip340secp256k1")]
-    Bip340secp256k1,
     #[serde(rename = "ed25519")]
     Ed25519,
 }
@@ -274,12 +276,6 @@ enum SolanaCluster {
 }
 
 #[derive(CandidType, Deserialize, Debug, Clone)]
-struct HttpHeader {
-    value: String,
-    name: String,
-}
-
-#[derive(CandidType, Deserialize, Debug, Clone)]
 struct RpcEndpoint {
     url: String,
     headers: Option<Vec<HttpHeader>>,
@@ -315,56 +311,11 @@ enum RpcSources {
     Default(SolanaCluster),
 }
 
-#[derive(CandidType, Deserialize, Debug)]
-enum ConsensusStrategy {
-    Equality,
-    Threshold { total: Option<u8>, min: u8 },
-}
-
-#[derive(CandidType, Deserialize, Debug)]
-struct RpcConfig {
-    #[serde(rename = "responseSizeEstimate")]
-    response_size_estimate: Option<u64>,
-    #[serde(rename = "responseConsensus")]
-    response_consensus: Option<ConsensusStrategy>,
-}
-
-#[derive(CandidType, Deserialize, Debug, Clone)]
-enum RejectionCode {
-    NoError,
-    CanisterError,
-    SysTransient,
-    DestinationInvalid,
-    Unknown,
-    SysFatal,
-    CanisterReject,
-}
-
-#[derive(CandidType, Deserialize, Debug, Clone)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
-}
-
 #[derive(CandidType, Deserialize, Debug, Clone)]
 enum ProviderError {
     TooFewCycles { expected: u128, received: u128 },
     InvalidRpcConfig(String),
     UnsupportedCluster(String),
-}
-
-#[derive(CandidType, Deserialize, Debug, Clone)]
-enum HttpOutcallError {
-    IcError {
-        code: RejectionCode,
-        message: String,
-    },
-    InvalidHttpJsonRpcResponse {
-        status: u16,
-        body: String,
-        #[serde(rename = "parsingError")]
-        parsing_error: Option<String>,
-    },
 }
 
 #[derive(CandidType, Deserialize, Debug, Clone)]
@@ -468,9 +419,6 @@ struct GetBlockParams {
 #[derive(CandidType, Deserialize, Debug)]
 struct ConfirmedBlock {
     blockhash: String,
-    #[serde(rename = "parentSlot")]
-    #[allow(dead_code)]
-    parent_slot: u64,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -547,9 +495,6 @@ pub struct SolConfig {
     pub rpc_urls: Vec<String>,
 }
 
-/// Cycles attached to each sign_with_schnorr call (the ed25519 fee matches
-/// ECDSA's ~26.15B on the fiduciary subnet); surplus refunded.
-const SIGN_CYCLES: u128 = 30_000_000_000;
 /// Cycles attached to each SOL RPC call; the canister refunds surplus, and
 /// its per-call cost (multi-provider HTTPS outcalls) runs above the EVM
 /// RPC canister's, hence the higher figure.
@@ -615,30 +560,6 @@ fn rpc_principal(cfg: &SolConfig) -> Result<Principal, String> {
     Principal::from_text(&cfg.sol_rpc).map_err(|e| format!("bad sol_rpc principal: {e}"))
 }
 
-/// All-but-one consensus across providers, as in evm.rs: one flaky provider
-/// must not fail the call. None with a single custom URL (nothing to vote).
-fn consensus(cfg: &SolConfig) -> Option<ConsensusStrategy> {
-    let n = if cfg.rpc_urls.is_empty() {
-        3 // the SOL RPC canister's default provider count per cluster
-    } else {
-        cfg.rpc_urls.len()
-    };
-    if n < 2 {
-        return None;
-    }
-    Some(ConsensusStrategy::Threshold {
-        min: (n - 1) as u8,
-        total: Some(n as u8),
-    })
-}
-
-fn rpc_config(cfg: &SolConfig) -> Option<RpcConfig> {
-    consensus(cfg).map(|c| RpcConfig {
-        response_size_estimate: None,
-        response_consensus: Some(c),
-    })
-}
-
 async fn rpc_call<A, T>(cfg: &SolConfig, method: &str, arg: A, what: &str) -> Result<T, String>
 where
     A: CandidType,
@@ -647,7 +568,7 @@ where
     let multi: MultiResult<T> = intercanister::call_with_payment(
         rpc_principal(cfg)?,
         method,
-        (sources(cfg)?, rpc_config(cfg), arg),
+        (sources(cfg)?, all_but_one(&cfg.rpc_urls), arg),
         RPC_CYCLES,
     )
     .await?;
@@ -673,7 +594,6 @@ async fn recent_blockhash(cfg: &SolConfig) -> Result<(u64, String, [u8; 32]), St
         "getSlot",
     )
     .await?;
-    let mut last_err = String::new();
     for back in 0..4u64 {
         let candidate = slot.saturating_sub(back);
         let block: Option<ConfirmedBlock> = rpc_call(
@@ -689,16 +609,17 @@ async fn recent_blockhash(cfg: &SolConfig) -> Result<(u64, String, [u8; 32]), St
             "getBlock",
         )
         .await?;
-        match block {
-            Some(b) => {
-                let hash = parse_pubkey(&b.blockhash)
-                    .map_err(|e| format!("bad blockhash from getBlock: {e}"))?;
-                return Ok((candidate, b.blockhash, hash));
-            }
-            None => last_err = format!("no block at slot {candidate} (skipped)"),
+        if let Some(b) = block {
+            let hash = parse_pubkey(&b.blockhash)
+                .map_err(|e| format!("bad blockhash from getBlock: {e}"))?;
+            return Ok((candidate, b.blockhash, hash));
         }
     }
-    Err(format!("getBlock: {last_err}"))
+    Err(format!(
+        "getBlock: no finalized block in slots {}..={} (skipped)",
+        slot.saturating_sub(3),
+        slot
+    ))
 }
 
 // --- sign and broadcast ------------------------------------------------------
@@ -777,10 +698,22 @@ pub async fn send_lamports(to: String, lamports: u64) -> Result<SolTxOutcome, St
     })
 }
 
+/// Cluster-side status of a signature: the structured analog of evm.rs's
+/// ReceiptSummary, so S1's provenance log and any external poller consume
+/// fields, not a string format.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SolSigStatus {
+    /// "processed", "confirmed", or "finalized".
+    pub level: String,
+    /// Slot the transaction was processed in.
+    pub slot: u64,
+    /// False when the transaction executed and failed on-chain.
+    pub ok: bool,
+}
+
 /// Confirmation status of a transaction signature: None while unknown to the
-/// cluster, otherwise "processed" / "confirmed" / "finalized", with "failed:"
-/// prefixed when the transaction errored. The Solana analog of evm_receipt.
-pub async fn signature_status(signature: String) -> Result<Option<String>, String> {
+/// cluster. The Solana analog of evm_receipt.
+pub async fn signature_status(signature: String) -> Result<Option<SolSigStatus>, String> {
     let cfg = require_config()?;
     let statuses: Vec<Option<TransactionStatus>> = rpc_call(
         &cfg,
@@ -792,17 +725,15 @@ pub async fn signature_status(signature: String) -> Result<Option<String>, Strin
         "getSignatureStatuses",
     )
     .await?;
-    Ok(statuses.into_iter().next().flatten().map(|s| {
-        let level = match s.confirmation_status {
+    Ok(statuses.into_iter().next().flatten().map(|s| SolSigStatus {
+        level: match s.confirmation_status {
             Some(TransactionConfirmationStatus::Finalized) => "finalized",
             Some(TransactionConfirmationStatus::Confirmed) => "confirmed",
             _ => "processed",
-        };
-        if s.err.is_some() {
-            format!("failed: {level} slot {}", s.slot)
-        } else {
-            format!("{level} slot {}", s.slot)
         }
+        .into(),
+        slot: s.slot,
+        ok: s.err.is_none(),
     }))
 }
 
