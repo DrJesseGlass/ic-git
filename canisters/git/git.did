@@ -146,6 +146,20 @@ type EvmDeployRecord = record {
   receipt_status : text;
   at_ns : nat64;
 };
+type SolConfig = record {
+  sol_rpc : text;
+  key_name : text;
+  cluster : text;
+  rpc_urls : vec text;
+};
+type SolTxOutcome = record {
+  signature : text;
+  from : text;
+  blockhash : text;
+  blockhash_slot : nat64;
+};
+type ResultSolTxOutcome = variant { Ok : SolTxOutcome; Err : text };
+type ResultOptText = variant { Ok : opt text; Err : text };
 
 service : {
   // git smart-HTTP surface (called by the HTTP gateway)
@@ -216,6 +230,14 @@ service : {
   evm_set_registry : (text) -> (Result);
   evm_get_registry : () -> (opt text) query;
   evm_registry_publish : (text) -> (ResultTxOutcome);
+
+  // Track S: Solana signing spine (S0)
+  sol_set_config : (text, text, text, vec text) -> (Result);
+  sol_get_config : () -> (opt SolConfig) query;
+  sol_address : () -> (ResultText);
+  sol_balance : () -> (ResultNat64);
+  sol_send : (text, nat64) -> (ResultSolTxOutcome);
+  sol_signature_status : (text) -> (ResultOptText);
 
   // R4: distribute compilation across a worker fleet
   set_compiler_workers : (vec principal) -> (Result);
