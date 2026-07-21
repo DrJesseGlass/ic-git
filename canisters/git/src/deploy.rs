@@ -561,7 +561,7 @@ async fn run_evm(
             st.tx_hash = out.tx_hash;
             st.message = format!("deployed to {} (chain via evm config)", st.contract_address);
             if evm::get_registry().is_some() {
-                match evm::registry_publish(repo).await {
+                match evm::registry_publish_commit(repo, commit_oid).await {
                     Ok(reg) => {
                         st.message = format!("{}; registry publish {}", st.message, reg.tx_hash)
                     }

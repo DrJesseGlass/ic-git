@@ -113,7 +113,11 @@ if (!servedRes.ok) {
 }
 const served = Buffer.from(await servedRes.arrayBuffer());
 const servedCommit = servedRes.headers.get("x-ic-git-commit") ?? "";
-console.log(`served: ${served.length} bytes, X-Ic-Git-Commit ${servedCommit}`);
+// Where the served bytes live in the commit tree (site root + index.html
+// fallback applied by the canister); the git-clone check must use this, not
+// the URL path. Fallback for canisters predating the header.
+const servedPath = servedRes.headers.get("x-ic-git-path") ?? path;
+console.log(`served: ${served.length} bytes, X-Ic-Git-Commit ${servedCommit}, tree path ${servedPath}`);
 
 // --- checks ------------------------------------------------------------------
 
@@ -161,7 +165,7 @@ try {
     );
     const blob = execFileSync(
       "git",
-      ["-C", dir, "show", `${servedCommit}:${path}`],
+      ["-C", dir, "show", `${servedCommit}:${servedPath}`],
       { maxBuffer: 64 * 1024 * 1024 }
     );
     report(

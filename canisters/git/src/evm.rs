@@ -1099,21 +1099,35 @@ fn abi_encode_set(repo: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec<u8> {
 /// commit and the sha256 of the artifact at its EVM deploy config's
 /// source_path. Returns the write transaction's outcome.
 pub async fn registry_publish(repo: &str) -> Result<TxOutcome, String> {
+    let branch = store::head_target(repo).ok_or(format!("no such repo: {repo}"))?;
+    let tip = store::get_ref(repo, &branch).ok_or("deploy branch has no commits")?;
+    registry_publish_commit(repo, &tip).await
+}
+
+/// Publish a specific commit's provenance: that commit and the sha256 of the
+/// artifact in *its* tree. The deploy queue's auto-publish passes the commit
+/// it just deployed rather than the mutable tip, so a push landing mid-deploy
+/// cannot make the registry attest a commit whose deploy has not yet run.
+pub async fn registry_publish_commit(
+    repo: &str,
+    commit_oid: &store::Oid,
+) -> Result<TxOutcome, String> {
     let cfg = require_config()?;
     let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
     let to = parse_address(&registry)?;
 
-    let branch = store::head_target(repo).ok_or(format!("no such repo: {repo}"))?;
-    let tip = store::get_ref(repo, &branch).ok_or("deploy branch has no commits")?;
     let dcfg = crate::deploy::get_evm_config(repo)
         .ok_or("repo has no EVM deploy config (nothing to hash)")?;
     // Hash the decoded bytecode, not the hex text, so the registry entry
     // equals the bytecode_sha256 already in evm_deploy_history.
-    let hex_text = crate::deploy::evm_artifact_hex(&tip, &dcfg.source_path)?;
+    let hex_text = crate::deploy::evm_artifact_hex(commit_oid, &dcfg.source_path)?;
     let raw = decode_bytecode_hex(&hex_text)?;
     let bundle: [u8; 32] = sha2::Sha256::digest(&raw).into();
 
-    let commit: [u8; 20] = *tip.as_slice().first_chunk::<20>().ok_or("bad oid length")?;
+    let commit: [u8; 20] = *commit_oid
+        .as_slice()
+        .first_chunk::<20>()
+        .ok_or("bad oid length")?;
     let data = abi_encode_set(repo, &commit, &bundle);
     send_tx(&cfg, Some(to), 0, data, 150_000).await
 }

@@ -97,7 +97,12 @@ pub fn serve(repo: &str, path: &str) -> HttpResponse {
             .and_then(|es| es.into_iter().find(|e| e.name == b"index.html"))
             .and_then(|e| store::get_object_parsed(&e.oid))
             .and_then(|(ty, body)| {
-                (ty == ObjectType::Blob).then(|| (format!("{full}/index.html"), body))
+                let name = if full.is_empty() {
+                    "index.html".to_string()
+                } else {
+                    format!("{full}/index.html")
+                };
+                (ty == ObjectType::Blob).then_some((name, body))
             }),
         _ => None,
     };
@@ -108,11 +113,14 @@ pub fn serve(repo: &str, path: &str) -> HttpResponse {
         return plain(413, "file exceeds the single-response limit\n");
     }
     let mut res = crate::git_response(200, content_type(&served), body);
-    // The provenance binding a verifier checks against the registry.
+    // The provenance binding a verifier checks against the registry. Path is
+    // the actual location in the commit tree (site root and index.html
+    // fallback applied), so `git show <commit>:<path>` reproduces the body.
     res.headers
         .push(("X-Ic-Git-Repo".to_string(), repo.to_string()));
     res.headers
         .push(("X-Ic-Git-Commit".to_string(), store::oid_hex(&tip)));
+    res.headers.push(("X-Ic-Git-Path".to_string(), served));
     res
 }
 
@@ -161,6 +169,12 @@ mod tests {
             .headers
             .iter()
             .any(|(k, v)| k == "X-Ic-Git-Commit" && *v == store::oid_hex(&commit_oid)));
+        // The tree-path header names the actual blob, index fallback applied,
+        // so `git show <commit>:<path>` reproduces the body.
+        assert!(res
+            .headers
+            .iter()
+            .any(|(k, v)| k == "X-Ic-Git-Path" && v == "index.html"));
         assert_eq!(serve("web", "app/main.js").body, b"console.log(1)");
         assert_eq!(serve("web", "missing.js").status_code, 404);
 
