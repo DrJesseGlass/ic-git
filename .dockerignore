@@ -1,0 +1,18 @@
+# None of these affect the module hash; excluding them keeps the build context
+# small and the in-container build path clean. The dfx metadata embeds no git
+# rev or timestamp (only pinned tool versions), so omitting .git is safe.
+#
+# tools/reproducible-build.sh builds from a `git archive` of the attested
+# commit, so target, .dfx and .git never reach the context on that path anyway;
+# the entries below still cover a direct `docker build .` on a working tree.
+target
+.dfx
+node_modules
+.git
+
+# Documentation cannot reach the wasm (nothing in canisters/ uses include_str!
+# or include_bytes!), but it sits above the build layer in COPY, so without
+# these a one-word edit to a design doc invalidates the cache and forces a full
+# 139-crate wasm32 release rebuild.
+docs
+*.md

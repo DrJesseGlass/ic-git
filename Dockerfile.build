@@ -1,0 +1,83 @@
+# Reproducible build for the ic-git canister (R1: verifiable backend).
+#
+# Pins every input that affects the output wasm so anyone, on any machine,
+# builds a byte-identical artifact whose sha256 equals the module hash the IC
+# reports for the deployed canister (umobs-yiaaa-aaaab-agyrq-cai). A match
+# proves the running code is exactly this source -- no trust in the deployer.
+#
+#   docker build -f Dockerfile.build -t ic-git-build .
+#   docker run --rm ic-git-build            # prints the module sha256
+#
+# tools/reproducible-build.sh wraps this and diffs against the on-chain hash.
+# Every pin here is part of the output hash.
+
+# Matches rust-toolchain.toml (channel 1.94.1). The platform is pinned because
+# the host triple reaches the artifact through the toolchain's own paths and
+# dependency resolution, so an arm64 and an amd64 rebuild are not the same
+# build. BASE_IMAGE is an override point for the hardened form: pass a digest
+# (rust:1.94.1-slim-bookworm@sha256:...) to pin the base image exactly. Both
+# values belong in the attested BuildDescriptor -- see docs/ATTESTATION.md.
+ARG BASE_IMAGE=rust:1.94.1-slim-bookworm
+FROM --platform=linux/amd64 ${BASE_IMAGE}
+
+# dfx's bundled ic-wasm post-processes the module (shrink + candid/dfx
+# metadata) into the exact artifact installed on-chain, so its version is part
+# of the output hash.
+ARG DFX_VERSION=0.31.0
+ENV DFXVM_INIT_YES=true
+
+# CARGO_HOME and RUSTUP_HOME are deliberately NOT overridden. The official
+# rust:*-slim base installs its toolchain under RUSTUP_HOME=/usr/local/rustup
+# with CARGO_HOME=/usr/local/cargo; pointing them at /root/* hides the pinned
+# 1.94.1 toolchain from rustup and the next command fails with
+# "no default toolchain configured". The path normalization that keeps those
+# locations out of the wasm lives in tools/build-env.sh, sourced by the build
+# step below and by tools/reproducible-build.sh, so there is one definition
+# rather than two that must be kept in sync.
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add wasm32-unknown-unknown
+
+# Pinned dfx. This is a live network fetch of an installer script, so the exact
+# bytes are not pinned by this file -- DFX_VERSION pins what it installs, and
+# the resulting dfx version is what the BuildDescriptor records.
+RUN DFX_VERSION=${DFX_VERSION} sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)"
+ENV PATH=/root/.local/share/dfx/bin:${PATH}
+
+# A fixed build path so no host-specific source path leaks into the wasm.
+WORKDIR /build
+COPY . .
+
+# The committed canister_ids.json (ic) supplies the id, so this builds fully
+# offline. This runs the same cargo + ic-wasm pipeline dfx uses to install on
+# mainnet. build-env.sh sets the path remapping; sourcing it here rather than in
+# an ENV is what lets the native build reuse the same definition.
+#
+# The lockfile is enforced by `cargo fetch --locked`, not by an environment
+# variable. CARGO_NET_LOCKED is NOT a Cargo setting -- measured against cargo
+# 1.94.1, `CARGO_NET_LOCKED=true cargo build` on a stale lock silently resolved
+# new versions and rewrote Cargo.lock, while `--locked` errored as intended. So
+# the preflight both asserts the committed lock resolves the manifest and warms
+# the registry cache, and the sha256 -c after the build catches any rewrite the
+# preflight could not: a hash built against dependencies nobody attested is
+# exactly as wrong as a hash built from the wrong source.
+RUN cargo fetch --locked --target wasm32-unknown-unknown \
+    && sha256sum Cargo.lock > /tmp/Cargo.lock.sha256 \
+    && . ./tools/build-env.sh \
+    && dfx build --network ic git \
+    && sha256sum -c /tmp/Cargo.lock.sha256 \
+    && cp .dfx/ic/canisters/git/git.wasm git_canister.wasm \
+    && sha256sum git_canister.wasm | tee git_canister.wasm.sha256
+
+# Declared AFTER the build so it can never invalidate the build layer or reach
+# the wasm: it only records WHICH tree produced the hash above. .git is not in
+# the build context (.dockerignore), so the container cannot tell a clean
+# checkout from a working tree with local edits -- tools/reproducible-build.sh
+# is what refuses a dirty tree and passes the commit in here.
+ARG SOURCE_COMMIT=unknown
+LABEL org.opencontainers.image.revision=${SOURCE_COMMIT}
+
+CMD ["cat", "/build/git_canister.wasm.sha256"]

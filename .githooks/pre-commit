@@ -1,0 +1,70 @@
+#!/bin/bash
+# ASCII-only guard: block committing non-ASCII bytes in text files.
+# The repo is ASCII-only by convention (comments, docs, commit messages).
+# Binary blobs are skipped. Bypass a false positive with: git commit --no-verify
+#
+# Activated per clone with:  git config core.hooksPath .githooks
+#
+# pipefail is what keeps the scan below fail-closed: the whole verdict is the
+# captured stdout of a pipe, and without it a failing `git show` would look
+# exactly like a clean file.
+set -uo pipefail
+
+# A guard that cannot run must fail closed. Without this the scan returns empty
+# output for every file, which is indistinguishable from "clean", and the policy
+# is silently unenforced on this clone.
+if ! command -v perl >/dev/null 2>&1; then
+  echo "pre-commit: perl not found; the ASCII guard cannot run." >&2
+  echo "Install perl, or bypass deliberately with: git commit --no-verify" >&2
+  exit 1
+fi
+
+# One numstat pass yields both the staged paths and the binary flag, so the
+# whole file list costs a single index walk. Asking per file instead re-walks
+# the entire index once per file, which is why this is hoisted.
+#
+# Record format (-z): "add\tdel\tpath\0", or "-\t-\tpath\0" for a binary, or
+# "add\tdel\t\0src\0dst\0" for a rename. ACMRT, not ACM: git reports a rename
+# as R, so a rename-with-edit would otherwise skip the scan entirely and land
+# non-ASCII bytes with the hook reporting success. U (unmerged) stays excluded
+# -- those paths have no stage-0 blob to read.
+files=()
+while IFS= read -r -d '' rec; do
+  added=${rec%%$'\t'*}
+  path=${rec#*$'\t'}
+  path=${path#*$'\t'}
+  # Empty path field means a rename: the two names follow as separate records.
+  # Consume both before any `continue`, or the stream desyncs on a binary one.
+  if [ -z "$path" ]; then
+    IFS= read -r -d '' _src || break
+    IFS= read -r -d '' path || break
+  fi
+  # numstat prints "-" for byte counts on files git treats as binary.
+  [ "$added" = "-" ] && continue
+  files+=("$path")
+done < <(git diff --cached --numstat -z --diff-filter=ACMRT)
+
+status=0
+for f in ${files+"${files[@]}"}; do
+  # Inspect the staged content (index blob), not the working tree. An empty
+  # result only means "clean" because pipefail makes a failure in either stage
+  # visible here; git's own stderr goes to the terminal unchanged.
+  if ! hits=$(git show ":$f" | perl -ne 'print "  line $.: $_" if /[^\x00-\x7F]/'); then
+    echo "pre-commit: cannot scan the staged blob for $f" >&2
+    status=1
+    continue
+  fi
+  if [ -n "$hits" ]; then
+    echo "non-ASCII in $f:"
+    printf '%s\n' "$hits"
+    status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  echo
+  echo "Commit blocked: ASCII-only policy. Fix the bytes above,"
+  echo "or bypass intentionally with: git commit --no-verify"
+  exit 1
+fi
+exit 0

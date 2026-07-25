@@ -1,0 +1,20 @@
+# Pinned toolchain for reproducible canister builds (R1: verifiable backend).
+#
+# The wasm the IC runs is a deterministic function of this toolchain, the
+# pinned dfx version (its bundled ic-wasm post-processes the module), the
+# committed Cargo.lock, the host platform, AND the path normalization applied
+# at build time -- rustc bakes dependency source paths into the module, so a
+# build without the --remap-path-prefix flags that Dockerfile.build and
+# tools/reproducible-build.sh set is reproducible only on the machine that
+# produced it. Build through tools/reproducible-build.sh, not a bare
+# `dfx build`, and you get a byte-identical wasm whose sha256 equals the module
+# hash the IC reports for umobs-yiaaa-aaaab-agyrq-cai -- proving the running
+# canister IS this source.
+#
+# The rust version here is itself embedded in the module's `icp:public dfx`
+# metadata section, so changing it changes the module hash. Bump deliberately
+# and re-attest. See REPRODUCIBLE_BUILD.md.
+[toolchain]
+channel = "1.94.1"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
