@@ -1057,6 +1057,28 @@ pub async fn registry_publish_commit(
     send_tx(&cfg, Some(to), 0, data, 150_000).await
 }
 
+/// Publish a *site* repo's provenance: its deploy-branch tip commit and the
+/// sha256 of the served entrypoint blob (site root + index.html fallback --
+/// byte-identical to what `/site/<repo>/` returns). Unlike registry_publish,
+/// this needs no EVM deploy config: the artifact is a frontend file, hashed as
+/// raw bytes, matching how the F2 verifier hashes a served non-hex artifact.
+pub async fn registry_publish_site(repo: &str) -> Result<TxOutcome, String> {
+    let cfg = require_config()?;
+    let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
+    let to = parse_address(&registry)?;
+
+    let (tip, _served, body) = crate::site::resolve_entry(repo, "")
+        .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html)")?;
+    let bundle: [u8; 32] = sha2::Sha256::digest(&body).into();
+
+    let commit: [u8; 20] = *tip
+        .as_slice()
+        .first_chunk::<20>()
+        .ok_or("bad oid length")?;
+    let data = abi_encode_set(repo, &commit, &bundle);
+    send_tx(&cfg, Some(to), 0, data, 150_000).await
+}
+
 // --- receipt lookup ----------------------------------------------------------
 
 /// Flattened receipt summary; big integers rendered as decimal strings.

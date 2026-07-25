@@ -685,6 +685,15 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
     evm::registry_publish(&repo).await
 }
 
+/// Write a *site* repo's provenance to the registry: set(repo, tip commit,
+/// sha256 of the served entrypoint blob). No EVM deploy config needed -- the
+/// attested artifact is the frontend file itself, so a client can verify a
+/// served page against the canister's own on-chain attestation.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
+    evm::registry_publish_site(&repo).await
+}
+
 // --- Track S: Solana signing spine (phase S0; see VISION.md section 4) -------
 
 /// Configure Solana signing and broadcast: the SOL RPC canister principal

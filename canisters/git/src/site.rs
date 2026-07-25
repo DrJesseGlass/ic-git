@@ -69,29 +69,19 @@ fn plain(status_code: u16, msg: &str) -> HttpResponse {
     crate::git_response(status_code, "text/plain", msg.as_bytes().to_vec())
 }
 
-/// GET /site/<repo>/<path>. `path` may be "", carry a trailing slash
-/// (directory request), or name a blob.
-pub fn serve(repo: &str, path: &str) -> HttpResponse {
-    let Some(cfg) = get_config(repo) else {
-        return plain(404, "no site configured for repo\n");
-    };
-    let Some(branch) = store::head_target(repo) else {
-        return plain(404, "no such repo\n");
-    };
-    let Some(tip) = store::get_ref(repo, &branch) else {
-        return plain(404, "site branch has no commits\n");
-    };
-
+/// The blob `serve` would return for `path`, given an already-resolved tip and
+/// config: its tree location (site root prefix and index.html fallback
+/// applied) and bytes. One walk from the root -- a blob serves directly; a
+/// directory (including "" for the bundle root) serves the index.html inside.
+fn resolve_blob(tip: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<(String, Vec<u8>)> {
     let rel = path.trim_matches('/');
     let full = match (cfg.root.is_empty(), rel.is_empty()) {
         (true, _) => rel.to_string(),
         (false, true) => cfg.root.clone(),
         (false, false) => format!("{}/{rel}", cfg.root),
     };
-    // One walk from the root: a blob serves directly; a directory (including
-    // "" for the bundle root) serves the index.html inside it.
-    let resolved = match object::node_at_path(&tip, &full) {
-        Ok((ObjectType::Blob, body)) => Some((full.clone(), body)),
+    match object::node_at_path(tip, &full) {
+        Ok((ObjectType::Blob, body)) => Some((full, body)),
         Ok((ObjectType::Tree, tree)) => object::tree_entries(&tree)
             .ok()
             .and_then(|es| es.into_iter().find(|e| e.name == b"index.html"))
@@ -105,8 +95,36 @@ pub fn serve(repo: &str, path: &str) -> HttpResponse {
                 (ty == ObjectType::Blob).then_some((name, body))
             }),
         _ => None,
+    }
+}
+
+/// What a verifier attests for `path` (site root when `path` is ""): the tip
+/// commit, the served blob's tree location, and its raw bytes -- exactly what
+/// `serve` would return as the body. `None` mirrors the cases `serve` turns
+/// into a 404. Used by the registry publisher so the attested bytes are byte-
+/// identical to what the network serves.
+pub fn resolve_entry(repo: &str, path: &str) -> Option<(store::Oid, String, Vec<u8>)> {
+    let cfg = get_config(repo)?;
+    let branch = store::head_target(repo)?;
+    let tip = store::get_ref(repo, &branch)?;
+    let (served, body) = resolve_blob(&tip, &cfg, path)?;
+    Some((tip, served, body))
+}
+
+/// GET /site/<repo>/<path>. `path` may be "", carry a trailing slash
+/// (directory request), or name a blob.
+pub fn serve(repo: &str, path: &str) -> HttpResponse {
+    let Some(cfg) = get_config(repo) else {
+        return plain(404, "no site configured for repo\n");
     };
-    let Some((served, body)) = resolved else {
+    let Some(branch) = store::head_target(repo) else {
+        return plain(404, "no such repo\n");
+    };
+    let Some(tip) = store::get_ref(repo, &branch) else {
+        return plain(404, "site branch has no commits\n");
+    };
+
+    let Some((served, body)) = resolve_blob(&tip, &cfg, path) else {
         return plain(404, "not found in site bundle\n");
     };
     if body.len() > MAX_BODY {
@@ -182,6 +200,36 @@ mod tests {
         set_config("web", "app".into()).unwrap();
         assert_eq!(serve("web", "main.js").status_code, 200);
         assert_eq!(serve("web", "").status_code, 404);
+    }
+
+    /// resolve_entry (what the registry publisher attests) returns the same
+    /// tip, tree path, and bytes that serve returns as the response body.
+    #[test]
+    fn resolve_entry_matches_served_bytes() {
+        store::create_repo("site2").unwrap();
+        let index = store::put_object(ObjectType::Blob, b"<h1>site2</h1>");
+        let mut root = Vec::new();
+        root.extend_from_slice(b"100644 index.html\0");
+        root.extend_from_slice(index.as_slice());
+        let root_tree = store::put_object(ObjectType::Tree, &root);
+        let commit = format!(
+            "tree {}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n",
+            store::oid_hex(&root_tree)
+        );
+        let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
+        let branch = store::head_target("site2").unwrap();
+        store::set_ref("site2", &branch, commit_oid).unwrap();
+
+        // No site config: nothing to attest.
+        assert!(resolve_entry("site2", "").is_none());
+        set_config("site2", String::new()).unwrap();
+
+        let (tip, served, body) = resolve_entry("site2", "").unwrap();
+        assert_eq!(tip, commit_oid);
+        assert_eq!(served, "index.html");
+        assert_eq!(body, b"<h1>site2</h1>");
+        // The attested bytes are exactly what the network serves.
+        assert_eq!(serve("site2", "").body, body);
     }
 
     #[test]

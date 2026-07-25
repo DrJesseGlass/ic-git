@@ -235,6 +235,7 @@ service : {
   evm_set_registry : (text) -> (Result);
   evm_get_registry : () -> (opt text) query;
   evm_registry_publish : (text) -> (ResultTxOutcome);
+  evm_registry_publish_site : (text) -> (ResultTxOutcome);
 
   // Track S: Solana signing spine (S0)
   sol_set_config : (text, text, text, vec text) -> (Result);
