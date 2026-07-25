@@ -1,0 +1,30 @@
+#!/bin/bash
+# ASCII-only guard: block committing non-ASCII bytes in text files.
+# The repo is ASCII-only by convention (comments, docs, commit messages).
+# Binary blobs are skipped. Bypass a false positive with: git commit --no-verify
+#
+# Activated per clone with:  git config core.hooksPath .githooks
+set -u
+
+status=0
+while IFS= read -r -d '' f; do
+  # Skip files git treats as binary (numstat prints "-" for byte counts).
+  if git diff --cached --numstat -- "$f" | head -n1 | grep -q '^-'; then
+    continue
+  fi
+  # Inspect the staged content (index blob), not the working tree.
+  hits=$(git show ":$f" | perl -ne 'print "  line $.: $_" if /[^\x00-\x7F]/')
+  if [ -n "$hits" ]; then
+    echo "non-ASCII in $f:"
+    printf '%s\n' "$hits"
+    status=1
+  fi
+done < <(git diff --cached --name-only -z --diff-filter=ACM)
+
+if [ "$status" -ne 0 ]; then
+  echo
+  echo "Commit blocked: ASCII-only policy. Fix the bytes above,"
+  echo "or bypass intentionally with: git commit --no-verify"
+  exit 1
+fi
+exit 0

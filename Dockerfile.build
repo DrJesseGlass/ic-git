@@ -1,0 +1,48 @@
+# Reproducible build for the ic-git canister (R1: verifiable backend).
+#
+# Pins every input that affects the output wasm so anyone, on any machine,
+# builds a byte-identical artifact whose sha256 equals the module hash the IC
+# reports for the deployed canister (umobs-yiaaa-aaaab-agyrq-cai). A match
+# proves the running code is exactly this source -- no trust in the deployer.
+#
+#   docker build -f Dockerfile.build -t ic-git-build .
+#   docker run --rm ic-git-build            # prints the module sha256
+#
+# tools/reproducible-build.sh wraps this and diffs against the on-chain hash.
+# Harden by pinning the base by digest (FROM rust@sha256:...); the version tag
+# below is the convenience form. Every pin here is part of the output hash.
+
+# Matches rust-toolchain.toml (channel 1.94.1).
+FROM rust:1.94.1-slim-bookworm
+
+# dfx's bundled ic-wasm post-processes the module (shrink + candid/dfx
+# metadata) into the exact artifact installed on-chain, so its version is part
+# of the output hash.
+ARG DFX_VERSION=0.31.0
+ENV DFXVM_INIT_YES=true \
+    CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add wasm32-unknown-unknown
+
+# Pinned dfx.
+RUN DFX_VERSION=${DFX_VERSION} sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)"
+ENV PATH=/root/.local/share/dfx/bin:${PATH}
+
+# A fixed build path so no host-specific absolute path leaks into the wasm
+# name section -- the main cross-machine non-determinism a container removes.
+WORKDIR /build
+COPY . .
+
+# The committed canister_ids.json (ic) supplies the id, so this builds fully
+# offline. --locked bars any Cargo.lock drift. This runs the same cargo +
+# ic-wasm pipeline dfx uses to install on mainnet.
+RUN CARGO_NET_LOCKED=true dfx build --network ic git \
+    && cp .dfx/ic/canisters/git/git.wasm git_canister.wasm \
+    && sha256sum git_canister.wasm | tee git_canister.wasm.sha256
+
+CMD ["cat", "/build/git_canister.wasm.sha256"]

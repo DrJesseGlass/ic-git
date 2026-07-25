@@ -1,0 +1,7 @@
+# None of these affect the module hash; excluding them keeps the build context
+# small and the in-container build path clean. The dfx metadata embeds no git
+# rev or timestamp (only pinned tool versions), so omitting .git is safe.
+target
+.dfx
+node_modules
+.git
