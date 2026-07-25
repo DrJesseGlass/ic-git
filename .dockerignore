@@ -1,6 +1,12 @@
 # None of these affect the module hash; excluding them keeps the build context
 # small and the in-container build path clean. The dfx metadata embeds no git
 # rev or timestamp (only pinned tool versions), so omitting .git is safe.
+#
+# The cost of omitting .git is that the container cannot tell a clean checkout
+# from a working tree with local edits, and cannot record which commit it
+# built. tools/reproducible-build.sh covers both from outside: it refuses a
+# dirty tree and passes the HEAD commit in as SOURCE_COMMIT. Build through the
+# script, not `docker build` directly, or the artifact is bound to no commit.
 target
 .dfx
 node_modules

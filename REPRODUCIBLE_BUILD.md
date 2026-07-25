@@ -27,7 +27,23 @@ The output wasm is a deterministic function of exactly these inputs:
 | Rust compiler | `rust-toolchain.toml` (`1.94.1`) | the rust version is embedded in the module's `icp:public dfx` metadata, so it is literally part of the hash |
 | Dependencies | `Cargo.lock` (committed, built `--locked`) | ic-cdk `0.20.2` etc. |
 | Post-processing | dfx `0.31.0` | dfx's bundled `ic-wasm` runs `shrink` + adds candid/dfx metadata; the deployed artifact is this post-processed wasm, not raw `cargo` output |
-| Build path | fixed `/build` in the container | prevents host absolute paths leaking into the wasm `name` section -- the main cross-machine non-determinism |
+| Build path | fixed `/build` in the container | keeps the source tree's own paths out of the wasm |
+| Dependency paths | `--remap-path-prefix=<CARGO_HOME>=/cargo` | see below -- this, not the build path, is the main cross-machine non-determinism |
+| Platform | `--platform=linux/amd64` in `Dockerfile.build` | an arm64 and an amd64 rebuild are not the same build |
+| Base image | `BASE_IMAGE` build arg (tag by default) | pass a `@sha256:` digest for the hardened form; the resolved digest belongs in the attested `BuildDescriptor` |
+
+**The dependency-path pin is load-bearing.** `rustc` bakes absolute dependency
+source paths into the module's data section -- panic locations, `file!()` --
+so an unremapped build embeds strings like
+`/Users/<someone>/.cargo/registry/src/index.crates.io-<hash>/lazy_static-1.5.0/src/inline_lazy.rs`.
+There are hundreds of these in the artifact. A fixed `WORKDIR` does not touch
+them: they come from `CARGO_HOME`, not the source tree, and `CARGO_HOME`
+differs between every machine and the container. Without the remap the wasm
+hash is a function of where the builder keeps their cargo registry, and no two
+people can ever agree on it. `Dockerfile.build` sets the mapping for the
+container (`/usr/local/cargo` -> `/cargo`) and `tools/reproducible-build.sh`
+derives the identical mapping for a native build, which is why you should build
+through the script rather than calling `dfx build` directly.
 
 The dfx metadata section was inspected and contains only pinned tool versions
 -- no timestamp, path, or git rev -- so the build is deterministic given the
@@ -35,7 +51,7 @@ pins above.
 
 ## Reproduce it
 
-Portable (fixes the toolchain, dfx version, and build path):
+Portable (fixes the toolchain, dfx version, platform, and all paths):
 
 ```bash
 tools/reproducible-build.sh --docker --check
@@ -57,8 +73,28 @@ Read the on-chain hash yourself, independently, at any time:
 dfx canister --network ic info umobs-yiaaa-aaaab-agyrq-cai | grep 'Module hash'
 ```
 
+Exit codes: `0` match, `1` mismatch, `2` usage or dirty tree, `3` the on-chain
+hash could not be read. `3` is deliberately distinct: "I could not reach the
+chain" is not evidence of a mismatch and must never be reported as one.
+
 Always reproduce from a **clean checkout of the attested commit** -- a dirty
-tree or a different commit legitimately produces a different hash.
+tree or a different commit legitimately produces a different hash. The script
+enforces this rather than trusting you to remember: it refuses to build a tree
+with uncommitted changes and prints the commit it is building. This matters
+because the container copies your *working tree* and `.git` is excluded from
+the build context, so nothing downstream could otherwise tell a clean checkout
+from one with local edits -- and an attestation naming a commit that never
+produced the hash is exactly the substitution this whole chain exists to
+prevent. `--allow-dirty` exists for local experiments and marks the printed
+commit `-dirty`; never attest a `-dirty` build.
+
+> **Status note.** The currently deployed module was built before the
+> path-remapping pins above existed, so it embeds the deployer's own
+> `CARGO_HOME` paths. `--check` will therefore report `MISMATCH` against this
+> source tree until the canister is redeployed from a build that uses them.
+> That is the correct signal: the deployed artifact genuinely is not
+> reproducible by anyone else, which is the gap these pins close. Redeploy and
+> re-attest to make `MATCH` meaningful.
 
 ## Residual assumptions (stated honestly)
 

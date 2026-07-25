@@ -1000,10 +1000,24 @@ pub fn get_registry() -> Option<String> {
     store::meta_get_json(REGISTRY_KEY)
 }
 
-/// ABI-encode set(string repo, bytes20 commit, bytes32 bundleHash):
+/// Suffix that namespaces a served-site record away from the same repo's
+/// deploy-artifact record. The registry stores one slot per key string, and
+/// this canister has two writers with incompatible bundleHash semantics
+/// (decoded contract bytecode vs. served site bytes), so a repo that both
+/// deploys a contract and serves a site would otherwise have one record
+/// silently clobber the other on the next push. See docs/ATTESTATION.md,
+/// "The two record types".
+pub const SITE_KEY_SUFFIX: &str = "#site";
+
+/// The registry key for a repo's served-site record.
+pub fn site_record_key(repo: &str) -> String {
+    format!("{repo}{SITE_KEY_SUFFIX}")
+}
+
+/// ABI-encode set(string recordKey, bytes20 commit, bytes32 bundleHash):
 /// selector, then three head words (string offset, bytes20 right-padded,
 /// bytes32), then the string tail (length word, data padded to a word).
-fn abi_encode_set(repo: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec<u8> {
+fn abi_encode_set(record_key: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec<u8> {
     let mut out = keccak256(b"set(string,bytes20,bytes32)")[..4].to_vec();
     let mut word = [0u8; 32];
     word[31] = 0x60; // string data starts after the 3-word head
@@ -1013,10 +1027,10 @@ fn abi_encode_set(repo: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec<u8> {
     out.extend_from_slice(&word);
     out.extend_from_slice(bundle);
     word = [0u8; 32];
-    word[24..].copy_from_slice(&(repo.len() as u64).to_be_bytes());
+    word[24..].copy_from_slice(&(record_key.len() as u64).to_be_bytes());
     out.extend_from_slice(&word);
-    out.extend_from_slice(repo.as_bytes());
-    out.extend(std::iter::repeat(0u8).take((32 - repo.len() % 32) % 32));
+    out.extend_from_slice(record_key.as_bytes());
+    out.extend(std::iter::repeat(0u8).take((32 - record_key.len() % 32) % 32));
     out
 }
 
@@ -1062,6 +1076,10 @@ pub async fn registry_publish_commit(
 /// byte-identical to what `/site/<repo>/` returns). Unlike registry_publish,
 /// this needs no EVM deploy config: the artifact is a frontend file, hashed as
 /// raw bytes, matching how the F2 verifier hashes a served non-hex artifact.
+///
+/// Written under `site_record_key(repo)`, not the bare repo name, so it cannot
+/// clobber (or be clobbered by) the deploy-artifact record that
+/// `registry_publish_commit` writes for the same repo.
 pub async fn registry_publish_site(repo: &str) -> Result<TxOutcome, String> {
     let cfg = require_config()?;
     let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
@@ -1075,7 +1093,7 @@ pub async fn registry_publish_site(repo: &str) -> Result<TxOutcome, String> {
         .as_slice()
         .first_chunk::<20>()
         .ok_or("bad oid length")?;
-    let data = abi_encode_set(repo, &commit, &bundle);
+    let data = abi_encode_set(&site_record_key(repo), &commit, &bundle);
     send_tx(&cfg, Some(to), 0, data, 150_000).await
 }
 

@@ -6,20 +6,45 @@
 # Activated per clone with:  git config core.hooksPath .githooks
 set -u
 
+# A guard that cannot run must fail closed. Without this the scan below returns
+# empty output for every file, which is indistinguishable from "clean", and the
+# policy is silently unenforced on this clone.
+if ! command -v perl >/dev/null 2>&1; then
+  echo "pre-commit: perl not found; the ASCII guard cannot run." >&2
+  echo "Install perl, or bypass deliberately with: git commit --no-verify" >&2
+  exit 1
+fi
+
 status=0
 while IFS= read -r -d '' f; do
   # Skip files git treats as binary (numstat prints "-" for byte counts).
   if git diff --cached --numstat -- "$f" | head -n1 | grep -q '^-'; then
     continue
   fi
-  # Inspect the staged content (index blob), not the working tree.
-  hits=$(git show ":$f" | perl -ne 'print "  line $.: $_" if /[^\x00-\x7F]/')
+  # Inspect the staged content (index blob), not the working tree. Read and
+  # scan as separate steps so a failure in either is reported: an empty result
+  # only means "clean" when both actually succeeded.
+  if ! blob=$(git show ":$f" 2>/dev/null); then
+    echo "pre-commit: cannot read the staged blob for $f" >&2
+    status=1
+    continue
+  fi
+  if ! hits=$(printf '%s\n' "$blob" \
+              | perl -ne 'print "  line $.: $_" if /[^\x00-\x7F]/'); then
+    echo "pre-commit: ASCII scan failed for $f" >&2
+    status=1
+    continue
+  fi
   if [ -n "$hits" ]; then
     echo "non-ASCII in $f:"
     printf '%s\n' "$hits"
     status=1
   fi
-done < <(git diff --cached --name-only -z --diff-filter=ACM)
+# ACMRT, not ACM: git reports a rename as R, so a rename-with-edit would skip
+# the scan entirely and land non-ASCII bytes with the hook reporting success.
+# For R the printed path is the destination, which is what has content to scan.
+# U (unmerged) stays excluded -- those paths have no stage-0 blob to read.
+done < <(git diff --cached --name-only -z --diff-filter=ACMRT)
 
 if [ "$status" -ne 0 ]; then
   echo
