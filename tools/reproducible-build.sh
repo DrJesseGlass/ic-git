@@ -25,6 +25,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CANISTER=umobs-yiaaa-aaaab-agyrq-cai
+cleanup_paths=()
+cleanup() { [ ${#cleanup_paths[@]} -eq 0 ] || rm -rf "${cleanup_paths[@]}"; }
+trap cleanup EXIT
+
 use_docker=0
 do_check=0
 allow_dirty=0
@@ -61,21 +65,44 @@ echo "source commit       : $commit"
 
 if [ "$use_docker" = 1 ]; then
   command -v docker >/dev/null || { echo "docker not found" >&2; exit 1; }
-  docker build -f Dockerfile.build --build-arg SOURCE_COMMIT="$commit" \
-    -t ic-git-build .
+  # Build the COMMIT, not the directory. `git archive` gives docker a context
+  # containing exactly the tracked files at $commit, so uncommitted edits are
+  # absent by construction rather than merely refused above, and SOURCE_COMMIT
+  # describes what was actually fed in instead of asserting it. --allow-dirty
+  # falls back to the working tree, which is why that mode must never back an
+  # attestation.
+  if [ "$allow_dirty" = 1 ] || [ "$commit" = unknown ]; then
+    ctx=.
+  else
+    ctx=$(mktemp -d)
+    cleanup_paths+=("$ctx")
+    git archive --format=tar "$commit" | tar -x -C "$ctx"
+  fi
+  # Take the Dockerfile from the context too, so the recipe and the sources it
+  # builds come from the same commit rather than from the working tree.
+  docker build -f "$ctx/Dockerfile.build" --build-arg SOURCE_COMMIT="$commit" \
+    -t ic-git-build "$ctx"
   built=$(docker run --rm ic-git-build | awk 'NR==1{print $1}')
 else
   command -v dfx >/dev/null || { echo "dfx not found; try --docker" >&2; exit 1; }
-  # Match the container's path normalization. rustc bakes dependency source
-  # paths into the wasm data section, so without this the native hash is a
-  # function of this machine's cargo registry location and can never equal a
-  # container build's. The container remaps /usr/local/cargo -> /cargo; do the
-  # same for whatever CARGO_HOME this host uses, and map the source root to the
-  # container's fixed /build. Keep these two mappings in sync with
-  # Dockerfile.build's RUSTFLAGS.
-  cargo_home=${CARGO_HOME:-$HOME/.cargo}
-  export RUSTFLAGS="--remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=$(pwd -P)=/build${RUSTFLAGS:+ $RUSTFLAGS}"
+  # Assert the committed lockfile actually resolves the manifest before
+  # building. dfx does not pass --locked to cargo, and CARGO_NET_LOCKED is not
+  # a Cargo setting -- measured against cargo 1.94.1, it does not prevent a
+  # rewrite -- so without this a stale Cargo.lock is silently updated and the
+  # resulting hash describes dependency versions nobody attested.
+  cargo metadata --locked --format-version 1 >/dev/null
+  lock_before=$(shasum -a 256 Cargo.lock | awk '{print $1}')
+  # The same path normalization the container applies, from the same file, so
+  # the native and container hashes cannot drift apart. Without it the native
+  # hash is a function of this machine's cargo registry location.
+  . ./tools/build-env.sh
   dfx build --network ic git >/dev/null
+  if [ "$(shasum -a 256 Cargo.lock | awk '{print $1}')" != "$lock_before" ]; then
+    echo "Cargo.lock changed during the build; the artifact does not match the" >&2
+    echo "committed lockfile. Restore it (git checkout -- Cargo.lock) or commit" >&2
+    echo "the update deliberately, then rebuild." >&2
+    exit 1
+  fi
   wasm=.dfx/ic/canisters/git/git.wasm
   [ -f "$wasm" ] || wasm=$(ls .dfx/*/canisters/git/git.wasm | head -1)
   built=$(shasum -a 256 "$wasm" | awk '{print $1}')
@@ -83,15 +110,14 @@ fi
 echo "built module sha256 : $built"
 
 if [ "$do_check" = 1 ]; then
-  # Read the on-chain hash without letting `set -e`/`pipefail` abort the script:
-  # a plain assignment takes the pipeline's status, so a missing dfx or a failed
-  # boundary-node call would kill the run here and print no verdict at all.
-  # Keep stderr so the reason is visible instead of silently discarded.
+  # `|| onchain=""` is load-bearing: a plain assignment takes the pipeline's
+  # status, so under `set -e`/`pipefail` a missing dfx or a failed boundary-node
+  # call would kill the run here and print no verdict at all. Keep stderr so the
+  # reason is visible instead of silently discarded.
   info_err=$(mktemp)
-  onchain=""
-  if info=$(dfx canister --network ic info "$CANISTER" 2>"$info_err"); then
-    onchain=$(printf '%s\n' "$info" | awk '/Module hash/{print $3}' | sed 's/^0x//')
-  fi
+  cleanup_paths+=("$info_err")
+  onchain=$(dfx canister --network ic info "$CANISTER" 2>"$info_err" \
+            | awk '/Module hash/{sub(/^0x/, "", $3); print $3}') || onchain=""
   if [ -z "$onchain" ]; then
     echo "on-chain module hash: <unreadable>"
     echo "could not read the on-chain module hash -- this is NOT a mismatch." >&2
@@ -102,10 +128,8 @@ if [ "$do_check" = 1 ]; then
       echo "  but --check does; install dfx or read the hash yourself:" >&2
       echo "  https://dashboard.internetcomputer.org/canister/$CANISTER)" >&2
     fi
-    rm -f "$info_err"
     exit 3
   fi
-  rm -f "$info_err"
   echo "on-chain module hash: $onchain"
   if [ "$built" = "$onchain" ]; then
     echo "MATCH -- $CANISTER is running exactly this source."

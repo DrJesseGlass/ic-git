@@ -25,10 +25,10 @@ The output wasm is a deterministic function of exactly these inputs:
 | Input | Pinned by | Note |
 |---|---|---|
 | Rust compiler | `rust-toolchain.toml` (`1.94.1`) | the rust version is embedded in the module's `icp:public dfx` metadata, so it is literally part of the hash |
-| Dependencies | `Cargo.lock` (committed, built `--locked`) | ic-cdk `0.20.2` etc. |
+| Dependencies | `Cargo.lock` (committed; a real `--locked` preflight, plus a post-build check that the lock did not move) | ic-cdk `0.20.2` etc. -- see below |
 | Post-processing | dfx `0.31.0` | dfx's bundled `ic-wasm` runs `shrink` + adds candid/dfx metadata; the deployed artifact is this post-processed wasm, not raw `cargo` output |
 | Build path | fixed `/build` in the container | keeps the source tree's own paths out of the wasm |
-| Dependency paths | `--remap-path-prefix=<CARGO_HOME>=/cargo` | see below -- this, not the build path, is the main cross-machine non-determinism |
+| Dependency paths | `tools/build-env.sh` | see below -- this, not the build path, is the main cross-machine non-determinism |
 | Platform | `--platform=linux/amd64` in `Dockerfile.build` | an arm64 and an amd64 rebuild are not the same build |
 | Base image | `BASE_IMAGE` build arg (tag by default) | pass a `@sha256:` digest for the hardened form; the resolved digest belongs in the attested `BuildDescriptor` |
 
@@ -40,10 +40,23 @@ There are hundreds of these in the artifact. A fixed `WORKDIR` does not touch
 them: they come from `CARGO_HOME`, not the source tree, and `CARGO_HOME`
 differs between every machine and the container. Without the remap the wasm
 hash is a function of where the builder keeps their cargo registry, and no two
-people can ever agree on it. `Dockerfile.build` sets the mapping for the
-container (`/usr/local/cargo` -> `/cargo`) and `tools/reproducible-build.sh`
-derives the identical mapping for a native build, which is why you should build
-through the script rather than calling `dfx build` directly.
+people can ever agree on it. The mapping has one definition, `tools/build-env.sh`,
+sourced by `Dockerfile.build`'s build step and by `tools/reproducible-build.sh`'s
+native branch -- so the two paths cannot drift apart. Build through the script
+rather than calling `dfx build` directly, or the mapping is never applied.
+(`tools/build-env.sh` explains why this is a shell fragment and not
+`.cargo/config.toml`: Cargo has no declarative form that works at this pin.)
+
+**The lockfile pin needs a real `--locked`.** `CARGO_NET_LOCKED` is not a Cargo
+setting, despite reading like one. Measured against cargo 1.94.1:
+`CARGO_NET_LOCKED=true cargo build` on a stale lock resolved new dependency
+versions and rewrote `Cargo.lock` without a word, while `cargo build --locked`
+failed with *"cannot update the lock file ... because --locked was passed"*.
+dfx does not pass `--locked` through either. Both build paths therefore assert
+it explicitly -- `cargo fetch --locked` in the container, `cargo metadata
+--locked` natively -- and then re-check `Cargo.lock`'s sha256 after the build,
+because a hash built against dependency versions nobody attested is exactly as
+wrong as a hash built from the wrong source.
 
 The dfx metadata section was inspected and contains only pinned tool versions
 -- no timestamp, path, or git rev -- so the build is deterministic given the
@@ -79,14 +92,14 @@ chain" is not evidence of a mismatch and must never be reported as one.
 
 Always reproduce from a **clean checkout of the attested commit** -- a dirty
 tree or a different commit legitimately produces a different hash. The script
-enforces this rather than trusting you to remember: it refuses to build a tree
-with uncommitted changes and prints the commit it is building. This matters
-because the container copies your *working tree* and `.git` is excluded from
-the build context, so nothing downstream could otherwise tell a clean checkout
-from one with local edits -- and an attestation naming a commit that never
-produced the hash is exactly the substitution this whole chain exists to
-prevent. `--allow-dirty` exists for local experiments and marks the printed
-commit `-dirty`; never attest a `-dirty` build.
+does not merely ask you to remember this. It refuses to build a tree with
+uncommitted changes, prints the commit it is building, and hands the container
+a `git archive` of that commit rather than the working directory, so local
+edits are *absent by construction* rather than only forbidden. That matters
+because an attestation naming a commit that never produced the hash is exactly
+the substitution this whole chain exists to prevent. `--allow-dirty` falls back
+to the working tree and marks the printed commit `-dirty`; never attest a
+`-dirty` build.
 
 > **Status note.** The currently deployed module was built before the
 > path-remapping pins above existed, so it embeds the deployer's own

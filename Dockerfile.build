@@ -30,17 +30,10 @@ ENV DFXVM_INIT_YES=true
 # rust:*-slim base installs its toolchain under RUSTUP_HOME=/usr/local/rustup
 # with CARGO_HOME=/usr/local/cargo; pointing them at /root/* hides the pinned
 # 1.94.1 toolchain from rustup and the next command fails with
-# "no default toolchain configured".
-#
-# Instead, normalize the absolute paths that would otherwise leak. rustc bakes
-# dependency source paths into the module's data section (panic locations,
-# file!()), so without --remap-path-prefix the wasm hash is a function of where
-# the builder happens to keep its cargo registry -- /usr/local/cargo here,
-# /Users/<someone>/.cargo natively. Remapping both to the same token /cargo is
-# what actually makes the build machine-independent; the fixed WORKDIR below
-# only handles the source tree. tools/reproducible-build.sh derives the exact
-# same mapping for a native build, so the two paths agree.
-ENV RUSTFLAGS="--remap-path-prefix=/usr/local/cargo=/cargo"
+# "no default toolchain configured". The path normalization that keeps those
+# locations out of the wasm lives in tools/build-env.sh, sourced by the build
+# step below and by tools/reproducible-build.sh, so there is one definition
+# rather than two that must be kept in sync.
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git build-essential pkg-config \
@@ -59,10 +52,23 @@ WORKDIR /build
 COPY . .
 
 # The committed canister_ids.json (ic) supplies the id, so this builds fully
-# offline. CARGO_NET_LOCKED bars any Cargo.lock drift (dfx reads it as the
-# --locked equivalent). This runs the same cargo + ic-wasm pipeline dfx uses to
-# install on mainnet.
-RUN CARGO_NET_LOCKED=true dfx build --network ic git \
+# offline. This runs the same cargo + ic-wasm pipeline dfx uses to install on
+# mainnet. build-env.sh sets the path remapping; sourcing it here rather than in
+# an ENV is what lets the native build reuse the same definition.
+#
+# The lockfile is enforced by `cargo fetch --locked`, not by an environment
+# variable. CARGO_NET_LOCKED is NOT a Cargo setting -- measured against cargo
+# 1.94.1, `CARGO_NET_LOCKED=true cargo build` on a stale lock silently resolved
+# new versions and rewrote Cargo.lock, while `--locked` errored as intended. So
+# the preflight both asserts the committed lock resolves the manifest and warms
+# the registry cache, and the sha256 -c after the build catches any rewrite the
+# preflight could not: a hash built against dependencies nobody attested is
+# exactly as wrong as a hash built from the wrong source.
+RUN cargo fetch --locked --target wasm32-unknown-unknown \
+    && sha256sum Cargo.lock > /tmp/Cargo.lock.sha256 \
+    && . ./tools/build-env.sh \
+    && dfx build --network ic git \
+    && sha256sum -c /tmp/Cargo.lock.sha256 \
     && cp .dfx/ic/canisters/git/git.wasm git_canister.wasm \
     && sha256sum git_canister.wasm | tee git_canister.wasm.sha256
 

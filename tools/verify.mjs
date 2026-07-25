@@ -116,12 +116,17 @@ function decodeGet(callRet) {
 
 // --- gather ------------------------------------------------------------------
 
+// The two record keys, named once: the key that is read and the key that is
+// reported must not be able to drift apart.
+const keys = { site: repo + SITE_SUFFIX, deploy: repo };
+
 // Both registry records and the served artifact are independent reads; fetch
-// them concurrently. Reading both keys costs one extra eth_call and is what
-// lets --record auto tell a site-only repo from a deploy-only one.
+// them concurrently. Reading both keys costs one extra eth_call and no extra
+// wall clock, and is what lets --record auto tell a site-only repo from a
+// deploy-only one.
 const [siteRet, deployRet, servedRes] = await Promise.all([
-  rpc("eth_call", [{ to: opts.registry, data: encodeGet(repo + SITE_SUFFIX) }, "latest"]),
-  rpc("eth_call", [{ to: opts.registry, data: encodeGet(repo) }, "latest"]),
+  rpc("eth_call", [{ to: opts.registry, data: encodeGet(keys.site) }, "latest"]),
+  rpc("eth_call", [{ to: opts.registry, data: encodeGet(keys.deploy) }, "latest"]),
   fetch(`${gateway}/site/${repo}/${path}`),
 ]);
 const records = { site: decodeGet(siteRet), deploy: decodeGet(deployRet) };
@@ -133,9 +138,10 @@ if (!servedRes.ok) {
 }
 const served = Buffer.from(await servedRes.arrayBuffer());
 
-// B. below hashes a pure-hex text artifact decoded (the committed-bytecode
-// pattern the deploy record attests) and anything else raw (a served site).
-// That same distinction disambiguates the two records when both exist.
+// A deploy record attests sha256 of the DECODED contract bytecode, so check B
+// needs the hex form for that kind. This is a property of the record, never of
+// the artifact: a site page whose entire content happens to be an even number
+// of hex characters is still hashed raw by the publisher.
 const servedText = served.toString("utf8").trim();
 const hexBody = servedText.startsWith("0x") ? servedText.slice(2) : servedText;
 const isHexText = /^[0-9a-fA-F]+$/.test(hexBody) && hexBody.length % 2 === 0;
@@ -144,13 +150,20 @@ function resolveRecord() {
   if (opts.record !== "auto") return opts.record;
   if (records.site.present && !records.deploy.present) return "site";
   if (records.deploy.present && !records.site.present) return "deploy";
-  // Both present (a repo that deploys a contract AND serves a site) or
-  // neither: fall back to the artifact's form. Never silently check the
-  // artifact against the other kind's bundleHash.
+  if (records.site.present && records.deploy.present) {
+    // Both exist (a repo that deploys a contract AND serves a site). Guessing
+    // from the artifact's shape gets a hex-looking site page wrong, and picking
+    // whichever record happens to match would turn check B into "matches
+    // something". Ask instead: only the caller knows which one they meant.
+    console.error(`"${repo}" has both a site and a deploy record; pass --record site or --record deploy`);
+    process.exit(2);
+  }
+  // Neither present. Pick by artifact form purely so the error below names the
+  // key the caller most likely meant.
   return isHexText ? "deploy" : "site";
 }
 const kind = resolveRecord();
-const recordKey = kind === "site" ? repo + SITE_SUFFIX : repo;
+const recordKey = keys[kind];
 const record = records[kind];
 if (!record.present) {
   console.error(`no registry entry for key "${recordKey}" at ${opts.registry}`);
@@ -179,21 +192,33 @@ console.log(`served: ${served.length} bytes, X-Ic-Git-Commit ${servedCommit}, tr
 const commitOk = servedCommit === registryCommit;
 report(commitOk, "A: served commit == registry commit", commitOk ? "" : `served ${servedCommit || "(none)"}`);
 
-// B. The artifact hashes to the attested bundleHash. A pure-hex text
-// artifact (the committed-bytecode pattern) is hashed decoded, matching how
-// the canister publishes it; anything else is hashed as raw bytes.
-const hashed = isHexText ? Buffer.from(hexBody, "hex") : served;
+// B. The artifact hashes to the attested bundleHash, hashed the way THIS
+// record's publisher hashed it: registry_publish_commit hashes the decoded
+// contract bytecode, registry_publish_site hashes the served bytes exactly as
+// delivered. Choosing by the artifact's shape instead would mis-hash a site
+// page that is all hex characters and report a correctly served page as
+// unverified.
+const wantsHex = kind === "deploy";
+const hashed = wantsHex && isHexText ? Buffer.from(hexBody, "hex") : served;
 const artifactHash = sha256(hashed);
 const hashOk = artifactHash === registryBundleHash;
 report(
   hashOk,
-  `B: sha256(${isHexText ? "hex-decoded" : "raw"} artifact) == registry bundleHash`,
-  hashOk ? "" : `artifact ${artifactHash}`
+  `B: sha256(${wantsHex ? "hex-decoded" : "raw"} artifact) == registry bundleHash`,
+  hashOk
+    ? ""
+    : wantsHex && !isHexText
+      ? "a deploy record attests hex-decoded bytecode, but the served artifact is not hex text"
+      : `artifact ${artifactHash}`
 );
 
 // C. Advisory: on-chain runtime code should be a trailing slice of the
-// attested creation bytecode.
-if (opts.contract) {
+// attested creation bytecode. Only a deploy record attests creation bytecode;
+// against a site record `hashed` is page content, so comparing it would be
+// meaningless rather than merely failing.
+if (opts.contract && !wantsHex) {
+  report(false, "C: --contract needs a deploy record", `resolved the ${kind} record; pass --record deploy`);
+} else if (opts.contract) {
   const code = (await rpc("eth_getCode", [opts.contract, "latest"])).slice(2).toLowerCase();
   const creation = hashed.toString("hex").toLowerCase();
   report(

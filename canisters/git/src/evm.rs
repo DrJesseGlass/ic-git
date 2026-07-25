@@ -1007,12 +1007,7 @@ pub fn get_registry() -> Option<String> {
 /// deploys a contract and serves a site would otherwise have one record
 /// silently clobber the other on the next push. See docs/ATTESTATION.md,
 /// "The two record types".
-pub const SITE_KEY_SUFFIX: &str = "#site";
-
-/// The registry key for a repo's served-site record.
-pub fn site_record_key(repo: &str) -> String {
-    format!("{repo}{SITE_KEY_SUFFIX}")
-}
+const SITE_KEY_SUFFIX: &str = "#site";
 
 /// ABI-encode set(string recordKey, bytes20 commit, bytes32 bundleHash):
 /// selector, then three head words (string offset, bytes20 right-padded,
@@ -1077,8 +1072,8 @@ pub async fn registry_publish_commit(
 /// this needs no EVM deploy config: the artifact is a frontend file, hashed as
 /// raw bytes, matching how the F2 verifier hashes a served non-hex artifact.
 ///
-/// Written under `site_record_key(repo)`, not the bare repo name, so it cannot
-/// clobber (or be clobbered by) the deploy-artifact record that
+/// Written under `<repo>#site`, not the bare repo name, so it cannot clobber
+/// (or be clobbered by) the deploy-artifact record that
 /// `registry_publish_commit` writes for the same repo.
 pub async fn registry_publish_site(repo: &str) -> Result<TxOutcome, String> {
     let cfg = require_config()?;
@@ -1093,7 +1088,7 @@ pub async fn registry_publish_site(repo: &str) -> Result<TxOutcome, String> {
         .as_slice()
         .first_chunk::<20>()
         .ok_or("bad oid length")?;
-    let data = abi_encode_set(&site_record_key(repo), &commit, &bundle);
+    let data = abi_encode_set(&format!("{repo}{SITE_KEY_SUFFIX}"), &commit, &bundle);
     send_tx(&cfg, Some(to), 0, data, 150_000).await
 }
 
