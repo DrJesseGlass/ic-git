@@ -58,8 +58,11 @@ has two independent writers of `set` with incompatible bundleHash semantics:
 
 | recordKey | writer | bundleHash is |
 |---|---|---|
-| `<repo>` | `registry_publish_commit` (deploy queue auto-publish) | sha256 of the decoded EVM contract bytecode |
-| `<repo>#site` | `registry_publish_site` | sha256 of the served site entrypoint |
+| `<repo>` | `provenance::publish_commit` (deploy queue auto-publish) | sha256 of the decoded EVM contract bytecode |
+| `<repo>#site` | `provenance::publish_site` | sha256 of the served site entrypoint |
+
+Both resolve the record on the git side and write it through the single
+registry writer, `evm::registry_publish_record(recordKey, commit, bundleHash)`.
 
 One slot per bare repo name would let these clobber each other: a repo that
 both deploys a contract and serves a site would have its site record
@@ -370,7 +373,7 @@ only ADD warnings (a check can downgrade, never falsely upgrade):
 
        Do NOT require C_be == C_fe in the general case. They are commits in
        DIFFERENT repositories: C_fe is the served repo's deploy-branch tip
-       (what `registry_publish_site` writes for, say, a third-party DeFi
+       (what `provenance::publish_site` writes for, say, a third-party DeFi
        frontend), while C_be is the ic-git canister's own source commit that a
        verifier reproduced. Equality essentially never holds, so requiring it
        would make GREEN unreachable for every repo ic-git hosts -- and even for

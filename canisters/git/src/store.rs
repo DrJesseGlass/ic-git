@@ -25,6 +25,14 @@ pub type Oid = Blob<20>;
 
 pub fn parse_oid(hex: &str) -> Result<Oid, String> {
     let bytes = hex::decode(hex).map_err(|e| format!("bad oid: {e}"))?;
+    // Length must be checked here, not left to Blob: `Blob<N>` is a MAXIMUM,
+    // so `try_from` accepts anything 20 bytes or shorter and this function's
+    // own error message would be a lie. A short Oid reaching the store (via
+    // set_ref, say) would then violate the 20-byte invariant that
+    // provenance::commit20 and the registry's bytes20 both depend on.
+    if bytes.len() != 20 {
+        return Err("oid must be 20 bytes".to_string());
+    }
     Oid::try_from(bytes.as_slice()).map_err(|_| "oid must be 20 bytes".to_string())
 }
 
@@ -332,6 +340,20 @@ pub fn meta_set_json<T: serde::Serialize>(key: &str, value: &T) {
 
 pub fn meta_get_json<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
     META.with(|m| storage::load_bytes(m, key)).and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// Like `meta_get_json`, but tells "absent" apart from "present and
+/// undecodable". `meta_get_json` collapses both to `None`, which is fine for a
+/// config that can fall back to a default and catastrophic for an append-only
+/// log: read-None, append, write-back silently replaces the whole history.
+/// Callers that would destroy data on a decode failure must use this.
+pub fn meta_try_get_json<T: serde::de::DeserializeOwned>(key: &str) -> Result<Option<T>, String> {
+    match META.with(|m| storage::load_bytes(m, key)) {
+        None => Ok(None),
+        Some(b) => serde_json::from_slice(&b)
+            .map(Some)
+            .map_err(|e| format!("stored value at {key} did not decode: {e}")),
+    }
 }
 
 // --- schema version ----------------------------------------------------------

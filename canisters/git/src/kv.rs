@@ -20,9 +20,20 @@
 
 use crate::store;
 
-/// Read a JSON-encoded value. `None` if absent or undecodable.
+/// Read a JSON-encoded value. `None` if absent **or undecodable** -- the two
+/// are indistinguishable here. That is safe for a config with a sensible
+/// default and unsafe for anything a caller reads, extends, and writes back:
+/// use [`try_get_json`] there.
 pub fn get_json<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
     store::meta_get_json(key)
+}
+
+/// Read a JSON-encoded value, distinguishing absent (`Ok(None)`) from present
+/// but undecodable (`Err`). Required wherever substituting a default would
+/// destroy stored data -- see `evm::record`, where a decode failure would
+/// otherwise overwrite the entire append-only deploy log with one entry.
+pub fn try_get_json<T: serde::de::DeserializeOwned>(key: &str) -> Result<Option<T>, String> {
+    store::meta_try_get_json(key)
 }
 
 /// Write a JSON-encoded value. Silently drops values that fail to encode,

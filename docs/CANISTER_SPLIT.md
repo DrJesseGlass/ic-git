@@ -121,7 +121,8 @@ the least urgent cut.
 
 ## 4. The interface, and why it is the real prize
 
-Today `evm.rs` reaches back into git state in exactly two places:
+Before phase 1, `evm.rs` reached back into git state in exactly two places
+(kept here because the shape of the fix is the shape of the interface):
 
     evm::registry_publish_commit(repo, commit_oid)
         -> deploy::get_evm_config(repo)
@@ -166,7 +167,7 @@ What was built:
 - `evm.rs` -- the three git-aware publishers (`registry_publish`,
   `registry_publish_commit`, `registry_publish_site`) collapse into one
   `registry_publish_record(record_key, commit, bundle)`, which is exactly the
-  planned inter-canister message from section 4. Net -66 lines.
+  planned inter-canister message from section 4.
 - `kv.rs` (new) -- the narrow persistence seam; `evm.rs` and `sol.rs` now use
   `kv::get_json` / `kv::set_json` instead of `store::meta_*_json`.
 - Callers rewired: `deploy::run_evm` and the two `lib.rs` endpoints. The
@@ -175,10 +176,19 @@ What was built:
   `tools/verify.mjs` and any operator scripts are unaffected.
 
 Verified: `evm.rs` and `sol.rs` now contain **zero** references to
-`crate::store`, `crate::deploy`, `crate::site`, or `crate::object`. The
-signing modules no longer reach into git state at all. 58 tests pass
-(2 new, covering site-record namespacing and the missing-entrypoint error);
-`cargo check --target wasm32-unknown-unknown` is clean.
+`crate::store`, `crate::deploy`, `crate::site`, or `crate::object`.
+
+**Scope of that claim, stated honestly:** it covers the two signing modules
+only, and section 3 also assigns the *chain half of `deploy.rs`* to the
+signer. That half is not clean: `deploy::run_evm` calls
+`provenance::publish_commit`, which reads the object store. Phase 1 moved that
+dependency from `evm.rs` into `deploy.rs` rather than removing it, and the
+completion check as originally written could not see it. Section 6 records the
+resulting open design question.
+
+59 tests pass (3 new: site-record namespacing, the missing-entrypoint error,
+and deploy-record hash semantics); `cargo check --target wasm32-unknown-unknown`
+is clean.
 
 **Phase 2 -- split the crate.** Workspace gains `canisters/signer` and
 `canisters/git`, sharing a `types` crate for the wire structs. Both still
@@ -223,7 +233,45 @@ phase 3 and then goes quiet. That is the point of the whole exercise.
 Phase 1 is the only phase that should proceed without a fresh look at
 mainnet state, because it is the only one that cannot affect it.
 
-## 6. What this does not change
+## 6. Open design question: the auto-publish path crosses the boundary
+
+**This is the one thing in the plan that does not yet work, and it must be
+settled before phase 3.**
+
+Section 3 puts the deploy queue (`run_evm`, `attempt_evm`, `drain_one`) on the
+**signer**. Section 4 says the split inverts the git/chain call direction: the
+git canister resolves, the signer signs. Those two are in conflict, because
+after a successful EVM deploy `run_evm` auto-publishes the provenance record,
+which requires resolving git state:
+
+    run_evm  (signer)  ->  provenance::publish_commit  (git: object store)
+
+Neither obvious repair is free:
+
+- **Move the queue to the git canister.** Contradicts section 3, and it puts
+  the retry/timer machinery on the side with the hostile input -- but it keeps
+  every call pointing git -> signer, which is the property section 4 exists to
+  protect. The signer stays a pure "sign what you are handed" service.
+- **Let the signer call back into git.** Contradicts section 4, reintroduces
+  the dependency this whole phase removed, and makes the attested signer's
+  behavior depend on a second canister's responses.
+- **Push the resolution to the enqueue side.** The git canister resolves both
+  the deploy artifact *and* the provenance record when it enqueues, and hands
+  the signer a job containing bytecode plus `(record_key, commit, bundle)`.
+  The signer then deploys and publishes without ever reading git. This
+  preserves both sections at the cost of a fatter queue entry, and it composes
+  with the phase-2 "deploy leg's hex seam" item below.
+
+The third is the current preference: it is the only one that leaves the
+signer's input surface as section 4 specifies -- scalars and byte arrays, no
+git. It needs the queue entry to carry the resolved record, which means
+resolving at enqueue time rather than at drain time, and that changes what a
+mid-flight config edit means (it can no longer affect an already-queued job --
+arguably a fix, see the TOCTOU note in section 5).
+
+Until this is decided, phase 3 is blocked regardless of how phase 2 goes.
+
+## 7. What this does not change
 
 - The public git remote URL changes (new canister id). Anyone with an existing
   remote must update it; there is no redirect story on the raw domain.

@@ -38,25 +38,37 @@ impl Record {
 }
 
 /// The leading 20 bytes of an oid, which is what the registry stores.
-/// Infallible: `Oid` is `Blob<20>`, so the chunk is always present.
-fn commit20(oid: &Oid) -> [u8; 20] {
-    *oid.as_slice()
+///
+/// Fallible on purpose. `Oid` is `Blob<20>`, but that is a *maximum* length --
+/// `Blob::try_from` only rejects slices longer than N -- so the type alone does
+/// not prove 20 bytes are present. `store::parse_oid` now enforces it, and
+/// every caller here resolves the object first, which is why this cannot fire
+/// today; returning an error rather than panicking keeps a future caller that
+/// skips those steps from trapping inside `deploy::run`, which is documented
+/// never to trap and whose queue would stop draining if it did.
+fn commit20(oid: &Oid) -> Result<[u8; 20], String> {
+    oid.as_slice()
         .first_chunk::<20>()
-        .expect("Oid is Blob<20>")
+        .copied()
+        .ok_or_else(|| "bad oid length".to_string())
 }
 
 /// Resolve the deploy-artifact record for a specific commit: the commit itself
-/// and the sha256 of the *decoded* bytecode at the repo's EVM deploy source
-/// path. Hashing the decoded bytes rather than the hex text is what keeps this
-/// equal to the `bytecode_sha256` already in `evm_deploy_history`.
-fn deploy_record(repo: &str, commit_oid: &Oid) -> Result<Record, String> {
-    let dcfg =
-        deploy::get_evm_config(repo).ok_or("repo has no EVM deploy config (nothing to hash)")?;
-    let hex_text = deploy::evm_artifact_hex(commit_oid, &dcfg.source_path)?;
+/// and the sha256 of the *decoded* bytecode at `source_path`. Hashing the
+/// decoded bytes rather than the hex text is what keeps this equal to the
+/// `bytecode_sha256` already in `evm_deploy_history`.
+///
+/// `source_path` is a parameter rather than a fresh read of the repo's deploy
+/// config because the caller may hold a snapshot taken before an await. The
+/// deploy queue does: re-reading here would let a config edit landing mid-
+/// deploy make the registry attest an artifact other than the one just
+/// deployed.
+fn deploy_record(repo: &str, commit_oid: &Oid, source_path: &str) -> Result<Record, String> {
+    let hex_text = deploy::evm_artifact_hex(commit_oid, source_path)?;
     let raw = evm::decode_bytecode_hex(&hex_text)?;
     Ok(Record {
         key: repo.to_string(),
-        commit: commit20(commit_oid),
+        commit: commit20(commit_oid)?,
         bundle: sha2::Sha256::digest(&raw).into(),
     })
 }
@@ -69,9 +81,20 @@ fn deploy_record(repo: &str, commit_oid: &Oid) -> Result<Record, String> {
 fn site_record(repo: &str) -> Result<Record, String> {
     let (tip, _served, body) = site::resolve_entry(repo, "")
         .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html)")?;
+    // Refuse to attest bytes `site::serve` would answer 413 for. Publishing
+    // one costs a real registry transaction and produces a record no verifier
+    // can ever check -- every fetch of the entrypoint fails before it can be
+    // hashed -- and the only repair is to shrink the bundle and republish.
+    if body.len() > site::MAX_BODY {
+        return Err(format!(
+            "site entrypoint is {} bytes, over the {} serving limit: it would be attested but never served",
+            body.len(),
+            site::MAX_BODY
+        ));
+    }
     Ok(Record {
         key: format!("{repo}{SITE_KEY_SUFFIX}"),
-        commit: commit20(&tip),
+        commit: commit20(&tip)?,
         bundle: sha2::Sha256::digest(&body).into(),
     })
 }
@@ -80,17 +103,27 @@ fn site_record(repo: &str) -> Result<Record, String> {
 /// auto-publish passes the commit it just deployed rather than the mutable tip,
 /// so a push landing mid-deploy cannot make the registry attest a commit whose
 /// deploy has not yet run.
-pub async fn publish_commit(repo: &str, commit_oid: &Oid) -> Result<TxOutcome, String> {
-    deploy_record(repo, commit_oid)?.publish().await
+/// `source_path` comes from the caller's config snapshot -- see `deploy_record`.
+pub async fn publish_commit(
+    repo: &str,
+    commit_oid: &Oid,
+    source_path: &str,
+) -> Result<TxOutcome, String> {
+    evm::require_publish_target()?;
+    deploy_record(repo, commit_oid, source_path)?.publish().await
 }
 
 /// Publish the repo's current deploy-branch tip as its deploy-artifact record.
 pub async fn publish_tip(repo: &str) -> Result<TxOutcome, String> {
-    publish_commit(repo, &deploy::current_tip(repo)?).await
+    evm::require_publish_target()?;
+    let cfg =
+        deploy::get_evm_config(repo).ok_or("repo has no EVM deploy config (nothing to hash)")?;
+    publish_commit(repo, &deploy::current_tip(repo)?, &cfg.source_path).await
 }
 
 /// Publish the repo's served-site record.
 pub async fn publish_site(repo: &str) -> Result<TxOutcome, String> {
+    evm::require_publish_target()?;
     site_record(repo)?.publish().await
 }
 
@@ -121,7 +154,7 @@ mod tests {
         assert_eq!(rec.key, "provrepo#site");
         let expected: [u8; 32] = sha2::Sha256::digest(body).into();
         assert_eq!(rec.bundle, expected);
-        assert_eq!(rec.commit, commit20(&commit_oid));
+        assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
     }
 
     /// A repo with site config but nothing committed reports that, rather than
@@ -133,5 +166,35 @@ mod tests {
         store::create_repo("emptyrepo").unwrap();
         site::set_config("emptyrepo", String::new()).unwrap();
         assert!(site_record("emptyrepo").is_err());
+    }
+
+    /// A deploy record's key is the bare repo name and its bundle is the
+    /// sha256 of the *hex-decoded* bytecode, not of the hex text. This is the
+    /// semantic `tools/verify.mjs` check B relies on (it hex-decodes before
+    /// hashing) and that `evm_deploy_history.bytecode_sha256` must equal;
+    /// hashing the text instead would compile, pass every other test, and
+    /// print NOT VERIFIED for correctly deployed contracts on mainnet.
+    #[test]
+    fn deploy_record_hashes_decoded_bytecode_under_the_bare_repo_key() {
+        store::create_repo("hexrepo").unwrap();
+        // Leading 0x and trailing newline both get stripped before decoding.
+        let artifact = b"0x6001600155\n";
+        let blob = store::put_object(ObjectType::Blob, artifact);
+        let mut root = Vec::new();
+        root.extend_from_slice(b"100644 contract.hex\0");
+        root.extend_from_slice(blob.as_slice());
+        let root_tree = store::put_object(ObjectType::Tree, &root);
+        let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&root_tree));
+        let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
+
+        let rec = deploy_record("hexrepo", &commit_oid, "contract.hex").expect("record resolves");
+        assert_eq!(rec.key, "hexrepo");
+        assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
+
+        let decoded = [0x60u8, 0x01, 0x60, 0x01, 0x55];
+        let expected: [u8; 32] = sha2::Sha256::digest(decoded).into();
+        assert_eq!(rec.bundle, expected, "must hash decoded bytecode, not hex");
+        let hashed_text: [u8; 32] = sha2::Sha256::digest(artifact).into();
+        assert_ne!(rec.bundle, hashed_text);
     }
 }

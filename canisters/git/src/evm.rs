@@ -907,7 +907,19 @@ async fn poll_receipt(tx_hash: String, attempt: u32) {
 
 fn record(rec: EvmDeployRecord) {
     let repo = rec.repo.clone();
-    let mut log = get_history();
+    // Read-modify-write on the append-only provenance log, so a decode failure
+    // must NOT fall back to an empty Vec: that would replace every prior
+    // deploy's tx hash and bytecode hash with this single entry, and take the
+    // same-commit dedupe in run_evm down with it (a re-push would redeploy a
+    // live contract and spend the EOA's gas again). Refuse to write instead --
+    // the stored bytes stay intact and recoverable.
+    let mut log = match kv::try_get_json::<Vec<EvmDeployRecord>>(LOG_KEY) {
+        Ok(existing) => existing.unwrap_or_default(),
+        Err(e) => {
+            ic_cdk::println!("evm: refusing to overwrite deploy log: {e}");
+            return;
+        }
+    };
     log.push(rec);
     let count = log.iter().filter(|r| r.repo == repo).count();
     if count > MAX_LOG {
@@ -1032,11 +1044,31 @@ pub async fn registry_publish_record(
     commit: &[u8; 20],
     bundle: &[u8; 32],
 ) -> Result<TxOutcome, String> {
+    let (cfg, to) = publish_target()?;
+    let data = abi_encode_set(record_key, commit, bundle);
+    send_tx(&cfg, Some(to), 0, data, 150_000).await
+}
+
+/// The canister-level preconditions for any registry write: a chain config and
+/// a parseable registry address. One definition, used twice on purpose --
+/// `registry_publish_record` needs the values, and `require_publish_target`
+/// lets a caller check them *before* resolving git state.
+fn publish_target() -> Result<(EvmConfig, [u8; 20]), String> {
     let cfg = require_config()?;
     let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
     let to = parse_address(&registry)?;
-    let data = abi_encode_set(record_key, commit, bundle);
-    send_tx(&cfg, Some(to), 0, data, 150_000).await
+    Ok((cfg, to))
+}
+
+/// Assert the canister is configured to publish, without doing any work.
+///
+/// `crate::provenance` calls this before it walks refs and hashes artifacts, so
+/// an unconfigured canister answers "call evm_set_config first" instead of a
+/// repo-level error about a deploy config the operator was never missing. It
+/// also keeps `evm_registry_publish_site` from inflating and hashing a whole
+/// site bundle only to discover there is nowhere to write the result.
+pub fn require_publish_target() -> Result<(), String> {
+    publish_target().map(|_| ())
 }
 
 // --- receipt lookup ----------------------------------------------------------

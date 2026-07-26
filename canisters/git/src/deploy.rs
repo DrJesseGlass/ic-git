@@ -561,7 +561,11 @@ async fn run_evm(
             st.tx_hash = out.tx_hash;
             st.message = format!("deployed to {} (chain via evm config)", st.contract_address);
             if evm::get_registry().is_some() {
-                match crate::provenance::publish_commit(repo, commit_oid).await {
+                // Pass the source_path from the snapshot this deploy used, not
+                // a fresh read: a config edit landing during the awaits above
+                // would otherwise have the registry attest a different artifact
+                // than the one just deployed.
+                match crate::provenance::publish_commit(repo, commit_oid, &cfg.source_path).await {
                     Ok(reg) => {
                         st.message = format!("{}; registry publish {}", st.message, reg.tx_hash)
                     }

@@ -687,10 +687,14 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
     provenance::publish_tip(&repo).await
 }
 
-/// Write a *site* repo's provenance to the registry: set(repo, tip commit,
-/// sha256 of the served entrypoint blob). No EVM deploy config needed -- the
-/// attested artifact is the frontend file itself, so a client can verify a
-/// served page against the canister's own on-chain attestation.
+/// Write a *site* repo's provenance to the registry under the key
+/// `<repo>#site` -- NOT the bare repo name, which belongs to the repo's
+/// deploy-artifact record: set("<repo>#site", tip commit, sha256 of the served
+/// entrypoint blob). Read it back with `get("<repo>#site")`; `get("<repo>")`
+/// returns the deploy record, or an all-zero struct if there is none.
+/// No EVM deploy config needed -- the attested artifact is the frontend file
+/// itself, so a client can verify a served page against the canister's own
+/// on-chain attestation.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
     provenance::publish_site(&repo).await
