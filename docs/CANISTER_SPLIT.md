@@ -132,6 +132,8 @@ Before phase 1, `evm.rs` reached back into git state in exactly two places
         -> site::resolve_entry(repo, "")                // reads the object store
 
 and `deploy::attempt_evm` resolves a blob before calling `evm::deploy_bytecode`.
+(`evm_artifact_hex` is spelled `evm_artifact_bytecode` today; the call graph
+above is how it stood before phase 1.)
 
 The split inverts the direction of these calls. **The git canister resolves;
 the signer canister signs.** The signer's input becomes a small, typed,
@@ -194,18 +196,28 @@ is clean.
 `canisters/git`, sharing a `types` crate for the wire structs. Both still
 deploy as today; only the build layout changes.
 
-Three items deliberately deferred from phase 1 to here, because each needs a
-crate boundary to be worth doing:
+**The deploy leg's hex seam -- DONE, ahead of the crate boundary.** Phase 1 had
+established the *publish* half of section 4 but not the *deploy* half:
+`evm::deploy_bytecode` took `bytecode_hex: String` and decoded internally while
+`provenance.rs` called the then-`pub` `evm::decode_bytecode_hex`, so hex
+decoding sat on both sides of the future boundary. Now:
 
-- **The deploy leg's hex seam.** Phase 1 established the *publish* half of
-  section 4 but not the *deploy* half: `evm::deploy_bytecode` still takes
-  `bytecode_hex: String` and decodes internally, while `provenance.rs` calls
-  the now-`pub` `evm::decode_bytecode_hex`. So hex decoding sits on both sides
-  of the future boundary, and `decode_bytecode_hex`'s "the single decode path"
-  comment stops being true at phase 3. Fix: move the decoder to the git side
-  (next to `deploy::evm_artifact_hex`), change `deploy_bytecode` to take
-  `Vec<u8>`, and decode in `lib.rs`'s operator-facing `evm_deploy` endpoint.
-  Then the signer takes bytes only, matching section 4.
+- `decode_bytecode_hex` lives in `deploy.rs`, next to the resolver
+  (`evm_artifact_bytecode`, which returns decoded bytes, and
+  `evm_artifact_hash`, the one derivation of the bundle hash).
+- `evm::deploy_bytecode` takes `Vec<u8>`. The signer's deploy input is bytes
+  and scalars, exactly as section 4 specifies.
+- `lib.rs`'s operator-facing `evm_deploy` decodes on the way in; its candid
+  signature `(text, nat64)` is unchanged.
+- `evm::deploy_target` / `require_deploy_target` mirror the existing
+  `publish_target` pair, so `deploy::set_evm_config` and `deploy::attempt_evm`
+  check config-and-gas from one definition -- and `attempt_evm` checks it
+  *before* walking the tree, instead of resolving and decoding an artifact for
+  a canister that turns out to have no EVM config.
+
+Two items remain deferred to phase 2, because each needs a crate boundary to be
+worth doing:
+
 - **META ownership.** `kv.rs` currently forwards to `store::meta_*_json`, and
   `deploy`/`site`/`fleet` still call `store::` directly -- one bucket, two
   names. Move the `META` map and its JSON codec out of `store.rs` into `kv.rs`
@@ -216,11 +228,13 @@ crate boundary to be worth doing:
   `site_record_key(repo)` in the shared `types` crate so signer, git, and the
   verifier derive it from one definition.
 
-One efficiency item is worth folding in whenever the deploy leg is touched:
-`run_evm` calls `provenance::publish_commit`, which re-reads, re-inflates,
-re-decodes and re-hashes the artifact `evm::deploy_bytecode` just hashed as
-`bytecode_sha256`. Negligible in cycles against a threshold signature plus RPC
-outcalls, but it is a second derivation of a value that must match the first.
+The efficiency item that rode along with the hex seam is also done: `run_evm`
+used to call `provenance::publish_commit`, which re-read, re-inflated,
+re-decoded and re-hashed the artifact `evm::deploy_bytecode` had just hashed as
+`bytecode_sha256`. `attempt_evm` now returns that hash alongside the outcome
+and `publish_commit` takes it as a parameter. Negligible in cycles either way
+against a threshold signature plus RPC outcalls -- the point is that a value
+which *must* match is no longer derived twice from mutable state.
 
 **Phase 3 -- cut the boundary.** git canister calls signer over the interface
 in section 4. Deploy the new git canister; keep `umobs-...` as signer, upgraded
@@ -240,11 +254,16 @@ settled before phase 3.**
 
 Section 3 puts the deploy queue (`run_evm`, `attempt_evm`, `drain_one`) on the
 **signer**. Section 4 says the split inverts the git/chain call direction: the
-git canister resolves, the signer signs. Those two are in conflict, because
-after a successful EVM deploy `run_evm` auto-publishes the provenance record,
-which requires resolving git state:
+git canister resolves, the signer signs. Those two are in conflict, because the
+deploy queue reads git state at drain time:
 
-    run_evm  (signer)  ->  provenance::publish_commit  (git: object store)
+    attempt_evm  (signer)  ->  deploy::evm_artifact_bytecode  (git: object store)
+
+The hex-seam work above narrowed this to one call. The auto-publish that
+follows a successful deploy used to be a second crossing --
+`run_evm -> provenance::publish_commit -> the object store` -- but
+`publish_commit` now takes the bundle hash `attempt_evm` already computed, so
+it reads nothing. The artifact resolve is what is left.
 
 Neither obvious repair is free:
 
@@ -255,19 +274,19 @@ Neither obvious repair is free:
 - **Let the signer call back into git.** Contradicts section 4, reintroduces
   the dependency this whole phase removed, and makes the attested signer's
   behavior depend on a second canister's responses.
-- **Push the resolution to the enqueue side.** The git canister resolves both
-  the deploy artifact *and* the provenance record when it enqueues, and hands
-  the signer a job containing bytecode plus `(record_key, commit, bundle)`.
-  The signer then deploys and publishes without ever reading git. This
-  preserves both sections at the cost of a fatter queue entry, and it composes
-  with the phase-2 "deploy leg's hex seam" item below.
+- **Push the resolution to the enqueue side.** The git canister resolves the
+  deploy artifact when it enqueues and hands the signer a job containing
+  bytecode plus `(record_key, commit, bundle)`. The signer then deploys and
+  publishes without ever reading git. This preserves both sections at the cost
+  of a fatter queue entry.
 
 The third is the current preference: it is the only one that leaves the
 signer's input surface as section 4 specifies -- scalars and byte arrays, no
-git. It needs the queue entry to carry the resolved record, which means
-resolving at enqueue time rather than at drain time, and that changes what a
-mid-flight config edit means (it can no longer affect an already-queued job --
-arguably a fix, see the TOCTOU note in section 5).
+git. The hex-seam work is most of it already: `attempt_evm` now produces
+exactly `(bytecode, bundle)` from one resolve and hands both onward, so the
+remaining move is to do that resolve at enqueue time rather than at drain time.
+That changes what a mid-flight config edit means (it can no longer affect an
+already-queued job -- arguably a fix, see the TOCTOU note in section 5).
 
 Until this is decided, phase 3 is blocked regardless of how phase 2 goes.
 

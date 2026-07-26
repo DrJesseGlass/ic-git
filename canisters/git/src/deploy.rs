@@ -13,6 +13,7 @@ use crate::{compile, evm, object};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 use std::time::Duration;
 
 /// How to install the compiled wasm into the target.
@@ -205,12 +206,10 @@ pub fn set_evm_config(repo: &str, source_path: String, gas_limit: u64) -> Result
     if !source_path.ends_with(".hex") {
         return Err("source_path must end in .hex (creation bytecode as hex text)".into());
     }
-    if evm::get_config().is_none() {
-        return Err("no global EVM config; call evm_set_config first".into());
-    }
-    if gas_limit < 53_000 {
-        return Err("gas_limit below the 53k floor of any CREATE".into());
-    }
+    // One definition of "could this canister deploy at all", shared with the
+    // deploy leg and with the evm_deploy endpoint, so a config accepted here
+    // cannot be rejected at drain time for a reason this check missed.
+    evm::require_deploy_target(gas_limit)?;
     store::meta_set_json(
         &evm_config_key(repo),
         &EvmDeployConfig {
@@ -374,14 +373,41 @@ async fn drain_one() {
     }
 }
 
-/// The trimmed hex text of an EVM artifact at `path` within a commit's tree.
+/// Decode a hex artifact (0x-optional, surrounding whitespace tolerated) to
+/// creation bytecode. The single decode path: the deploy leg and the registry
+/// publisher must hash identical bytes, or the on-chain registry entry would
+/// diverge from the bytecode_sha256 in the deploy history.
+///
+/// Lives on the git side, next to the resolver, because "the committed file is
+/// hex text" is a fact about the artifact format, not about signing. The signer
+/// takes bytes (see `evm::deploy_bytecode`), so this decoder does not straddle
+/// the future canister boundary -- docs/CANISTER_SPLIT.md section 4.
+pub fn decode_bytecode_hex(text: &str) -> Result<Vec<u8>, String> {
+    let s = text.trim();
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(s).map_err(|e| format!("bad bytecode hex: {e}"))?;
+    if bytes.is_empty() {
+        return Err("empty bytecode".into());
+    }
+    Ok(bytes)
+}
+
+/// The creation bytecode of an EVM artifact at `path` within a commit's tree.
 /// The one resolution path shared by the deploy leg and the registry
 /// publisher, so both end up hashing the same bytes.
-pub fn evm_artifact_hex(commit_oid: &Oid, path: &str) -> Result<String, String> {
+pub fn evm_artifact_bytecode(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
     let bytes =
         object::blob_at_path(commit_oid, path).map_err(|e| format!("resolve {path}: {e}"))?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8"))?;
-    Ok(text.trim().to_string())
+    decode_bytecode_hex(&text)
+}
+
+/// sha256 of a commit's decoded EVM artifact -- the bundle hash the registry
+/// stores, and the value `evm_deploy_history.bytecode_sha256` must equal.
+/// Used by the publish paths that have no deploy in flight to inherit the
+/// hash from; see `provenance::publish_commit`.
+pub fn evm_artifact_hash(commit_oid: &Oid, path: &str) -> Result<[u8; 32], String> {
+    Ok(sha2::Sha256::digest(evm_artifact_bytecode(commit_oid, path)?).into())
 }
 
 // --- management canister install_code ---------------------------------------
@@ -503,22 +529,31 @@ async fn attempt(
     Ok(format!("{label} to {}", cfg.target))
 }
 
-/// The fallible steps of an EVM deploy: resolve the committed hex artifact,
-/// decode-check it, and hand it to evm::deploy_bytecode, which signs a CREATE
+/// The fallible steps of an EVM deploy: resolve and decode the committed hex
+/// artifact, then hand the bytes to evm::deploy_bytecode, which signs a CREATE
 /// with the commit oid threaded into the provenance record.
+///
+/// Returns the broadcast outcome together with the artifact's sha256, which is
+/// the bundle hash the registry publish then attests -- computed once here,
+/// from the exact bytes that were deployed.
 async fn attempt_evm(
     repo: &str,
     cfg: &EvmDeployConfig,
     commit_oid: &Oid,
-) -> Result<crate::evm::TxOutcome, String> {
-    let hex_text = evm_artifact_hex(commit_oid, &cfg.source_path)?;
-    evm::deploy_bytecode(
+) -> Result<(crate::evm::TxOutcome, [u8; 32]), String> {
+    // Chain-side preconditions first: an unconfigured canister or an unpayable
+    // gas limit should say so without first walking the tree and decoding.
+    evm::require_deploy_target(cfg.gas_limit)?;
+    let bytecode = evm_artifact_bytecode(commit_oid, &cfg.source_path)?;
+    let bundle: [u8; 32] = sha2::Sha256::digest(&bytecode).into();
+    let out = evm::deploy_bytecode(
         repo.to_string(),
-        hex_text,
+        bytecode,
         cfg.gas_limit,
         store::oid_hex(commit_oid),
     )
-    .await
+    .await?;
+    Ok((out, bundle))
 }
 
 /// Run a repo's configured EVM deploy and persist its status. Never traps.
@@ -555,17 +590,18 @@ async fn run_evm(
     }
     store::meta_set_json(&evm_status_key(repo), &st);
     match attempt_evm(repo, cfg, commit_oid).await {
-        Ok(out) => {
+        Ok((out, bundle)) => {
             st.ok = true;
             st.contract_address = out.contract_address.unwrap_or_default();
             st.tx_hash = out.tx_hash;
             st.message = format!("deployed to {} (chain via evm config)", st.contract_address);
             if evm::get_registry().is_some() {
-                // Pass the source_path from the snapshot this deploy used, not
-                // a fresh read: a config edit landing during the awaits above
-                // would otherwise have the registry attest a different artifact
-                // than the one just deployed.
-                match crate::provenance::publish_commit(repo, commit_oid, &cfg.source_path).await {
+                // Publish the hash of the bytes this deploy actually sent, not
+                // a fresh resolve: re-reading the repo would both redo the tree
+                // walk and let a config edit landing during the awaits above
+                // have the registry attest a different artifact than the one
+                // just deployed.
+                match crate::provenance::publish_commit(repo, commit_oid, bundle).await {
                     Ok(reg) => {
                         st.message = format!("{}; registry publish {}", st.message, reg.tx_hash)
                     }

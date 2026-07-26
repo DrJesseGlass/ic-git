@@ -647,7 +647,10 @@ async fn evm_send(to: String, value_wei: String) -> Result<evm::TxOutcome, Strin
 /// confirm with evm_receipt. Appends to the EVM provenance log.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutcome, String> {
-    evm::deploy_bytecode(String::new(), bytecode_hex, gas_limit, String::new()).await
+    // Hex in, bytes out: the signing side takes decoded bytecode, so this
+    // endpoint decodes on the way in. The candid signature is unchanged.
+    let bytecode = deploy::decode_bytecode_hex(&bytecode_hex)?;
+    evm::deploy_bytecode(String::new(), bytecode, gas_limit, String::new()).await
 }
 
 /// Poll a transaction receipt. None while still pending. A found receipt is
