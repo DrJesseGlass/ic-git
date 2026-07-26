@@ -905,21 +905,36 @@ async fn poll_receipt(tx_hash: String, attempt: u32) {
     }
 }
 
-fn record(rec: EvmDeployRecord) {
+/// Read the deploy log, refusing to substitute a default for an undecodable
+/// one. Callers must treat `Err` as "this log cannot be safely written".
+fn read_log() -> Result<Vec<EvmDeployRecord>, String> {
+    kv::try_get_json::<Vec<EvmDeployRecord>>(LOG_KEY).map(Option::unwrap_or_default)
+}
+
+/// Refuse to start a deploy whose result could not be recorded.
+///
+/// This must be checked BEFORE broadcasting. `record` failing after `send_tx`
+/// would leave a paid, live CREATE with no log entry -- and because
+/// `latest_deploy` reads the same unreadable log, the same-commit dedupe in
+/// `run_evm` would not see it either, so every retry or re-push would broadcast
+/// another paid deployment of a contract that is already on chain. Failing
+/// closed here costs nothing; failing open costs gas on every attempt.
+fn preflight_log() -> Result<(), String> {
+    read_log().map(|_| ()).map_err(|e| {
+        format!("{e}; refusing to deploy because the outcome could not be recorded (inspect or clear the {LOG_KEY} entry first)")
+    })
+}
+
+fn record(rec: EvmDeployRecord) -> Result<(), String> {
     let repo = rec.repo.clone();
     // Read-modify-write on the append-only provenance log, so a decode failure
     // must NOT fall back to an empty Vec: that would replace every prior
     // deploy's tx hash and bytecode hash with this single entry, and take the
-    // same-commit dedupe in run_evm down with it (a re-push would redeploy a
-    // live contract and spend the EOA's gas again). Refuse to write instead --
-    // the stored bytes stay intact and recoverable.
-    let mut log = match kv::try_get_json::<Vec<EvmDeployRecord>>(LOG_KEY) {
-        Ok(existing) => existing.unwrap_or_default(),
-        Err(e) => {
-            ic_cdk::println!("evm: refusing to overwrite deploy log: {e}");
-            return;
-        }
-    };
+    // same-commit dedupe in run_evm down with it. Refuse to write instead --
+    // the stored bytes stay intact and recoverable. `preflight_log` should have
+    // caught this before any gas was spent; reaching here means the log became
+    // unreadable mid-flight, so the failure is propagated rather than logged.
+    let mut log = read_log()?;
     log.push(rec);
     let count = log.iter().filter(|r| r.repo == repo).count();
     if count > MAX_LOG {
@@ -934,6 +949,7 @@ fn record(rec: EvmDeployRecord) {
         });
     }
     kv::set_json(LOG_KEY, &log);
+    Ok(())
 }
 
 /// Decode a hex artifact (0x-optional, surrounding whitespace tolerated) to
@@ -966,8 +982,10 @@ pub async fn deploy_bytecode(
     let bytecode = decode_bytecode_hex(&bytecode_hex)?;
     let sha256 = hex::encode(sha2::Sha256::digest(&bytecode));
     let len = bytecode.len() as u64;
+    // Before spending gas: if the outcome cannot be recorded, do not broadcast.
+    preflight_log()?;
     let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
-    record(EvmDeployRecord {
+    let recorded = record(EvmDeployRecord {
         repo,
         commit,
         chain_id: cfg.chain_id,
@@ -988,6 +1006,19 @@ pub async fn deploy_bytecode(
         receipt_status: String::new(),
         at_ns: ic_cdk::api::time(),
     });
+    // A broadcast we could not record must never be reported as a clean
+    // success: the transaction is live and paid for, but nothing in the log
+    // will dedupe it, so a caller that retries on error would deploy it again.
+    // Surface the tx hash and say so explicitly -- this needs a human, not a
+    // retry. (preflight_log makes this near-unreachable; it is the backstop.)
+    if let (Ok(o), Err(e)) = (&out, &recorded) {
+        return Err(format!(
+            "DEPLOY BROADCAST BUT NOT RECORDED: tx {} is live on chain {} and paid for, \
+             but the deploy log could not be updated ({e}). Do NOT retry -- \
+             resolve the log first, or the contract will be deployed twice.",
+            o.tx_hash, cfg.chain_id
+        ));
+    }
     if let Ok(o) = &out {
         schedule_receipt_poll(o.tx_hash.clone(), 0);
     }
@@ -1270,15 +1301,54 @@ mod tests {
             receipt_status: String::new(),
             at_ns: 0,
         };
-        record(rec("quiet", 0));
+        record(rec("quiet", 0)).unwrap();
         for n in 0..(MAX_LOG as u64 + 5) {
-            record(rec("chatty", n));
+            record(rec("chatty", n)).unwrap();
         }
         let log = get_history();
         let chatty: Vec<_> = log.iter().filter(|r| r.repo == "chatty").collect();
         assert_eq!(chatty.len(), MAX_LOG);
         assert_eq!(chatty[0].nonce, 5); // oldest five dropped
         assert_eq!(log.iter().filter(|r| r.repo == "quiet").count(), 1);
+    }
+
+    /// An undecodable deploy log must stop a deploy BEFORE it broadcasts, and
+    /// must not be silently replaced by an empty one.
+    ///
+    /// Both halves matter and they fail in opposite directions. Overwriting
+    /// destroys every prior deploy's provenance; broadcasting first and failing
+    /// to record leaves a paid, live contract that `latest_deploy` cannot see,
+    /// so the push path's same-commit dedupe goes blind and every retry deploys
+    /// it again. `preflight_log` is what makes the deploy fail closed while the
+    /// gas is still unspent.
+    #[test]
+    fn corrupt_deploy_log_blocks_deploy_and_survives_intact() {
+        kv::set_json(LOG_KEY, &"not a deploy log at all".to_string());
+
+        assert!(
+            preflight_log().is_err(),
+            "preflight must refuse before any broadcast"
+        );
+        let err = record(EvmDeployRecord {
+            repo: "r".into(),
+            commit: "c".into(),
+            chain_id: 1,
+            contract_address: String::new(),
+            tx_hash: "0x01".into(),
+            nonce: 0,
+            bytecode_sha256: String::new(),
+            bytecode_len: 0,
+            ok: true,
+            message: String::new(),
+            receipt_status: String::new(),
+            at_ns: 0,
+        });
+        assert!(err.is_err(), "record must propagate, not swallow");
+
+        // The original bytes are still there: nothing was clobbered.
+        let raw: String = kv::get_json(LOG_KEY).expect("original value intact");
+        assert_eq!(raw, "not a deploy log at all");
+        kv::set_json(LOG_KEY, &Vec::<EvmDeployRecord>::new());
     }
 
     /// A reverted receipt (folded case-insensitively by tx hash) must
@@ -1298,7 +1368,8 @@ mod tests {
             message: String::new(),
             receipt_status: String::new(),
             at_ns: 0,
-        });
+        })
+        .unwrap();
         assert!(latest_deploy("r", "c").is_some());
         mark_receipt("0xabcd", "success");
         assert!(latest_deploy("r", "c").is_some());
