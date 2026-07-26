@@ -115,10 +115,11 @@ This is strong verifiability, not infinite. Two things it does *not* remove:
 
 1. **Toolchain trust.** A reproducible build still assumes the pinned
    `rustc` / dfx / `ic-wasm` are not themselves backdoored. The mitigation is
-   *diverse* rebuilders: many independent people reproducing the same hash
-   turns "trust the toolchain" into "trust that they did not all collude."
-   Only building the canister **on-chain** from attested source removes this
-   residue entirely -- that is the self-hosting endgame this rung leads toward.
+   *diverse* rebuilders: independent people reproducing the same hash with
+   toolchains that do not share a lineage turns "trust the toolchain" into
+   "trust that they did not all collude." The word *diverse* is load-bearing
+   and our current pins work against it -- see the next section, which is
+   also where the self-hosting endgame gets its honest accounting.
 
 2. **Upgrade / temporal trust.** "Verified now" is not "verified forever" -- a
    controller can upgrade the canister to different code, which changes the
@@ -128,6 +129,102 @@ This is strong verifiability, not infinite. Two things it does *not* remove:
    then **blackhole** (remove controllers; code frozen, maximally verifiable
    but unfixable). Appropriate as components stabilize.
 
+## Trusting trust, and what K-of-N actually buys
+
+Residual assumption 1 is not a footnote. It is Thompson's problem, and the
+ladder below has to answer it out loud or R3 is a slogan.
+
+**The attack.** In his 1984 Turing Award lecture, *Reflections on Trusting
+Trust*, Ken Thompson describes a compiler that inserts a backdoor into a
+target program and -- the part that matters -- also recognizes when it is
+compiling *its own source*, reinserting both the backdoor and the recognizer
+into the new compiler binary. The backdoor is then deleted from the compiler's
+source. Every line anyone can read is clean. Every rebuild from that clean
+source reproduces the backdoor, indefinitely, with nothing a source review
+could find. Reproducibility does not help here; it makes it worse. The build
+is perfectly deterministic *and* perfectly compromised, so all N rebuilders
+get the same hash and all N are wrong together.
+
+**Why the self-hosting chain does not, by itself, answer it.** The appeal of
+R3 is that version N+1 of the on-chain compiler is compiled by version N,
+which was compiled by N-1, back to a root that humans reviewed once. It is
+worth building. But as a *trust* argument it is exactly the structure Thompson
+subverted: a chain in which every link is checked by the previous link
+inherits whatever the previous link was hiding, and adding links does not
+dilute it. If the root binary -- or any binary along the way -- carried the
+quine, every descendant carries it and every step's check passes. Chain length
+is not evidence.
+
+**What the chain does buy is review economy, which is a different and real
+thing.** Each N -> N+1 step is a small diff. A reviewer who has read the root
+once thereafter reviews deltas instead of a compiler from scratch, and a
+malicious change has to survive line-by-line reading at the size where humans
+are actually good at it. Front-loading the expensive review once and paying a
+small marginal cost per version genuinely beats "audit the whole toolchain,
+forever, or trust it." That is a claim about the *cost of the human check*,
+not about removing the need for one, and it should never be stated as though
+it closed the Thompson gap.
+
+**What answers Thompson is diversity, not depth.** David A. Wheeler's *diverse
+double-compiling* (DDC; ACSAC 2005, dissertation 2009) is the standard result.
+Given compiler source `Sc` and a claimed binary `A` said to be built from it,
+take a second, independently produced compiler `B` -- one that shares no
+lineage with `A` -- and compute `X = B(Sc)`. `X` is functionally the same
+compiler as `A` but is not bit-identical to it, because `B`'s codegen differs.
+The *double* compile is what recovers bit-identity: `X(Sc)` and `A(Sc)` are
+both `Sc` compiling itself, so if `A` is honest they agree bit-for-bit, and if
+`A` carries the quine they do not. Diversity of the second compiler is what
+makes the comparison informative; nothing about the length of `A`'s own
+ancestry does.
+
+Applied here, the check is not "use a different compiler," which would just
+produce a different wasm for uninteresting reasons. It is: build the *pinned*
+`rustc` from its own source through a different bootstrap path -- a
+distro-packaged toolchain, or the mrustc/Guix full-source bootstrap -- and
+then build ic-git with the result. That wasm should be bit-identical to the
+attested one. The practical difficulty is that rustc's codegen depends on how
+rustc itself was configured, above all the LLVM version linked into it, so the
+diverse builder has to match rustc's build configuration or the outputs differ
+for reasons that have nothing to do with a backdoor. Making that reproducible
+is real work. It is why this is a rung, not a checkbox.
+
+**K-of-N reproducible builds are DDC executed in public -- but only if the N
+are actually diverse, and right now they are not.** Everything in "What is
+pinned" pushes reviewers toward *one* environment: `--platform=linux/amd64`,
+one `BASE_IMAGE`, the exact `rustc` that `rust-toolchain.toml` names, fetched
+from the same place by everyone. N reviewers agreeing under those pins is
+strong evidence about the *source and the recipe* -- it catches source
+substitution, dependency drift, a lying deployer -- and it is no evidence at
+all about the toolchain. A subverted `rustc 1.94.1` tarball would be
+reproduced identically by all N, and K-of-N would report GREEN with complete
+confidence. Determinism pins and DDC diversity pull in opposite directions,
+and both are necessary; the resolution is that they belong to *different
+reviewers*.
+
+So the verifier set should be deliberately heterogeneous rather than merely
+numerous:
+
+- most reviewers run the pinned container -- cheap, and it is the recipe check
+  that catches the overwhelmingly more likely attack;
+- at least one reviewer builds through an independent toolchain lineage and
+  reports the same hash, which is the DDC arm;
+- each attestation records which lineage it used in its `BuildDescriptor`
+  (alongside the resolved base-image digest), so a reader can tell whether K
+  agreeing signatures are K independent observations or one observation
+  counted K times.
+
+That last point is the operational consequence and the easiest to skip: an
+attestation set whose diversity is unrecorded is indistinguishable from a
+monoculture, and a verifier client cannot weigh what it cannot see.
+
+Wheeler's DDC was a researcher performing an experiment once and publishing a
+paper about it. K-of-N attestations on chain make the same argument *standing*:
+public, re-runnable by anyone, recorded where the verifier client already
+reads, and re-executed on every release rather than once in 2009. That is a
+fair thing to claim, and it is the honest version of the claim -- not that
+self-hosting removes the toolchain residue, but that a diverse public reviewer
+set converts it from an assumption into a continuously tested one.
+
 ## Where this sits on the ladder
 
 - **R1 (this):** reproducible build + on-chain-hash check. Shores up the
@@ -136,5 +233,7 @@ This is strong verifiability, not infinite. Two things it does *not* remove:
   (`compile_lang` -> IC deploy -> attest) -- the same guarantee the frontends
   already enjoy, now for a real build.
 - **R3:** ic-git itself, self-hosted -- building the canister on-chain from
-  attested source, which removes the toolchain-trust residue above. The
-  destination R1 makes credible in the meantime.
+  attested source. This shrinks the toolchain-trust residue to the on-chain
+  compiler and makes each release a small reviewable diff; per the section
+  above, it does not by itself remove the residue, and the diverse-rebuilder
+  arm is still required. The destination R1 makes credible in the meantime.

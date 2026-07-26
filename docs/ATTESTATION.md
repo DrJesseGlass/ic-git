@@ -64,6 +64,20 @@ has two independent writers of `set` with incompatible bundleHash semantics:
 Both resolve the record on the git side and write it through the single
 registry writer, `evm::registry_publish_record(recordKey, commit, bundleHash)`.
 
+**What a `#site` record does and does not cover.** It covers one blob: the
+served entrypoint. Every file that entrypoint *references* is fetched in a
+separate request no record attests, so a client that compares only the
+entrypoint hash can be fully satisfied while running unattested code -- the
+false GREEN this document's doctrine forbids, reached without anyone forging a
+hash. `provenance::site_record` closes it at the writing end by refusing to
+attest an entrypoint that names a subresource the browser will not enforce
+`integrity` on (`site::unverifiable_subresource`); an attested site is
+therefore self-contained or SRI-complete. Step 1 below must still check it
+independently rather than trusting that the publisher did -- images, fonts, and
+media are deliberately out of scope there (SRI has no mechanism for them), and
+a client that assumed full coverage would be assuming more than the guard
+promises.
+
 One slot per bare repo name would let these clobber each other: a repo that
 both deploys a contract and serves a site would have its site record
 overwritten by the next push, and `verify.mjs` would print `NOT VERIFIED` for a
@@ -346,8 +360,19 @@ makes change-detection trustworthy.
 Per page load, in the service worker, honoring the doctrine that a verdict may
 only ADD warnings (a check can downgrade, never falsely upgrade):
 
-    1. (existing) Identify the serving canister X and served bundle; confirm
-       the loaded frontend matches the attested bundle at commit C_fe.
+    1. Identify the serving canister X and served bundle; confirm the loaded
+       frontend matches the attested bundle at commit C_fe, AND that the
+       entrypoint's own references are enforceable (see "What a `#site` record
+       does and does not cover"). A matching hash on an entrypoint that pulls
+       an un-`integrity`-declared script is NOT a frontend match; treat it as
+       a failed check, never a passed one.
+
+       Not yet built. `tools/verify.mjs` performs the hash comparison as a
+       CLI, which is the F2 rung of VISION.md; nothing does it in a browser,
+       and it cannot be a MetaMask Snap, since Snaps are isolated from the
+       page and never see the served bytes. It needs a content script -- so
+       this step implies an extension of our own, whether or not it ships in
+       the same bundle as the transaction reviewer.
 
     2. Read X's CERTIFIED module hash -> H_live (BLS-verified, fresh).
 

@@ -252,6 +252,36 @@ Mitigations, in deployment order:
    updates directly: full end-to-end verification with no local gateway,
    plus private repos and unlimited push size.
 
+### Site serving vs git traffic
+
+The reasoning above is about what a *cloner* receives. Site serving
+(`site.rs`, VISION.md's F-ladder) has the same gateway boundary but a
+different escape hatch, so keep the two cases apart:
+
+- **Same conclusion on the gateway.** A browser is a stock client. Certified
+  responses on the non-raw domain are verified *inside* the gateway, so
+  certification does not let a browser prove anything a hostile gateway could
+  not have faked. Raw-vs-non-raw is not the security question here either.
+- **Different conclusion on certification's worth.** For git traffic,
+  certifying the packfile buys nothing because the pack is self-verifying
+  against a trusted ref (item 2 above). A served bundle has no such internal
+  check, so an uncertified response is the unverified word of the single
+  replica that answered the query. Certifying it makes a lying replica
+  detectable *by the gateway*, with no client change and no user action --
+  a smaller win than it first sounds, but a free one, and unlike the git case
+  it is not zero.
+- **The escape hatch git does not have.** The served bundle's sha256 is
+  published to an EVM registry, so a client can obtain the expected hash over
+  a channel the IC gateway does not control and compare it to the bytes it
+  actually rendered. That, not certification, is what moves the trust boundary
+  off the gateway for site traffic -- and it is why `tools/verify.mjs` is
+  meaningful today despite fetching over the raw domain. The git-side analogue
+  is item 1: signed commits/tags.
+
+Consequence for sequencing: certification (VISION.md F0.5) is a cheap
+defense-in-depth rung against a dishonest replica, not a prerequisite for the
+verifying client (F2), and not a substitute for it.
+
 ### Auth
 
 - Reads: public, no auth.

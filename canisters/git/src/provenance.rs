@@ -78,7 +78,7 @@ fn deploy_record(repo: &str, commit_oid: &Oid, bundle: [u8; 32]) -> Result<Recor
 /// artifact is a frontend file hashed as raw bytes, matching how the F2
 /// verifier hashes a served non-hex artifact.
 fn site_record(repo: &str) -> Result<Record, String> {
-    let (tip, _served, body) = site::resolve_entry(repo, "")
+    let (tip, served, body) = site::resolve_entry(repo, "")
         .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html)")?;
     // Refuse to attest bytes `site::serve` would answer 413 for. Publishing
     // one costs a real registry transaction and produces a record no verifier
@@ -89,6 +89,19 @@ fn site_record(repo: &str) -> Result<Record, String> {
             "site entrypoint is {} bytes, over the {} serving limit: it would be attested but never served",
             body.len(),
             site::MAX_BODY
+        ));
+    }
+    // Same principle, sharper failure: refuse an entrypoint whose hash a
+    // verifier could check and still be wrong. This record covers one blob, so
+    // an uncovered subresource lets a hostile gateway pair the honest
+    // entrypoint with malicious code and still pass the comparison -- the
+    // verifier reports verified, which is worse than reporting nothing.
+    if let Some(why) = site::unverifiable_subresource(&served, &body) {
+        return Err(format!(
+            "{served}: {why}. This record attests only the entrypoint, so a \
+             referenced file is covered by nothing and a verifier would report \
+             verified while it went unchecked. Inline it, or add \
+             integrity=\"sha384-...\" so the browser enforces it."
         ));
     }
     Ok(Record {
@@ -171,6 +184,42 @@ mod tests {
         store::create_repo("emptyrepo").unwrap();
         site::set_config("emptyrepo", String::new()).unwrap();
         assert!(site_record("emptyrepo").is_err());
+    }
+
+    /// A site record is refused when the entrypoint references a file the
+    /// record cannot cover, and allowed once the reference is enforceable.
+    /// Without this the publish succeeds, the verifier's hash comparison
+    /// passes, and the verdict says verified while unattested code runs.
+    #[test]
+    fn site_record_refuses_an_entrypoint_it_cannot_fully_cover() {
+        let commit_index = |repo: &str, html: &[u8]| {
+            let index = store::put_object(ObjectType::Blob, html);
+            let mut root = Vec::new();
+            root.extend_from_slice(b"100644 index.html\0");
+            root.extend_from_slice(index.as_slice());
+            let root_tree = store::put_object(ObjectType::Tree, &root);
+            let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&root_tree));
+            let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
+            let branch = store::head_target(repo).unwrap();
+            store::set_ref(repo, &branch, commit_oid).unwrap();
+        };
+
+        store::create_repo("srirepo").unwrap();
+        site::set_config("srirepo", String::new()).unwrap();
+
+        commit_index("srirepo", b"<script src=\"app.js\"></script>");
+        let err = site_record("srirepo")
+            .err()
+            .expect("must refuse an uncovered subresource");
+        assert!(err.contains("index.html"), "names the entrypoint: {err}");
+        assert!(err.contains("integrity"), "says how to fix it: {err}");
+
+        // Same page, reference now enforced by the browser: attestable.
+        commit_index(
+            "srirepo",
+            b"<script src=\"app.js\" integrity=\"sha384-x\"></script>",
+        );
+        assert!(site_record("srirepo").is_ok());
     }
 
     /// A deploy record's key is the bare repo name and its bundle is the

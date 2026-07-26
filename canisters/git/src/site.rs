@@ -48,6 +48,176 @@ pub fn get_config(repo: &str) -> Option<SiteConfig> {
 /// an attestation nobody can ever verify is worse than no attestation.
 pub const MAX_BODY: usize = 1_900_000;
 
+/// Byte offset of `needle` in `hay` at or after `from`.
+fn find_from(hay: &str, needle: &str, from: usize) -> Option<usize> {
+    hay.get(from..).and_then(|s| s.find(needle)).map(|p| p + from)
+}
+
+/// End of a tag's attribute region: the `>` that closes it, skipping any `>`
+/// inside a quoted attribute value. `None` if the tag never closes.
+fn tag_end(hay: &str, from: usize) -> Option<usize> {
+    let b = hay.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (i, &c) in b.iter().enumerate().skip(from) {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                b'"' | b'\'' => quote = Some(c),
+                b'>' => return Some(i),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+/// Start offset of attribute `name` in an attribute region: the name must sit
+/// on a word boundary and be followed by `=`. Rules out `data-integrity=` and a
+/// bare `integrity` with no value, both of which a substring test would accept.
+fn attr_at(region: &str, name: &str) -> Option<usize> {
+    let b = region.as_bytes();
+    let mut i = 0;
+    while let Some(pos) = find_from(region, name, i) {
+        i = pos + 1;
+        if pos > 0 && !b[pos - 1].is_ascii_whitespace() {
+            continue;
+        }
+        let mut j = pos + name.len();
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j < b.len() && b[j] == b'=' {
+            return Some(j + 1);
+        }
+    }
+    None
+}
+
+fn has_attr(region: &str, name: &str) -> bool {
+    attr_at(region, name).is_some()
+}
+
+/// Value of attribute `name`, quoted or bare.
+fn attr_value<'a>(region: &'a str, name: &str) -> Option<&'a str> {
+    let b = region.as_bytes();
+    let mut j = attr_at(region, name)?;
+    while j < b.len() && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if j >= b.len() {
+        return None;
+    }
+    let (quote, start) = match b[j] {
+        q @ (b'"' | b'\'') => (Some(q), j + 1),
+        _ => (None, j),
+    };
+    let mut k = start;
+    while k < b.len() {
+        let stop = match quote {
+            Some(q) => b[k] == q,
+            None => b[k].is_ascii_whitespace(),
+        };
+        if stop {
+            break;
+        }
+        k += 1;
+    }
+    region.get(start..k)
+}
+
+/// Why a served entrypoint's own bytes are not enough to verify the page, or
+/// `None` if they are.
+///
+/// The registry attests exactly ONE blob -- the entrypoint, since
+/// `provenance::site_record` resolves path "" -- so every file the entrypoint
+/// *names* is fetched in a separate request that no attestation covers. Without
+/// this check a hostile gateway serves the honest, correctly-hashing index.html
+/// next to a malicious app.js, and a verifier comparing only the entrypoint
+/// hash reports "verified" while attacker code runs. That is a false GREEN, the
+/// one direction docs/ATTESTATION.md's doctrine forbids.
+///
+/// Two entrypoint shapes are honest, and this accepts exactly those: reference
+/// nothing (inline it, so the attested bytes cover it), or declare `integrity`
+/// on every reference, which the *browser* then enforces -- SRI covers the
+/// subresources and the registry covers the document that names them, so the
+/// pair is complete where either alone is not.
+///
+/// Deliberately conservative, and biased toward refusing:
+/// - `<script src>` and `<link rel=stylesheet|modulepreload>` need `integrity`.
+/// - `<iframe>`, `<object>`, `<embed>` have no SRI mechanism at all, so they can
+///   never be made verifiable and are refused outright.
+/// - A tag that never closes, or a body that is not UTF-8, is refused rather
+///   than skipped.
+/// A false refusal costs the operator one inline-or-add-integrity edit; a false
+/// accept costs a user their funds. That asymmetry is the whole design, and it
+/// is why no attempt is made to track HTML comments: a commented-out
+/// `<script src=...>` is refused, which is the safe direction to be wrong in.
+///
+/// NOT covered, stated rather than implied: images, fonts, and media. SRI has
+/// no mechanism for them, so refusing them would reject every real site. They
+/// cannot execute; a swapped image can mislead the eye but not the machine.
+pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String> {
+    if !matches!(
+        served_path.rsplit('.').next().unwrap_or(""),
+        "html" | "htm"
+    ) {
+        return None;
+    }
+    let Ok(text) = core::str::from_utf8(body) else {
+        return Some("entrypoint is not valid UTF-8, so its references cannot be read".to_string());
+    };
+    // ASCII-only lowercasing, so offsets stay aligned with the original.
+    let hay = text.to_ascii_lowercase();
+    let b = hay.as_bytes();
+    let mut i = 0;
+    while let Some(lt) = find_from(&hay, "<", i) {
+        let name_start = lt + 1;
+        let mut name_end = name_start;
+        while name_end < b.len() && b[name_end].is_ascii_alphanumeric() {
+            name_end += 1;
+        }
+        i = name_end.max(lt + 1);
+        let tag = &hay[name_start..name_end];
+        if !matches!(tag, "script" | "link" | "iframe" | "object" | "embed") {
+            continue;
+        }
+        let Some(end) = tag_end(&hay, name_end) else {
+            return Some(format!("<{tag}> tag is never closed"));
+        };
+        let region = &hay[name_end..end];
+        i = end + 1;
+        match tag {
+            // No SRI mechanism exists for these; integrity= on them is ignored
+            // by the browser, so accepting one would be accepting a promise
+            // nothing enforces.
+            "iframe" | "object" | "embed" => {
+                if has_attr(region, "src") || has_attr(region, "data") {
+                    return Some(format!(
+                        "<{tag}> loads a subresource SRI cannot cover; inline the content instead"
+                    ));
+                }
+            }
+            "script" => {
+                if has_attr(region, "src") && !has_attr(region, "integrity") {
+                    return Some("<script src=...> has no integrity=".to_string());
+                }
+            }
+            "link" => {
+                let rel = attr_value(region, "rel").unwrap_or("");
+                let enforced = rel
+                    .split_ascii_whitespace()
+                    .any(|r| matches!(r, "stylesheet" | "modulepreload"));
+                if enforced && has_attr(region, "href") && !has_attr(region, "integrity") {
+                    return Some(format!("<link rel=\"{rel}\"> has no integrity="));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
         "html" | "htm" => "text/html; charset=utf-8",
@@ -202,6 +372,78 @@ mod tests {
         set_config("web", "app".into()).unwrap();
         assert_eq!(serve("web", "main.js").status_code, 200);
         assert_eq!(serve("web", "").status_code, 404);
+    }
+
+    /// The two entrypoint shapes whose attested hash actually proves something:
+    /// self-contained, or SRI-complete so the browser enforces the rest.
+    #[test]
+    fn accepts_self_contained_and_sri_complete_entrypoints() {
+        for ok in [
+            // Inline script and style are inside the attested bytes already.
+            "<html><script>go()</script><style>b{}</style></html>",
+            "<script src=\"app.js\" integrity=\"sha384-x\"></script>",
+            // Bare and single-quoted attributes, uppercase tags, attribute
+            // order, and a multi-token rel all still parse.
+            "<SCRIPT SRC=app.js INTEGRITY=sha384-x></SCRIPT>",
+            "<link integrity='sha384-x' rel='preload stylesheet' href='a.css'>",
+            // rel values SRI does not enforce are not subresource execution
+            // surfaces, so they need no integrity.
+            "<link rel=\"icon\" href=\"favicon.ico\">",
+            "<link rel=\"canonical\" href=\"https://example.com/\">",
+            // Images and fonts are documented as out of scope.
+            "<img src=\"logo.png\"><p>text</p>",
+        ] {
+            assert_eq!(
+                unverifiable_subresource("index.html", ok.as_bytes()),
+                None,
+                "should accept: {ok}"
+            );
+        }
+    }
+
+    /// Every shape where the entrypoint hash would verify while unattested
+    /// bytes went unchecked -- the false GREEN this guard exists to stop.
+    #[test]
+    fn refuses_entrypoints_whose_hash_would_not_prove_the_page() {
+        for bad in [
+            // The core case: honest index.html, unattested app.js.
+            "<script src=\"app.js\"></script>",
+            "<script src=\"https://cdn.example.com/a.js\"></script>",
+            "<link rel=\"stylesheet\" href=\"app.css\">",
+            "<link rel=\"modulepreload\" href=\"m.js\">",
+            // SRI does not apply to these at all, so integrity= on them is a
+            // promise nothing enforces -- refused even when it is present.
+            "<iframe src=\"child.html\"></iframe>",
+            "<object data=\"x.swf\"></object>",
+            "<embed src=\"x.svg\">",
+            "<iframe src=\"child.html\" integrity=\"sha384-x\"></iframe>",
+            // A substring test would have accepted both of these.
+            "<script src=\"app.js\" data-integrity=\"sha384-x\"></script>",
+            "<script src=\"app.js\" integrity></script>",
+            // Unparseable beats optimistic: never closed, so never checked.
+            "<script src=\"app.js\"",
+        ] {
+            assert!(
+                unverifiable_subresource("index.html", bad.as_bytes()).is_some(),
+                "should refuse: {bad}"
+            );
+        }
+        // Not UTF-8: the references cannot be read, so they cannot be cleared.
+        assert!(unverifiable_subresource("index.html", &[0xff, 0xfe]).is_some());
+    }
+
+    /// The scan is HTML-only. A non-HTML entrypoint names no subresources, and
+    /// a `<script` byte sequence inside one is data, not markup -- gating on it
+    /// would refuse to attest artifacts that are perfectly verifiable.
+    #[test]
+    fn scan_applies_only_to_html_entrypoints() {
+        let looks_like_markup = b"{\"a\":\"<script src=x>\"}";
+        assert_eq!(
+            unverifiable_subresource("data.json", looks_like_markup),
+            None
+        );
+        assert_eq!(unverifiable_subresource("contract.hex", b"0x6001"), None);
+        assert!(unverifiable_subresource("index.htm", looks_like_markup).is_some());
     }
 
     /// resolve_entry (what the registry publisher attests) returns the same
