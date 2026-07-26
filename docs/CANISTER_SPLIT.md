@@ -184,6 +184,34 @@ signing modules no longer reach into git state at all. 58 tests pass
 `canisters/git`, sharing a `types` crate for the wire structs. Both still
 deploy as today; only the build layout changes.
 
+Three items deliberately deferred from phase 1 to here, because each needs a
+crate boundary to be worth doing:
+
+- **The deploy leg's hex seam.** Phase 1 established the *publish* half of
+  section 4 but not the *deploy* half: `evm::deploy_bytecode` still takes
+  `bytecode_hex: String` and decodes internally, while `provenance.rs` calls
+  the now-`pub` `evm::decode_bytecode_hex`. So hex decoding sits on both sides
+  of the future boundary, and `decode_bytecode_hex`'s "the single decode path"
+  comment stops being true at phase 3. Fix: move the decoder to the git side
+  (next to `deploy::evm_artifact_hex`), change `deploy_bytecode` to take
+  `Vec<u8>`, and decode in `lib.rs`'s operator-facing `evm_deploy` endpoint.
+  Then the signer takes bytes only, matching section 4.
+- **META ownership.** `kv.rs` currently forwards to `store::meta_*_json`, and
+  `deploy`/`site`/`fleet` still call `store::` directly -- one bucket, two
+  names. Move the `META` map and its JSON codec out of `store.rs` into `kv.rs`
+  and point every caller at it, so `store.rs` is objects/refs/repos only.
+- **Record-key construction.** `SITE_KEY_SUFFIX` is defined in
+  `provenance.rs`, hardcoded in `tools/verify.mjs`, and documented in
+  docs/ATTESTATION.md as a registry-contract convention. Put the suffix and a
+  `site_record_key(repo)` in the shared `types` crate so signer, git, and the
+  verifier derive it from one definition.
+
+One efficiency item is worth folding in whenever the deploy leg is touched:
+`run_evm` calls `provenance::publish_commit`, which re-reads, re-inflates,
+re-decodes and re-hashes the artifact `evm::deploy_bytecode` just hashed as
+`bytecode_sha256`. Negligible in cycles against a threshold signature plus RPC
+outcalls, but it is a second derivation of a value that must match the first.
+
 **Phase 3 -- cut the boundary.** git canister calls signer over the interface
 in section 4. Deploy the new git canister; keep `umobs-...` as signer, upgraded
 in place. Migrate objects/refs by re-push or a bulk copy (`tools/seed-repo.sh`

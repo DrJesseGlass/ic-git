@@ -5,17 +5,18 @@
 //! of it is git data; it just happens to live in the same stable-memory META
 //! map today because there has only ever been one canister.
 //!
-//! Routing those reads and writes through here rather than calling
-//! `store::meta_*_json` directly means the signing half of this canister
-//! depends on a two-function interface instead of on the git object store's
-//! module. When the signer becomes its own canister (docs/CANISTER_SPLIT.md,
-//! phase 3) the backing store changes in exactly one place, and no signing
-//! logic is touched -- which matters because that logic is the part K
-//! reviewers are attesting, and a diff there costs a re-review.
+//! Be honest about what this is today: a rename. These functions forward
+//! verbatim to `store::meta_*_json`, so `evm.rs` and `sol.rs` still reach the
+//! git crate's storage transitively -- the decoupling is a marked seam, not a
+//! severed dependency. Its value is that the swap point exists in one place:
+//! when the signer becomes its own canister (docs/CANISTER_SPLIT.md phase 3)
+//! these two bodies change and no signing logic is touched, which matters
+//! because that logic is what K reviewers attest and a diff there costs a
+//! re-review. Phase 2 should move the META map itself here and point
+//! `deploy`/`site`/`fleet` at it too, so one bucket stops having two names.
 //!
-//! Deliberately not generic over a backend trait: a trait would be indirection
-//! bought before it is needed. Two functions and a honest comment are enough
-//! to mark the boundary.
+//! Deliberately not generic over a backend trait: indirection bought before
+//! it is needed.
 
 use crate::store;
 

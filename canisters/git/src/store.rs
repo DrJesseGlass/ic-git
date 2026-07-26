@@ -321,6 +321,9 @@ pub fn load_auth_snapshot() -> Option<Vec<u8>> {
 // The caller owns the key, including its namespace prefix, which keeps these
 // out of the way of the auth/schema markers.
 
+/// Signing-side callers (`evm.rs`, `sol.rs`) go through `crate::kv` instead,
+/// which wraps this pair so their persistence has one swap point when the
+/// signer splits out. See docs/CANISTER_SPLIT.md.
 pub fn meta_set_json<T: serde::Serialize>(key: &str, value: &T) {
     if let Ok(bytes) = serde_json::to_vec(value) {
         META.with(|m| storage::save_bytes(m, key, bytes));

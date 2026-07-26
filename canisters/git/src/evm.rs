@@ -1020,15 +1020,9 @@ fn abi_encode_set(record_key: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec
     out
 }
 
-/// Publish an already-resolved provenance record to the registry.
-///
-/// This is the whole registry-write surface, and it deliberately knows nothing
-/// about repos, commits-as-git-objects, trees, or site config: the caller
-/// (`crate::provenance`) resolves those and hands down three values. That
-/// direction of dependency is what lets the signing half of this canister
-/// become its own canister without dragging the git object store with it --
-/// see docs/CANISTER_SPLIT.md section 4, where this function's signature is
-/// literally the planned inter-canister message.
+/// Publish an already-resolved provenance record to the registry. The whole
+/// registry-write surface; `crate::provenance` does the resolving. Signature
+/// is the planned inter-canister message (docs/CANISTER_SPLIT.md section 4).
 ///
 /// `record_key` is namespaced by the caller (`<repo>` for a deploy artifact,
 /// `<repo>#site` for a served site); `commit` is the first 20 bytes of the git

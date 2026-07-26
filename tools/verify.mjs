@@ -42,7 +42,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const GET_SELECTOR = "693ec85e"; // keccak256("get(string)")[..4]
-const SITE_SUFFIX = "#site"; // must match evm.rs::SITE_KEY_SUFFIX
+const SITE_SUFFIX = "#site"; // must match provenance.rs::SITE_KEY_SUFFIX
 
 const args = process.argv.slice(2);
 const positional = [];
