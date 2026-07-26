@@ -42,7 +42,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const GET_SELECTOR = "693ec85e"; // keccak256("get(string)")[..4]
-const SITE_SUFFIX = "#site"; // must match evm.rs::SITE_KEY_SUFFIX
+const SITE_SUFFIX = "#site"; // must match provenance.rs::SITE_KEY_SUFFIX
 
 const args = process.argv.slice(2);
 const positional = [];
@@ -193,9 +193,10 @@ const commitOk = servedCommit === registryCommit;
 report(commitOk, "A: served commit == registry commit", commitOk ? "" : `served ${servedCommit || "(none)"}`);
 
 // B. The artifact hashes to the attested bundleHash, hashed the way THIS
-// record's publisher hashed it: registry_publish_commit hashes the decoded
-// contract bytecode, registry_publish_site hashes the served bytes exactly as
-// delivered. Choosing by the artifact's shape instead would mis-hash a site
+// record's publisher hashed it: provenance::deploy_record hashes the decoded
+// contract bytecode, provenance::site_record hashes the served bytes exactly
+// as delivered (both then write through evm::registry_publish_record).
+// Choosing by the artifact's shape instead would mis-hash a site
 // page that is all hex characters and report a correctly served page as
 // unverified.
 const wantsHex = kind === "deploy";

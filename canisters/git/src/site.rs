@@ -43,8 +43,10 @@ pub fn get_config(repo: &str) -> Option<SiteConfig> {
 }
 
 /// Stay under the ~2 MiB ingress reply limit with headroom for headers.
-/// Bigger assets need the streaming rung.
-const MAX_BODY: usize = 1_900_000;
+/// Bigger assets need the streaming rung. Public because the registry
+/// publisher must refuse to attest a body `serve` would answer 413 for --
+/// an attestation nobody can ever verify is worse than no attestation.
+pub const MAX_BODY: usize = 1_900_000;
 
 fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {

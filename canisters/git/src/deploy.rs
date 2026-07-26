@@ -561,7 +561,11 @@ async fn run_evm(
             st.tx_hash = out.tx_hash;
             st.message = format!("deployed to {} (chain via evm config)", st.contract_address);
             if evm::get_registry().is_some() {
-                match evm::registry_publish_commit(repo, commit_oid).await {
+                // Pass the source_path from the snapshot this deploy used, not
+                // a fresh read: a config edit landing during the awaits above
+                // would otherwise have the registry attest a different artifact
+                // than the one just deployed.
+                match crate::provenance::publish_commit(repo, commit_oid, &cfg.source_path).await {
                     Ok(reg) => {
                         st.message = format!("{}; registry publish {}", st.message, reg.tx_hash)
                     }
@@ -657,12 +661,19 @@ pub fn deploy_branch(repo: &str) -> Option<String> {
     store::head_target(repo)
 }
 
+/// The commit the deploy branch currently points at. The one resolution path
+/// for "what would deploy right now", shared by the explicit-redeploy escape
+/// hatch and the registry publisher, so the two cannot disagree about which
+/// commit -- or about how to phrase not finding one.
+pub fn current_tip(repo: &str) -> Result<Oid, String> {
+    let branch = deploy_branch(repo).ok_or(format!("no such repo: {repo}"))?;
+    store::get_ref(repo, &branch).ok_or_else(|| "deploy branch has no commits".to_string())
+}
+
 /// Run the configured deploy against the repo's current deploy-branch tip,
 /// without waiting for a push. Always deploys, even if the tip commit is
 /// already in the provenance log -- the explicit-redeploy escape hatch.
 pub async fn run_current(repo: &str) -> Result<DeployStatus, String> {
-    let branch = deploy_branch(repo).ok_or(format!("no such repo: {repo}"))?;
-    let tip = store::get_ref(repo, &branch).ok_or("deploy branch has no commits")?;
-    Ok(run(repo, tip, true).await)
+    Ok(run(repo, current_tip(repo)?, true).await)
 }
 

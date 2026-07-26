@@ -20,8 +20,8 @@
 //! broadcast acceptance; mined-and-succeeded is confirmed separately via
 //! its tx_hash (evm_receipt).
 
+use crate::kv;
 use crate::rpc_common::{all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, SIGN_CYCLES};
-use crate::store;
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -223,7 +223,7 @@ async fn public_key(cfg: &EvmConfig) -> Result<Vec<u8>, String> {
     const CACHE_KEY: &str = "evm:pubkey";
     // The cache is per key name: switching key_name (test key -> production
     // key) must not serve the stale key.
-    if let Some((name, pk)) = store::meta_get_json::<(String, Vec<u8>)>(CACHE_KEY) {
+    if let Some((name, pk)) = kv::get_json::<(String, Vec<u8>)>(CACHE_KEY) {
         if name == cfg.key_name {
             return Ok(pk);
         }
@@ -238,7 +238,7 @@ async fn public_key(cfg: &EvmConfig) -> Result<Vec<u8>, String> {
         },),
     )
     .await?;
-    store::meta_set_json(CACHE_KEY, &(cfg.key_name.clone(), reply.public_key.clone()));
+    kv::set_json(CACHE_KEY, &(cfg.key_name.clone(), reply.public_key.clone()));
     Ok(reply.public_key)
 }
 
@@ -569,12 +569,12 @@ pub fn set_config(
         chain_id,
         rpc_urls,
     };
-    store::meta_set_json(CONFIG_KEY, &cfg);
+    kv::set_json(CONFIG_KEY, &cfg);
     Ok(())
 }
 
 pub fn get_config() -> Option<EvmConfig> {
-    store::meta_get_json(CONFIG_KEY)
+    kv::get_json(CONFIG_KEY)
 }
 
 fn require_config() -> Result<EvmConfig, String> {
@@ -839,7 +839,7 @@ fn default_record_ok() -> bool {
 const MAX_LOG: usize = 200;
 
 pub fn get_history() -> Vec<EvmDeployRecord> {
-    store::meta_get_json(LOG_KEY).unwrap_or_default()
+    kv::get_json(LOG_KEY).unwrap_or_default()
 }
 
 /// ReceiptSummary.status / EvmDeployRecord.receipt_status values. Defined
@@ -871,7 +871,7 @@ fn mark_receipt(tx_hash: &str, status: &str) {
         }
     }
     if changed {
-        store::meta_set_json(LOG_KEY, &log);
+        kv::set_json(LOG_KEY, &log);
     }
 }
 
@@ -905,9 +905,36 @@ async fn poll_receipt(tx_hash: String, attempt: u32) {
     }
 }
 
-fn record(rec: EvmDeployRecord) {
+/// Read the deploy log, refusing to substitute a default for an undecodable
+/// one. Callers must treat `Err` as "this log cannot be safely written".
+fn read_log() -> Result<Vec<EvmDeployRecord>, String> {
+    kv::try_get_json::<Vec<EvmDeployRecord>>(LOG_KEY).map(Option::unwrap_or_default)
+}
+
+/// Refuse to start a deploy whose result could not be recorded.
+///
+/// This must be checked BEFORE broadcasting. `record` failing after `send_tx`
+/// would leave a paid, live CREATE with no log entry -- and because
+/// `latest_deploy` reads the same unreadable log, the same-commit dedupe in
+/// `run_evm` would not see it either, so every retry or re-push would broadcast
+/// another paid deployment of a contract that is already on chain. Failing
+/// closed here costs nothing; failing open costs gas on every attempt.
+fn preflight_log() -> Result<(), String> {
+    read_log().map(|_| ()).map_err(|e| {
+        format!("{e}; refusing to deploy because the outcome could not be recorded (inspect or clear the {LOG_KEY} entry first)")
+    })
+}
+
+fn record(rec: EvmDeployRecord) -> Result<(), String> {
     let repo = rec.repo.clone();
-    let mut log = get_history();
+    // Read-modify-write on the append-only provenance log, so a decode failure
+    // must NOT fall back to an empty Vec: that would replace every prior
+    // deploy's tx hash and bytecode hash with this single entry, and take the
+    // same-commit dedupe in run_evm down with it. Refuse to write instead --
+    // the stored bytes stay intact and recoverable. `preflight_log` should have
+    // caught this before any gas was spent; reaching here means the log became
+    // unreadable mid-flight, so the failure is propagated rather than logged.
+    let mut log = read_log()?;
     log.push(rec);
     let count = log.iter().filter(|r| r.repo == repo).count();
     if count > MAX_LOG {
@@ -921,14 +948,15 @@ fn record(rec: EvmDeployRecord) {
             }
         });
     }
-    store::meta_set_json(LOG_KEY, &log);
+    kv::set_json(LOG_KEY, &log);
+    Ok(())
 }
 
 /// Decode a hex artifact (0x-optional, surrounding whitespace tolerated) to
 /// creation bytecode. The single decode path: the deploy leg and the registry
 /// publisher must hash identical bytes, or the on-chain registry entry would
 /// diverge from the bytecode_sha256 in the deploy history.
-fn decode_bytecode_hex(text: &str) -> Result<Vec<u8>, String> {
+pub fn decode_bytecode_hex(text: &str) -> Result<Vec<u8>, String> {
     let s = text.trim();
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("bad bytecode hex: {e}"))?;
@@ -954,8 +982,10 @@ pub async fn deploy_bytecode(
     let bytecode = decode_bytecode_hex(&bytecode_hex)?;
     let sha256 = hex::encode(sha2::Sha256::digest(&bytecode));
     let len = bytecode.len() as u64;
+    // Before spending gas: if the outcome cannot be recorded, do not broadcast.
+    preflight_log()?;
     let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
-    record(EvmDeployRecord {
+    let recorded = record(EvmDeployRecord {
         repo,
         commit,
         chain_id: cfg.chain_id,
@@ -976,6 +1006,19 @@ pub async fn deploy_bytecode(
         receipt_status: String::new(),
         at_ns: ic_cdk::api::time(),
     });
+    // A broadcast we could not record must never be reported as a clean
+    // success: the transaction is live and paid for, but nothing in the log
+    // will dedupe it, so a caller that retries on error would deploy it again.
+    // Surface the tx hash and say so explicitly -- this needs a human, not a
+    // retry. (preflight_log makes this near-unreachable; it is the backstop.)
+    if let (Ok(o), Err(e)) = (&out, &recorded) {
+        return Err(format!(
+            "DEPLOY BROADCAST BUT NOT RECORDED: tx {} is live on chain {} and paid for, \
+             but the deploy log could not be updated ({e}). Do NOT retry -- \
+             resolve the log first, or the contract will be deployed twice.",
+            o.tx_hash, cfg.chain_id
+        ));
+    }
     if let Ok(o) = &out {
         schedule_receipt_poll(o.tx_hash.clone(), 0);
     }
@@ -992,22 +1035,13 @@ const REGISTRY_KEY: &str = "evm:registry";
 
 pub fn set_registry(address: String) -> Result<(), String> {
     parse_address(&address)?;
-    store::meta_set_json(REGISTRY_KEY, &address);
+    kv::set_json(REGISTRY_KEY, &address);
     Ok(())
 }
 
 pub fn get_registry() -> Option<String> {
-    store::meta_get_json(REGISTRY_KEY)
+    kv::get_json(REGISTRY_KEY)
 }
-
-/// Suffix that namespaces a served-site record away from the same repo's
-/// deploy-artifact record. The registry stores one slot per key string, and
-/// this canister has two writers with incompatible bundleHash semantics
-/// (decoded contract bytecode vs. served site bytes), so a repo that both
-/// deploys a contract and serves a site would otherwise have one record
-/// silently clobber the other on the next push. See docs/ATTESTATION.md,
-/// "The two record types".
-const SITE_KEY_SUFFIX: &str = "#site";
 
 /// ABI-encode set(string recordKey, bytes20 commit, bytes32 bundleHash):
 /// selector, then three head words (string offset, bytes20 right-padded,
@@ -1029,67 +1063,43 @@ fn abi_encode_set(record_key: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec
     out
 }
 
-/// Publish a repo's current provenance to the registry: its deploy-branch tip
-/// commit and the sha256 of the artifact at its EVM deploy config's
-/// source_path. Returns the write transaction's outcome.
-pub async fn registry_publish(repo: &str) -> Result<TxOutcome, String> {
-    let branch = store::head_target(repo).ok_or(format!("no such repo: {repo}"))?;
-    let tip = store::get_ref(repo, &branch).ok_or("deploy branch has no commits")?;
-    registry_publish_commit(repo, &tip).await
-}
-
-/// Publish a specific commit's provenance: that commit and the sha256 of the
-/// artifact in *its* tree. The deploy queue's auto-publish passes the commit
-/// it just deployed rather than the mutable tip, so a push landing mid-deploy
-/// cannot make the registry attest a commit whose deploy has not yet run.
-pub async fn registry_publish_commit(
-    repo: &str,
-    commit_oid: &store::Oid,
-) -> Result<TxOutcome, String> {
-    let cfg = require_config()?;
-    let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
-    let to = parse_address(&registry)?;
-
-    let dcfg = crate::deploy::get_evm_config(repo)
-        .ok_or("repo has no EVM deploy config (nothing to hash)")?;
-    // Hash the decoded bytecode, not the hex text, so the registry entry
-    // equals the bytecode_sha256 already in evm_deploy_history.
-    let hex_text = crate::deploy::evm_artifact_hex(commit_oid, &dcfg.source_path)?;
-    let raw = decode_bytecode_hex(&hex_text)?;
-    let bundle: [u8; 32] = sha2::Sha256::digest(&raw).into();
-
-    let commit: [u8; 20] = *commit_oid
-        .as_slice()
-        .first_chunk::<20>()
-        .ok_or("bad oid length")?;
-    let data = abi_encode_set(repo, &commit, &bundle);
-    send_tx(&cfg, Some(to), 0, data, 150_000).await
-}
-
-/// Publish a *site* repo's provenance: its deploy-branch tip commit and the
-/// sha256 of the served entrypoint blob (site root + index.html fallback --
-/// byte-identical to what `/site/<repo>/` returns). Unlike registry_publish,
-/// this needs no EVM deploy config: the artifact is a frontend file, hashed as
-/// raw bytes, matching how the F2 verifier hashes a served non-hex artifact.
+/// Publish an already-resolved provenance record to the registry. The whole
+/// registry-write surface; `crate::provenance` does the resolving. Signature
+/// is the planned inter-canister message (docs/CANISTER_SPLIT.md section 4).
 ///
-/// Written under `<repo>#site`, not the bare repo name, so it cannot clobber
-/// (or be clobbered by) the deploy-artifact record that
-/// `registry_publish_commit` writes for the same repo.
-pub async fn registry_publish_site(repo: &str) -> Result<TxOutcome, String> {
+/// `record_key` is namespaced by the caller (`<repo>` for a deploy artifact,
+/// `<repo>#site` for a served site); `commit` is the first 20 bytes of the git
+/// oid; `bundle` is whatever sha256 the record type calls for.
+pub async fn registry_publish_record(
+    record_key: &str,
+    commit: &[u8; 20],
+    bundle: &[u8; 32],
+) -> Result<TxOutcome, String> {
+    let (cfg, to) = publish_target()?;
+    let data = abi_encode_set(record_key, commit, bundle);
+    send_tx(&cfg, Some(to), 0, data, 150_000).await
+}
+
+/// The canister-level preconditions for any registry write: a chain config and
+/// a parseable registry address. One definition, used twice on purpose --
+/// `registry_publish_record` needs the values, and `require_publish_target`
+/// lets a caller check them *before* resolving git state.
+fn publish_target() -> Result<(EvmConfig, [u8; 20]), String> {
     let cfg = require_config()?;
     let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
     let to = parse_address(&registry)?;
+    Ok((cfg, to))
+}
 
-    let (tip, _served, body) = crate::site::resolve_entry(repo, "")
-        .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html)")?;
-    let bundle: [u8; 32] = sha2::Sha256::digest(&body).into();
-
-    let commit: [u8; 20] = *tip
-        .as_slice()
-        .first_chunk::<20>()
-        .ok_or("bad oid length")?;
-    let data = abi_encode_set(&format!("{repo}{SITE_KEY_SUFFIX}"), &commit, &bundle);
-    send_tx(&cfg, Some(to), 0, data, 150_000).await
+/// Assert the canister is configured to publish, without doing any work.
+///
+/// `crate::provenance` calls this before it walks refs and hashes artifacts, so
+/// an unconfigured canister answers "call evm_set_config first" instead of a
+/// repo-level error about a deploy config the operator was never missing. It
+/// also keeps `evm_registry_publish_site` from inflating and hashing a whole
+/// site bundle only to discover there is nowhere to write the result.
+pub fn require_publish_target() -> Result<(), String> {
+    publish_target().map(|_| ())
 }
 
 // --- receipt lookup ----------------------------------------------------------
@@ -1291,15 +1301,54 @@ mod tests {
             receipt_status: String::new(),
             at_ns: 0,
         };
-        record(rec("quiet", 0));
+        record(rec("quiet", 0)).unwrap();
         for n in 0..(MAX_LOG as u64 + 5) {
-            record(rec("chatty", n));
+            record(rec("chatty", n)).unwrap();
         }
         let log = get_history();
         let chatty: Vec<_> = log.iter().filter(|r| r.repo == "chatty").collect();
         assert_eq!(chatty.len(), MAX_LOG);
         assert_eq!(chatty[0].nonce, 5); // oldest five dropped
         assert_eq!(log.iter().filter(|r| r.repo == "quiet").count(), 1);
+    }
+
+    /// An undecodable deploy log must stop a deploy BEFORE it broadcasts, and
+    /// must not be silently replaced by an empty one.
+    ///
+    /// Both halves matter and they fail in opposite directions. Overwriting
+    /// destroys every prior deploy's provenance; broadcasting first and failing
+    /// to record leaves a paid, live contract that `latest_deploy` cannot see,
+    /// so the push path's same-commit dedupe goes blind and every retry deploys
+    /// it again. `preflight_log` is what makes the deploy fail closed while the
+    /// gas is still unspent.
+    #[test]
+    fn corrupt_deploy_log_blocks_deploy_and_survives_intact() {
+        kv::set_json(LOG_KEY, &"not a deploy log at all".to_string());
+
+        assert!(
+            preflight_log().is_err(),
+            "preflight must refuse before any broadcast"
+        );
+        let err = record(EvmDeployRecord {
+            repo: "r".into(),
+            commit: "c".into(),
+            chain_id: 1,
+            contract_address: String::new(),
+            tx_hash: "0x01".into(),
+            nonce: 0,
+            bytecode_sha256: String::new(),
+            bytecode_len: 0,
+            ok: true,
+            message: String::new(),
+            receipt_status: String::new(),
+            at_ns: 0,
+        });
+        assert!(err.is_err(), "record must propagate, not swallow");
+
+        // The original bytes are still there: nothing was clobbered.
+        let raw: String = kv::get_json(LOG_KEY).expect("original value intact");
+        assert_eq!(raw, "not a deploy log at all");
+        kv::set_json(LOG_KEY, &Vec::<EvmDeployRecord>::new());
     }
 
     /// A reverted receipt (folded case-insensitively by tx hash) must
@@ -1319,7 +1368,8 @@ mod tests {
             message: String::new(),
             receipt_status: String::new(),
             at_ns: 0,
-        });
+        })
+        .unwrap();
         assert!(latest_deploy("r", "c").is_some());
         mark_receipt("0xabcd", "success");
         assert!(latest_deploy("r", "c").is_some());
