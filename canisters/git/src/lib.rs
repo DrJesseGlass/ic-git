@@ -9,9 +9,11 @@ mod deploy;
 mod evm;
 mod fleet;
 mod interp;
+mod kv;
 mod lang;
 mod object;
 mod pack;
+mod provenance;
 mod receive;
 mod rpc_common;
 mod site;
@@ -682,7 +684,7 @@ fn evm_get_registry() -> Option<String> {
 /// this transaction is the canister's own attestation.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
-    evm::registry_publish(&repo).await
+    provenance::publish_tip(&repo).await
 }
 
 /// Write a *site* repo's provenance to the registry: set(repo, tip commit,
@@ -691,7 +693,7 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
 /// served page against the canister's own on-chain attestation.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
-    evm::registry_publish_site(&repo).await
+    provenance::publish_site(&repo).await
 }
 
 // --- Track S: Solana signing spine (phase S0; see VISION.md section 4) -------

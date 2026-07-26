@@ -20,8 +20,8 @@
 //! broadcast acceptance; mined-and-succeeded is confirmed separately via
 //! its tx_hash (evm_receipt).
 
+use crate::kv;
 use crate::rpc_common::{all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, SIGN_CYCLES};
-use crate::store;
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -223,7 +223,7 @@ async fn public_key(cfg: &EvmConfig) -> Result<Vec<u8>, String> {
     const CACHE_KEY: &str = "evm:pubkey";
     // The cache is per key name: switching key_name (test key -> production
     // key) must not serve the stale key.
-    if let Some((name, pk)) = store::meta_get_json::<(String, Vec<u8>)>(CACHE_KEY) {
+    if let Some((name, pk)) = kv::get_json::<(String, Vec<u8>)>(CACHE_KEY) {
         if name == cfg.key_name {
             return Ok(pk);
         }
@@ -238,7 +238,7 @@ async fn public_key(cfg: &EvmConfig) -> Result<Vec<u8>, String> {
         },),
     )
     .await?;
-    store::meta_set_json(CACHE_KEY, &(cfg.key_name.clone(), reply.public_key.clone()));
+    kv::set_json(CACHE_KEY, &(cfg.key_name.clone(), reply.public_key.clone()));
     Ok(reply.public_key)
 }
 
@@ -569,12 +569,12 @@ pub fn set_config(
         chain_id,
         rpc_urls,
     };
-    store::meta_set_json(CONFIG_KEY, &cfg);
+    kv::set_json(CONFIG_KEY, &cfg);
     Ok(())
 }
 
 pub fn get_config() -> Option<EvmConfig> {
-    store::meta_get_json(CONFIG_KEY)
+    kv::get_json(CONFIG_KEY)
 }
 
 fn require_config() -> Result<EvmConfig, String> {
@@ -839,7 +839,7 @@ fn default_record_ok() -> bool {
 const MAX_LOG: usize = 200;
 
 pub fn get_history() -> Vec<EvmDeployRecord> {
-    store::meta_get_json(LOG_KEY).unwrap_or_default()
+    kv::get_json(LOG_KEY).unwrap_or_default()
 }
 
 /// ReceiptSummary.status / EvmDeployRecord.receipt_status values. Defined
@@ -871,7 +871,7 @@ fn mark_receipt(tx_hash: &str, status: &str) {
         }
     }
     if changed {
-        store::meta_set_json(LOG_KEY, &log);
+        kv::set_json(LOG_KEY, &log);
     }
 }
 
@@ -921,14 +921,14 @@ fn record(rec: EvmDeployRecord) {
             }
         });
     }
-    store::meta_set_json(LOG_KEY, &log);
+    kv::set_json(LOG_KEY, &log);
 }
 
 /// Decode a hex artifact (0x-optional, surrounding whitespace tolerated) to
 /// creation bytecode. The single decode path: the deploy leg and the registry
 /// publisher must hash identical bytes, or the on-chain registry entry would
 /// diverge from the bytecode_sha256 in the deploy history.
-fn decode_bytecode_hex(text: &str) -> Result<Vec<u8>, String> {
+pub fn decode_bytecode_hex(text: &str) -> Result<Vec<u8>, String> {
     let s = text.trim();
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("bad bytecode hex: {e}"))?;
@@ -992,22 +992,13 @@ const REGISTRY_KEY: &str = "evm:registry";
 
 pub fn set_registry(address: String) -> Result<(), String> {
     parse_address(&address)?;
-    store::meta_set_json(REGISTRY_KEY, &address);
+    kv::set_json(REGISTRY_KEY, &address);
     Ok(())
 }
 
 pub fn get_registry() -> Option<String> {
-    store::meta_get_json(REGISTRY_KEY)
+    kv::get_json(REGISTRY_KEY)
 }
-
-/// Suffix that namespaces a served-site record away from the same repo's
-/// deploy-artifact record. The registry stores one slot per key string, and
-/// this canister has two writers with incompatible bundleHash semantics
-/// (decoded contract bytecode vs. served site bytes), so a repo that both
-/// deploys a contract and serves a site would otherwise have one record
-/// silently clobber the other on the next push. See docs/ATTESTATION.md,
-/// "The two record types".
-const SITE_KEY_SUFFIX: &str = "#site";
 
 /// ABI-encode set(string recordKey, bytes20 commit, bytes32 bundleHash):
 /// selector, then three head words (string offset, bytes20 right-padded,
@@ -1029,66 +1020,28 @@ fn abi_encode_set(record_key: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec
     out
 }
 
-/// Publish a repo's current provenance to the registry: its deploy-branch tip
-/// commit and the sha256 of the artifact at its EVM deploy config's
-/// source_path. Returns the write transaction's outcome.
-pub async fn registry_publish(repo: &str) -> Result<TxOutcome, String> {
-    let branch = store::head_target(repo).ok_or(format!("no such repo: {repo}"))?;
-    let tip = store::get_ref(repo, &branch).ok_or("deploy branch has no commits")?;
-    registry_publish_commit(repo, &tip).await
-}
-
-/// Publish a specific commit's provenance: that commit and the sha256 of the
-/// artifact in *its* tree. The deploy queue's auto-publish passes the commit
-/// it just deployed rather than the mutable tip, so a push landing mid-deploy
-/// cannot make the registry attest a commit whose deploy has not yet run.
-pub async fn registry_publish_commit(
-    repo: &str,
-    commit_oid: &store::Oid,
+/// Publish an already-resolved provenance record to the registry.
+///
+/// This is the whole registry-write surface, and it deliberately knows nothing
+/// about repos, commits-as-git-objects, trees, or site config: the caller
+/// (`crate::provenance`) resolves those and hands down three values. That
+/// direction of dependency is what lets the signing half of this canister
+/// become its own canister without dragging the git object store with it --
+/// see docs/CANISTER_SPLIT.md section 4, where this function's signature is
+/// literally the planned inter-canister message.
+///
+/// `record_key` is namespaced by the caller (`<repo>` for a deploy artifact,
+/// `<repo>#site` for a served site); `commit` is the first 20 bytes of the git
+/// oid; `bundle` is whatever sha256 the record type calls for.
+pub async fn registry_publish_record(
+    record_key: &str,
+    commit: &[u8; 20],
+    bundle: &[u8; 32],
 ) -> Result<TxOutcome, String> {
     let cfg = require_config()?;
     let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
     let to = parse_address(&registry)?;
-
-    let dcfg = crate::deploy::get_evm_config(repo)
-        .ok_or("repo has no EVM deploy config (nothing to hash)")?;
-    // Hash the decoded bytecode, not the hex text, so the registry entry
-    // equals the bytecode_sha256 already in evm_deploy_history.
-    let hex_text = crate::deploy::evm_artifact_hex(commit_oid, &dcfg.source_path)?;
-    let raw = decode_bytecode_hex(&hex_text)?;
-    let bundle: [u8; 32] = sha2::Sha256::digest(&raw).into();
-
-    let commit: [u8; 20] = *commit_oid
-        .as_slice()
-        .first_chunk::<20>()
-        .ok_or("bad oid length")?;
-    let data = abi_encode_set(repo, &commit, &bundle);
-    send_tx(&cfg, Some(to), 0, data, 150_000).await
-}
-
-/// Publish a *site* repo's provenance: its deploy-branch tip commit and the
-/// sha256 of the served entrypoint blob (site root + index.html fallback --
-/// byte-identical to what `/site/<repo>/` returns). Unlike registry_publish,
-/// this needs no EVM deploy config: the artifact is a frontend file, hashed as
-/// raw bytes, matching how the F2 verifier hashes a served non-hex artifact.
-///
-/// Written under `<repo>#site`, not the bare repo name, so it cannot clobber
-/// (or be clobbered by) the deploy-artifact record that
-/// `registry_publish_commit` writes for the same repo.
-pub async fn registry_publish_site(repo: &str) -> Result<TxOutcome, String> {
-    let cfg = require_config()?;
-    let registry = get_registry().ok_or("no registry address; call evm_set_registry first")?;
-    let to = parse_address(&registry)?;
-
-    let (tip, _served, body) = crate::site::resolve_entry(repo, "")
-        .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html)")?;
-    let bundle: [u8; 32] = sha2::Sha256::digest(&body).into();
-
-    let commit: [u8; 20] = *tip
-        .as_slice()
-        .first_chunk::<20>()
-        .ok_or("bad oid length")?;
-    let data = abi_encode_set(&format!("{repo}{SITE_KEY_SUFFIX}"), &commit, &bundle);
+    let data = abi_encode_set(record_key, commit, bundle);
     send_tx(&cfg, Some(to), 0, data, 150_000).await
 }
 

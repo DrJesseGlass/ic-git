@@ -24,8 +24,8 @@
 //!   pattern is `getSlot` (with its consensus rounding) then `getBlock` for
 //!   that slot's blockhash, which is what `recent_blockhash` does.
 
+use crate::kv;
 use crate::rpc_common::{all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, SIGN_CYCLES};
-use crate::store;
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -220,7 +220,7 @@ fn key_id(cfg: &SolConfig) -> SchnorrKeyId {
 /// test_key_1 -> key_1 cannot serve the stale key. Mirrors evm.rs.
 async fn public_key(cfg: &SolConfig) -> Result<[u8; 32], String> {
     const CACHE_KEY: &str = "sol:pubkey";
-    if let Some((name, pk)) = store::meta_get_json::<(String, Vec<u8>)>(CACHE_KEY) {
+    if let Some((name, pk)) = kv::get_json::<(String, Vec<u8>)>(CACHE_KEY) {
         if name == cfg.key_name {
             return pk
                 .try_into()
@@ -237,7 +237,7 @@ async fn public_key(cfg: &SolConfig) -> Result<[u8; 32], String> {
         },),
     )
     .await?;
-    store::meta_set_json(CACHE_KEY, &(cfg.key_name.clone(), reply.public_key.clone()));
+    kv::set_json(CACHE_KEY, &(cfg.key_name.clone(), reply.public_key.clone()));
     reply
         .public_key
         .try_into()
@@ -532,12 +532,12 @@ pub fn set_config(
         cluster,
         rpc_urls,
     };
-    store::meta_set_json(CONFIG_KEY, &cfg);
+    kv::set_json(CONFIG_KEY, &cfg);
     Ok(())
 }
 
 pub fn get_config() -> Option<SolConfig> {
-    store::meta_get_json(CONFIG_KEY)
+    kv::get_json(CONFIG_KEY)
 }
 
 fn require_config() -> Result<SolConfig, String> {
