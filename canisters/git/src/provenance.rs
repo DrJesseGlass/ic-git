@@ -101,7 +101,9 @@ fn site_record(repo: &str) -> Result<Record, String> {
             "{served}: {why}. This record attests only the entrypoint, so a \
              referenced file is covered by nothing and a verifier would report \
              verified while it went unchecked. Inline it, or add \
-             integrity=\"sha384-...\" so the browser enforces it."
+             integrity=\"sha384-...\" so the browser enforces it -- bundlers \
+             do not emit SRI by default, but their plugins do \
+             (vite-plugin-sri, webpack-subresource-integrity, rollup-plugin-sri)."
         ));
     }
     Ok(Record {

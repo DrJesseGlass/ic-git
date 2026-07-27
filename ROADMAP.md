@@ -222,9 +222,10 @@ what this can and cannot become.
 
 ### R5-alt -- a circuit backend, and why it may be the better next rung
 
-PROPOSED, not started. Raised 2026-07-26 from ic-vote's side; the argument is
-in `ic-vote/ZK.md` and is summarized here because the decision belongs to this
-ladder.
+PROPOSED, not started. Raised 2026-07-26 from ic-vote's side -- ic-vote is a
+SEPARATE repository, not a path in this one; nothing below exists in an
+ic-git-only clone. The argument is in ic-vote's `ZK.md` and is summarized here
+because the decision belongs to this ladder.
 
 R5 grows the language toward Rust. The rung below it changes the *backend*
 instead of the frontend: keep the language small, emit an **R1CS constraint
@@ -272,14 +273,23 @@ and under-constrained circuits accept proofs of false statements while looking
 perfectly fine. Circom and Noir have absorbed years of adversarial attention
 and this would not have.
 
-The mitigation is specified in `docs/CIRCUIT_TESTING.md`, which also corrects
-the sketch that first appeared here. Differential testing against Circom is
-one of three axes and it is **not** the one that covers under-constraining --
-an under-constrained circuit still produces honest outputs on honest inputs,
-so two compilers can be broken in different ways and agree on every test.
-Under-constraining needs a determinism analysis instead, and that tool is
-compiler-independent: `tools/r1cs-check` consumes an R1CS from anywhere and is
-already built and self-testing, before any of R5-alt exists.
+The mitigation is specified in ic-vote's `docs/CIRCUIT_TESTING.md`, which also
+corrects the sketch that first appeared here. Differential testing against
+Circom is one of three axes and it is **not** the one that covers
+under-constraining -- an under-constrained circuit still produces honest
+outputs on honest inputs, so two compilers can be broken in different ways and
+agree on every test. Under-constraining needs a determinism analysis instead,
+and that tool is compiler-independent: ic-vote's `tools/r1cs-check` consumes
+an R1CS from anywhere and is already built and self-testing, before any of
+R5-alt exists.
+
+The harness and that tool live in **ic-vote**, not here, and deliberately.
+Neither has any ic-git dependency -- the screen consumes an R1CS whoever
+emitted it -- and the one step that can be taken today (run it against Circom's
+output for the target circuit) needs a circuit, which ic-vote has and this repo
+does not. What belongs on this ladder is the decision above, not the tooling.
+If R5-alt is ever taken off the shelf, the harness comes back into scope from
+there.
 
 Two scope items that fall out of the testing design and belong in any R5-alt
 estimate: the backend needs a **witness generator** as well as an R1CS

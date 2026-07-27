@@ -53,77 +53,108 @@ fn find_from(hay: &str, needle: &str, from: usize) -> Option<usize> {
     hay.get(from..).and_then(|s| s.find(needle)).map(|p| p + from)
 }
 
-/// End of a tag's attribute region: the `>` that closes it, skipping any `>`
-/// inside a quoted attribute value. `None` if the tag never closes.
-fn tag_end(hay: &str, from: usize) -> Option<usize> {
+/// One tag's attributes, tokenized the way the browser's tokenizer does it,
+/// because every divergence from that tokenizer fails open: a new attribute
+/// may begin after whitespace, a `/`, or a closing quote (so `<script/src=a>`
+/// and `<script data-x="y"src=a>` both carry `src`); quotes delimit a value
+/// only immediately after `=` and are literal bytes anywhere else (so
+/// `alt=it's` opens nothing); an unquoted value ends at whitespace or `>`.
+/// Attribute lookups take the FIRST occurrence of a name, which is also the
+/// one the browser keeps. Returns the attributes and the offset of the
+/// closing `>`, or `None` if the tag never closes.
+fn parse_tag(hay: &str, from: usize) -> Option<(Vec<(&str, &str)>, usize)> {
     let b = hay.as_bytes();
-    let mut quote: Option<u8> = None;
-    for (i, &c) in b.iter().enumerate().skip(from) {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None => match c {
-                b'"' | b'\'' => quote = Some(c),
-                b'>' => return Some(i),
-                _ => {}
-            },
+    let mut attrs = Vec::new();
+    let mut i = from;
+    loop {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'/') {
+            i += 1;
         }
-    }
-    None
-}
-
-/// Start offset of attribute `name` in an attribute region: the name must sit
-/// on a word boundary and be followed by `=`. Rules out `data-integrity=` and a
-/// bare `integrity` with no value, both of which a substring test would accept.
-fn attr_at(region: &str, name: &str) -> Option<usize> {
-    let b = region.as_bytes();
-    let mut i = 0;
-    while let Some(pos) = find_from(region, name, i) {
-        i = pos + 1;
-        if pos > 0 && !b[pos - 1].is_ascii_whitespace() {
-            continue;
+        if i >= b.len() {
+            return None;
         }
-        let mut j = pos + name.len();
+        if b[i] == b'>' {
+            return Some((attrs, i));
+        }
+        let name_start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b'/' | b'=' | b'>') {
+            i += 1;
+        }
+        let name = &hay[name_start..i];
+        let mut j = i;
         while j < b.len() && b[j].is_ascii_whitespace() {
             j += 1;
         }
         if j < b.len() && b[j] == b'=' {
-            return Some(j + 1);
+            j += 1;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j >= b.len() {
+                return None;
+            }
+            let value = match b[j] {
+                q @ (b'"' | b'\'') => {
+                    let vs = j + 1;
+                    let ve = find_from(hay, if q == b'"' { "\"" } else { "'" }, vs)?;
+                    j = ve + 1;
+                    &hay[vs..ve]
+                }
+                _ => {
+                    let vs = j;
+                    while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'>' {
+                        j += 1;
+                    }
+                    &hay[vs..j]
+                }
+            };
+            attrs.push((name, value));
+            i = j;
+        } else {
+            attrs.push((name, ""));
         }
     }
-    None
 }
 
-fn has_attr(region: &str, name: &str) -> bool {
-    attr_at(region, name).is_some()
+/// First (the browser's winner) value of attribute `name`.
+fn attr<'a>(attrs: &[(&'a str, &'a str)], name: &str) -> Option<&'a str> {
+    attrs.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
 }
 
-/// Value of attribute `name`, quoted or bare.
-fn attr_value<'a>(region: &'a str, name: &str) -> Option<&'a str> {
-    let b = region.as_bytes();
-    let mut j = attr_at(region, name)?;
-    while j < b.len() && b[j].is_ascii_whitespace() {
-        j += 1;
+/// True when an `integrity` value holds at least one token the SRI spec
+/// recognizes: `sha256-`/`sha384-`/`sha512-` plus base64, options after `?`.
+/// Presence of the attribute proves nothing -- the spec makes the browser
+/// IGNORE metadata that parses to an empty set, so `integrity=""` or a
+/// malformed value loads the resource with no check at all. A token that
+/// parses but carries a wrong digest fails closed (the browser blocks the
+/// load), so charset-level validity is the right bar here.
+fn integrity_enforceable(value: &str) -> bool {
+    value.split_ascii_whitespace().any(|tok| {
+        ["sha256-", "sha384-", "sha512-"]
+            .iter()
+            .find_map(|p| tok.strip_prefix(p))
+            .and_then(|rest| rest.split('?').next())
+            .is_some_and(|h| {
+                !h.is_empty()
+                    && h.bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
+            })
+    })
+}
+
+/// Guard for values compared against keywords: the browser decodes character
+/// references in attribute values and this scanner does not, so to the
+/// browser `rel="style&#115;heet"` IS a stylesheet. A `&` in a value a
+/// decision keys on is refused rather than compared wrong; no keyword value
+/// (`rel`, `type`, `http-equiv`) legitimately contains one.
+fn char_ref_free<'a>(tag: &str, name: &str, value: &'a str) -> Result<&'a str, String> {
+    if value.contains('&') {
+        Err(format!(
+            "<{tag} {name}=...> value holds a character reference this scanner does not decode"
+        ))
+    } else {
+        Ok(value)
     }
-    if j >= b.len() {
-        return None;
-    }
-    let (quote, start) = match b[j] {
-        q @ (b'"' | b'\'') => (Some(q), j + 1),
-        _ => (None, j),
-    };
-    let mut k = start;
-    while k < b.len() {
-        let stop = match quote {
-            Some(q) => b[k] == q,
-            None => b[k].is_ascii_whitespace(),
-        };
-        if stop {
-            break;
-        }
-        k += 1;
-    }
-    region.get(start..k)
 }
 
 /// Why a served entrypoint's own bytes are not enough to verify the page, or
@@ -144,24 +175,50 @@ fn attr_value<'a>(region: &'a str, name: &str) -> Option<&'a str> {
 /// pair is complete where either alone is not.
 ///
 /// Deliberately conservative, and biased toward refusing:
-/// - `<script src>` and `<link rel=stylesheet|modulepreload>` need `integrity`.
-/// - `<iframe>`, `<object>`, `<embed>` have no SRI mechanism at all, so they can
-///   never be made verifiable and are refused outright.
-/// - A tag that never closes, or a body that is not UTF-8, is refused rather
-///   than skipped.
+/// - `<script src>` and `<link rel=stylesheet|modulepreload>` need an
+///   `integrity` value the SRI spec actually parses -- presence alone leaves
+///   the browser loading the file unchecked.
+/// - `<iframe>`, `<object>`, `<embed>` have no SRI mechanism for anything they
+///   load (src, data, srcdoc), so they can never be made verifiable and are
+///   refused outright, whatever their attributes.
+/// - `<base href>` and `<meta http-equiv=refresh>` relocate the page or its
+///   relative URLs to bytes no record attests, and are refused for the same
+///   reason.
+/// - SVG-form `<script href>` / `xlink:href` executes with no SRI coverage;
+///   an inline `<script type=module>` imports files no integrity can pin.
+/// - A tag that never closes, a keyword value hiding behind a character
+///   reference, or a body that is not UTF-8, is refused rather than skipped.
 /// A false refusal costs the operator one inline-or-add-integrity edit; a false
-/// accept costs a user their funds. That asymmetry is the whole design, and it
-/// is why no attempt is made to track HTML comments: a commented-out
-/// `<script src=...>` is refused, which is the safe direction to be wrong in.
+/// accept costs a user their funds. That asymmetry is the whole design.
+/// Comments get no full tracking: `<!` constructs are skipped only to their
+/// first `>` (never past anything the browser would execute), so trailing
+/// comment text can be rescanned as markup and over-refuse -- the safe
+/// direction to be wrong in.
 ///
-/// NOT covered, stated rather than implied: images, fonts, and media. SRI has
-/// no mechanism for them, so refusing them would reject every real site. They
-/// cannot execute; a swapped image can mislead the eye but not the machine.
+/// NOT covered, stated rather than implied:
+/// - Images, fonts, and media. SRI has no mechanism for them, so refusing them
+///   would reject every real site. They cannot execute; a swapped image can
+///   mislead the eye but not the machine.
+/// - What attested or SRI-pinned JavaScript does at runtime. A markup scan
+///   cannot follow `fetch()`, dynamic `import()`, or the import chain of an
+///   integrity-pinned external module (import specifiers take no integrity);
+///   those loads are issued by code the record or SRI already covers, and
+///   auditing that code is the operator's job, not this scanner's.
 pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String> {
-    if !matches!(
-        served_path.rsplit('.').next().unwrap_or(""),
-        "html" | "htm"
-    ) {
+    // Gate on the entrypoint's file NAME, case-insensitively -- `index.HTML`
+    // renders exactly like `index.html`. `set_site` can also point the root
+    // at a blob directly; when that name has no extension at all there is no
+    // evidence it is not a page, so scan rather than skip. Known non-markup
+    // extensions stay exempt: a JSON or hex artifact holding "<script" as
+    // data is verifiable as-is (see tests).
+    let name = served_path.rsplit('/').next().unwrap_or(served_path);
+    let markup = match name.rsplit_once('.') {
+        Some((_, ext)) => ["html", "htm", "xhtml", "svg"]
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e)),
+        None => true,
+    };
+    if !markup {
         return None;
     }
     let Ok(text) = core::str::from_utf8(body) else {
@@ -172,44 +229,116 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
     let b = hay.as_bytes();
     let mut i = 0;
     while let Some(lt) = find_from(&hay, "<", i) {
+        let Some(&c) = b.get(lt + 1) else { break };
+        if !c.is_ascii_alphabetic() {
+            // `</`, `<!`, `<?`: closing tag, comment, doctype, or bogus
+            // comment. Nothing inside one executes before its first `>` (a
+            // real comment runs at least to the `>` of `-->`), so skipping
+            // there never hides executable markup; what follows may be
+            // rescanned and over-refuse. Any other byte is a stray `<`.
+            i = if matches!(c, b'/' | b'!' | b'?') {
+                match find_from(&hay, ">", lt + 1) {
+                    Some(gt) => gt + 1,
+                    None => break,
+                }
+            } else {
+                lt + 1
+            };
+            continue;
+        }
         let name_start = lt + 1;
         let mut name_end = name_start;
         while name_end < b.len() && b[name_end].is_ascii_alphanumeric() {
             name_end += 1;
         }
-        i = name_end.max(lt + 1);
         let tag = &hay[name_start..name_end];
-        if !matches!(tag, "script" | "link" | "iframe" | "object" | "embed") {
-            continue;
-        }
-        let Some(end) = tag_end(&hay, name_end) else {
+        // Every element is tokenized to its real end, quoted values and all,
+        // so an unchecked tag's attribute text is never rescanned as markup:
+        // `<div title="<script src=x>">` is inert to the browser and must not
+        // block attestation.
+        let Some((attrs, end)) = parse_tag(&hay, name_end) else {
             return Some(format!("<{tag}> tag is never closed"));
         };
-        let region = &hay[name_end..end];
         i = end + 1;
+        let get = |n: &str| attr(&attrs, n);
         match tag {
-            // No SRI mechanism exists for these; integrity= on them is ignored
-            // by the browser, so accepting one would be accepting a promise
-            // nothing enforces.
+            // No SRI mechanism exists for anything these load -- src, data,
+            // or a whole srcdoc document -- so integrity= on them is a
+            // promise nothing enforces. Refused outright.
             "iframe" | "object" | "embed" => {
-                if has_attr(region, "src") || has_attr(region, "data") {
-                    return Some(format!(
-                        "<{tag}> loads a subresource SRI cannot cover; inline the content instead"
-                    ));
+                return Some(format!(
+                    "<{tag}> loads content SRI cannot cover; inline the content instead"
+                ));
+            }
+            // Re-roots every relative URL on the page, so each subresource
+            // resolves to bytes no record attests.
+            "base" => {
+                if get("href").is_some() {
+                    return Some(
+                        "<base href=...> relocates every relative URL on the page".to_string(),
+                    );
+                }
+            }
+            "meta" => {
+                if let Some(v) = get("http-equiv") {
+                    let v = match char_ref_free(tag, "http-equiv", v) {
+                        Ok(v) => v,
+                        Err(why) => return Some(why),
+                    };
+                    if v.trim() == "refresh" {
+                        return Some(
+                            "<meta http-equiv=refresh> navigates away from the attested page"
+                                .to_string(),
+                        );
+                    }
                 }
             }
             "script" => {
-                if has_attr(region, "src") && !has_attr(region, "integrity") {
-                    return Some("<script src=...> has no integrity=".to_string());
+                // The SVG form loads and executes via href/xlink:href, which
+                // SRI does not cover at all.
+                if get("href").is_some() || get("xlink:href").is_some() {
+                    return Some(
+                        "<script href=...> (SVG form) loads a subresource SRI cannot cover"
+                            .to_string(),
+                    );
+                }
+                if get("src").is_some() {
+                    if !get("integrity").is_some_and(integrity_enforceable) {
+                        return Some(
+                            "<script src=...> has no enforceable integrity= \
+                             (missing, empty, or not sha256/384/512-base64)"
+                                .to_string(),
+                        );
+                    }
+                } else if let Some(t) = get("type") {
+                    let t = match char_ref_free(tag, "type", t) {
+                        Ok(t) => t,
+                        Err(why) => return Some(why),
+                    };
+                    // An inline module's import statements fetch files SRI
+                    // cannot pin, from inside the attested bytes.
+                    if t.trim() == "module" {
+                        return Some(
+                            "inline <script type=module> imports files SRI cannot cover; \
+                             use a classic inline script or src= with integrity="
+                                .to_string(),
+                        );
+                    }
                 }
             }
             "link" => {
-                let rel = attr_value(region, "rel").unwrap_or("");
+                let rel = match char_ref_free(tag, "rel", get("rel").unwrap_or("")) {
+                    Ok(rel) => rel,
+                    Err(why) => return Some(why),
+                };
                 let enforced = rel
                     .split_ascii_whitespace()
                     .any(|r| matches!(r, "stylesheet" | "modulepreload"));
-                if enforced && has_attr(region, "href") && !has_attr(region, "integrity") {
-                    return Some(format!("<link rel=\"{rel}\"> has no integrity="));
+                if enforced
+                    && get("href").is_some()
+                    && !get("integrity").is_some_and(integrity_enforceable)
+                {
+                    return Some(format!("<link rel=\"{rel}\"> has no enforceable integrity="));
                 }
             }
             _ => {}
@@ -219,7 +348,13 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
 }
 
 fn content_type(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("") {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -386,12 +521,27 @@ mod tests {
             // order, and a multi-token rel all still parse.
             "<SCRIPT SRC=app.js INTEGRITY=sha384-x></SCRIPT>",
             "<link integrity='sha384-x' rel='preload stylesheet' href='a.css'>",
+            // An SRI-pinned external module is enforced at the top; its import
+            // chain is documented as out of the scanner's reach.
+            "<script type=\"module\" src=\"m.js\" integrity=\"sha384-abc\"></script>",
             // rel values SRI does not enforce are not subresource execution
             // surfaces, so they need no integrity.
             "<link rel=\"icon\" href=\"favicon.ico\">",
             "<link rel=\"canonical\" href=\"https://example.com/\">",
             // Images and fonts are documented as out of scope.
             "<img src=\"logo.png\"><p>text</p>",
+            // Markup sitting inside an unchecked tag's quoted value is inert
+            // to the browser and must not block attestation.
+            "<div title=\"<script src=x>\">inert</div>",
+            // An apostrophe in an unquoted value is a literal byte, not an
+            // open quote; the tags after it must still be seen (and this page
+            // has nothing to refuse).
+            "<img alt=it's src=logo.png><p>fine</p>",
+            // meta/base are only refused in their page-relocating forms.
+            "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"w\">",
+            "<base target=\"_blank\">",
+            // Comment content the browser never executes is not refused.
+            "<!-- <script src=x> --><p>ok</p>",
         ] {
             assert_eq!(
                 unverifiable_subresource("index.html", ok.as_bytes()),
@@ -411,17 +561,45 @@ mod tests {
             "<script src=\"https://cdn.example.com/a.js\"></script>",
             "<link rel=\"stylesheet\" href=\"app.css\">",
             "<link rel=\"modulepreload\" href=\"m.js\">",
+            // The browser starts a new attribute after `/` and after a
+            // closing quote -- both of these DO carry src.
+            "<script/src=app.js></script>",
+            "<script data-x=\"y\"src=app.js></script>",
+            // integrity= inside another attribute's value is not an attribute.
+            "<script data-x=\"y integrity=sha384-q\" src=app.js></script>",
+            // An unquoted apostrophe must not swallow the tags after it.
+            "<img alt=it's><script src=app.js></script>",
             // SRI does not apply to these at all, so integrity= on them is a
-            // promise nothing enforces -- refused even when it is present.
+            // promise nothing enforces -- refused even when it is present,
+            // and srcdoc (a whole inline document) is refused with them.
             "<iframe src=\"child.html\"></iframe>",
             "<object data=\"x.swf\"></object>",
             "<embed src=\"x.svg\">",
             "<iframe src=\"child.html\" integrity=\"sha384-x\"></iframe>",
+            "<iframe srcdoc=\"<p>hi</p>\"></iframe>",
+            // Page-relocating tags: same reason iframe is refused.
+            "<base href=\"https://evil.example/\">",
+            "<meta http-equiv=\"refresh\" content=\"0;url=https://x/\">",
+            // The SVG script form has no SRI coverage at all.
+            "<svg><script href=\"x.js\"></script></svg>",
+            "<svg><script xlink:href=\"x.js\"/></svg>",
+            // An inline module imports files nothing can pin.
+            "<script type=\"module\">import './app.js'</script>",
             // A substring test would have accepted both of these.
             "<script src=\"app.js\" data-integrity=\"sha384-x\"></script>",
             "<script src=\"app.js\" integrity></script>",
+            // Present but unenforceable: the SRI spec makes the browser load
+            // these with no check at all.
+            "<script src=\"app.js\" integrity=\"\"></script>",
+            "<script src=\"app.js\" integrity=\"sha384-\"></script>",
+            "<script src=\"app.js\" integrity=\"lol\"></script>",
+            "<link rel=\"stylesheet\" href=\"a.css\" integrity=\"md5-x\">",
+            // The browser decodes character references in values; we do not,
+            // so a keyword hiding behind one is refused, not compared wrong.
+            "<link rel=\"style&#115;heet\" href=\"a.css\">",
             // Unparseable beats optimistic: never closed, so never checked.
             "<script src=\"app.js\"",
+            "<div class=\"x",
         ] {
             assert!(
                 unverifiable_subresource("index.html", bad.as_bytes()).is_some(),
@@ -432,11 +610,14 @@ mod tests {
         assert!(unverifiable_subresource("index.html", &[0xff, 0xfe]).is_some());
     }
 
-    /// The scan is HTML-only. A non-HTML entrypoint names no subresources, and
-    /// a `<script` byte sequence inside one is data, not markup -- gating on it
-    /// would refuse to attest artifacts that are perfectly verifiable.
+    /// The scan gates on the served file's NAME: markup extensions in any
+    /// case, and extensionless blobs (set_site can point the root straight at
+    /// one, and nothing proves those are not pages). A known non-markup
+    /// extension is exempt -- a `<script` byte sequence inside JSON or hex is
+    /// data, not markup, and gating on it would refuse artifacts that are
+    /// perfectly verifiable.
     #[test]
-    fn scan_applies_only_to_html_entrypoints() {
+    fn scan_gates_on_served_name_not_exact_extension() {
         let looks_like_markup = b"{\"a\":\"<script src=x>\"}";
         assert_eq!(
             unverifiable_subresource("data.json", looks_like_markup),
@@ -444,6 +625,14 @@ mod tests {
         );
         assert_eq!(unverifiable_subresource("contract.hex", b"0x6001"), None);
         assert!(unverifiable_subresource("index.htm", looks_like_markup).is_some());
+        // Case must not open a hole: app.HTML renders exactly like app.html.
+        assert!(unverifiable_subresource("app.HTML", looks_like_markup).is_some());
+        // Extensionless entrypoint: no evidence it is not a page, so scanned.
+        assert!(unverifiable_subresource("entry", looks_like_markup).is_some());
+        // The dot in a directory name is not an extension.
+        assert!(unverifiable_subresource("v1.2/entry", looks_like_markup).is_some());
+        // SVG documents execute scripts too.
+        assert!(unverifiable_subresource("logo.svg", b"<script href=x></script>").is_some());
     }
 
     /// resolve_entry (what the registry publisher attests) returns the same
