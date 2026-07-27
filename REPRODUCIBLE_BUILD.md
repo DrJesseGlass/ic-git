@@ -232,6 +232,18 @@ set converts it from an assumption into a continuously tested one.
 - **R2:** the first app *built on* ic-git, on-chain, in the project's own DSL
   (`compile_lang` -> IC deploy -> attest) -- the same guarantee the frontends
   already enjoy, now for a real build.
+
+  **Candidate customer, proposed 2026-07-26: ic-vote's zero-knowledge
+  circuit.** A ZK voting system's membership circuit is compiled by a
+  toolchain nobody attests, and a backdoored circuit compiler emits
+  constraints that do not match the reviewed source while every proof
+  downstream still verifies -- the same shape as the malicious ballot-marking
+  device and as Thompson's compiler above. Compiling that circuit on chain is
+  therefore load-bearing rather than demonstrative, which is what makes it a
+  better R2 than a generic application. It needs a constraint-system backend
+  for the existing compiler; see ROADMAP.md "R5-alt" and `ic-vote/ZK.md`.
+  Note that it delivers R2 only -- a circuit compiler cannot compile itself,
+  so R3 below still depends on the wasm-emitting language.
 - **R3:** ic-git itself, self-hosted -- building the canister on-chain from
   attested source. This shrinks the toolchain-trust residue to the on-chain
   compiler and makes each release a small reviewable diff; per the section
