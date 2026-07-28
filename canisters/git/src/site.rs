@@ -62,6 +62,13 @@ fn find_from(hay: &str, needle: &str, from: usize) -> Option<usize> {
 /// Attribute lookups take the FIRST occurrence of a name, which is also the
 /// one the browser keeps. Returns the attributes and the offset of the
 /// closing `>`, or `None` if the tag never closes.
+///
+/// "Whitespace" throughout is `u8::is_ascii_whitespace`, which is exactly the
+/// HTML tokenizer's set -- TAB, LF, FF, CR, SPACE, and NOT vertical tab
+/// (0x0B). The match matters: a VT inside an unquoted value stays inside the
+/// value for the browser, so `src=x\x0Bintegrity=y` carries no integrity
+/// attribute and must not be read as one (there is a test pinning this, and
+/// the verify.mjs port's isWs must keep the same five characters).
 fn parse_tag(hay: &str, from: usize) -> Option<(Vec<(&str, &str)>, usize)> {
     let b = hay.as_bytes();
     let mut attrs = Vec::new();
@@ -125,9 +132,17 @@ fn attr<'a>(attrs: &[(&'a str, &'a str)], name: &str) -> Option<&'a str> {
 /// recognizes: `sha256-`/`sha384-`/`sha512-` plus base64, options after `?`.
 /// Presence of the attribute proves nothing -- the spec makes the browser
 /// IGNORE metadata that parses to an empty set, so `integrity=""` or a
-/// malformed value loads the resource with no check at all. A token that
-/// parses but carries a wrong digest fails closed (the browser blocks the
-/// load), so charset-level validity is the right bar here.
+/// malformed value loads the resource with no check at all.
+///
+/// A token counts only if the browser's grammar would KEEP it. The CSP
+/// base64-value grammar is `1*(ALPHA/DIGIT/"+"/"/"/"-"/"_") *2("=")` --
+/// padding is trailing only, two at most, never the whole value -- so
+/// `sha384-====` fails it, the browser discards the metadata, and the
+/// resource loads unchecked. This check is a strict SUBSET of that grammar
+/// (the base64url chars `-`/`_` are refused too): a token we keep and the
+/// browser discards is a false accept, while a token we discard and the
+/// browser keeps merely fails closed at digest time -- the browser blocks
+/// the load -- so tightness costs nothing.
 fn integrity_enforceable(value: &str) -> bool {
     value.split_ascii_whitespace().any(|tok| {
         ["sha256-", "sha384-", "sha512-"]
@@ -135,9 +150,12 @@ fn integrity_enforceable(value: &str) -> bool {
             .find_map(|p| tok.strip_prefix(p))
             .and_then(|rest| rest.split('?').next())
             .is_some_and(|h| {
-                !h.is_empty()
-                    && h.bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
+                let body = h.trim_end_matches('=');
+                !body.is_empty()
+                    && h.len() - body.len() <= 2
+                    && body
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/'))
             })
     })
 }
@@ -517,6 +535,8 @@ mod tests {
             // Inline script and style are inside the attested bytes already.
             "<html><script>go()</script><style>b{}</style></html>",
             "<script src=\"app.js\" integrity=\"sha384-x\"></script>",
+            // Trailing base64 padding is part of the grammar the browser keeps.
+            "<script src=\"app.js\" integrity=\"sha384-abc==\"></script>",
             // Bare and single-quoted attributes, uppercase tags, attribute
             // order, and a multi-token rel all still parse.
             "<SCRIPT SRC=app.js INTEGRITY=sha384-x></SCRIPT>",
@@ -594,6 +614,15 @@ mod tests {
             "<script src=\"app.js\" integrity=\"sha384-\"></script>",
             "<script src=\"app.js\" integrity=\"lol\"></script>",
             "<link rel=\"stylesheet\" href=\"a.css\" integrity=\"md5-x\">",
+            // Grammar-invalid base64: padding must be trailing, two at most,
+            // never the whole value -- the browser discards each of these.
+            "<script src=\"app.js\" integrity=\"sha384-====\"></script>",
+            "<script src=\"app.js\" integrity=\"sha384-ab=c\"></script>",
+            "<script src=\"app.js\" integrity=\"sha384-abc===\"></script>",
+            // Vertical tab is NOT whitespace to the HTML tokenizer: the VT
+            // stays inside the unquoted src value, so this tag carries no
+            // integrity attribute at all.
+            "<script src=x\u{0B}integrity=sha384-x></script>",
             // The browser decodes character references in values; we do not,
             // so a keyword hiding behind one is refused, not compared wrong.
             "<link rel=\"style&#115;heet\" href=\"a.css\">",

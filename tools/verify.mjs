@@ -98,11 +98,15 @@ const isWs = (c) => " \t\n\r\f".includes(c); // Rust is_ascii_whitespace
 // True when an integrity value holds at least one token the SRI spec
 // recognizes (sha256/384/512 + base64, options after `?`). The spec makes the
 // browser IGNORE metadata that parses to an empty set -- the resource then
-// loads with no check at all -- so presence alone proves nothing.
+// loads with no check at all -- so presence alone proves nothing, and a token
+// counts only if the browser's grammar would KEEP it: padding is trailing
+// only, two at most, never the whole value (`sha384-====` is discarded). Like
+// the canister, this is a strict subset of the CSP grammar -- a token we
+// discard and the browser keeps merely fails closed at digest time.
 const integrityEnforceable = (value) =>
   value.split(/[ \t\n\r\f]+/).some((tok) => {
     const m = /^sha(?:256|384|512)-([^?]*)/.exec(tok);
-    return m !== null && m[1].length > 0 && /^[a-zA-Z0-9+/=]+$/.test(m[1]);
+    return m !== null && /^[a-zA-Z0-9+/]+={0,2}$/.test(m[1]);
   });
 
 function unverifiableSubresource(servedPath, body) {
