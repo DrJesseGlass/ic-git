@@ -67,8 +67,25 @@ served by the least verified pipeline in the stack.
 The path here, in shippable order:
 
 - **F0 -- serve from the repo.** The canister serves a committed static
-  bundle over `http_request` with IC response certification. The serving
-  code and the source of truth are the same audited canister.
+  bundle over `http_request`: the serving code and the source of truth are
+  the same audited canister, and there is no upload step, CDN, or DNS record
+  between the commit and the reader. Responses are *not* certified today --
+  `site.rs` sets provenance headers (`X-Ic-Git-Commit`, `X-Ic-Git-Path`) and
+  no `certified_data`, and both clients fetch the raw domain, which bypasses
+  gateway verification. See F0.5.
+- **F0.5 -- certify the served response.** `set_certified_data` over the
+  served bundle plus an `IC-Certificate` header, served from the non-raw
+  domain. What this buys a stock browser is narrow but real and needs no
+  user action: a query call is answered by a *single replica* with no
+  consensus, so an uncertified response is one replica's unverified word,
+  while a certified one carries the subnet's threshold signature and the
+  gateway rejects a replica that lies. What it does *not* buy is protection
+  from a malicious gateway -- certificate verification for non-raw domains
+  happens inside the gateway itself, so a stock client trusts the gateway
+  either way (ARCHITECTURE.md, "Trust model"). That gap is F2's job, and F2
+  closes it without needing this rung: the registry comparison reaches the
+  bundle hash over an independent channel (an EVM RPC), which a hostile
+  gateway cannot forge or suppress.
 - **F1 -- attest on update.** On push, publish `(commit, sha256(bundle))` to
   the ProvenanceRegistry. The machinery exists today
   (`provenance::publish_tip`); F1 is wiring it into the deploy queue.
@@ -90,15 +107,30 @@ Against the alternatives:
   human keyholder (the credential problem returns), and users reach it
   through gateways anyway. It verifies *what* you got, not *where it came
   from*.
-- **Signed releases / SRI hashes:** verify the publisher's key, which is
-  exactly the thing that gets stolen; no source binding, no history, and SRI
-  protects sub-resources, not the document that names them.
+- **Signed releases:** verify the publisher's key, which is exactly the thing
+  that gets stolen; no source binding and no history.
+- **SRI hashes:** not an alternative but the missing half, and ic-git now
+  requires them. The registry attests exactly one blob -- the entrypoint --
+  so a referenced `app.js` is covered by nothing, and a hostile gateway can
+  pair the honest, correctly-hashing `index.html` with malicious code and
+  still pass a verifier's comparison. SRI is the reverse shape: it protects
+  sub-resources but not the document that names them. Composed, they close:
+  the registry covers the document, the browser enforces the document's
+  `integrity` declarations over everything else. `provenance::site_record`
+  therefore refuses to attest an entrypoint that references a subresource
+  without `integrity` (see `site::unverifiable_subresource`), on the same
+  principle as its `MAX_BODY` refusal -- an attestation a verifier can check
+  and still be wrong about is worse than none. Self-contained entrypoints
+  satisfy it trivially, since inlined bytes are attested bytes.
 
 ic-git's claim: source, build trigger, serving, and attestation live in one
 auditable trust domain with no standing credentials, plus a checkpoint on
 the chain the user's wallet already watches. Honest caveats: the HTTP
-gateway (`icp0.io`) remains a trusted party for users who don't verify
-certification locally, and the F2 client so far is a zero-dependency CLI
+gateway remains a trusted party for any user who does not hash the served
+bytes themselves and compare -- and note that the fix for that is the F2
+registry comparison, not F0.5 certification, which the gateway performs on
+the client's behalf and a hostile gateway therefore simply skips. The F2
+client so far is a zero-dependency CLI
 (`tools/verify.mjs`: registry entry vs served bytes vs deployed code vs an
 independent `git clone`), not yet the in-wallet verifier of section 3.
 The registry makes the frontend *checkable*; F2 makes it *checked*.

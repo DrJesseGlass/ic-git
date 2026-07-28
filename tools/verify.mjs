@@ -13,6 +13,14 @@
 //   D. (if git is installed) an independent `git clone` of the repo from
 //      the canister contains that commit, and the blob at <commit>:<path>
 //      is byte-identical to what was served.
+//   E. (site records) the served entrypoint's own markup references are
+//      enforceable -- a port of the canister's site::unverifiable_subresource.
+//      A matching hash on a page that pulls un-integrity'd code is a FAILED
+//      verification, never a passed one (docs/ATTESTATION.md, step 1): this
+//      record attests ONE blob, so a subresource without SRI is covered by
+//      nothing and a hostile gateway can swap it while A-D all pass. Checked
+//      here independently because the publish-time guard is not retroactive:
+//      records written before it shipped may cover pages that fail it.
 //
 // Zero dependencies (node >= 18: fetch + crypto). The one piece of
 // precomputation is the registry getter's 4-byte selector, because node has
@@ -77,6 +85,171 @@ const report = (ok, label, detail) => {
   if (!ok) failures++;
 };
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+
+// --- entrypoint reference scan (check E) -------------------------------------
+// Port of canisters/git/src/site.rs::unverifiable_subresource; the two must
+// track each other. Returns a reason string when the entrypoint names a
+// subresource the browser will not enforce, else null. Same bias as the
+// canister: every ambiguity refuses, because a false refusal costs one edit
+// and a false accept reports "verified" over swappable code.
+
+const isWs = (c) => " \t\n\r\f".includes(c); // Rust is_ascii_whitespace
+
+// True when an integrity value holds at least one token the SRI spec
+// recognizes (sha256/384/512 + base64, options after `?`). The spec makes the
+// browser IGNORE metadata that parses to an empty set -- the resource then
+// loads with no check at all -- so presence alone proves nothing, and a token
+// counts only if the browser's grammar would KEEP it: padding is trailing
+// only, two at most, never the whole value (`sha384-====` is discarded). Like
+// the canister, this is a strict subset of the CSP grammar -- a token we
+// discard and the browser keeps merely fails closed at digest time.
+const integrityEnforceable = (value) =>
+  value.split(/[ \t\n\r\f]+/).some((tok) => {
+    const m = /^sha(?:256|384|512)-([^?]*)/.exec(tok);
+    return m !== null && /^[a-zA-Z0-9+/]+={0,2}$/.test(m[1]);
+  });
+
+function unverifiableSubresource(servedPath, body) {
+  // Gate on the served file's NAME, case-insensitively; an extensionless
+  // blob could be a page, so it is scanned rather than skipped.
+  const name = servedPath.split("/").pop();
+  const dot = name.lastIndexOf(".");
+  const markup =
+    dot === -1 || ["html", "htm", "xhtml", "svg"].includes(name.slice(dot + 1).toLowerCase());
+  if (!markup) return null;
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+  } catch {
+    return "entrypoint is not valid UTF-8, so its references cannot be read";
+  }
+  // ASCII-only lowercasing, mirroring the canister's to_ascii_lowercase.
+  const hay = text.replace(/[A-Z]/g, (c) => c.toLowerCase());
+
+  // Tokenize one tag's attributes the way the browser does: a new attribute
+  // may begin after whitespace, `/`, or a closing quote; quotes delimit a
+  // value only immediately after `=`; an unquoted value ends at whitespace
+  // or `>`. Returns {attrs, end} or null when the tag never closes.
+  const parseTag = (from) => {
+    const attrs = [];
+    let i = from;
+    for (;;) {
+      while (i < hay.length && (isWs(hay[i]) || hay[i] === "/")) i++;
+      if (i >= hay.length) return null;
+      if (hay[i] === ">") return { attrs, end: i };
+      const nameStart = i;
+      while (i < hay.length && !isWs(hay[i]) && !"/=>".includes(hay[i])) i++;
+      const attrName = hay.slice(nameStart, i);
+      let j = i;
+      while (j < hay.length && isWs(hay[j])) j++;
+      if (j < hay.length && hay[j] === "=") {
+        j++;
+        while (j < hay.length && isWs(hay[j])) j++;
+        if (j >= hay.length) return null;
+        let value;
+        if (hay[j] === '"' || hay[j] === "'") {
+          const ve = hay.indexOf(hay[j], j + 1);
+          if (ve === -1) return null;
+          value = hay.slice(j + 1, ve);
+          j = ve + 1;
+        } else {
+          const vs = j;
+          while (j < hay.length && !isWs(hay[j]) && hay[j] !== ">") j++;
+          value = hay.slice(vs, j);
+        }
+        attrs.push([attrName, value]);
+        i = j;
+      } else {
+        attrs.push([attrName, ""]);
+      }
+    }
+  };
+
+  let i = 0;
+  for (;;) {
+    const lt = hay.indexOf("<", i);
+    if (lt === -1 || lt + 1 >= hay.length) return null;
+    const c = hay[lt + 1];
+    if (!/[a-z]/.test(c)) {
+      // Closing tag, comment, doctype, or bogus comment: nothing inside one
+      // executes before its first `>`, so skip there; a stray `<` is text.
+      if (c === "/" || c === "!" || c === "?") {
+        const gt = hay.indexOf(">", lt + 1);
+        if (gt === -1) return null;
+        i = gt + 1;
+      } else {
+        i = lt + 1;
+      }
+      continue;
+    }
+    let nameEnd = lt + 1;
+    while (nameEnd < hay.length && /[a-z0-9]/.test(hay[nameEnd])) nameEnd++;
+    const tag = hay.slice(lt + 1, nameEnd);
+    const parsed = parseTag(nameEnd);
+    if (parsed === null) return `<${tag}> tag is never closed`;
+    i = parsed.end + 1;
+    // First occurrence wins, as in the browser.
+    const get = (n) => parsed.attrs.find(([an]) => an === n)?.[1];
+    // The browser decodes character references in values; this scanner does
+    // not, so a keyword value hiding one is refused, not compared wrong.
+    const charRef = (an, v) =>
+      v.includes("&")
+        ? `<${tag} ${an}=...> value holds a character reference this scanner does not decode`
+        : null;
+    if (tag === "iframe" || tag === "object" || tag === "embed") {
+      return `<${tag}> loads content SRI cannot cover; inline the content instead`;
+    }
+    if (tag === "base" && get("href") !== undefined) {
+      return "<base href=...> relocates every relative URL on the page";
+    }
+    if (tag === "meta") {
+      const v = get("http-equiv");
+      if (v !== undefined) {
+        const bad = charRef("http-equiv", v);
+        if (bad) return bad;
+        if (v.trim() === "refresh") {
+          return "<meta http-equiv=refresh> navigates away from the attested page";
+        }
+      }
+    }
+    if (tag === "script") {
+      if (get("href") !== undefined || get("xlink:href") !== undefined) {
+        return "<script href=...> (SVG form) loads a subresource SRI cannot cover";
+      }
+      if (get("src") !== undefined) {
+        const integ = get("integrity");
+        if (integ === undefined || !integrityEnforceable(integ)) {
+          return "<script src=...> has no enforceable integrity=";
+        }
+      } else {
+        const t = get("type");
+        if (t !== undefined) {
+          const bad = charRef("type", t);
+          if (bad) return bad;
+          if (t.trim() === "module") {
+            return "inline <script type=module> imports files SRI cannot cover";
+          }
+        }
+      }
+    }
+    if (tag === "link") {
+      const rel = get("rel") ?? "";
+      const bad = charRef("rel", rel);
+      if (bad) return bad;
+      const enforced = rel
+        .split(/[ \t\n\r\f]+/)
+        .some((r) => r === "stylesheet" || r === "modulepreload");
+      const integ = get("integrity");
+      if (
+        enforced &&
+        get("href") !== undefined &&
+        (integ === undefined || !integrityEnforceable(integ))
+      ) {
+        return `<link rel="${rel}"> has no enforceable integrity=`;
+      }
+    }
+  }
+}
 
 // ABI-encode get(string repo): selector, offset word, length word, padded data.
 function encodeGet(repo) {
@@ -254,6 +427,17 @@ try {
   }
 } catch (e) {
   report(false, "D: git clone reproduces the served bytes", e.message.split("\n")[0]);
+}
+
+// E. A matching hash proves the entrypoint, not the page. Only meaningful for
+// a site record -- a deploy record's artifact is bytecode, not a page.
+if (kind === "site") {
+  const reason = unverifiableSubresource(servedPath, served);
+  report(
+    reason === null,
+    "E: entrypoint references are enforceable (self-contained or SRI-pinned)",
+    reason ?? ""
+  );
 }
 
 console.log(failures === 0 ? "\nVERIFIED" : `\nNOT VERIFIED (${failures} failing check${failures === 1 ? "" : "s"})`);

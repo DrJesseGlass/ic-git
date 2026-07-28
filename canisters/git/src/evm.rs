@@ -952,34 +952,48 @@ fn record(rec: EvmDeployRecord) -> Result<(), String> {
     Ok(())
 }
 
-/// Decode a hex artifact (0x-optional, surrounding whitespace tolerated) to
-/// creation bytecode. The single decode path: the deploy leg and the registry
-/// publisher must hash identical bytes, or the on-chain registry entry would
-/// diverge from the bytecode_sha256 in the deploy history.
-pub fn decode_bytecode_hex(text: &str) -> Result<Vec<u8>, String> {
-    let s = text.trim();
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("bad bytecode hex: {e}"))?;
-    if bytes.is_empty() {
-        return Err("empty bytecode".into());
-    }
-    Ok(bytes)
-}
-
-/// Deploy init bytecode (hex, 0x-optional) as a CREATE transaction and record
-/// the provenance binding, success or failure. `repo` and `commit` are empty
-/// for direct-hex deploys outside the E2 git path.
-pub async fn deploy_bytecode(
-    repo: String,
-    bytecode_hex: String,
-    gas_limit: u64,
-    commit: String,
-) -> Result<TxOutcome, String> {
+/// The canister-level preconditions for a CREATE deploy: a chain config, and a
+/// gas limit that could pay for one (21k intrinsic + 32k for the CREATE).
+///
+/// One definition, used from three places on purpose -- `deploy_bytecode`
+/// needs the config, while `require_deploy_target` lets `deploy::set_evm_config`
+/// reject an unpayable config at configure time and lets `deploy::attempt_evm`
+/// fail *before* it walks the repo tree and decodes the artifact. Same shape as
+/// `publish_target` / `require_publish_target` below.
+fn deploy_target(gas_limit: u64) -> Result<EvmConfig, String> {
     let cfg = require_config()?;
     if gas_limit < 53_000 {
         return Err("gas_limit below the 53k floor of any CREATE".into());
     }
-    let bytecode = decode_bytecode_hex(&bytecode_hex)?;
+    Ok(cfg)
+}
+
+/// Assert the canister is configured to deploy at this gas limit, without
+/// doing any work. See `deploy_target`.
+pub fn require_deploy_target(gas_limit: u64) -> Result<(), String> {
+    deploy_target(gas_limit).map(|_| ())
+}
+
+/// Deploy init bytecode as a CREATE transaction and record the provenance
+/// binding, success or failure.
+///
+/// Takes decoded bytes rather than hex text: hex is an artifact-format concern
+/// of the git side (`deploy::decode_bytecode_hex`), and bytes-plus-scalars is
+/// exactly the signer-side message docs/CANISTER_SPLIT.md section 4 specifies.
+/// `repo` and `commit` are empty for direct deploys outside the E2 git path.
+pub async fn deploy_bytecode(
+    repo: String,
+    bytecode: Vec<u8>,
+    gas_limit: u64,
+    commit: String,
+) -> Result<TxOutcome, String> {
+    let cfg = deploy_target(gas_limit)?;
+    if bytecode.is_empty() {
+        return Err("empty bytecode".into());
+    }
+    // Hashed here rather than taken from the caller: the log has to record what
+    // this canister actually broadcast, a property that must survive the caller
+    // becoming a separate canister.
     let sha256 = hex::encode(sha2::Sha256::digest(&bytecode));
     let len = bytecode.len() as u64;
     // Before spending gas: if the outcome cannot be recorded, do not broadcast.

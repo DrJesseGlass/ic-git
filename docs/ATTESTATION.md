@@ -64,6 +64,30 @@ has two independent writers of `set` with incompatible bundleHash semantics:
 Both resolve the record on the git side and write it through the single
 registry writer, `evm::registry_publish_record(recordKey, commit, bundleHash)`.
 
+**What a `#site` record does and does not cover.** It covers one blob: the
+served entrypoint. Every file that entrypoint *references* is fetched in a
+separate request no record attests, so a client that compares only the
+entrypoint hash can be fully satisfied while running unattested code -- the
+false GREEN this document's doctrine forbids, reached without anyone forging a
+hash. `provenance::site_record` closes it at the writing end by refusing to
+attest an entrypoint that names a subresource the browser will not enforce
+`integrity` on (`site::unverifiable_subresource`).
+
+That guard is a markup scan, and what it proves is exactly bounded by that:
+the entrypoint's MARKUP names no file the browser will fetch unenforced. Three
+limits follow, stated rather than implied. (1) It does not follow the page
+into JavaScript: an attested inline script or SRI-pinned external script can
+still `fetch()`, dynamically `import()`, or -- for a module -- statically
+import files nothing pins (import specifiers take no integrity; an import
+map's `integrity` section is the eventual remedy). Those loads are issued by
+code the record or SRI already covers, so auditing that code is the
+operator's, not the scanner's, job. (2) Images, fonts, and media are out of
+scope -- SRI has no mechanism for them. (3) The guarantee is not retroactive:
+records published before the guard shipped may cover pages that would fail it
+today. All three are why step 1 below must check the served entrypoint
+independently rather than trusting that the publisher did -- a client that
+assumed full coverage would be assuming more than the guard promises.
+
 One slot per bare repo name would let these clobber each other: a repo that
 both deploys a contract and serves a site would have its site record
 overwritten by the next push, and `verify.mjs` would print `NOT VERIFIED` for a
@@ -346,8 +370,21 @@ makes change-detection trustworthy.
 Per page load, in the service worker, honoring the doctrine that a verdict may
 only ADD warnings (a check can downgrade, never falsely upgrade):
 
-    1. (existing) Identify the serving canister X and served bundle; confirm
-       the loaded frontend matches the attested bundle at commit C_fe.
+    1. Identify the serving canister X and served bundle; confirm the loaded
+       frontend matches the attested bundle at commit C_fe, AND that the
+       entrypoint's own references are enforceable (see "What a `#site` record
+       does and does not cover"). A matching hash on an entrypoint that pulls
+       an un-`integrity`-declared script is NOT a frontend match; treat it as
+       a failed check, never a passed one.
+
+       As a CLI, this exists: `tools/verify.mjs` performs the hash comparison
+       AND the reference check (its check E is a port of
+       `site::unverifiable_subresource`; the two must track each other),
+       which is the F2 rung of VISION.md. Nothing does it in a browser yet,
+       and it cannot be a MetaMask Snap, since Snaps are isolated from the
+       page and never see the served bytes. It needs a content script -- so
+       this step implies an extension of our own, whether or not it ships in
+       the same bundle as the transaction reviewer.
 
     2. Read X's CERTIFIED module hash -> H_live (BLS-verified, fresh).
 

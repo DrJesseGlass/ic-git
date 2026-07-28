@@ -220,6 +220,83 @@ locals/let bindings. Borrow-checking is optional and can come last, or never,
 if an unsafe subset is acceptable. See "R5 and the rustc question" below for
 what this can and cannot become.
 
+### R5-alt -- a circuit backend, and why it may be the better next rung
+
+PROPOSED, not started. Raised 2026-07-26 from ic-vote's side -- ic-vote is a
+SEPARATE repository, not a path in this one; nothing below exists in an
+ic-git-only clone. The argument is in ic-vote's `ZK.md` and is summarized here
+because the decision belongs to this ladder.
+
+R5 grows the language toward Rust. The rung below it changes the *backend*
+instead of the frontend: keep the language small, emit an **R1CS constraint
+system** rather than wasm, and compile zero-knowledge circuits on chain.
+
+Why this is a natural fit rather than a detour:
+
+- **R1's language is already almost the right shape.** It is i32 functions
+  over `+ - * /`, variables, cross-function calls, no control flow. A
+  Semaphore-style membership circuit is field arithmetic over `+` and `*` in
+  named sub-circuits that call each other, with no control flow. Poseidon and
+  a Merkle path are *nothing but* that -- which is precisely why Poseidon is
+  the hash ZK systems standardized on. The delta is a 255-bit field element
+  in place of i32, a signal-versus-constant distinction, and an R1CS emitter
+  in place of wasm-encoder.
+- **R2/R3/R4 carry over untouched.** Lexer, parser, `use name(arity);` module
+  interfaces, the symbolic-relocation linker, the resumable job mechanism,
+  and fleet distribution all apply unchanged. Constraint systems concatenate
+  more cleanly than wasm function bodies, and renumbering signal indices at
+  link time is the same operation the linker already performs on function
+  indices. Circuit compilation is, if anything, more embarrassingly parallel
+  than wasm codegen.
+- **It has a finish line, which R5 does not.** "R5 and the rustc question"
+  below concludes correctly that this compiler can never match rustc exactly,
+  so the wasm language is open-ended by construction. A constraint system has
+  no incumbent to match byte-for-byte -- it has to be *sound*, not identical
+  to Circom's output. So the rung has a real completion criterion: does it
+  compile the Semaphore circuit into a system that accepts exactly the valid
+  witnesses. Testable, and it terminates.
+- **It is the first case where on-chain compilation is load-bearing rather
+  than demonstrative.** A backdoored circuit compiler emits constraints that
+  do not match the reviewed circuit source, and every proof downstream still
+  verifies -- the ballot-marking-device attack of `ic-vote/VISION.md`,
+  relocated into the build. For a generic app, "compiled on chain" is a nice
+  property. For a circuit, it is the only thing that closes the gap.
+
+This does **not** give self-hosting. A circuit compiler emits constraints, not
+wasm, so it cannot compile itself; REPRODUCIBLE_BUILD.md's R3 still needs the
+R5 path. What it gives is REPRODUCIBLE_BUILD.md's **R2** -- the first real
+application built on ic-git's own on-chain compiler -- with a customer that
+genuinely needs the property rather than merely exhibiting it.
+
+Costs, stated plainly: a new circuit compiler is a new unreviewed compiler,
+and under-constrained circuits accept proofs of false statements while looking
+perfectly fine. Circom and Noir have absorbed years of adversarial attention
+and this would not have.
+
+The mitigation is specified in ic-vote's `docs/CIRCUIT_TESTING.md`, which also
+corrects the sketch that first appeared here. Differential testing against
+Circom is one of three axes and it is **not** the one that covers
+under-constraining -- an under-constrained circuit still produces honest
+outputs on honest inputs, so two compilers can be broken in different ways and
+agree on every test. Under-constraining needs a determinism analysis instead,
+and that tool is compiler-independent: ic-vote's `tools/r1cs-check` consumes
+an R1CS from anywhere and is already built and self-testing, before any of
+R5-alt exists.
+
+The harness and that tool live in **ic-vote**, not here, and deliberately.
+Neither has any ic-git dependency -- the screen consumes an R1CS whoever
+emitted it -- and the one step that can be taken today (run it against Circom's
+output for the target circuit) needs a circuit, which ic-vote has and this repo
+does not. What belongs on this ladder is the decision above, not the tooling.
+If R5-alt is ever taken off the shelf, the harness comes back into scope from
+there.
+
+Two scope items that fall out of the testing design and belong in any R5-alt
+estimate: the backend needs a **witness generator** as well as an R1CS
+emitter, or the differential axis cannot run at all; and compile-twice
+determinism plus fleet-equals-local must be verified for constraint systems
+exactly as R4 already verifies them for wasm.
+
 ### R5 and the rustc question: can this ever match rustc exactly?
 
 Short answer: no -- not "match rustc exactly", and that was never the goal.

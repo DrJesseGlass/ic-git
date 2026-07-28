@@ -53,23 +53,22 @@ fn commit20(oid: &Oid) -> Result<[u8; 20], String> {
         .ok_or_else(|| "bad oid length".to_string())
 }
 
-/// Resolve the deploy-artifact record for a specific commit: the commit itself
-/// and the sha256 of the *decoded* bytecode at `source_path`. Hashing the
-/// decoded bytes rather than the hex text is what keeps this equal to the
-/// `bytecode_sha256` already in `evm_deploy_history`.
+/// The deploy-artifact record for a commit: the bare repo name as key (no
+/// suffix -- that is what distinguishes it from the site record), the commit,
+/// and `bundle`, which must be the sha256 of the *decoded* bytecode. Hashing
+/// the decoded bytes rather than the hex text is what keeps this equal to the
+/// `bytecode_sha256` already in `evm_deploy_history`;
+/// `deploy::evm_artifact_hash` is the one function that derives it.
 ///
-/// `source_path` is a parameter rather than a fresh read of the repo's deploy
-/// config because the caller may hold a snapshot taken before an await. The
-/// deploy queue does: re-reading here would let a config edit landing mid-
-/// deploy make the registry attest an artifact other than the one just
-/// deployed.
-fn deploy_record(repo: &str, commit_oid: &Oid, source_path: &str) -> Result<Record, String> {
-    let hex_text = deploy::evm_artifact_hex(commit_oid, source_path)?;
-    let raw = evm::decode_bytecode_hex(&hex_text)?;
+/// The hash is a parameter rather than something resolved here because the
+/// caller may already hold it -- the deploy queue does, from the bytes it just
+/// broadcast -- and re-deriving it would both redo the tree walk and open the
+/// window for a mid-deploy config edit to redirect the attestation.
+fn deploy_record(repo: &str, commit_oid: &Oid, bundle: [u8; 32]) -> Result<Record, String> {
     Ok(Record {
         key: repo.to_string(),
         commit: commit20(commit_oid)?,
-        bundle: sha2::Sha256::digest(&raw).into(),
+        bundle,
     })
 }
 
@@ -79,7 +78,7 @@ fn deploy_record(repo: &str, commit_oid: &Oid, source_path: &str) -> Result<Reco
 /// artifact is a frontend file hashed as raw bytes, matching how the F2
 /// verifier hashes a served non-hex artifact.
 fn site_record(repo: &str) -> Result<Record, String> {
-    let (tip, _served, body) = site::resolve_entry(repo, "")
+    let (tip, served, body) = site::resolve_entry(repo, "")
         .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html)")?;
     // Refuse to attest bytes `site::serve` would answer 413 for. Publishing
     // one costs a real registry transaction and produces a record no verifier
@@ -92,6 +91,21 @@ fn site_record(repo: &str) -> Result<Record, String> {
             site::MAX_BODY
         ));
     }
+    // Same principle, sharper failure: refuse an entrypoint whose hash a
+    // verifier could check and still be wrong. This record covers one blob, so
+    // an uncovered subresource lets a hostile gateway pair the honest
+    // entrypoint with malicious code and still pass the comparison -- the
+    // verifier reports verified, which is worse than reporting nothing.
+    if let Some(why) = site::unverifiable_subresource(&served, &body) {
+        return Err(format!(
+            "{served}: {why}. This record attests only the entrypoint, so a \
+             referenced file is covered by nothing and a verifier would report \
+             verified while it went unchecked. Inline it, or add \
+             integrity=\"sha384-...\" so the browser enforces it -- bundlers \
+             do not emit SRI by default, but their plugins do \
+             (vite-plugin-sri, webpack-subresource-integrity, rollup-plugin-sri)."
+        ));
+    }
     Ok(Record {
         key: format!("{repo}{SITE_KEY_SUFFIX}"),
         commit: commit20(&tip)?,
@@ -99,26 +113,32 @@ fn site_record(repo: &str) -> Result<Record, String> {
     })
 }
 
-/// Publish a specific commit's deploy-artifact provenance. The deploy queue's
-/// auto-publish passes the commit it just deployed rather than the mutable tip,
-/// so a push landing mid-deploy cannot make the registry attest a commit whose
-/// deploy has not yet run.
-/// `source_path` comes from the caller's config snapshot -- see `deploy_record`.
+/// Publish a specific commit's deploy-artifact provenance, given its already
+/// resolved artifact hash. The deploy queue's auto-publish passes the commit it
+/// just deployed rather than the mutable tip, so a push landing mid-deploy
+/// cannot make the registry attest a commit whose deploy has not yet run --
+/// and passes the hash of the bytes it broadcast, so nothing here re-reads the
+/// object store. That takes the auto-publish path off git state entirely,
+/// which is what docs/CANISTER_SPLIT.md section 6 needs it to be.
 pub async fn publish_commit(
     repo: &str,
     commit_oid: &Oid,
-    source_path: &str,
+    bundle: [u8; 32],
 ) -> Result<TxOutcome, String> {
     evm::require_publish_target()?;
-    deploy_record(repo, commit_oid, source_path)?.publish().await
+    deploy_record(repo, commit_oid, bundle)?.publish().await
 }
 
 /// Publish the repo's current deploy-branch tip as its deploy-artifact record.
+/// The operator entry point, and the only deploy-artifact path that resolves
+/// the hash out of the repo: there is no deploy in flight to inherit bytes from.
 pub async fn publish_tip(repo: &str) -> Result<TxOutcome, String> {
     evm::require_publish_target()?;
     let cfg =
         deploy::get_evm_config(repo).ok_or("repo has no EVM deploy config (nothing to hash)")?;
-    publish_commit(repo, &deploy::current_tip(repo)?, &cfg.source_path).await
+    let commit_oid = deploy::current_tip(repo)?;
+    let bundle = deploy::evm_artifact_hash(&commit_oid, &cfg.source_path)?;
+    publish_commit(repo, &commit_oid, bundle).await
 }
 
 /// Publish the repo's served-site record.
@@ -168,6 +188,42 @@ mod tests {
         assert!(site_record("emptyrepo").is_err());
     }
 
+    /// A site record is refused when the entrypoint references a file the
+    /// record cannot cover, and allowed once the reference is enforceable.
+    /// Without this the publish succeeds, the verifier's hash comparison
+    /// passes, and the verdict says verified while unattested code runs.
+    #[test]
+    fn site_record_refuses_an_entrypoint_it_cannot_fully_cover() {
+        let commit_index = |repo: &str, html: &[u8]| {
+            let index = store::put_object(ObjectType::Blob, html);
+            let mut root = Vec::new();
+            root.extend_from_slice(b"100644 index.html\0");
+            root.extend_from_slice(index.as_slice());
+            let root_tree = store::put_object(ObjectType::Tree, &root);
+            let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&root_tree));
+            let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
+            let branch = store::head_target(repo).unwrap();
+            store::set_ref(repo, &branch, commit_oid).unwrap();
+        };
+
+        store::create_repo("srirepo").unwrap();
+        site::set_config("srirepo", String::new()).unwrap();
+
+        commit_index("srirepo", b"<script src=\"app.js\"></script>");
+        let err = site_record("srirepo")
+            .err()
+            .expect("must refuse an uncovered subresource");
+        assert!(err.contains("index.html"), "names the entrypoint: {err}");
+        assert!(err.contains("integrity"), "says how to fix it: {err}");
+
+        // Same page, reference now enforced by the browser: attestable.
+        commit_index(
+            "srirepo",
+            b"<script src=\"app.js\" integrity=\"sha384-x\"></script>",
+        );
+        assert!(site_record("srirepo").is_ok());
+    }
+
     /// A deploy record's key is the bare repo name and its bundle is the
     /// sha256 of the *hex-decoded* bytecode, not of the hex text. This is the
     /// semantic `tools/verify.mjs` check B relies on (it hex-decodes before
@@ -187,7 +243,8 @@ mod tests {
         let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&root_tree));
         let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
 
-        let rec = deploy_record("hexrepo", &commit_oid, "contract.hex").expect("record resolves");
+        let bundle = deploy::evm_artifact_hash(&commit_oid, "contract.hex").expect("hash resolves");
+        let rec = deploy_record("hexrepo", &commit_oid, bundle).expect("record resolves");
         assert_eq!(rec.key, "hexrepo");
         assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
 
