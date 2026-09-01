@@ -179,6 +179,11 @@ service : {
   create_push_token : (text) -> (ResultText);
   revoke_push_token : (text) -> (bool);
 
+  // admin allowlist (callable by controllers or authorized principals)
+  authorize : (principal) -> (Result);
+  deauthorize : (principal) -> (Result);
+  list_authorized : () -> (vec principal) query;
+
   // public reads
   get_object : (text) -> (opt blob) query;
   list_refs : (text) -> (vec record { text; text }) query;

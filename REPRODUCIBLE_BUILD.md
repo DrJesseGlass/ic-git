@@ -101,13 +101,42 @@ the substitution this whole chain exists to prevent. `--allow-dirty` falls back
 to the working tree and marks the printed commit `-dirty`; never attest a
 `-dirty` build.
 
-> **Status note.** The currently deployed module was built before the
-> path-remapping pins above existed, so it embeds the deployer's own
-> `CARGO_HOME` paths. `--check` will therefore report `MISMATCH` against this
-> source tree until the canister is redeployed from a build that uses them.
-> That is the correct signal: the deployed artifact genuinely is not
-> reproducible by anyone else, which is the gap these pins close. Redeploy and
-> re-attest to make `MATCH` meaningful.
+> **Status.** Reproducible and matched since 2026-09-01. The commit the live
+> module was built from is the **last entry of `verified.json`** (narrative in
+> VERIFIED.md); rebuild that commit, not whichever tag this sentence might
+> name, because the deploy moves and this paragraph does not. The module
+> deployed before 2026-09-01 was built before these pins existed, embedded the
+> deployer's `CARGO_HOME` paths, and was therefore reproducible by nobody. The
+> watch below fails if the live hash ever departs from the last entry.
+
+## The record: `verified.json`
+
+A MATCH that only scrolled past in one terminal is not evidence anyone else
+can use. Every verified deploy is recorded in `verified.json` at the repo
+root -- one entry per (commit, module hash), newest last -- with the commit,
+tag, module hash, the pinned tool versions, the *resolved* base-image digest,
+and who reproduced it under which toolchain lineage. The file is the
+machine-readable half of the `BuildDescriptor` in docs/ATTESTATION.md and the
+source of truth for the monitor below; VERIFIED.md is the human-readable
+narrative next to it.
+
+Two independent observers, standing:
+
+- **CI rebuilder** (`.github/workflows/reproducible-build.yml`): a native
+  linux/amd64 GitHub runner that shares no machine with the deployer runs the
+  same pinned container on every `v*` tag (and on demand, for any ref, with
+  `--check`), prints the hash, and keeps the wasm it built as a downloadable
+  artifact. Agreement between the deployer's build and CI's is K=2 in the
+  pinned-container lineage: it rules out source substitution and a lying
+  deployer, and says nothing about the toolchain (see below).
+- **Module-hash watch** (`.github/workflows/module-hash-watch.yml`, or
+  `tools/check-module-hash.sh` locally): every six hours, read the live module
+  hash through a certificate-verifying client and compare it with the latest
+  `verified.json` entry. A change is either a deploy that has not been
+  reproduced and recorded yet, or an unauthorized upgrade; either way the job
+  fails and the owner is notified. This is the cheapest rung of the
+  upgrade-trust spectrum in "Residual assumptions" below: monitor first,
+  governance later.
 
 ## Residual assumptions (stated honestly)
 

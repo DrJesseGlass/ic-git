@@ -1,0 +1,66 @@
+{
+  "canister": "umobs-yiaaa-aaaab-agyrq-cai",
+  "note": "Machine-readable record of reproduced module hashes (REPRODUCIBLE_BUILD.md, 'The record'). Newest entry last; tools/check-module-hash.sh compares the live canister against the last entry. Human narrative in VERIFIED.md.",
+  "verified": [
+    {
+      "commit": "80bcb4ad957667fad91d0ece6b15c46060f28d54",
+      "tag": "v0.1.0",
+      "module_hash": "662990224e41ce296030ce04cb085055b15f2e1abe95b58892f1a93dd65aaec6",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, colima vz + Rosetta, docker 29.5.2",
+          "date": "2026-09-01"
+        }
+      ],
+      "deployed": {
+        "date": "2026-09-01",
+        "on_chain_match": "match",
+        "checked_by": "tools/reproducible-build.sh --docker --check at the tagged commit; tools/check-module-hash.sh"
+      }
+    },
+    {
+      "commit": "0707147b1e4ceecbd9ac97076745b30f0b1bb609",
+      "tag": "v0.1.1",
+      "module_hash": "a7156c6dc5eaa03adf9fd1a691550ac702b8adf2bcf8bb7f4d27e2651c601557",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, colima vz + Rosetta, docker 29.5.2 (two fresh VMs, same hash)",
+          "date": "2026-09-01"
+        },
+        {
+          "who": "GitHub Actions (independent runner, no deployer machine)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/33563166779",
+          "date": "2026-09-01",
+          "check": "MATCH against the live canister"
+        }
+      ],
+      "deployed": {
+        "date": "2026-09-01",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh"
+      }
+    }
+  ]
+}

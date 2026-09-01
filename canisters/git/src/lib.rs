@@ -286,6 +286,53 @@ fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String>
     store::set_ref(&repo, &refname, store::parse_oid(&oid_hex)?)
 }
 
+// --- admin allowlist management ---------------------------------------------
+//
+// The allowlist that guards the admin API is seeded with the principal that
+// ran the first install and survives upgrades via the stable snapshot. Until
+// these endpoints existed nothing could change it, so the canister's operator
+// was permanently whoever deployed it -- a controller cutover could hand over
+// the upgrade key but not the admin API. Controllers can already reinstall the
+// canister, so they are trusted at least as much as an allowlisted principal;
+// letting them manage the list makes the cutover a settings change.
+
+/// Guard: the caller is a controller or an allowlisted principal.
+fn is_admin() -> Result<(), String> {
+    if ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        return Ok(());
+    }
+    auth::is_authorized()
+}
+
+#[ic_cdk::update(guard = "is_admin")]
+fn authorize(principal: candid::Principal) -> Result<(), String> {
+    if principal == candid::Principal::anonymous() {
+        return Err("refusing to authorize the anonymous principal".to_string());
+    }
+    auth::add_principal(principal)
+}
+
+/// Refuses to empty the list: an allowlist with no members would leave the
+/// admin API reachable only by controllers, which is a state nobody chose.
+#[ic_cdk::update(guard = "is_admin")]
+fn deauthorize(principal: candid::Principal) -> Result<(), String> {
+    let current = auth::list_principals()?;
+    if !current.contains(&principal) {
+        return Err(format!("{principal} is not authorized"));
+    }
+    if current.len() == 1 {
+        return Err("refusing to remove the last authorized principal".to_string());
+    }
+    auth::remove_principal(principal).map(|_| ())
+}
+
+/// Public, like the controller list is: who may operate this canister is part
+/// of what a verifier should be able to see.
+#[ic_cdk::query]
+fn list_authorized() -> Vec<candid::Principal> {
+    auth::list_principals().unwrap_or_default()
+}
+
 /// Mint a push token for a repo. Returned once, in the clear; only its
 /// sha256 is stored. Use as the password in the remote URL:
 /// https://ic:<token>@<canister>.raw.icp0.io/<repo>.git

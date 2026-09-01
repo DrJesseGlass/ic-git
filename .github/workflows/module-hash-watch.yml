@@ -1,0 +1,43 @@
+# Temporal-trust monitor (REPRODUCIBLE_BUILD.md, "Residual assumptions", 2):
+# "verified now" is not "verified forever" -- a controller can upgrade the
+# canister to different code at any time, and the only public signal is the
+# module hash changing. This job reads the live hash (a certified read: dfx
+# verifies the subnet certificate against the IC root key) on a schedule and
+# fails, which emails the repository owner, if it differs from the hash
+# recorded in verified.json.
+#
+# Caveat: GitHub disables scheduled workflows on repositories with no commit
+# activity for 60 days. Re-enable it from the Actions tab if that happens.
+name: module-hash-watch
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dfx
+        run: |
+          DFX_VERSION=0.31.0 DFXVM_INIT_YES=true sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)"
+          echo "$HOME/.local/share/dfx/bin" >> "$GITHUB_PATH"
+
+      - name: Compare live module hash with verified.json
+        run: tools/check-module-hash.sh 2>&1 | tee "$RUNNER_TEMP/check.log"
+        env:
+          DFX_IDENTITY: anonymous
+
+      - name: Summary
+        if: always()
+        run: |
+          { echo '## Module hash watch'; echo; echo '```'; cat "$RUNNER_TEMP/check.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

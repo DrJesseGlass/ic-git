@@ -16,3 +16,5 @@ node_modules
 # 139-crate wasm32 release rebuild.
 docs
 *.md
+.github
+verified.json
