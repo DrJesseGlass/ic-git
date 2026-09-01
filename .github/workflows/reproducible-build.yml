@@ -65,6 +65,9 @@ jobs:
           # Log outside the checkout: an untracked file in the tree would trip
           # the script's clean-tree refusal (and rightly so).
           tools/reproducible-build.sh "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          # Name outputs after the commit that was BUILT (inputs.ref), not the
+          # commit the workflow file came from (github.sha).
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
         env:
           # dfx refuses an insecurely stored identity on mainnet; anonymous is
           # all a read needs.
@@ -91,7 +94,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: git_canister-${{ github.sha }}
+          name: git_canister-${{ steps.build.outputs.commit }}
           path: |
             ${{ runner.temp }}/git_canister.wasm
             ${{ runner.temp }}/git_canister.wasm.sha256

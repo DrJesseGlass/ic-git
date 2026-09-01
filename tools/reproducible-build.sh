@@ -80,14 +80,20 @@ if [ "$use_docker" = 1 ]; then
   fi
   # Take the Dockerfile from the context too, so the recipe and the sources it
   # builds come from the same commit rather than from the working tree.
+  # Pull the base image explicitly so its resolved digest is readable
+  # afterwards: a BuildKit-driven build (the default on CI runners) keeps
+  # what it pulls out of the image store, and `docker image inspect` would
+  # find nothing to report.
+  base_image=$(sed -n 's/^ARG BASE_IMAGE=//p' "$ctx/Dockerfile.build" | head -1)
+  docker pull --platform=linux/amd64 -q "$base_image" >/dev/null
   docker build -f "$ctx/Dockerfile.build" --build-arg SOURCE_COMMIT="$commit" \
     -t ic-git-build "$ctx"
   built=$(docker run --rm ic-git-build | awk 'NR==1{print $1}')
   # The resolved base-image digest belongs in the attested BuildDescriptor
   # (docs/ATTESTATION.md): the Dockerfile pins a tag by default, and a tag can
   # move. Print what was actually used so verified.json can record it.
-  base_image=$(sed -n 's/^ARG BASE_IMAGE=//p' "$ctx/Dockerfile.build" | head -1)
-  base_digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$base_image" 2>/dev/null || echo unknown)
+  base_digest=$(docker image inspect --format '{{join .RepoDigests ","}}' "$base_image" 2>/dev/null || true)
+  base_digest=${base_digest:-unknown}
   dfx_version=$(sed -n 's/^ARG DFX_VERSION=//p' "$ctx/Dockerfile.build" | head -1)
   echo "base image digest   : $base_digest"
   echo "dfx (in container)  : $dfx_version"
