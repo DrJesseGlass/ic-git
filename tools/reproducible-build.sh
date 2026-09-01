@@ -83,6 +83,14 @@ if [ "$use_docker" = 1 ]; then
   docker build -f "$ctx/Dockerfile.build" --build-arg SOURCE_COMMIT="$commit" \
     -t ic-git-build "$ctx"
   built=$(docker run --rm ic-git-build | awk 'NR==1{print $1}')
+  # The resolved base-image digest belongs in the attested BuildDescriptor
+  # (docs/ATTESTATION.md): the Dockerfile pins a tag by default, and a tag can
+  # move. Print what was actually used so verified.json can record it.
+  base_image=$(sed -n 's/^ARG BASE_IMAGE=//p' "$ctx/Dockerfile.build" | head -1)
+  base_digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$base_image" 2>/dev/null || echo unknown)
+  dfx_version=$(sed -n 's/^ARG DFX_VERSION=//p' "$ctx/Dockerfile.build" | head -1)
+  echo "base image digest   : $base_digest"
+  echo "dfx (in container)  : $dfx_version"
 else
   command -v dfx >/dev/null || { echo "dfx not found; try --docker" >&2; exit 1; }
   # Assert the committed lockfile actually resolves the manifest before
@@ -116,7 +124,11 @@ if [ "$do_check" = 1 ]; then
   # reason is visible instead of silently discarded.
   info_err=$(mktemp)
   cleanup_paths+=("$info_err")
-  onchain=$(dfx canister --network ic info "$CANISTER" 2>"$info_err" \
+  # A read needs no identity, and dfx refuses insecurely stored ones on
+  # mainnet (a fresh CI runner's default identity is exactly that), so ask as
+  # anonymous unless the caller says otherwise. dfx still verifies the
+  # certificate, so the hash is the subnet's word, not the boundary node's.
+  onchain=$(dfx canister --network ic --identity "${DFX_IDENTITY:-anonymous}" info "$CANISTER" 2>"$info_err" \
             | awk '/Module hash/{sub(/^0x/, "", $3); print $3}') || onchain=""
   if [ -z "$onchain" ]; then
     echo "on-chain module hash: <unreadable>"

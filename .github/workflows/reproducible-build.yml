@@ -1,0 +1,98 @@
+# Independent rebuilder (REPRODUCIBLE_BUILD.md, "K-of-N"): a second observer of
+# the module hash that shares no machine with the deployer. It runs the same
+# pinned container recipe (Dockerfile.build via tools/reproducible-build.sh) on
+# a native linux/amd64 runner and publishes the resulting sha256 plus the wasm
+# it came from, so a reader can compare it against the hash recorded in
+# verified.json and against the hash the IC reports for the canister.
+#
+# This is the "pinned container" lineage: it verifies source and recipe, not
+# the toolchain. The diverse-toolchain arm (a rebuild through an independent
+# rustc lineage) is a separate, deliberately different job -- see the
+# "Trusting trust" section of REPRODUCIBLE_BUILD.md.
+#
+# Triggers:
+#   - a pushed tag (v*): builds that tag and prints its hash. It does NOT
+#     compare against the chain, because a tag is normally built BEFORE it is
+#     deployed; the continuous comparison lives in module-hash-watch.yml.
+#   - manual dispatch: builds any ref, optionally with --check against the
+#     live canister (use this after a deploy to get an independent MATCH).
+name: reproducible-build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit or tag to build (default: the ref the workflow runs from)'
+        required: false
+        default: ''
+      check:
+        description: 'Also compare the built hash against the live canister (--check)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # The script builds a `git archive` of HEAD and refuses a dirty tree;
+          # a shallow clone of the exact ref is all it needs.
+          fetch-depth: 1
+
+      # dfx is only needed for --check (reading the on-chain hash). The build
+      # itself runs entirely inside the container, with dfx pinned there.
+      - name: Install dfx (for --check)
+        if: ${{ inputs.check }}
+        run: |
+          DFX_VERSION=0.31.0 DFXVM_INIT_YES=true sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)"
+          echo "$HOME/.local/share/dfx/bin" >> "$GITHUB_PATH"
+
+      - name: Reproducible build
+        id: build
+        run: |
+          set -o pipefail
+          args=(--docker)
+          if [ "${{ inputs.check }}" = "true" ]; then args+=(--check); fi
+          tools/reproducible-build.sh "${args[@]}" 2>&1 | tee build.log
+        env:
+          # dfx refuses an insecurely stored identity on mainnet; anonymous is
+          # all a read needs.
+          DFX_IDENTITY: anonymous
+
+      - name: Extract the built wasm
+        run: |
+          id=$(docker create ic-git-build)
+          docker cp "$id:/build/git_canister.wasm" git_canister.wasm
+          docker cp "$id:/build/git_canister.wasm.sha256" git_canister.wasm.sha256
+          docker rm "$id" >/dev/null
+          sha256sum -c git_canister.wasm.sha256
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '## Reproducible build'
+            echo
+            echo '```'
+            grep -E '^(source commit|built module sha256|base image digest|on-chain module hash|MATCH|MISMATCH)' build.log || cat build.log | tail -20
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: git_canister-${{ github.sha }}
+          path: |
+            git_canister.wasm
+            git_canister.wasm.sha256
+            build.log
+          if-no-files-found: error
+          retention-days: 90
