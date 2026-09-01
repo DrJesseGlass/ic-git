@@ -27,6 +27,32 @@
         "on_chain_match": "match",
         "checked_by": "tools/reproducible-build.sh --docker --check at the tagged commit; tools/check-module-hash.sh"
       }
+    },
+    {
+      "commit": "0707147b1e4ceecbd9ac97076745b30f0b1bb609",
+      "tag": "v0.1.1",
+      "module_hash": "a7156c6dc5eaa03adf9fd1a691550ac702b8adf2bcf8bb7f4d27e2651c601557",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, colima vz + Rosetta, docker 29.5.2 (two fresh VMs, same hash)",
+          "date": "2026-09-01"
+        }
+      ],
+      "deployed": {
+        "date": "2026-09-01",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh"
+      }
     }
   ]
 }

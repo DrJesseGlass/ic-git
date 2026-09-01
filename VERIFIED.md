@@ -10,6 +10,16 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | Date | Commit | Tag | Module hash (sha256 of the wasm) | On-chain match | Independent rebuilds |
 |---|---|---|---|---|---|
 | 2026-09-01 | `80bcb4a` | `v0.1.0` | `662990224e41ce296030ce04cb085055b15f2e1abe95b58892f1a93dd65aaec6` | MATCH, 2026-09-01 | deployer (pinned container, macOS arm64 host under Rosetta) |
+| 2026-09-01 | `0707147` | `v0.1.1` | `a7156c6dc5eaa03adf9fd1a691550ac702b8adf2bcf8bb7f4d27e2651c601557` | MATCH, 2026-09-01 | deployer (pinned container, two fresh VMs agreed) |
+
+## v0.1.1 -- 2026-09-01
+
+Adds admin-allowlist management (`authorize`, `deauthorize`,
+`list_authorized`) so a controller cutover can hand over the admin API, not
+only the upgrade key. Same recipe and base-image digest as v0.1.0. The hash
+was produced twice on two freshly created VMs (the first VM's disk was
+corrupted by a full host disk after the compile had already printed the
+hash; the rebuild on a new VM printed the same one).
 
 ## v0.1.0 -- 2026-09-01
 
