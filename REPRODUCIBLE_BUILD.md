@@ -101,12 +101,13 @@ the substitution this whole chain exists to prevent. `--allow-dirty` falls back
 to the working tree and marks the printed commit `-dirty`; never attest a
 `-dirty` build.
 
-> **Status.** MATCH since 2026-09-01: the canister runs the wasm reproduced
-> from tag `v0.1.0` (commit `80bcb4a`). The module deployed before that was
-> built before these pins existed, embedded the deployer's `CARGO_HOME` paths,
-> and was therefore reproducible by nobody. Every verified deploy is listed in
-> VERIFIED.md and `verified.json`; the watch below fails if the live hash ever
-> departs from the last entry.
+> **Status.** Reproducible and matched since 2026-09-01. The commit the live
+> module was built from is the **last entry of `verified.json`** (narrative in
+> VERIFIED.md); rebuild that commit, not whichever tag this sentence might
+> name, because the deploy moves and this paragraph does not. The module
+> deployed before 2026-09-01 was built before these pins existed, embedded the
+> deployer's `CARGO_HOME` paths, and was therefore reproducible by nobody. The
+> watch below fails if the live hash ever departs from the last entry.
 
 ## The record: `verified.json`
 
