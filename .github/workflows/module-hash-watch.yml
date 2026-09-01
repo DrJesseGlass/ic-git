@@ -33,11 +33,11 @@ jobs:
           echo "$HOME/.local/share/dfx/bin" >> "$GITHUB_PATH"
 
       - name: Compare live module hash with verified.json
-        run: tools/check-module-hash.sh 2>&1 | tee check.log
+        run: tools/check-module-hash.sh 2>&1 | tee "$RUNNER_TEMP/check.log"
         env:
           DFX_IDENTITY: anonymous
 
       - name: Summary
         if: always()
         run: |
-          { echo '## Module hash watch'; echo; echo '```'; cat check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '## Module hash watch'; echo; echo '```'; cat "$RUNNER_TEMP/check.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

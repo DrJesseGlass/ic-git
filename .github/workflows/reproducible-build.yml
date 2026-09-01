@@ -62,7 +62,9 @@ jobs:
           set -o pipefail
           args=(--docker)
           if [ "${{ inputs.check }}" = "true" ]; then args+=(--check); fi
-          tools/reproducible-build.sh "${args[@]}" 2>&1 | tee build.log
+          # Log outside the checkout: an untracked file in the tree would trip
+          # the script's clean-tree refusal (and rightly so).
+          tools/reproducible-build.sh "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/build.log"
         env:
           # dfx refuses an insecurely stored identity on mainnet; anonymous is
           # all a read needs.
@@ -71,10 +73,10 @@ jobs:
       - name: Extract the built wasm
         run: |
           id=$(docker create ic-git-build)
-          docker cp "$id:/build/git_canister.wasm" git_canister.wasm
-          docker cp "$id:/build/git_canister.wasm.sha256" git_canister.wasm.sha256
+          docker cp "$id:/build/git_canister.wasm" "$RUNNER_TEMP/git_canister.wasm"
+          docker cp "$id:/build/git_canister.wasm.sha256" "$RUNNER_TEMP/git_canister.wasm.sha256"
           docker rm "$id" >/dev/null
-          sha256sum -c git_canister.wasm.sha256
+          (cd "$RUNNER_TEMP" && sha256sum -c git_canister.wasm.sha256)
 
       - name: Summary
         if: always()
@@ -83,7 +85,7 @@ jobs:
             echo '## Reproducible build'
             echo
             echo '```'
-            grep -E '^(source commit|built module sha256|base image digest|on-chain module hash|MATCH|MISMATCH)' build.log || cat build.log | tail -20
+            grep -E '^(source commit|built module sha256|base image digest|on-chain module hash|MATCH|MISMATCH)' "$RUNNER_TEMP/build.log" || tail -20 "$RUNNER_TEMP/build.log"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -91,8 +93,8 @@ jobs:
         with:
           name: git_canister-${{ github.sha }}
           path: |
-            git_canister.wasm
-            git_canister.wasm.sha256
-            build.log
+            ${{ runner.temp }}/git_canister.wasm
+            ${{ runner.temp }}/git_canister.wasm.sha256
+            ${{ runner.temp }}/build.log
           if-no-files-found: error
           retention-days: 90
