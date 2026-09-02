@@ -209,6 +209,7 @@ service : {
 
   // tenancy: accounts, ownership, membership, votes (docs/TENANCY.md)
   deposit : () -> (ResultAccount);
+  deposit_for : (principal) -> (ResultAccount);
   deposit_from_cycles_ledger : (nat64) -> (ResultNat64);
   get_account : (principal) -> (Account) query;
   my_repos : (principal) -> (vec text) query;
@@ -221,7 +222,7 @@ service : {
   get_votes : (text, text) -> (vec Ballot) query;
   get_pricing : () -> (Pricing) query;
   set_pricing : (Pricing) -> (Result);
-  charge_rent_now : () -> (record { nat32; nat64 });
+  charge_rent_now : () -> (nat32, nat64);
   set_cycles_ledger : (principal) -> (Result);
   stranded_deposits : () -> (vec Stranded) query;
   create_app_canister : (text, nat64) -> (ResultPrincipal);

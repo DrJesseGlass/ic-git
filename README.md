@@ -87,6 +87,31 @@ node tools/verify.mjs ic-git index.html
 The page is then at `https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-git/`
 and browses, among other things, its own source.
 
+## Accounts, ownership, and paying for what you use
+
+ic-git is multi-tenant (design: docs/TENANCY.md). Any signed-in principal
+with a funded balance can create a repo and owns it; owners add members as
+**writers** (push, tokens, config) or **voters** (approve commits before the
+deploy queue runs them, once `set_required_votes` is set). Tenants prepay in
+cycles and are charged for creation, each push, storage rent, and each
+deploy action; an action that would overdraw is refused first. Apps deployed
+to the IC run in a canister the owner controls, created from their balance.
+
+From the browser: open `/site/ic-git/`, connect a wallet (OISY), and use
+the console panels. From the command line, the same calls through dfx:
+
+```sh
+C=umobs-yiaaa-aaaab-agyrq-cai
+dfx canister --network https://icp-api.io call $C deposit_from_cycles_ledger '(2_000_000_000_000)'   # after icrc2_approve on the cycles ledger
+dfx canister --network https://icp-api.io call $C create_repo '("myapp")'
+dfx canister --network https://icp-api.io call $C add_member '("myapp", principal "<friend>", "voter")'
+dfx canister --network https://icp-api.io call $C set_required_votes '("myapp", 1)'
+dfx canister --network https://icp-api.io call $C create_push_token '("myapp")'
+```
+
+`GET /api/account/<principal>`, `/api/<repo>/info`, `/api/<repo>/votes/<commit>`
+and `/api/pricing` expose the same state read-only.
+
 ## Development
 
 ```sh

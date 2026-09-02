@@ -420,6 +420,19 @@ fn deposit() -> Result<tenancy::Account, String> {
     Ok(tenancy::credit(&who, accepted.min(u64::MAX as u128) as u64))
 }
 
+/// Fund `beneficiary`'s account with the cycles attached to this call. For
+/// deposits that arrive through a proxy -- a cycles wallet canister, another
+/// canister paying on a user's behalf -- where the caller is not the tenant.
+#[ic_cdk::update]
+fn deposit_for(beneficiary: candid::Principal) -> Result<tenancy::Account, String> {
+    if beneficiary == candid::Principal::anonymous() {
+        return Err("the anonymous principal cannot hold a balance".into());
+    }
+    let available = ic_cdk::api::msg_cycles_available();
+    let accepted = ic_cdk::api::msg_cycles_accept(available);
+    Ok(tenancy::credit(&beneficiary, accepted.min(u64::MAX as u128) as u64))
+}
+
 /// Fund the caller's account from cycles they approved to this canister on
 /// the cycles ledger (icrc2_approve). Returns the new balance.
 #[ic_cdk::update]
