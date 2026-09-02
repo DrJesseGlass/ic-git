@@ -112,8 +112,10 @@
         }
       ],
       "deployed": {
-        "date": null,
-        "on_chain_match": "pending"
+        "date": "2026-09-02",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh",
+        "note": "first gzipped install; single ingress message via https://icp-api.io"
       },
       "wasm_sha256": "f49a6d0428e7e6451038964c02341a7077333890d736be817085df72f1bf360c"
     }
