@@ -85,6 +85,9 @@ const MEM_REFS: MemoryId = MemoryId::new(1);
 const MEM_REPOS: MemoryId = MemoryId::new(2);
 const MEM_META: MemoryId = MemoryId::new(3);
 const MEM_TOKENS: MemoryId = MemoryId::new(4);
+const MEM_ACCOUNTS: MemoryId = MemoryId::new(5);
+const MEM_REPO_META: MemoryId = MemoryId::new(6);
+const MEM_VOTES: MemoryId = MemoryId::new(7);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -117,6 +120,70 @@ thread_local! {
     static TOKENS: RefCell<StableBTreeMap<String, String, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_TOKENS))),
     );
+
+    /// Tenancy (see tenancy.rs): principal text -> JSON account.
+    static ACCOUNTS: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_ACCOUNTS))),
+    );
+
+    /// Tenancy: repo name -> JSON repo metadata (owner, members, rent state).
+    static REPO_META: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_REPO_META))),
+    );
+
+    /// Tenancy: "<repo>\0<commit hex>" -> JSON ballot list.
+    static VOTES: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_VOTES))),
+    );
+}
+
+// --- tenancy maps (JSON values; tenancy.rs owns the schemas) -----------------
+
+pub fn account_get<T: serde::de::DeserializeOwned>(principal: &str) -> Option<T> {
+    ACCOUNTS.with(|a| a.borrow().get(&principal.to_string()))
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+pub fn account_set<T: serde::Serialize>(principal: &str, value: &T) {
+    if let Ok(b) = serde_json::to_vec(value) {
+        ACCOUNTS.with(|a| a.borrow_mut().insert(principal.to_string(), b));
+    }
+}
+
+pub fn repo_meta_get<T: serde::de::DeserializeOwned>(repo: &str) -> Option<T> {
+    REPO_META.with(|m| m.borrow().get(&repo.to_string()))
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+pub fn repo_meta_set<T: serde::Serialize>(repo: &str, value: &T) {
+    if let Ok(b) = serde_json::to_vec(value) {
+        REPO_META.with(|m| m.borrow_mut().insert(repo.to_string(), b));
+    }
+}
+
+/// Every repo that has tenancy metadata, with it decoded.
+pub fn repo_meta_all<T: serde::de::DeserializeOwned>() -> Vec<(String, T)> {
+    REPO_META.with(|m| {
+        m.borrow()
+            .iter()
+            .filter_map(|e| serde_json::from_slice(&e.value()).ok().map(|v| (e.key().clone(), v)))
+            .collect()
+    })
+}
+
+fn vote_key(repo: &str, commit_hex: &str) -> String {
+    format!("{repo}\0{commit_hex}")
+}
+
+pub fn votes_get<T: serde::de::DeserializeOwned>(repo: &str, commit_hex: &str) -> Option<T> {
+    VOTES.with(|v| v.borrow().get(&vote_key(repo, commit_hex)))
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+pub fn votes_set<T: serde::Serialize>(repo: &str, commit_hex: &str, value: &T) {
+    if let Ok(b) = serde_json::to_vec(value) {
+        VOTES.with(|v| v.borrow_mut().insert(vote_key(repo, commit_hex), b));
+    }
 }
 
 // --- objects ----------------------------------------------------------------

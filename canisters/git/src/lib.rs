@@ -5,6 +5,7 @@
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
 mod api;
+mod apps;
 mod compile;
 mod deploy;
 mod evm;
@@ -12,6 +13,7 @@ mod fleet;
 mod interp;
 mod kv;
 mod lang;
+mod ledger;
 mod object;
 mod pack;
 mod provenance;
@@ -21,6 +23,7 @@ mod site;
 mod smart_http;
 mod sol;
 mod store;
+mod tenancy;
 
 use base64::Engine;
 use ic_dev_kit_rs::auth;
@@ -37,6 +40,7 @@ use store::ObjectType;
 fn init() {
     auth::init_with_caller();
     store::init_schema_version();
+    tenancy::arm_rent_timer();
 }
 
 #[ic_cdk::pre_upgrade]
@@ -51,6 +55,7 @@ fn post_upgrade() {
     // Timers do not survive upgrades; re-arm the drain timer if the queue
     // (which does survive, in stable memory) still holds pending deploys.
     deploy::resume_pending();
+    tenancy::arm_rent_timer();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -254,6 +259,11 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             if !push_authorized(&repo, &req.headers) {
                 return unauthorized();
             }
+            // Tenancy: the owner pays for the push before anything is
+            // ingested. 402 is what git shows the pusher verbatim.
+            if let Err(e) = tenancy::charge_push(&repo, req.body.len()) {
+                return git_response(402, "text/plain", format!("{e}\n").into_bytes());
+            }
             let outcome = receive::handle(&repo, &req.body);
             // m4: if the push moved the deploy branch and a deploy is
             // configured, enqueue a job and return immediately. The compile +
@@ -274,9 +284,11 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
 
 // --- candid admin API (milestone 1; auth = dev-kit principal allowlist) -----
 
-#[ic_cdk::update(guard = "auth::is_authorized")]
+/// Anyone signed in with a funded account may create a repo and becomes its
+/// owner; operators pay nothing. See tenancy.rs.
+#[ic_cdk::update]
 fn create_repo(name: String) -> Result<(), String> {
-    store::create_repo(&name)
+    tenancy::create_repo(&name, &caller(), operator())
 }
 
 /// Store an object from (type, content); returns the hex oid.
@@ -315,6 +327,16 @@ fn is_admin() -> Result<(), String> {
     auth::is_authorized()
 }
 
+fn caller() -> candid::Principal {
+    ic_cdk::api::msg_caller()
+}
+
+/// Operators (controllers and the allowlist) may act on any repo and pay
+/// nothing; everyone else is a tenant.
+fn operator() -> bool {
+    is_admin().is_ok()
+}
+
 #[ic_cdk::update(guard = "is_admin")]
 fn authorize(principal: candid::Principal) -> Result<(), String> {
     if principal == candid::Principal::anonymous() {
@@ -347,11 +369,9 @@ fn list_authorized() -> Vec<candid::Principal> {
 /// Mint a push token for a repo. Returned once, in the clear; only its
 /// sha256 is stored. Use as the password in the remote URL:
 /// https://ic:<token>@<canister>.raw.icp0.io/<repo>.git
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update]
 async fn create_push_token(repo: String) -> Result<String, String> {
-    if !store::repo_exists(&repo) {
-        return Err(format!("no such repo: {repo}"));
-    }
+    tenancy::can_write(&repo, &caller(), operator())?;
     let bytes: Vec<u8> = ic_dev_kit_rs::intercanister::call_no_args(
         candid::Principal::management_canister(),
         "raw_rand",
@@ -362,9 +382,15 @@ async fn create_push_token(repo: String) -> Result<String, String> {
     Ok(token)
 }
 
-#[ic_cdk::update(guard = "auth::is_authorized")]
+/// Revoke a token you could have minted: writers of its repo, or operators.
+#[ic_cdk::update]
 fn revoke_push_token(token: String) -> bool {
-    store::revoke_push_token(&token)
+    match store::push_token_repo(&token) {
+        Some(repo) if tenancy::can_write(&repo, &caller(), operator()).is_ok() => {
+            store::revoke_push_token(&token)
+        }
+        _ => false,
+    }
 }
 
 #[ic_cdk::query]
@@ -378,6 +404,132 @@ fn list_refs(repo: String) -> Vec<(String, String)> {
 #[ic_cdk::query]
 fn list_repos() -> Vec<String> {
     store::list_repos()
+}
+
+// --- tenancy: accounts, ownership, membership, votes (docs/TENANCY.md) --------
+
+/// Fund the caller's account with the cycles attached to this call.
+#[ic_cdk::update]
+fn deposit() -> Result<tenancy::Account, String> {
+    let who = caller();
+    if who == candid::Principal::anonymous() {
+        return Err("sign in first: the anonymous principal cannot hold a balance".into());
+    }
+    let available = ic_cdk::api::msg_cycles_available();
+    let accepted = ic_cdk::api::msg_cycles_accept(available);
+    Ok(tenancy::credit(&who, accepted.min(u64::MAX as u128) as u64))
+}
+
+/// Fund the caller's account from cycles they approved to this canister on
+/// the cycles ledger (icrc2_approve). Returns the new balance.
+#[ic_cdk::update]
+async fn deposit_from_cycles_ledger(amount: u64) -> Result<u64, String> {
+    ledger::deposit_from_cycles_ledger(caller(), amount).await
+}
+
+#[ic_cdk::query]
+fn get_account(principal: candid::Principal) -> tenancy::Account {
+    tenancy::get_account(&principal)
+}
+
+/// Repos a principal owns or is a member of.
+#[ic_cdk::query]
+fn my_repos(principal: candid::Principal) -> Vec<String> {
+    tenancy::repos_of(&principal)
+}
+
+#[ic_cdk::query]
+fn get_repo_info(repo: String) -> Option<tenancy::RepoInfo> {
+    tenancy::repo_info(&repo)
+}
+
+/// Grant a principal a role on a repo: "writer" (push, tokens, config) or
+/// "voter" (approve commits for deploy). Owner or operator only.
+#[ic_cdk::update]
+fn add_member(repo: String, principal: candid::Principal, role: String) -> Result<Vec<tenancy::Member>, String> {
+    tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?)
+}
+
+#[ic_cdk::update]
+fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
+    tenancy::remove_member(&repo, &caller(), operator(), principal)
+}
+
+/// Hand a repo to a new owner, who pays for it from then on.
+#[ic_cdk::update]
+fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), String> {
+    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner)
+}
+
+/// Approvals a commit needs from voters before the deploy queue runs it.
+#[ic_cdk::update]
+fn set_required_votes(repo: String, k: u32) -> Result<(), String> {
+    tenancy::set_required_votes(&repo, &caller(), operator(), k)
+}
+
+/// Cast (or change) a ballot on a commit. Returns (approvals, required). When
+/// the commit is the deploy-branch tip and just reached the threshold, its
+/// deploy is queued.
+#[ic_cdk::update]
+fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
+    let (yes, need) = tenancy::vote(&repo, &caller(), &commit, approve)?;
+    if need > 0 && yes >= need {
+        if let (Some(branch), Ok(oid)) = (store::head_target(&repo), store::parse_oid(&commit)) {
+            if store::get_ref(&repo, &branch) == Some(oid) {
+                deploy::enqueue(&repo, oid);
+            }
+        }
+    }
+    Ok((yes, need))
+}
+
+#[ic_cdk::query]
+fn get_votes(repo: String, commit: String) -> Vec<tenancy::Ballot> {
+    tenancy::votes(&repo, &commit)
+}
+
+#[ic_cdk::query]
+fn get_pricing() -> tenancy::Pricing {
+    tenancy::pricing()
+}
+
+#[ic_cdk::update(guard = "is_admin")]
+fn set_pricing(p: tenancy::Pricing) -> Result<(), String> {
+    tenancy::set_pricing(p);
+    Ok(())
+}
+
+/// Operator only: settle rent now instead of waiting for the hourly timer.
+/// Returns (repos charged, cycles collected).
+#[ic_cdk::update(guard = "is_admin")]
+fn charge_rent_now() -> (u32, u64) {
+    tenancy::charge_rent_all()
+}
+
+#[ic_cdk::update(guard = "is_admin")]
+fn set_cycles_ledger(principal: candid::Principal) -> Result<(), String> {
+    ledger::set_ledger_id(principal);
+    Ok(())
+}
+
+/// Create the repo's app canister from the owner's balance, with the owner
+/// and this canister as controllers. Then `set_wasm_deploy(repo, "app", ...)`.
+#[ic_cdk::update]
+async fn create_app_canister(repo: String, cycles: u64) -> Result<candid::Principal, String> {
+    apps::create_app_canister(&repo, &caller(), operator(), cycles).await
+}
+
+/// Move cycles from the owner's balance into the repo's app canister.
+#[ic_cdk::update]
+async fn top_up_app_canister(repo: String, cycles: u64) -> Result<(), String> {
+    apps::top_up_app_canister(&repo, &caller(), operator(), cycles).await
+}
+
+/// Deposits whose cycles reached this canister's ledger account but could
+/// not be withdrawn into it; the tenant was credited, the operator sweeps.
+#[ic_cdk::query]
+fn stranded_deposits() -> Vec<ledger::Stranded> {
+    ledger::stranded()
 }
 
 // --- on-chain build spike (Track B rung R0; see ROADMAP.md) -----------------
@@ -584,23 +736,34 @@ async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeRepo
 /// source at `source_path` (.wat or .lang) is compiled and installed into
 /// `target`. The git canister must be a controller of `target`. Install mode
 /// defaults to upgrade; change it with set_deploy_mode.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update]
 fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
+    let m = tenancy::can_admin(&repo, &caller(), operator())?;
+    // "app" names the repo's own app canister (create_app_canister).
+    let target = if target == "app" {
+        m.app_canister
+            .ok_or_else(|| format!("repo {repo} has no app canister; call create_app_canister"))?
+            .to_text()
+    } else {
+        target
+    };
     deploy::set_config(&repo, target, source_path)
 }
 
 /// Set a repo's install mode: "upgrade" (default; preserves target state) or
 /// "reinstall" (wipes target state).
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update]
 fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
+    tenancy::can_admin(&repo, &caller(), operator())?;
     deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
 }
 
 /// Run the configured deploy now against the repo's current deploy-branch tip,
 /// without waiting for a push. Returns the outcome. Redeploys even when the
 /// tip commit is already in the EVM provenance log (the push path dedupes).
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update]
 async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
+    tenancy::can_admin(&repo, &caller(), operator())?;
     deploy::run_current(&repo).await
 }
 
@@ -634,8 +797,9 @@ fn deploy_queue_len() -> u64 {
 /// with the commit oid recorded in the provenance log. Coexists with
 /// set_wasm_deploy: a repo can deploy to a canister and an EVM chain from the
 /// same push.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update]
 fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(), String> {
+    tenancy::can_admin(&repo, &caller(), operator())?;
     deploy::set_evm_config(&repo, source_path, gas_limit)
 }
 
@@ -654,8 +818,9 @@ fn get_evm_deploy_status(repo: String) -> Option<deploy::EvmDeployStatus> {
 /// Turn on bundle serving for a repo: GET /site/<repo>/<path> serves blobs
 /// from `root` (a directory in the repo tree; "" = repo root) at the
 /// deploy-branch tip, each response bound to its commit via X-Ic-Git-Commit.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update]
 fn set_site(repo: String, root: String) -> Result<(), String> {
+    tenancy::can_admin(&repo, &caller(), operator())?;
     site::set_config(&repo, root)
 }
 
@@ -743,8 +908,10 @@ fn evm_get_registry() -> Option<String> {
 /// Write a repo's provenance to the on-chain registry: set(repo, tip commit,
 /// sha256 of its EVM artifact). The canister's EOA is the registry's owner, so
 /// this transaction is the canister's own attestation.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update]
 async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
+    tenancy::can_admin(&repo, &caller(), operator())?;
+    tenancy::charge_action(&repo, tenancy::pricing().evm_action, "registry publish")?;
     provenance::publish_tip(&repo).await
 }
 
@@ -756,8 +923,10 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
 /// No EVM deploy config needed -- the attested artifact is the frontend file
 /// itself, so a client can verify a served page against the canister's own
 /// on-chain attestation.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update]
 async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
+    tenancy::can_admin(&repo, &caller(), operator())?;
+    tenancy::charge_action(&repo, tenancy::pricing().evm_action, "registry publish")?;
     provenance::publish_site(&repo).await
 }
 

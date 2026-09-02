@@ -36,6 +36,34 @@ type HttpResponse = record {
 
 type Result = variant { Ok; Err : text };
 type ResultText = variant { Ok : text; Err : text };
+
+// tenancy (docs/TENANCY.md)
+type Account = record { balance : nat64; deposited : nat64; spent : nat64; created_ns : nat64 };
+type Role = variant { Writer; Voter };
+type Member = record { "principal" : principal; role : Role };
+type RepoInfo = record {
+  owner : opt principal;
+  members : vec Member;
+  storage_bytes : nat64;
+  delinquent : bool;
+  required_votes : nat32;
+  app_canister : opt principal;
+  exempt : bool;
+};
+type Ballot = record { "principal" : principal; approve : bool; at_ns : nat64 };
+type Pricing = record {
+  create_repo : nat64;
+  push_base : nat64;
+  push_per_byte : nat64;
+  rent_per_byte_year : nat64;
+  evm_action : nat64;
+  ic_deploy : nat64;
+};
+type Stranded = record { who : principal; amount : nat64; error : text; at_ns : nat64 };
+type ResultAccount = variant { Ok : Account; Err : text };
+type ResultMembers = variant { Ok : vec Member; Err : text };
+type ResultVote = variant { Ok : record { nat32; nat32 }; Err : text };
+type ResultPrincipal = variant { Ok : principal; Err : text };
 type ResultBlob = variant { Ok : blob; Err : text };
 
 type CompileInfo = record { wasm_len : nat64; sha256_hex : text };
@@ -178,6 +206,26 @@ service : {
   set_ref : (text, text, text) -> (Result);
   create_push_token : (text) -> (ResultText);
   revoke_push_token : (text) -> (bool);
+
+  // tenancy: accounts, ownership, membership, votes (docs/TENANCY.md)
+  deposit : () -> (ResultAccount);
+  deposit_from_cycles_ledger : (nat64) -> (ResultNat64);
+  get_account : (principal) -> (Account) query;
+  my_repos : (principal) -> (vec text) query;
+  get_repo_info : (text) -> (opt RepoInfo) query;
+  add_member : (text, principal, text) -> (ResultMembers);
+  remove_member : (text, principal) -> (ResultMembers);
+  transfer_repo : (text, principal) -> (Result);
+  set_required_votes : (text, nat32) -> (Result);
+  vote : (text, text, bool) -> (ResultVote);
+  get_votes : (text, text) -> (vec Ballot) query;
+  get_pricing : () -> (Pricing) query;
+  set_pricing : (Pricing) -> (Result);
+  charge_rent_now : () -> (record { nat32; nat64 });
+  set_cycles_ledger : (principal) -> (Result);
+  stranded_deposits : () -> (vec Stranded) query;
+  create_app_canister : (text, nat64) -> (ResultPrincipal);
+  top_up_app_canister : (text, nat64) -> (Result);
 
   // admin allowlist (callable by controllers or authorized principals)
   authorize : (principal) -> (Result);

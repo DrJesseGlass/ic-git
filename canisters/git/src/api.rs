@@ -6,6 +6,10 @@
 //!   GET /api/<repo>/commit/<rev>
 //!   GET /api/<repo>/tree/<rev>[/<path>]
 //!   GET /api/<repo>/blob/<rev>/<path>
+//!   GET /api/<repo>/info                        tenancy: owner, members, rent state
+//!   GET /api/<repo>/votes/<commit>              ballots on a commit
+//!   GET /api/account/<principal>                balance and repos of a principal
+//!   GET /api/pricing                            the fee table
 //!
 //! `<rev>` is HEAD, a 40-hex oid, a bare branch or tag name, or a full ref
 //! name. Segments are split on `/` first and percent-decoded second, so a
@@ -21,6 +25,8 @@
 use crate::object;
 use crate::site;
 use crate::store::{self, ObjectType, Oid};
+use crate::tenancy;
+use candid::Principal;
 use ic_dev_kit_rs::http::{self, HttpResponse};
 use serde::Serialize;
 
@@ -67,6 +73,39 @@ struct Entry {
 }
 
 #[derive(Serialize)]
+struct AccountInfo {
+    principal: String,
+    balance: u64,
+    deposited: u64,
+    spent: u64,
+    repos: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct MemberInfo {
+    principal: String,
+    role: &'static str,
+}
+
+#[derive(Serialize)]
+struct RepoTenancy {
+    owner: Option<String>,
+    members: Vec<MemberInfo>,
+    storage_bytes: u64,
+    delinquent: bool,
+    required_votes: u32,
+    app_canister: Option<String>,
+    exempt: bool,
+}
+
+#[derive(Serialize)]
+struct BallotInfo {
+    principal: String,
+    approve: bool,
+    at_ns: u64,
+}
+
+#[derive(Serialize)]
 struct TreeInfo {
     commit: String,
     path: String,
@@ -85,6 +124,28 @@ pub fn handle(url: &str) -> HttpResponse {
     if rest == "repos" {
         return json(200, &repos(), None);
     }
+    if rest == "pricing" {
+        return json(200, &tenancy::pricing(), None);
+    }
+    if let Some(p) = rest.strip_prefix("account/") {
+        return match decode(p).and_then(|t| Principal::from_text(t).map_err(|e| e.to_string())) {
+            Ok(principal) => {
+                let a = tenancy::get_account(&principal);
+                json(
+                    200,
+                    &AccountInfo {
+                        principal: principal.to_text(),
+                        balance: a.balance,
+                        deposited: a.deposited,
+                        spent: a.spent,
+                        repos: tenancy::repos_of(&principal),
+                    },
+                    None,
+                )
+            }
+            Err(e) => error(400, &format!("bad principal: {e}")),
+        };
+    }
     let segs: Vec<&str> = rest.splitn(4, '/').collect();
     let (Some(repo), Some(what)) = (segs.first(), segs.get(1)) else {
         return error(404, "not found");
@@ -97,6 +158,43 @@ pub fn handle(url: &str) -> HttpResponse {
         return error(404, "no such repo");
     }
     match (*what, segs.get(2).copied(), segs.get(3).copied()) {
+        ("info", None, None) => match tenancy::repo_info(&repo) {
+            Some(i) => json(
+                200,
+                &RepoTenancy {
+                    owner: i.owner.map(|p| p.to_text()),
+                    members: i
+                        .members
+                        .iter()
+                        .map(|m| MemberInfo {
+                            principal: m.principal.to_text(),
+                            role: match m.role {
+                                tenancy::Role::Writer => "writer",
+                                tenancy::Role::Voter => "voter",
+                            },
+                        })
+                        .collect(),
+                    storage_bytes: i.storage_bytes,
+                    delinquent: i.delinquent,
+                    required_votes: i.required_votes,
+                    app_canister: i.app_canister.map(|p| p.to_text()),
+                    exempt: i.exempt,
+                },
+                None,
+            ),
+            None => error(404, "no such repo"),
+        },
+        ("votes", Some(commit), None) => {
+            let ballots: Vec<BallotInfo> = tenancy::votes(&repo, commit)
+                .into_iter()
+                .map(|b| BallotInfo {
+                    principal: b.principal.to_text(),
+                    approve: b.approve,
+                    at_ns: b.at_ns,
+                })
+                .collect();
+            json(200, &ballots, None)
+        }
         ("refs", None, None) => {
             let refs: Vec<RefInfo> = store::list_refs(&repo)
                 .into_iter()
@@ -469,6 +567,34 @@ mod tests {
         // Old commit sees the old tree.
         let old = body_json(&handle("/api/api-tree/tree/v1"));
         assert_eq!(old["entries"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tenancy_views() {
+        let (_, c2) = seed("api-ten");
+        let owner = Principal::from_slice(&[7; 8]);
+        let voter = Principal::from_slice(&[8; 8]);
+        tenancy::credit(&owner, 10_000_000_000);
+        tenancy::create_repo("api-ten-owned", &owner, false).unwrap();
+        tenancy::add_member("api-ten-owned", &owner, false, voter, tenancy::Role::Voter).unwrap();
+
+        let legacy = body_json(&handle("/api/api-ten/info"));
+        assert_eq!(legacy["exempt"], true);
+        assert!(legacy["owner"].is_null());
+        let owned = body_json(&handle("/api/api-ten-owned/info"));
+        assert_eq!(owned["owner"], owner.to_text());
+        assert_eq!(owned["members"][0]["role"], "voter");
+        assert_eq!(owned["exempt"], false);
+
+        let acct = body_json(&handle(&format!("/api/account/{}", owner.to_text())));
+        assert_eq!(acct["balance"], 10_000_000_000u64 - tenancy::pricing().create_repo);
+        assert_eq!(acct["repos"][0], "api-ten-owned");
+        assert_eq!(handle("/api/account/not-a-principal").status_code, 400);
+
+        assert_eq!(body_json(&handle("/api/pricing"))["push_base"], tenancy::pricing().push_base);
+        // Votes on the seeded repo's tip (an object that exists): none yet.
+        let v = body_json(&handle(&format!("/api/api-ten/votes/{}", store::oid_hex(&c2))));
+        assert_eq!(v.as_array().unwrap().len(), 0);
     }
 
     #[test]
