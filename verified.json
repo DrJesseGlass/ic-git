@@ -89,6 +89,33 @@
         "checked_by": "tools/check-module-hash.sh",
         "note": "install went through https://icp-api.io; the icp0.io gateway timed out buffering 1 MiB chunks on a slow uplink"
       }
+    },
+    {
+      "commit": "9cdc58ca094ab31c2b0a440d983267fe10a5e6b2",
+      "tag": "v0.2.0",
+      "module_hash": "278ebec09bc4d353da718a2751ce01dd74bb44804d1f99abf72b0e08d4b3541a",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, colima vz + Rosetta, docker 29.5.2",
+          "date": "2026-09-02"
+        }
+      ],
+      "deployed": {
+        "date": null,
+        "on_chain_match": "pending"
+      },
+      "wasm_sha256": "f49a6d0428e7e6451038964c02341a7077333890d736be817085df72f1bf360c"
     }
   ]
 }
