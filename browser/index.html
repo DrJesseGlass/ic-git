@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ic-git</title>
+<!--
+  ic-git repo browser. One file, no external resources: every byte that runs
+  is inside the blob the ProvenanceRegistry attests, so a verifier that
+  matches this file's hash has covered the whole app (VISION.md section 2,
+  "SRI hashes"). Reads go to the canister's /api routes on the same origin.
+-->
+<style>
+  :root { --fg:#1c1c1c; --muted:#6b6b6b; --bg:#fafaf8; --line:#e2e0da; --link:#0b57a4; --code:#f1efe9; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e6e4dd; --muted:#9a978f; --bg:#161615; --line:#2c2b28; --link:#7fb3ea; --code:#1f1e1c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  header { border-bottom:1px solid var(--line); padding:.7rem 1rem; display:flex; gap:1rem; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:1.05rem; margin:0; }
+  header .prov { color:var(--muted); font-size:.85rem; margin-left:auto; }
+  main { max-width: 1040px; margin: 0 auto; padding: 1rem; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.88em; }
+  pre { background:var(--code); border:1px solid var(--line); border-radius:6px; padding:.8rem 1rem; overflow-x:auto; }
+  pre.src { counter-reset: ln; padding-left:0; }
+  pre.src span.l { display:block; padding-left:4.2em; position:relative; white-space:pre; }
+  pre.src span.l:empty::after { content:"\00a0"; }
+  pre.src span.l::before { counter-increment: ln; content: counter(ln); position:absolute; left:0; width:3.2em; text-align:right; color:var(--muted); user-select:none; }
+  table { border-collapse: collapse; width:100%; }
+  td, th { text-align:left; padding:.35rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:.85rem; }
+  .muted { color: var(--muted); }
+  .crumbs { margin:.2rem 0 1rem; }
+  .crumbs > * + *::before { content:" / "; color:var(--muted); }
+  .row { display:flex; gap:1.5rem; flex-wrap:wrap; align-items:baseline; margin-bottom:.6rem; }
+  .tabs a { margin-right:1rem; }
+  .tabs a.on { font-weight:600; color:var(--fg); }
+  .oid { font-family: ui-monospace, Menlo, monospace; font-size:.85em; }
+  .err { color:#b3261e; }
+  select { font: inherit; padding:.15rem .3rem; }
+  .commit .msg { white-space: pre-wrap; margin:.2rem 0 0; }
+  .commit { padding:.5rem 0; border-bottom:1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="#/">ic-git</a></h1>
+  <span class="muted">a git remote on the Internet Computer</span>
+  <span class="prov" id="prov"></span>
+</header>
+<main id="main"><p class="muted">loading&hellip;</p></main>
+<script>
+(() => {
+  'use strict';
+  const main = document.getElementById('main');
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const enc = p => p.split('/').map(encodeURIComponent).join('/');
+  const short = o => o.slice(0, 8);
+  // One hash builder, one rule: repo, rev and each path component are
+  // percent-encoded, so a branch named feature/login is one segment
+  // (feature%2Flogin) and route() can split on '/' before decoding.
+  const R = r => encodeURIComponent(r);
+  const H = (repo, kind, rev, path) => '#/' + enc(repo) + (kind ? '/' + kind + '/' + R(rev) : '') + (path ? '/' + enc(path) : '');
+  const when = t => t ? new Date(t * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '';
+
+  async function api(path) {
+    const r = await fetch('/api/' + path, { headers: { 'Accept': 'application/json' } });
+    const ct = r.headers.get('content-type') || '';
+    const commit = r.headers.get('x-ic-git-commit');
+    if (!r.ok) {
+      let msg = r.status + ' ' + r.statusText;
+      if (ct.includes('json')) { try { msg = (await r.json()).error || msg; } catch (_) {} }
+      throw new Error(msg);
+    }
+    return { data: ct.includes('json') ? await r.json() : await r.text(), commit };
+  }
+
+  // Where this page itself came from: the canister stamps every /site
+  // response with the commit it served. Shown, not trusted -- the trusted
+  // check is tools/verify.mjs against the registry.
+  fetch(location.pathname, { method: 'GET', cache: 'no-store' }).then(r => {
+    const c = r.headers.get('x-ic-git-commit'), repo = r.headers.get('x-ic-git-repo');
+    if (c) document.getElementById('prov').innerHTML =
+      'this page: <a class="oid" href="' + esc(H(repo, 'commit', c)) + '">' + esc(repo) + '@' + esc(short(c)) + '</a>';
+  }).catch(() => {});
+
+  const render = html => { main.innerHTML = html; };
+  const fail = e => render('<p class="err">' + esc(e.message || e) + '</p>');
+
+  function crumbs(repo, rev, kind, path) {
+    const parts = path ? path.split('/') : [];
+    let out = '<a href="' + esc(H(repo)) + '">' + esc(repo) + '</a>';
+    let acc = '';
+    parts.forEach((p, i) => {
+      acc += (acc ? '/' : '') + p;
+      const last = i === parts.length - 1;
+      out += last && kind === 'blob'
+        ? '<span>' + esc(p) + '</span>'
+        : '<a href="' + esc(H(repo, 'tree', rev, acc)) + '">' + esc(p) + '</a>';
+    });
+    return '<div class="crumbs">' + out + '</div>';
+  }
+
+  function tabs(repo, rev, on) {
+    const t = (k, label) => '<a class="' + (on === k ? 'on' : '') + '" href="' + esc(H(repo, k, rev)) + '">' + label + '</a>';
+    return '<span class="tabs">' + t('tree', 'files') + t('commits', 'commits') + '</span>';
+  }
+
+  function refPicker(repo, refs, rev, kind, path) {
+    const names = refs.map(r => r.name).sort();
+    const opts = names.map(n => {
+      const s = n.replace(/^refs\/(heads|tags)\//, '');
+      return '<option value="' + esc(s) + '"' + (s === rev || n === rev ? ' selected' : '') + '>' + esc(n) + '</option>';
+    }).join('');
+    const sel = '<select id="ref">' + opts + (names.some(n => n.replace(/^refs\/(heads|tags)\//, '') === rev) ? '' : '<option selected value="' + esc(rev) + '">' + esc(rev) + '</option>') + '</select>';
+    setTimeout(() => {
+      const el = document.getElementById('ref');
+      if (el) el.onchange = () => { location.hash = H(repo, kind, el.value, path); };
+    }, 0);
+    return sel;
+  }
+
+  async function showRepos() {
+    const { data } = await api('repos');
+    if (!data.length) return render('<p class="muted">no repositories yet</p>');
+    render('<h2>repositories</h2><table><tr><th>name</th><th>default branch</th><th>site</th><th>clone</th></tr>' +
+      data.map(r => '<tr><td><a href="' + esc(H(r.name)) + '">' + esc(r.name) + '</a></td><td class="muted">' + esc(r.head.replace(/^refs\/heads\//, '')) + '</td><td>' +
+        (r.site ? '<a href="/site/' + esc(enc(r.name)) + '/">/site/' + esc(r.name) + '/</a>' : '<span class="muted">&ndash;</span>') +
+        '</td><td><code>git clone ' + esc(location.origin) + '/' + esc(enc(r.name)) + '.git</code></td></tr>').join('') + '</table>');
+  }
+
+  async function showTree(repo, rev, path) {
+    const [{ data: refs }, { data: t, commit }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/tree/' + encodeURIComponent(rev) + (path ? '/' + enc(path) : ''))]);
+    const rows = t.entries.map(e => {
+      const p = (path ? path + '/' : '') + e.name;
+      const href = e.kind === 'tree' ? H(repo, 'tree', rev, p) : e.kind === 'blob' ? H(repo, 'blob', rev, p) : null;
+      const name = href ? '<a href="' + esc(href) + '">' + esc(e.name) + (e.kind === 'tree' ? '/' : '') + '</a>' : esc(e.name);
+      return '<tr><td>' + name + '</td><td class="muted">' + esc(e.kind === 'blob' ? 'file' : e.kind) + '</td><td class="oid muted">' + esc(short(e.oid)) + '</td></tr>';
+    }).join('');
+    const up = path ? '<tr><td><a href="' + esc(H(repo, 'tree', rev, path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '')) + '">..</a></td><td></td><td></td></tr>' : '';
+    render(crumbs(repo, rev, 'tree', path) +
+      '<div class="row">' + refPicker(repo, refs, rev, 'tree', path) + tabs(repo, rev, 'tree') +
+      '<span class="muted">at <a class="oid" href=\"' + esc(H(repo, 'commit', commit)) + '\">' + esc(short(commit)) + '</a></span></div>' +
+      '<table>' + up + rows + '</table>');
+  }
+
+  async function showBlob(repo, rev, path) {
+    const { data, commit } = await api(enc(repo) + '/blob/' + encodeURIComponent(rev) + '/' + enc(path));
+    const binary = /[\x00-\x08\x0E-\x1F]/.test(data.slice(0, 8000));
+    const body = binary
+      ? '<p class="muted">binary file, ' + data.length + ' bytes</p>'
+      : '<pre class="src">' + data.split('\n').map(l => '<span class="l">' + esc(l) + '</span>').join('') + '</pre>';
+    render(crumbs(repo, rev, 'blob', path) +
+      '<div class="row"><span class="muted">' + data.length + ' bytes at <a class="oid" href=\"' + esc(H(repo, 'commit', commit)) + '\">' + esc(short(commit)) + '</a></span>' +
+      '<a href="/api/' + esc(enc(repo)) + '/blob/' + esc(encodeURIComponent(commit)) + '/' + esc(enc(path)) + '">raw</a>' +
+      '<span class="muted"><code>git show ' + esc(short(commit)) + ':' + esc(path) + '</code> reproduces this</span></div>' + body);
+  }
+
+  async function showCommits(repo, rev) {
+    const [{ data: refs }, { data: list }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/commits/' + encodeURIComponent(rev) + '?n=50')]);
+    const items = list.map(c => {
+      const title = (c.message || '').split('\n')[0];
+      return '<div class="commit"><a href=\"' + esc(H(repo, 'commit', c.oid)) + '\"><b>' + esc(title || '(no message)') + '</b></a>' +
+        '<div class="muted">' + esc(c.author ? c.author.name : '?') + ' &middot; ' + esc(when(c.author && c.author.time)) + ' &middot; <a class="oid" href=\"' + esc(H(repo, 'tree', c.oid)) + '\">' + esc(short(c.oid)) + '</a></div></div>';
+    }).join('');
+    render(crumbs(repo, rev, 'commits', '') + '<div class="row">' + refPicker(repo, refs, rev, 'commits', '') + tabs(repo, rev, 'commits') + '</div>' + items);
+  }
+
+  async function showCommit(repo, oid) {
+    const { data: c } = await api(enc(repo) + '/commit/' + encodeURIComponent(oid));
+    const who = (label, id) => id ? '<tr><th>' + label + '</th><td>' + esc(id.name) + ' &lt;' + esc(id.email) + '&gt; <span class="muted">' + esc(when(id.time)) + ' ' + esc(id.tz) + '</span></td></tr>' : '';
+    render(crumbs(repo, c.oid, 'commits', '') +
+      '<table>' +
+      '<tr><th>commit</th><td class="oid">' + esc(c.oid) + ' &middot; <a href=\"' + esc(H(repo, 'tree', c.oid)) + '\">browse files</a></td></tr>' +
+      '<tr><th>tree</th><td class="oid">' + esc(c.tree) + '</td></tr>' +
+      (c.parents.length ? '<tr><th>parents</th><td class="oid">' + c.parents.map(p => '<a href=\"' + esc(H(repo, 'commit', p)) + '\">' + esc(p) + '</a>').join('<br>') + '</td></tr>' : '') +
+      who('author', c.author) + who('committer', c.committer) +
+      '</table><pre>' + esc(c.message) + '</pre>');
+  }
+
+  async function route() {
+    const raw = location.hash.replace(/^#\/?/, '');
+    const dec = x => { try { return decodeURIComponent(x); } catch (_) { return x; } };
+    const seg = raw ? raw.split('/').map(dec) : [];
+    try {
+      if (!seg.length) return await showRepos();
+      const repo = seg[0];
+      const kind = seg[1] || 'tree';
+      const rev = seg[2] || 'HEAD';
+      const path = seg.slice(3).join('/');
+      if (kind === 'tree') return await showTree(repo, rev, path);
+      if (kind === 'blob') return await showBlob(repo, rev, path);
+      if (kind === 'commits') return await showCommits(repo, rev);
+      if (kind === 'commit') return await showCommit(repo, rev);
+      throw new Error('unknown view: ' + kind);
+    } catch (e) { fail(e); }
+  }
+  window.addEventListener('hashchange', route);
+  route();
+})();
+</script>
+</body>
+</html>

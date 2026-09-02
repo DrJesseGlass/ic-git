@@ -65,6 +65,35 @@ pub fn commit_refs(content: &[u8]) -> Result<CommitRefs, String> {
     })
 }
 
+/// Author, committer and message of a commit, as text. Missing headers are
+/// `None` rather than errors: a hand-made commit still has a tree and can be
+/// browsed.
+pub struct CommitMeta {
+    pub author: Option<String>,
+    pub committer: Option<String>,
+    pub message: String,
+}
+
+pub fn commit_meta(content: &[u8]) -> CommitMeta {
+    let mut meta = CommitMeta {
+        author: None,
+        committer: None,
+        message: String::new(),
+    };
+    for line in header_lines(content) {
+        let Ok(line) = std::str::from_utf8(line) else { continue };
+        if let Some(v) = line.strip_prefix("author ") {
+            meta.author = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("committer ") {
+            meta.committer = Some(v.to_string());
+        }
+    }
+    if let Some(pos) = content.windows(2).position(|w| w == b"\n\n") {
+        meta.message = String::from_utf8_lossy(&content[pos + 2..]).into_owned();
+    }
+    meta
+}
+
 /// The object an annotated tag points at.
 pub fn tag_target(content: &[u8]) -> Result<Oid, String> {
     for line in header_lines(content) {

@@ -527,6 +527,15 @@ mod tests {
         assert_eq!(serve("web", "").status_code, 404);
     }
 
+    /// The repo browser is the first page ic-git serves about itself; it
+    /// must pass the same gate every attested entrypoint passes. Test-only
+    /// include: the page is not part of the wasm.
+    #[test]
+    fn repo_browser_page_is_verifiable() {
+        let page = include_bytes!("../../../browser/index.html");
+        assert_eq!(unverifiable_subresource("index.html", page), None);
+    }
+
     /// The two entrypoint shapes whose attested hash actually proves something:
     /// self-contained, or SRI-complete so the browser enforces the rest.
     #[test]

@@ -4,6 +4,7 @@
 //! refs + admin API) plus the info/refs advertisement, so `git ls-remote`
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
+mod api;
 mod compile;
 mod deploy;
 mod evm;
@@ -62,6 +63,8 @@ enum Route {
     Rpc { repo: String, service: Service },
     /// GET /site/<repo>/<path>: a committed static bundle (see site.rs).
     Site { repo: String, path: String },
+    /// GET /api/...: read-only JSON for the repo browser (see api.rs).
+    Api { url: String },
     Index,
     NotFound,
 }
@@ -70,6 +73,13 @@ fn route(req: &HttpRequest) -> Route {
     let path = http::extract_path(&req.url);
     if path == "/" {
         return Route::Index;
+    }
+    if path.starts_with("/api/") {
+        return if req.method == "GET" {
+            Route::Api { url: req.url.clone() }
+        } else {
+            Route::NotFound
+        };
     }
     if let Some(rest) = path.strip_prefix("/site/") {
         if req.method != "GET" {
@@ -178,6 +188,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         } => http::upgrade_response(),
         Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
         Route::Site { repo, path } => site::serve(&repo, &path),
+        Route::Api { url } => api::handle(&url),
         Route::Index => {
             let repos = store::list_repos().join("\n");
             git_response(

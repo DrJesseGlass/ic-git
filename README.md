@@ -40,10 +40,52 @@ canisters/git/          the git canister (Rust)
   src/smart_http.rs     pkt-line codec, services, ref advertisement
   src/pack.rs           closure walk, pack writer, streamed upload-pack
   src/lib.rs            HTTP routing + candid admin API
+  src/site.rs           GET /site/<repo>/<path>: serve a committed static bundle
+  src/api.rs            GET /api/...: read-only JSON for the repo browser
+browser/index.html      the repo browser -- one self-contained page, served by
+                        ic-git from its own repo (see "Repo browser")
 tools/seed-repo.sh      upload a local repo via the admin API (pre-m3 push)
+tools/reproducible-build.sh, tools/check-module-hash.sh
+                        prove the deployed wasm is this source (REPRODUCIBLE_BUILD.md)
 site/                   placeholder content for the asset canister ("www")
 ARCHITECTURE.md         the design
 ```
+
+## Repo browser
+
+`browser/index.html` is a GitHub-style read-only browser: repositories,
+branches and tags, commit log, trees, and files. It is one file with no
+external resources, so the registry attestation of that single blob covers
+every byte that runs (VISION.md section 2). It talks to the canister's own
+`/api/...` routes on the same origin:
+
+```
+GET /api/repos                          [{name, head, site}]
+GET /api/<repo>/refs                    [{name, oid}]
+GET /api/<repo>/commits/<rev>?n=30      first-parent walk, newest first
+GET /api/<repo>/commit/<rev>            one commit
+GET /api/<repo>/tree/<rev>[/<path>]     {commit, path, entries: [{name, mode, kind, oid}]}
+GET /api/<repo>/blob/<rev>/<path>       raw bytes, text/plain, nosniff
+```
+
+`<rev>` is `HEAD`, a 40-hex oid, or a bare branch/tag name. Every response
+that resolved a commit carries `X-Ic-Git-Commit`.
+
+ic-git hosts the browser from its own source: push this repository to the
+canister as repo `ic-git`, point the site at the `browser` directory, and
+attest it like any other frontend.
+
+```sh
+dfx canister --network ic call umobs-yiaaa-aaaab-agyrq-cai create_repo '("ic-git")'
+TOKEN=$(dfx canister --network ic call umobs-yiaaa-aaaab-agyrq-cai create_push_token '("ic-git")' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
+git push "https://ic:$TOKEN@umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/ic-git.git" main
+dfx canister --network ic call umobs-yiaaa-aaaab-agyrq-cai set_site '("ic-git", "browser")'
+dfx canister --network ic call umobs-yiaaa-aaaab-agyrq-cai evm_registry_publish_site '("ic-git")'
+node tools/verify.mjs ic-git index.html
+```
+
+The page is then at `https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-git/`
+and browses, among other things, its own source.
 
 ## Development
 
