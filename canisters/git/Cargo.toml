@@ -42,3 +42,5 @@ wasmi = "1"
 # trial recovery. Both build cleanly to wasm32-unknown-unknown.
 sha3 = "0.10"
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
+
+[dev-dependencies]
