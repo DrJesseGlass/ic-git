@@ -43,6 +43,15 @@
   select { font: inherit; padding:.15rem .3rem; }
   .commit .msg { white-space: pre-wrap; margin:.2rem 0 0; }
   .commit { padding:.5rem 0; border-bottom:1px solid var(--line); }
+  .panel { border:1px solid var(--line); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; background:var(--code); }
+  .panel h3 { margin:0 0 .5rem; font-size:.95rem; }
+  .panel form { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin:.4rem 0; }
+  .panel input { font:inherit; padding:.25rem .4rem; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--fg); min-width:12rem; }
+  .panel button, header button { font:inherit; padding:.25rem .7rem; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--fg); cursor:pointer; }
+  .panel button:hover, header button:hover { border-color:var(--link); }
+  .panel .status { margin:.4rem 0 0; min-height:1.2em; }
+  .panel .ok { color:#1a7f37; } .panel .bad { color:#b3261e; }
+  .tok { user-select:all; }
 </style>
 </head>
 <body>
@@ -50,8 +59,204 @@
   <h1><a href="#/">ic-git</a></h1>
   <span class="muted">a git remote on the Internet Computer</span>
   <span class="prov" id="prov"></span>
+  <span id="wallet"></span>
 </header>
 <main id="main"><p class="muted">loading&hellip;</p></main>
+<script>
+// === candid ===
+// Minimal Candid, CBOR, and IC certificate handling for the console. Enough of
+// each for the calls this page makes and the replies it reads; tested against
+// encodings produced by the Rust candid crate (tools/console-codec-test.mjs).
+const IC = (() => {
+  'use strict';
+  const te = new TextEncoder(), td = new TextDecoder();
+  const big = v => typeof v === 'bigint' ? v : BigInt(v);
+  function uleb(n) { n = big(n); const out = []; do { let b = Number(n & 0x7fn); n >>= 7n; if (n) b |= 0x80; out.push(b); } while (n); return out; }
+  function sleb(n) { n = big(n); const out = []; for (;;) { const b = Number(n & 0x7fn); n >>= 7n; const sign = b & 0x40; if ((n === 0n && !sign) || (n === -1n && sign)) { out.push(b); return out; } out.push(b | 0x80); } }
+  function idlHash(name) { let h = 0; for (const c of te.encode(name)) h = (Math.imul(h, 223) + c) >>> 0; return h; }
+  const fieldId = n => /^[0-9]+$/.test(n) ? Number(n) : idlHash(n);
+  const PRIM = { null: -1, bool: -2, nat: -3, int: -4, nat8: -5, nat16: -6, nat32: -7, nat64: -8, int8: -9, int16: -10, int32: -11, int64: -12, float32: -13, float64: -14, text: -15, reserved: -16, empty: -17, principal: -24 };
+
+  // --- principals ---
+  const CRC = (() => { const t = new Uint32Array(256); for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; } return t; })();
+  function crc32(bytes) { let c = 0xffffffff; for (const b of bytes) c = CRC[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+  const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
+  function b32enc(bytes) { let bits = 0, val = 0, out = ''; for (const b of bytes) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } } if (bits) out += B32[(val << (5 - bits)) & 31]; return out; }
+  function b32dec(str) { let bits = 0, val = 0; const out = []; for (const ch of str) { const i = B32.indexOf(ch); if (i < 0) throw new Error('bad base32'); val = (val << 5) | i; bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; } } return Uint8Array.from(out); }
+  function principalToText(bytes) { const c = crc32(bytes); const all = new Uint8Array(4 + bytes.length); all.set([c >>> 24, (c >>> 16) & 255, (c >>> 8) & 255, c & 255]); all.set(bytes, 4); return b32enc(all).match(/.{1,5}/g).join('-'); }
+  function principalFromText(text) { const raw = b32dec(text.toLowerCase().replace(/-/g, '')); const bytes = raw.slice(4); const c = crc32(bytes); if (((raw[0] << 24) | (raw[1] << 16) | (raw[2] << 8) | raw[3]) >>> 0 !== c) throw new Error('bad principal checksum'); return bytes; }
+
+  // --- encoder ---
+  // Types: a primitive name, 'blob', {opt: T}, {vec: T}, {record: {field: T}}, {variant: {tag: T}}.
+  function encode(types, values) {
+    const table = [], memo = new Map();
+    function idx(t) {
+      if (typeof t === 'string') { if (t === 'blob') return idx({ vec: 'nat8' }); if (!(t in PRIM)) throw new Error('unknown type ' + t); return PRIM[t]; }
+      const key = JSON.stringify(t); if (memo.has(key)) return memo.get(key);
+      const i = table.length; table.push(null); memo.set(key, i);
+      let body;
+      if (t.opt !== undefined) body = [...sleb(-18), ...sleb(idx(t.opt))];
+      else if (t.vec !== undefined) body = [...sleb(-19), ...sleb(idx(t.vec))];
+      else if (t.record || t.variant) {
+        const fs = Object.entries(t.record || t.variant).map(([n, ft]) => [fieldId(n), idx(ft)]).sort((a, b) => a[0] - b[0]);
+        body = [...sleb(t.record ? -20 : -21), ...uleb(fs.length)];
+        for (const [id, ti] of fs) body.push(...uleb(id), ...sleb(ti));
+      } else throw new Error('bad type');
+      table[i] = body; return i;
+    }
+    function val(t, v, out) {
+      if (t === 'blob') t = { vec: 'nat8' };
+      if (typeof t === 'string') {
+        switch (t) {
+          case 'null': return;
+          case 'bool': out.push(v ? 1 : 0); return;
+          case 'nat': out.push(...uleb(v)); return;
+          case 'int': out.push(...sleb(v)); return;
+          case 'nat8': out.push(Number(v) & 255); return;
+          case 'nat32': { const n = Number(v) >>> 0; out.push(n & 255, (n >>> 8) & 255, (n >>> 16) & 255, n >>> 24); return; }
+          case 'nat64': { let n = big(v); for (let i = 0; i < 8; i++) { out.push(Number(n & 255n)); n >>= 8n; } return; }
+          case 'text': { const b = te.encode(v); out.push(...uleb(b.length), ...b); return; }
+          case 'principal': { const b = typeof v === 'string' ? principalFromText(v) : v; out.push(1, ...uleb(b.length), ...b); return; }
+          default: throw new Error('cannot encode ' + t);
+        }
+      }
+      if (t.opt !== undefined) { if (v === null || v === undefined) out.push(0); else { out.push(1); val(t.opt, v, out); } return; }
+      if (t.vec !== undefined) { const arr = v instanceof Uint8Array ? Array.from(v) : v; out.push(...uleb(arr.length)); for (const x of arr) val(t.vec, x, out); return; }
+      if (t.record) { for (const [n] of Object.entries(t.record).map(([n, ft]) => [n, ft]).sort((a, b) => fieldId(a[0]) - fieldId(b[0]))) val(t.record[n], v[n], out); return; }
+      if (t.variant) { const names = Object.keys(t.variant).sort((a, b) => fieldId(a) - fieldId(b)); const tag = Object.keys(v)[0]; const i = names.indexOf(tag); if (i < 0) throw new Error('bad variant ' + tag); out.push(...uleb(i)); val(t.variant[tag], v[tag], out); return; }
+      throw new Error('bad type');
+    }
+    const tis = types.map(idx);
+    const out = [0x44, 0x49, 0x44, 0x4c, ...uleb(table.length)];
+    for (const body of table) out.push(...body);
+    out.push(...uleb(tis.length));
+    for (const ti of tis) out.push(...sleb(ti));
+    types.forEach((t, i) => val(t, values[i], out));
+    return Uint8Array.from(out);
+  }
+
+  // --- decoder ---
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount']) NAMES[idlHash(n)] = n;
+  function decode(bytes) {
+    let pos = 0;
+    const u8 = () => bytes[pos++];
+    const rUleb = () => { let r = 0n, sh = 0n, b; do { b = u8(); r |= BigInt(b & 0x7f) << sh; sh += 7n; } while (b & 0x80); return r; };
+    const rSleb = () => { let r = 0n, sh = 0n, b; do { b = u8(); r |= BigInt(b & 0x7f) << sh; sh += 7n; } while (b & 0x80); if (b & 0x40) r -= 1n << sh; return r; };
+    if (td.decode(bytes.slice(0, 4)) !== 'DIDL') throw new Error('not candid'); pos = 4;
+    const table = []; const n = Number(rUleb());
+    for (let i = 0; i < n; i++) {
+      const op = Number(rSleb());
+      if (op === -18 || op === -19) table.push({ op, of: Number(rSleb()) });
+      else if (op === -20 || op === -21) { const m = Number(rUleb()); const fields = []; for (let j = 0; j < m; j++) { const id = Number(rUleb()); fields.push({ id, t: Number(rSleb()) }); } table.push({ op, fields }); }
+      else if (op === -22) { rUleb(); const a = Number(rUleb()); for (let j = 0; j < a; j++) rSleb(); const r = Number(rUleb()); for (let j = 0; j < r; j++) rSleb(); const ann = Number(rUleb()); pos += ann; table.push({ op }); }
+      else throw new Error('unsupported type op ' + op);
+    }
+    const argc = Number(rUleb()); const types = []; for (let i = 0; i < argc; i++) types.push(Number(rSleb()));
+    const name = id => NAMES[id] !== undefined ? NAMES[id] : (id < 256 ? String(id) : '_' + id);
+    function value(t) {
+      if (t < 0) switch (t) {
+        case -1: return null;
+        case -2: return u8() !== 0;
+        case -3: return rUleb();
+        case -4: return rSleb();
+        case -5: return u8();
+        case -6: return u8() | (u8() << 8);
+        case -7: return (u8() | (u8() << 8) | (u8() << 16) | (u8() << 24)) >>> 0;
+        case -8: { let r = 0n; for (let i = 0; i < 8; i++) r |= BigInt(u8()) << BigInt(8 * i); return r; }
+        case -12: { let r = 0n; for (let i = 0; i < 8; i++) r |= BigInt(u8()) << BigInt(8 * i); return BigInt.asIntN(64, r); }
+        case -15: { const l = Number(rUleb()); const s = td.decode(bytes.slice(pos, pos + l)); pos += l; return s; }
+        case -16: return null;
+        case -24: { if (u8() !== 1) throw new Error('opaque principal'); const l = Number(rUleb()); const b = bytes.slice(pos, pos + l); pos += l; return principalToText(b); }
+        default: throw new Error('cannot decode type ' + t);
+      }
+      const e = table[t];
+      if (e.op === -18) return u8() ? value(e.of) : null;
+      if (e.op === -19) { const l = Number(rUleb()); if (e.of === -5) { const b = bytes.slice(pos, pos + l); pos += l; return b; } const a = []; for (let i = 0; i < l; i++) a.push(value(e.of)); return a; }
+      if (e.op === -20) { const o = {}; for (const f of e.fields) o[name(f.id)] = value(f.t); return o; }
+      if (e.op === -21) { const i = Number(rUleb()); const f = e.fields[i]; return { [name(f.id)]: value(f.t) }; }
+      throw new Error('cannot decode');
+    }
+    return types.map(value);
+  }
+
+  // --- CBOR (decode only: certificates and content maps) ---
+  function cbor(bytes) {
+    let pos = 0;
+    function item() {
+      const ib = bytes[pos++], mt = ib >> 5, ai = ib & 31;
+      let n;
+      if (ai < 24) n = ai; else if (ai === 24) n = bytes[pos++]; else if (ai === 25) { n = (bytes[pos] << 8) | bytes[pos + 1]; pos += 2; }
+      else if (ai === 26) { n = ((bytes[pos] << 24) >>> 0) + ((bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3]); pos += 4; }
+      else if (ai === 27) { n = 0n; for (let i = 0; i < 8; i++) n = (n << 8n) | BigInt(bytes[pos++]); if (n <= BigInt(Number.MAX_SAFE_INTEGER)) n = Number(n); }
+      else if (ai === 31) n = -1; else throw new Error('cbor: bad ai');
+      switch (mt) {
+        case 0: return n;
+        case 1: return typeof n === 'bigint' ? -1n - n : -1 - n;
+        case 2: { const b = bytes.slice(pos, pos + Number(n)); pos += Number(n); return b; }
+        case 3: { const s = td.decode(bytes.slice(pos, pos + Number(n))); pos += Number(n); return s; }
+        case 4: { const a = []; if (n === -1) { while (bytes[pos] !== 0xff) a.push(item()); pos++; } else for (let i = 0; i < Number(n); i++) a.push(item()); return a; }
+        case 5: { const o = {}; const cnt = n === -1 ? Infinity : Number(n); for (let i = 0; i < cnt; i++) { if (n === -1 && bytes[pos] === 0xff) { pos++; break; } const k = item(); o[typeof k === 'string' ? k : String(k)] = item(); } return o; }
+        case 6: return item();
+        case 7: if (ai === 20) return false; if (ai === 21) return true; if (ai === 22 || ai === 23) return null; throw new Error('cbor: unsupported simple');
+        default: throw new Error('cbor: bad major type');
+      }
+    }
+    return item();
+  }
+
+  // --- certificates ---
+  const sha256 = async b => new Uint8Array(await crypto.subtle.digest('SHA-256', b));
+  const cmp = (a, b) => { for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i]; return a.length - b.length; };
+  const same = (a, b) => cmp(a, b) === 0;
+  // Representation-independent hash of a call's content map: the request id.
+  async function requestId(content) {
+    const entries = [];
+    for (const [k, v] of Object.entries(content)) {
+      let vb;
+      if (typeof v === 'string') vb = te.encode(v);
+      else if (v instanceof Uint8Array) vb = v;
+      else if (typeof v === 'number' || typeof v === 'bigint') vb = Uint8Array.from(uleb(v));
+      else throw new Error('request id: unsupported field ' + k);
+      entries.push([await sha256(te.encode(k)), await sha256(vb)]);
+    }
+    entries.sort((a, b) => cmp(a[0], b[0]));
+    const all = []; for (const [kh, vh] of entries) all.push(...kh, ...vh);
+    return sha256(Uint8Array.from(all));
+  }
+  // Hash-tree lookup: [0] empty, [1,l,r] fork, [2,label,sub] labeled, [3,leaf], [4,pruned].
+  function flatten(t, out) { if (t[0] === 1) { flatten(t[1], out); flatten(t[2], out); } else if (t[0] !== 0) out.push(t); return out; }
+  function lookup(tree, path) {
+    let node = tree;
+    for (const label of path) {
+      const lb = typeof label === 'string' ? te.encode(label) : label;
+      const asBytes = l => typeof l === 'string' ? te.encode(l) : l;
+      const hit = flatten(node, []).find(n => n[0] === 2 && same(asBytes(n[1]), lb));
+      if (!hit) return undefined;
+      node = hit[2];
+    }
+    return node[0] === 3 ? node[1] : undefined;
+  }
+  // What a signed call returned, from the signer's {contentMap, certificate}.
+  // Trusts the wallet's certificate rather than verifying the BLS signature
+  // (docs/TENANCY.md, "Console"); the wallet is the party that just signed.
+  async function callResult(res) {
+    const content = cbor(b64dec(res.contentMap));
+    const cert = cbor(b64dec(res.certificate));
+    const id = await requestId(content);
+    const reply = lookup(cert.tree, ['request_status', id, 'reply']);
+    if (reply) return decode(reply);
+    const status = lookup(cert.tree, ['request_status', id, 'status']);
+    const st = status ? td.decode(status) : 'unknown';
+    if (st === 'rejected') { const msg = lookup(cert.tree, ['request_status', id, 'reject_message']); throw new Error('call rejected: ' + (msg ? td.decode(msg) : '')); }
+    throw new Error('no reply in certificate (status ' + st + ')');
+  }
+  const b64enc = bytes => btoa(String.fromCharCode(...bytes));
+  const b64dec = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  return { encode, decode, cbor, requestId, lookup, callResult, principalToText, principalFromText, idlHash, b64enc, b64dec, hex };
+})();
+// === end candid ===
+</script>
 <script>
 (() => {
   'use strict';
@@ -130,6 +335,7 @@
       data.map(r => '<tr><td><a href="' + esc(H(r.name)) + '">' + esc(r.name) + '</a></td><td class="muted">' + esc(r.head.replace(/^refs\/heads\//, '')) + '</td><td>' +
         (r.site ? '<a href="/site/' + esc(enc(r.name)) + '/">/site/' + esc(r.name) + '/</a>' : '<span class="muted">&ndash;</span>') +
         '</td><td><code>git clone ' + esc(location.origin) + '/' + esc(enc(r.name)) + '.git</code></td></tr>').join('') + '</table>');
+    Console.mount('repos');
   }
 
   async function showTree(repo, rev, path) {
@@ -145,6 +351,7 @@
       '<div class="row">' + refPicker(repo, refs, rev, 'tree', path) + tabs(repo, rev, 'tree') +
       '<span class="muted">at <a class="oid" href=\"' + esc(H(repo, 'commit', commit)) + '\">' + esc(short(commit)) + '</a></span></div>' +
       '<table>' + up + rows + '</table>');
+    Console.mount('repo', repo);
   }
 
   async function showBlob(repo, rev, path) {
@@ -179,6 +386,7 @@
       (c.parents.length ? '<tr><th>parents</th><td class="oid">' + c.parents.map(p => '<a href=\"' + esc(H(repo, 'commit', p)) + '\">' + esc(p) + '</a>').join('<br>') + '</td></tr>' : '') +
       who('author', c.author) + who('committer', c.committer) +
       '</table><pre>' + esc(c.message) + '</pre>');
+    Console.mount('commit', repo, c.oid);
   }
 
   async function route() {
@@ -201,6 +409,187 @@
   window.addEventListener('hashchange', route);
   route();
 })();
+</script>
+<script>
+// === console ===
+// Signed-in mode (docs/TENANCY.md, "Console"). Reads come from /api like the
+// rest of the page; every write is a canister call signed by the user's
+// wallet through the IC signer standards (ICRC-25/27/29/49), which OISY
+// implements. The page never holds a key: it encodes arguments, the wallet
+// signs and submits, and the page decodes the reply from the certificate the
+// wallet hands back.
+const Console = (() => {
+  'use strict';
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const CANISTER = location.hostname.split('.')[0];
+  const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
+  const SIGNER = { url: 'https://oisy.com/sign', origin: 'https://oisy.com' };
+  const T = 1_000_000_000_000n;
+  // Cycles for humans: T above 0.01 T, otherwise B or M.
+  const fmtT = n => { n = BigInt(n); if (n >= 10_000_000_000n) { const whole = n / T, frac = (n % T) / 1_000_000_000n; return whole + '.' + String(frac).padStart(3, '0') + ' T'; } if (n >= 1_000_000_000n) return (Number(n) / 1e9).toFixed(1) + ' B cycles'; return (Number(n) / 1e6).toFixed(0) + ' M cycles'; };
+  const short = p => p.length > 20 ? p.slice(0, 5) + '...' + p.slice(-3) : p;
+  const RESULT_TYPES = {}; // method -> nothing needed: replies are self-describing
+
+  // --- signer (ICRC-25 over postMessage) ---
+  const signer = {
+    win: null, ready: false, nextId: 1, pending: new Map(),
+    listen() {
+      if (this.listening) return; this.listening = true;
+      window.addEventListener('message', e => {
+        if (e.origin !== SIGNER.origin) return;
+        const d = e.data; if (!d || d.jsonrpc !== '2.0' || !this.pending.has(d.id)) return;
+        const { resolve, reject } = this.pending.get(d.id); this.pending.delete(d.id);
+        if (d.error) reject(new Error(d.error.message || ('signer error ' + d.error.code))); else resolve(d.result);
+      });
+    },
+    request(method, params, timeoutMs) {
+      const id = this.nextId++;
+      return new Promise((resolve, reject) => {
+        this.pending.set(id, { resolve, reject });
+        this.win.postMessage({ jsonrpc: '2.0', id, method, params }, SIGNER.origin);
+        if (timeoutMs) setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error('timeout')); } }, timeoutMs);
+      });
+    },
+    async connect() {
+      this.listen();
+      if (!this.win || this.win.closed) { this.win = window.open(SIGNER.url, 'ic-git-signer', 'width=480,height=720'); this.ready = false; }
+      if (!this.win) throw new Error('popup blocked: allow popups for this site');
+      const until = Date.now() + 60000;
+      while (!this.ready) {
+        try { if (await this.request('icrc29_status', {}, 700) === 'ready') this.ready = true; } catch (_) {}
+        if (!this.ready && Date.now() > until) throw new Error('wallet did not answer');
+      }
+      return this;
+    },
+    async accounts() {
+      await this.request('icrc25_request_permissions', { scopes: [{ method: 'icrc27_accounts' }, { method: 'icrc49_call_canister' }] });
+      const r = await this.request('icrc27_accounts', {});
+      return (r.accounts || []).map(a => a.owner);
+    },
+    async call(canisterId, sender, method, types, values) {
+      const arg = IC.b64enc(IC.encode(types, values));
+      const r = await this.request('icrc49_call_canister', { canisterId, sender, method, arg });
+      return (await IC.callResult(r))[0];
+    },
+  };
+
+  // --- session ---
+  let me = null;
+  try { me = localStorage.getItem('ic-git.principal'); } catch (_) {}
+  const walletEl = () => document.getElementById('wallet');
+  function paintWallet() {
+    const el = walletEl(); if (!el) return;
+    el.innerHTML = me
+      ? '<span class="muted">signed in as</span> <span class="oid" title="' + esc(me) + '">' + esc(short(me)) + '</span> <button id="signout">sign out</button>'
+      : '<button id="signin">connect wallet</button>';
+    const si = document.getElementById('signin'), so = document.getElementById('signout');
+    if (si) si.onclick = signIn;
+    if (so) so.onclick = () => { me = null; try { localStorage.removeItem('ic-git.principal'); } catch (_) {} paintWallet(); location.reload(); };
+  }
+  async function signIn() {
+    try {
+      await signer.connect();
+      const accounts = await signer.accounts();
+      if (!accounts.length) throw new Error('wallet returned no accounts');
+      me = accounts[0]; try { localStorage.setItem('ic-git.principal', me); } catch (_) {}
+      paintWallet(); location.reload();
+    } catch (e) { alert('sign in failed: ' + e.message); }
+  }
+  // Every write: connect (reuses the popup), sign, decode, unwrap Result.
+  async function write(method, types, values, canister) {
+    if (!me) throw new Error('connect a wallet first');
+    await signer.connect();
+    const r = await signer.call(canister || CANISTER, me, method, types, values);
+    if (r && typeof r === 'object' && 'Err' in r) throw new Error(typeof r.Err === 'string' ? r.Err : JSON.stringify(r.Err, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+    return r && typeof r === 'object' && 'Ok' in r ? r.Ok : r;
+  }
+
+  // --- panels ---
+  const get = async path => { const r = await fetch('/api/' + path); if (!r.ok) throw new Error((await r.json()).error || r.statusText); return r.json(); };
+  const status = (id, msg, ok) => { const el = document.getElementById(id); if (el) { el.textContent = msg; el.className = 'status ' + (ok ? 'ok' : 'bad'); } };
+  const form = (id, fields, label) => '<form id="' + id + '">' + fields.map(f => '<input name="' + f.name + '" placeholder="' + esc(f.placeholder) + '"' + (f.value ? ' value="' + esc(f.value) + '"' : '') + (f.list ? ' list="' + f.list + '"' : '') + '>').join('') + '<button>' + esc(label) + '</button></form>';
+  const onsubmit = (id, fn) => { const f = document.getElementById(id); if (f) f.onsubmit = async e => { e.preventDefault(); const st = id + '-st'; status(st, 'waiting for wallet...', true); try { status(st, await fn(Object.fromEntries(new FormData(f))), true); } catch (err) { status(st, err.message, false); } }; };
+  const cycles = s => { const t = Number(s); if (!(t > 0)) throw new Error('enter an amount in T cycles'); return BigInt(Math.round(t * 1e9)) * 1_000n; };
+
+  async function reposPanel() {
+    let html = '<div class="panel"><h3>console</h3>';
+    if (!me) { html += '<p class="muted">Connect a wallet to create repositories, mint push tokens, manage members and votes, and deposit cycles. Reads need no sign-in.</p></div>'; return html; }
+    const pricing = await get('pricing');
+    let acct; try { acct = await get('account/' + encodeURIComponent(me)); } catch (_) { acct = { balance: 0, repos: [] }; }
+    html += '<p>balance <b>' + fmtT(acct.balance) + '</b> <span class="muted">(' + acct.balance + ' cycles)</span>' +
+      (acct.repos.length ? ' &middot; your repos: ' + acct.repos.map(r => '<a href="#/' + encodeURIComponent(r) + '">' + esc(r) + '</a>').join(', ') : '') + '</p>' +
+      '<p class="muted">creating a repo costs ' + fmtT(pricing.create_repo) + '; a push costs ' + fmtT(pricing.push_base) + ' + ' + pricing.push_per_byte + ' cycles/byte; storage rent ' + pricing.rent_per_byte_year + ' cycles per byte-year.</p>' +
+      form('f-deposit', [{ name: 'amount', placeholder: 'deposit, in T cycles (e.g. 2)' }], 'deposit from cycles ledger') + '<p id="f-deposit-st" class="status"></p>' +
+      form('f-create', [{ name: 'name', placeholder: 'new repo name' }], 'create repo') + '<p id="f-create-st" class="status"></p></div>';
+    setTimeout(() => {
+      onsubmit('f-deposit', async v => {
+        const amount = cycles(v.amount);
+        const fee = 100_000_000n;
+        // 1. approve ic-git on the cycles ledger (amount + the withdraw fee), 2. ic-git pulls it.
+        const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: { record: { owner: 'principal', subaccount: { opt: 'blob' } } }, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
+        await write('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
+        const balance = await write('deposit_from_cycles_ledger', ['nat64'], [amount + fee]);
+        setTimeout(() => location.reload(), 1200);
+        return 'deposited; balance now ' + fmtT(balance);
+      });
+      onsubmit('f-create', async v => { await write('create_repo', ['text'], [v.name.trim()]); setTimeout(() => { location.hash = '#/' + encodeURIComponent(v.name.trim()); }, 800); return 'created ' + v.name; });
+    }, 0);
+    return html;
+  }
+
+  async function repoPanel(repo) {
+    const info = await get(encodeURIComponent(repo) + '/info');
+    const isOwner = me && info.owner === me, isWriter = isOwner || (me && info.members.some(m => m.principal === me && m.role === 'writer'));
+    let html = '<div class="panel"><h3>ownership</h3>' +
+      '<p>owner: ' + (info.owner ? '<span class="oid" title="' + esc(info.owner) + '">' + esc(short(info.owner)) + '</span>' : '<span class="muted">operator (exempt)</span>') +
+      ' &middot; storage ' + info.storage_bytes + ' bytes' + (info.delinquent ? ' &middot; <b class="bad">behind on rent</b>' : '') +
+      ' &middot; deploys need ' + info.required_votes + ' approval' + (info.required_votes === 1 ? '' : 's') +
+      (info.app_canister ? ' &middot; app canister <span class="oid">' + esc(info.app_canister) + '</span>' : '') + '</p>';
+    if (info.members.length) html += '<table><tr><th>member</th><th>role</th>' + (isOwner ? '<th></th>' : '') + '</tr>' + info.members.map(m => '<tr><td class="oid">' + esc(m.principal) + '</td><td>' + esc(m.role) + '</td>' + (isOwner ? '<td><button class="rm" data-p="' + esc(m.principal) + '">remove</button></td>' : '') + '</tr>').join('') + '</table>';
+    if (isWriter) html += form('f-token', [], 'mint push token') + '<p id="f-token-st" class="status tok"></p>';
+    if (isOwner) html += form('f-member', [{ name: 'principal', placeholder: 'principal' }, { name: 'role', placeholder: 'writer or voter', value: 'writer' }], 'add member') + '<p id="f-member-st" class="status"></p>' +
+      form('f-votes', [{ name: 'k', placeholder: 'approvals required before deploy', value: String(info.required_votes) }], 'set required votes') + '<p id="f-votes-st" class="status"></p>' +
+      (info.app_canister
+        ? form('f-topup', [{ name: 'amount', placeholder: 'T cycles to add' }], 'top up app canister') + '<p id="f-topup-st" class="status"></p>'
+        : form('f-app', [{ name: 'amount', placeholder: 'T cycles (min 1)' }], 'create app canister') + '<p id="f-app-st" class="status"></p>');
+    if (!me) html += '<p class="muted">connect a wallet to manage this repo.</p>';
+    html += '</div>';
+    setTimeout(() => {
+      onsubmit('f-token', async () => 'token (shown once): ' + await write('create_push_token', ['text'], [repo]) + '  -> git push https://ic:<token>@' + location.host + '/' + repo + '.git main');
+      onsubmit('f-member', async v => { await write('add_member', ['text', 'principal', 'text'], [repo, v.principal.trim(), v.role.trim()]); setTimeout(() => location.reload(), 800); return 'added'; });
+      onsubmit('f-votes', async v => { await write('set_required_votes', ['text', 'nat32'], [repo, Number(v.k)]); setTimeout(() => location.reload(), 800); return 'saved'; });
+      onsubmit('f-app', async v => 'created app canister ' + await write('create_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]));
+      onsubmit('f-topup', async v => { await write('top_up_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]); return 'topped up'; });
+      document.querySelectorAll('button.rm').forEach(b => { b.onclick = async () => { try { await write('remove_member', ['text', 'principal'], [repo, b.dataset.p]); location.reload(); } catch (e) { alert(e.message); } }; });
+    }, 0);
+    return html;
+  }
+
+  async function commitPanel(repo, oid) {
+    const [info, votes] = await Promise.all([get(encodeURIComponent(repo) + '/info'), get(encodeURIComponent(repo) + '/votes/' + oid)]);
+    const yes = votes.filter(v => v.approve).length;
+    const canVote = me && (info.owner === me || info.members.some(m => m.principal === me && m.role === 'voter'));
+    let html = '<div class="panel"><h3>approvals</h3><p>' + yes + ' approve' + (yes === 1 ? 's' : '') + ' of ' + info.required_votes + ' required' + (votes.length ? '</p><table>' + votes.map(v => '<tr><td class="oid">' + esc(v.principal) + '</td><td>' + (v.approve ? 'approve' : 'reject') + '</td></tr>').join('') + '</table>' : '</p>');
+    if (canVote) html += '<form id="f-vote"><button data-v="1">approve</button><button data-v="0">reject</button></form><p id="f-vote-st" class="status"></p>';
+    html += '</div>';
+    setTimeout(() => {
+      document.querySelectorAll('#f-vote button').forEach(b => { b.onclick = async e => { e.preventDefault(); status('f-vote-st', 'waiting for wallet...', true); try { const r = await write('vote', ['text', 'text', 'bool'], [repo, oid, b.dataset.v === '1']); status('f-vote-st', 'recorded: ' + r[0] + ' of ' + r[1], true); setTimeout(() => location.reload(), 800); } catch (err) { status('f-vote-st', err.message, false); } }; });
+    }, 0);
+    return html;
+  }
+
+  async function mount(view, repo, oid) {
+    paintWallet();
+    const main = document.getElementById('main');
+    try {
+      const html = view === 'repos' ? await reposPanel() : view === 'repo' ? await repoPanel(repo) : await commitPanel(repo, oid);
+      main.insertAdjacentHTML('beforeend', html);
+    } catch (e) { main.insertAdjacentHTML('beforeend', '<p class="muted">console unavailable: ' + esc(e.message) + '</p>'); }
+  }
+  paintWallet();
+  return { mount };
+})();
+// === end console ===
 </script>
 </body>
 </html>

@@ -646,6 +646,23 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         return st;
     }
 
+    // Tenancy (docs/TENANCY.md): a repo can require voter approval before a
+    // commit deploys, and the owner pays for each action up front. Both are
+    // recorded as the outcome rather than trapped on; the job is consumed.
+    if !crate::tenancy::approved(repo, &st.commit) {
+        st.message = "awaiting voter approval; see get_votes".into();
+        put_status(repo, &st);
+        return st;
+    }
+    let pricing = crate::tenancy::pricing();
+    let cost = wasm_cfg.as_ref().map_or(0, |_| pricing.ic_deploy)
+        + evm_cfg.as_ref().map_or(0, |_| pricing.evm_action);
+    if let Err(e) = crate::tenancy::charge_action(repo, cost, "deploy") {
+        st.message = e;
+        put_status(repo, &st);
+        return st;
+    }
+
     put_status(
         repo,
         &DeployStatus {
