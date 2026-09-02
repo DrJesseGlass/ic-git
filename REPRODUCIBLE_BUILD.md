@@ -109,6 +109,30 @@ to the working tree and marks the printed commit `-dirty`; never attest a
 > deployer's `CARGO_HOME` paths, and was therefore reproducible by nobody. The
 > watch below fails if the live hash ever departs from the last entry.
 
+## Deploying the artifact
+
+Install the container's output, never a native build, so the on-chain hash
+equals the reproducible one by construction. `tools/reproducible-build.sh
+--docker` exports that output to
+`target/reproducible/git_canister-<short-commit>.wasm` (checking its sha256
+against the hash the container reported) and prints the path on its
+`artifact` line:
+
+```bash
+tools/reproducible-build.sh --docker
+dfx canister --network https://icp-api.io --identity <controller> \
+  install umobs-yiaaa-aaaab-agyrq-cai --mode upgrade \
+  --wasm target/reproducible/git_canister-<short-commit>.wasm --yes
+```
+
+The module is above the 2 MiB ingress limit, so dfx uploads it in 1 MiB
+chunks. The HTTP gateway (`icp0.io`, what `--network ic` uses) buffers each
+chunk with a timeout that a slow uplink trips -- the symptom is `408 Request
+Timeout ... Unable to buffer body`, and nothing changes on chain. The API
+boundary node (`https://icp-api.io`) takes the same calls without the
+gateway's buffering and measured about three times faster from the same
+machine; dfx accepts the URL directly as the network name.
+
 ## The record: `verified.json`
 
 A MATCH that only scrolled past in one terminal is not evidence anyone else
