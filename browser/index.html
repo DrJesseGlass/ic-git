@@ -425,7 +425,8 @@ const Console = (() => {
   const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
   const SIGNER = { url: 'https://oisy.com/sign', origin: 'https://oisy.com' };
   const T = 1_000_000_000_000n;
-  const fmtT = n => { n = BigInt(n); const whole = n / T, frac = (n % T) / 1_000_000_000n; return whole + '.' + String(frac).padStart(3, '0') + ' T'; };
+  // Cycles for humans: T above 0.01 T, otherwise B or M.
+  const fmtT = n => { n = BigInt(n); if (n >= 10_000_000_000n) { const whole = n / T, frac = (n % T) / 1_000_000_000n; return whole + '.' + String(frac).padStart(3, '0') + ' T'; } if (n >= 1_000_000_000n) return (Number(n) / 1e9).toFixed(1) + ' B cycles'; return (Number(n) / 1e6).toFixed(0) + ' M cycles'; };
   const short = p => p.length > 20 ? p.slice(0, 5) + '...' + p.slice(-3) : p;
   const RESULT_TYPES = {}; // method -> nothing needed: replies are self-describing
 
