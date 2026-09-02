@@ -70,8 +70,16 @@ RUN cargo fetch --locked --target wasm32-unknown-unknown \
     && dfx build --network ic git \
     && sha256sum -c /tmp/Cargo.lock.sha256 \
     && cp .dfx/ic/canisters/git/git.wasm git_canister.wasm \
-    && sha256sum git_canister.wasm | tee git_canister.wasm.sha256
+    && gzip -9 -n -c git_canister.wasm > git_canister.wasm.gz \
+    && sha256sum git_canister.wasm git_canister.wasm.gz | tee git_canister.wasm.sha256
 
+# The installed artifact is the GZIPPED module: the IC accepts gzip-compressed
+# wasm and reports the module hash of the compressed bytes, and the module is
+# above the 2 MiB ingress limit uncompressed, so this cuts a slow upload by
+# 3x. `gzip -n` omits the timestamp and name, and the gzip binary is the
+# base image's, so the .gz is as reproducible as the .wasm. Both hashes are
+# printed; the on-chain hash matches the .gz line.
+#
 # Declared AFTER the build so it can never invalidate the build layer or reach
 # the wasm: it only records WHICH tree produced the hash above. .git is not in
 # the build context (.dockerignore), so the container cannot tell a clean
