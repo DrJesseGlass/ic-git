@@ -27,6 +27,7 @@ The output wasm is a deterministic function of exactly these inputs:
 | Rust compiler | `rust-toolchain.toml` (`1.94.1`) | the rust version is embedded in the module's `icp:public dfx` metadata, so it is literally part of the hash |
 | Dependencies | `Cargo.lock` (committed; a real `--locked` preflight, plus a post-build check that the lock did not move) | ic-cdk `0.20.2` etc. -- see below |
 | Post-processing | dfx `0.31.0` | dfx's bundled `ic-wasm` runs `shrink` + adds candid/dfx metadata; the deployed artifact is this post-processed wasm, not raw `cargo` output |
+| Compression | `gzip -9 -n` in the container (the base image's gzip) | the installed artifact is the gzipped module; the IC reports the hash of the compressed bytes, so that is the hash a MATCH compares. The raw wasm hash is printed too |
 | Build path | fixed `/build` in the container | keeps the source tree's own paths out of the wasm |
 | Dependency paths | `tools/build-env.sh` | see below -- this, not the build path, is the main cross-machine non-determinism |
 | Platform | `--platform=linux/amd64` in `Dockerfile.build` | an arm64 and an amd64 rebuild are not the same build |
@@ -122,8 +123,11 @@ against the hash the container reported) and prints the path on its
 tools/reproducible-build.sh --docker
 dfx canister --network https://icp-api.io --identity <controller> \
   install umobs-yiaaa-aaaab-agyrq-cai --mode upgrade \
-  --wasm target/reproducible/git_canister-<short-commit>.wasm --yes
+  --wasm target/reproducible/git_canister-<short-commit>.wasm.gz --yes
 ```
+
+Install the `.gz`: it is what the recorded hash names (about 2 MB against
+6.5 MB raw), and dfx still chunks anything above 2 MiB.
 
 The module is above the 2 MiB ingress limit, so dfx uploads it in 1 MiB
 chunks. The HTTP gateway (`icp0.io`, what `--network ic` uses) buffers each

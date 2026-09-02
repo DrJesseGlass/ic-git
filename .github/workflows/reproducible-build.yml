@@ -77,6 +77,7 @@ jobs:
         run: |
           id=$(docker create ic-git-build)
           docker cp "$id:/build/git_canister.wasm" "$RUNNER_TEMP/git_canister.wasm"
+          docker cp "$id:/build/git_canister.wasm.gz" "$RUNNER_TEMP/git_canister.wasm.gz" 2>/dev/null || true
           docker cp "$id:/build/git_canister.wasm.sha256" "$RUNNER_TEMP/git_canister.wasm.sha256"
           docker rm "$id" >/dev/null
           (cd "$RUNNER_TEMP" && sha256sum -c git_canister.wasm.sha256)
@@ -88,7 +89,7 @@ jobs:
             echo '## Reproducible build'
             echo
             echo '```'
-            grep -E '^(source commit|built module sha256|base image digest|on-chain module hash|MATCH|MISMATCH)' "$RUNNER_TEMP/build.log" || tail -20 "$RUNNER_TEMP/build.log"
+            grep -E '^(source commit|built module sha256|raw wasm sha256|artifact|base image digest|on-chain module hash|MATCH|MISMATCH)' "$RUNNER_TEMP/build.log" || tail -20 "$RUNNER_TEMP/build.log"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -97,6 +98,7 @@ jobs:
           name: git_canister-${{ steps.build.outputs.commit }}
           path: |
             ${{ runner.temp }}/git_canister.wasm
+            ${{ runner.temp }}/git_canister.wasm.gz
             ${{ runner.temp }}/git_canister.wasm.sha256
             ${{ runner.temp }}/build.log
           if-no-files-found: error

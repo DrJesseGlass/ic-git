@@ -64,13 +64,13 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 echo "source commit       : $commit"
 
-# Copy /build/git_canister.wasm out of a built image to $2 and check that its
-# sha256 is $3 -- the hash the container itself reported.
+# Copy /build/$4 (default git_canister.wasm) out of a built image to $2 and
+# check that its sha256 is $3 -- the hash the container itself reported.
 export_wasm() {
-  local image=$1 dest=$2 want=$3 id
+  local image=$1 dest=$2 want=$3 name=${4:-git_canister.wasm} id
   mkdir -p "$(dirname "$dest")"
   id=$(docker create "$image")
-  docker cp "$id:/build/git_canister.wasm" "$dest"
+  docker cp "$id:/build/$name" "$dest"
   docker rm "$id" >/dev/null
   local got
   got=$(shasum -a 256 "$dest" | awk '{print $1}')
@@ -105,12 +105,24 @@ if [ "$use_docker" = 1 ]; then
   docker pull --platform=linux/amd64 -q "$base_image" >/dev/null
   docker build -f "$ctx/Dockerfile.build" --build-arg SOURCE_COMMIT="$commit" \
     -t ic-git-build "$ctx"
-  built=$(docker run --rm ic-git-build | awk 'NR==1{print $1}')
-  # Export the artifact: what gets INSTALLED must be the container's output,
+  # The container prints two hashes: the raw wasm and its gzip. The gzip is
+  # what gets installed (Dockerfile.build explains why), so it is the hash
+  # the chain reports; the raw hash is kept for older records and readers.
+  hashes=$(docker run --rm ic-git-build 2>/dev/null)
+  built_wasm=$(echo "$hashes" | awk '$2=="git_canister.wasm"{print $1}')
+  built=$(echo "$hashes" | awk '$2=="git_canister.wasm.gz"{print $1}')
+  [ -n "$built" ] || built=$built_wasm   # recipes before the gzip step
+  # Export the artifacts: what gets INSTALLED must be the container's output,
   # not a native rebuild, or the on-chain hash is not the reproducible one.
   out="target/reproducible/git_canister-${commit:0:7}.wasm"
-  export_wasm ic-git-build "$out" "$built"
-  echo "artifact            : $out"
+  export_wasm ic-git-build "$out" "$built_wasm" git_canister.wasm
+  if [ "$built" != "$built_wasm" ]; then
+    export_wasm ic-git-build "$out.gz" "$built" git_canister.wasm.gz
+    echo "raw wasm sha256     : $built_wasm"
+    echo "artifact            : $out.gz  (install this one)"
+  else
+    echo "artifact            : $out"
+  fi
   # The resolved base-image digest belongs in the attested BuildDescriptor
   # (docs/ATTESTATION.md): the Dockerfile pins a tag by default, and a tag can
   # move. Print what was actually used so verified.json can record it.
@@ -143,7 +155,7 @@ else
   [ -f "$wasm" ] || wasm=$(ls .dfx/*/canisters/git/git.wasm | head -1)
   built=$(shasum -a 256 "$wasm" | awk '{print $1}')
 fi
-echo "built module sha256 : $built"
+echo "built module sha256 : $built"  # sha256 of the artifact to install
 
 if [ "$do_check" = 1 ]; then
   # `|| onchain=""` is load-bearing: a plain assignment takes the pipeline's
