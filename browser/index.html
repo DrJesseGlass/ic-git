@@ -483,6 +483,12 @@ const Console = (() => {
       const r = await this.request('icrc49_call_canister', { canisterId, sender, method, arg }, INTERACT_TIMEOUT_MS);
       return (await IC.callResult(r))[0];
     },
+    // Close the popup when an interaction is over; the next write reopens
+    // it. Left open, OISY sits on "waiting for the dapp".
+    disconnect() {
+      try { if (this.win && !this.win.closed) this.win.close(); } catch (_) {}
+      this.win = null; this.ready = false;
+    },
   };
 
   // --- session ---
@@ -496,7 +502,7 @@ const Console = (() => {
       : '<button id="signin">connect wallet</button>';
     const si = document.getElementById('signin'), so = document.getElementById('signout');
     if (si) si.onclick = signIn;
-    if (so) so.onclick = () => { me = null; try { localStorage.removeItem('ic-git.principal'); } catch (_) {} paintWallet(); location.reload(); };
+    if (so) so.onclick = () => { me = null; try { localStorage.removeItem('ic-git.principal'); } catch (_) {} signer.disconnect(); paintWallet(); location.reload(); };
   }
   async function signIn() {
     const el = walletEl();
@@ -508,8 +514,10 @@ const Console = (() => {
       const accounts = await signer.accounts();
       if (!accounts.length) throw new Error('wallet returned no accounts');
       me = accounts[0]; try { localStorage.setItem('ic-git.principal', me); } catch (_) {}
+      signer.disconnect();
       paintWallet(); location.reload();
     } catch (e) {
+      signer.disconnect();
       paintWallet();
       if (el) el.insertAdjacentHTML('afterbegin', '<span class="bad">sign in failed: ' + esc(e.message) + '</span> ');
     }
@@ -518,7 +526,9 @@ const Console = (() => {
   async function write(method, types, values, canister) {
     if (!me) throw new Error('connect a wallet first');
     await signer.connect(null);
-    const r = await signer.call(canister || CANISTER, me, method, types, values);
+    let r;
+    try { r = await signer.call(canister || CANISTER, me, method, types, values); }
+    finally { signer.disconnect(); }
     if (r && typeof r === 'object' && 'Err' in r) throw new Error(typeof r.Err === 'string' ? r.Err : JSON.stringify(r.Err, (k, v) => typeof v === 'bigint' ? v.toString() : v));
     return r && typeof r === 'object' && 'Ok' in r ? r.Ok : r;
   }
