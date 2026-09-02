@@ -109,6 +109,14 @@
           "lineage": "pinned-container",
           "host": "macOS arm64, colima vz + Rosetta, docker 29.5.2",
           "date": "2026-09-02"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/33653643555",
+          "date": "2026-09-02",
+          "check": "MATCH against the live canister"
         }
       ],
       "deployed": {

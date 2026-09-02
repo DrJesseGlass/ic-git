@@ -12,7 +12,7 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-09-01 | `80bcb4a` | `v0.1.0` | `662990224e41ce296030ce04cb085055b15f2e1abe95b58892f1a93dd65aaec6` | MATCH, 2026-09-01 | deployer (pinned container, macOS arm64 host under Rosetta) |
 | 2026-09-01 | `0707147` | `v0.1.1` | `a7156c6dc5eaa03adf9fd1a691550ac702b8adf2bcf8bb7f4d27e2651c601557` | MATCH, 2026-09-01 | deployer (pinned container, two fresh VMs agreed); GitHub Actions amd64 runner, [run 33563166779](https://github.com/DrJesseGlass/ic-git/actions/runs/33563166779), MATCH |
 | 2026-09-01 | `2dd941d` | `v0.1.2` | `268c18bbfeb0cda616a55fcd500e62fcfc267c77aa8f297ad046d69108718d8f` | MATCH, 2026-09-01 | deployer (pinned container) |
-| 2026-09-02 | `9cdc58c` | `v0.2.0` | `278ebec09bc4d353da718a2751ce01dd74bb44804d1f99abf72b0e08d4b3541a` (gz) | MATCH, 2026-09-02 | deployer (pinned container) |
+| 2026-09-02 | `9cdc58c` | `v0.2.0` | `278ebec09bc4d353da718a2751ce01dd74bb44804d1f99abf72b0e08d4b3541a` (gz) | MATCH, 2026-09-02 | deployer (pinned container); GitHub Actions amd64 runner, [run 33653643555](https://github.com/DrJesseGlass/ic-git/actions/runs/33653643555), MATCH |
 
 ## v0.2.0 -- 2026-09-02
 
