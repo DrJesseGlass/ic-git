@@ -4,7 +4,8 @@
 # See REPRODUCIBLE_BUILD.md.
 #
 #   tools/reproducible-build.sh            build natively (host dfx), print sha256
-#   tools/reproducible-build.sh --docker   build in the pinned container (portable)
+#   tools/reproducible-build.sh --docker   build in the pinned container (portable);
+#                                          exports target/reproducible/git_canister-<commit>.wasm
 #   tools/reproducible-build.sh --check    also diff the result vs the IC module hash
 #   tools/reproducible-build.sh --allow-dirty  build a tree with uncommitted edits
 #
@@ -63,6 +64,22 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 echo "source commit       : $commit"
 
+# Copy /build/git_canister.wasm out of a built image to $2 and check that its
+# sha256 is $3 -- the hash the container itself reported.
+export_wasm() {
+  local image=$1 dest=$2 want=$3 id
+  mkdir -p "$(dirname "$dest")"
+  id=$(docker create "$image")
+  docker cp "$id:/build/git_canister.wasm" "$dest"
+  docker rm "$id" >/dev/null
+  local got
+  got=$(shasum -a 256 "$dest" | awk '{print $1}')
+  if [ "$got" != "$want" ]; then
+    echo "exported artifact hash $got != container-reported $want" >&2
+    exit 1
+  fi
+}
+
 if [ "$use_docker" = 1 ]; then
   command -v docker >/dev/null || { echo "docker not found" >&2; exit 1; }
   # Build the COMMIT, not the directory. `git archive` gives docker a context
@@ -89,6 +106,11 @@ if [ "$use_docker" = 1 ]; then
   docker build -f "$ctx/Dockerfile.build" --build-arg SOURCE_COMMIT="$commit" \
     -t ic-git-build "$ctx"
   built=$(docker run --rm ic-git-build | awk 'NR==1{print $1}')
+  # Export the artifact: what gets INSTALLED must be the container's output,
+  # not a native rebuild, or the on-chain hash is not the reproducible one.
+  out="target/reproducible/git_canister-${commit:0:7}.wasm"
+  export_wasm ic-git-build "$out" "$built"
+  echo "artifact            : $out"
   # The resolved base-image digest belongs in the attested BuildDescriptor
   # (docs/ATTESTATION.md): the Dockerfile pins a tag by default, and a tag can
   # move. Print what was actually used so verified.json can record it.
