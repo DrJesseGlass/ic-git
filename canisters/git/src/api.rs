@@ -8,8 +8,9 @@
 //!   GET /api/<repo>/blob/<rev>/<path>
 //!
 //! `<rev>` is HEAD, a 40-hex oid, a bare branch or tag name, or a full ref
-//! name without slashes (a branch named `a/b` is reachable by oid only).
-//! Path components are percent-decoded.
+//! name. Segments are split on `/` first and percent-decoded second, so a
+//! branch named `feature/login` is addressed as `feature%2Flogin`.
+//! Path components are percent-decoded the same way.
 //!
 //! Every response that resolved a commit carries `X-Ic-Git-Commit`, the same
 //! binding `/site` responses carry, so the page can show exactly which commit
@@ -457,6 +458,13 @@ mod tests {
         assert_eq!(header(&blob, "X-Content-Type-Options"), Some("nosniff"));
         assert_eq!(header(&blob, "X-Ic-Git-Path"), Some("sub dir/b.txt"));
         assert_eq!(header(&blob, "X-Ic-Git-Commit"), Some(store::oid_hex(&c2).as_str()));
+
+        // A slash in a branch name travels percent-encoded as one segment.
+        store::set_ref("api-tree", "refs/heads/feature/login", c2).unwrap();
+        let slashy = handle("/api/api-tree/tree/feature%2Flogin/sub%20dir");
+        assert_eq!(slashy.status_code, 200, "{}", String::from_utf8_lossy(&slashy.body));
+        assert_eq!(body_json(&slashy)["path"], "sub dir");
+        assert_eq!(handle("/api/api-tree/commit/feature%2Flogin").status_code, 200);
 
         // Old commit sees the old tree.
         let old = body_json(&handle("/api/api-tree/tree/v1"));

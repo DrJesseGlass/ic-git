@@ -59,6 +59,11 @@
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const enc = p => p.split('/').map(encodeURIComponent).join('/');
   const short = o => o.slice(0, 8);
+  // One hash builder, one rule: repo, rev and each path component are
+  // percent-encoded, so a branch named feature/login is one segment
+  // (feature%2Flogin) and route() can split on '/' before decoding.
+  const R = r => encodeURIComponent(r);
+  const H = (repo, kind, rev, path) => '#/' + enc(repo) + (kind ? '/' + kind + '/' + R(rev) : '') + (path ? '/' + enc(path) : '');
   const when = t => t ? new Date(t * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '';
 
   async function api(path) {
@@ -79,7 +84,7 @@
   fetch(location.pathname, { method: 'GET', cache: 'no-store' }).then(r => {
     const c = r.headers.get('x-ic-git-commit'), repo = r.headers.get('x-ic-git-repo');
     if (c) document.getElementById('prov').innerHTML =
-      'this page: <a class="oid" href="#/' + esc(repo) + '/commit/' + esc(c) + '">' + esc(repo) + '@' + esc(short(c)) + '</a>';
+      'this page: <a class="oid" href="' + esc(H(repo, 'commit', c)) + '">' + esc(repo) + '@' + esc(short(c)) + '</a>';
   }).catch(() => {});
 
   const render = html => { main.innerHTML = html; };
@@ -87,20 +92,20 @@
 
   function crumbs(repo, rev, kind, path) {
     const parts = path ? path.split('/') : [];
-    let out = '<a href="#/' + esc(repo) + '">' + esc(repo) + '</a>';
+    let out = '<a href="' + esc(H(repo)) + '">' + esc(repo) + '</a>';
     let acc = '';
     parts.forEach((p, i) => {
       acc += (acc ? '/' : '') + p;
       const last = i === parts.length - 1;
       out += last && kind === 'blob'
         ? '<span>' + esc(p) + '</span>'
-        : '<a href="#/' + esc(repo) + '/tree/' + esc(rev) + '/' + esc(enc(acc)) + '">' + esc(p) + '</a>';
+        : '<a href="' + esc(H(repo, 'tree', rev, acc)) + '">' + esc(p) + '</a>';
     });
     return '<div class="crumbs">' + out + '</div>';
   }
 
   function tabs(repo, rev, on) {
-    const t = (k, label) => '<a class="' + (on === k ? 'on' : '') + '" href="#/' + esc(repo) + '/' + k + '/' + esc(rev) + '">' + label + '</a>';
+    const t = (k, label) => '<a class="' + (on === k ? 'on' : '') + '" href="' + esc(H(repo, k, rev)) + '">' + label + '</a>';
     return '<span class="tabs">' + t('tree', 'files') + t('commits', 'commits') + '</span>';
   }
 
@@ -113,7 +118,7 @@
     const sel = '<select id="ref">' + opts + (names.some(n => n.replace(/^refs\/(heads|tags)\//, '') === rev) ? '' : '<option selected value="' + esc(rev) + '">' + esc(rev) + '</option>') + '</select>';
     setTimeout(() => {
       const el = document.getElementById('ref');
-      if (el) el.onchange = () => { location.hash = '#/' + repo + '/' + kind + '/' + el.value + (path ? '/' + enc(path) : ''); };
+      if (el) el.onchange = () => { location.hash = H(repo, kind, el.value, path); };
     }, 0);
     return sel;
   }
@@ -122,7 +127,7 @@
     const { data } = await api('repos');
     if (!data.length) return render('<p class="muted">no repositories yet</p>');
     render('<h2>repositories</h2><table><tr><th>name</th><th>default branch</th><th>site</th><th>clone</th></tr>' +
-      data.map(r => '<tr><td><a href="#/' + esc(r.name) + '">' + esc(r.name) + '</a></td><td class="muted">' + esc(r.head.replace(/^refs\/heads\//, '')) + '</td><td>' +
+      data.map(r => '<tr><td><a href="' + esc(H(r.name)) + '">' + esc(r.name) + '</a></td><td class="muted">' + esc(r.head.replace(/^refs\/heads\//, '')) + '</td><td>' +
         (r.site ? '<a href="/site/' + esc(enc(r.name)) + '/">/site/' + esc(r.name) + '/</a>' : '<span class="muted">&ndash;</span>') +
         '</td><td><code>git clone ' + esc(location.origin) + '/' + esc(enc(r.name)) + '.git</code></td></tr>').join('') + '</table>');
   }
@@ -131,14 +136,14 @@
     const [{ data: refs }, { data: t, commit }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/tree/' + encodeURIComponent(rev) + (path ? '/' + enc(path) : ''))]);
     const rows = t.entries.map(e => {
       const p = (path ? path + '/' : '') + e.name;
-      const href = e.kind === 'tree' ? '#/' + repo + '/tree/' + rev + '/' + enc(p) : e.kind === 'blob' ? '#/' + repo + '/blob/' + rev + '/' + enc(p) : null;
+      const href = e.kind === 'tree' ? H(repo, 'tree', rev, p) : e.kind === 'blob' ? H(repo, 'blob', rev, p) : null;
       const name = href ? '<a href="' + esc(href) + '">' + esc(e.name) + (e.kind === 'tree' ? '/' : '') + '</a>' : esc(e.name);
       return '<tr><td>' + name + '</td><td class="muted">' + esc(e.kind === 'blob' ? 'file' : e.kind) + '</td><td class="oid muted">' + esc(short(e.oid)) + '</td></tr>';
     }).join('');
-    const up = path ? '<tr><td><a href="#/' + esc(repo) + '/tree/' + esc(rev) + (path.includes('/') ? '/' + esc(enc(path.slice(0, path.lastIndexOf('/')))) : '') + '">..</a></td><td></td><td></td></tr>' : '';
+    const up = path ? '<tr><td><a href="' + esc(H(repo, 'tree', rev, path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '')) + '">..</a></td><td></td><td></td></tr>' : '';
     render(crumbs(repo, rev, 'tree', path) +
       '<div class="row">' + refPicker(repo, refs, rev, 'tree', path) + tabs(repo, rev, 'tree') +
-      '<span class="muted">at <a class="oid" href="#/' + esc(repo) + '/commit/' + esc(commit) + '">' + esc(short(commit)) + '</a></span></div>' +
+      '<span class="muted">at <a class="oid" href=\"' + esc(H(repo, 'commit', commit)) + '\">' + esc(short(commit)) + '</a></span></div>' +
       '<table>' + up + rows + '</table>');
   }
 
@@ -149,7 +154,7 @@
       ? '<p class="muted">binary file, ' + data.length + ' bytes</p>'
       : '<pre class="src">' + data.split('\n').map(l => '<span class="l">' + esc(l) + '</span>').join('') + '</pre>';
     render(crumbs(repo, rev, 'blob', path) +
-      '<div class="row"><span class="muted">' + data.length + ' bytes at <a class="oid" href="#/' + esc(repo) + '/commit/' + esc(commit) + '">' + esc(short(commit)) + '</a></span>' +
+      '<div class="row"><span class="muted">' + data.length + ' bytes at <a class="oid" href=\"' + esc(H(repo, 'commit', commit)) + '\">' + esc(short(commit)) + '</a></span>' +
       '<a href="/api/' + esc(enc(repo)) + '/blob/' + esc(encodeURIComponent(commit)) + '/' + esc(enc(path)) + '">raw</a>' +
       '<span class="muted"><code>git show ' + esc(short(commit)) + ':' + esc(path) + '</code> reproduces this</span></div>' + body);
   }
@@ -158,8 +163,8 @@
     const [{ data: refs }, { data: list }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/commits/' + encodeURIComponent(rev) + '?n=50')]);
     const items = list.map(c => {
       const title = (c.message || '').split('\n')[0];
-      return '<div class="commit"><a href="#/' + esc(repo) + '/commit/' + esc(c.oid) + '"><b>' + esc(title || '(no message)') + '</b></a>' +
-        '<div class="muted">' + esc(c.author ? c.author.name : '?') + ' &middot; ' + esc(when(c.author && c.author.time)) + ' &middot; <a class="oid" href="#/' + esc(repo) + '/tree/' + esc(c.oid) + '">' + esc(short(c.oid)) + '</a></div></div>';
+      return '<div class="commit"><a href=\"' + esc(H(repo, 'commit', c.oid)) + '\"><b>' + esc(title || '(no message)') + '</b></a>' +
+        '<div class="muted">' + esc(c.author ? c.author.name : '?') + ' &middot; ' + esc(when(c.author && c.author.time)) + ' &middot; <a class="oid" href=\"' + esc(H(repo, 'tree', c.oid)) + '\">' + esc(short(c.oid)) + '</a></div></div>';
     }).join('');
     render(crumbs(repo, rev, 'commits', '') + '<div class="row">' + refPicker(repo, refs, rev, 'commits', '') + tabs(repo, rev, 'commits') + '</div>' + items);
   }
@@ -169,16 +174,17 @@
     const who = (label, id) => id ? '<tr><th>' + label + '</th><td>' + esc(id.name) + ' &lt;' + esc(id.email) + '&gt; <span class="muted">' + esc(when(id.time)) + ' ' + esc(id.tz) + '</span></td></tr>' : '';
     render(crumbs(repo, c.oid, 'commits', '') +
       '<table>' +
-      '<tr><th>commit</th><td class="oid">' + esc(c.oid) + ' &middot; <a href="#/' + esc(repo) + '/tree/' + esc(c.oid) + '">browse files</a></td></tr>' +
+      '<tr><th>commit</th><td class="oid">' + esc(c.oid) + ' &middot; <a href=\"' + esc(H(repo, 'tree', c.oid)) + '\">browse files</a></td></tr>' +
       '<tr><th>tree</th><td class="oid">' + esc(c.tree) + '</td></tr>' +
-      (c.parents.length ? '<tr><th>parents</th><td class="oid">' + c.parents.map(p => '<a href="#/' + esc(repo) + '/commit/' + esc(p) + '">' + esc(p) + '</a>').join('<br>') + '</td></tr>' : '') +
+      (c.parents.length ? '<tr><th>parents</th><td class="oid">' + c.parents.map(p => '<a href=\"' + esc(H(repo, 'commit', p)) + '\">' + esc(p) + '</a>').join('<br>') + '</td></tr>' : '') +
       who('author', c.author) + who('committer', c.committer) +
       '</table><pre>' + esc(c.message) + '</pre>');
   }
 
   async function route() {
-    const h = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
-    const seg = h ? h.split('/') : [];
+    const raw = location.hash.replace(/^#\/?/, '');
+    const dec = x => { try { return decodeURIComponent(x); } catch (_) { return x; } };
+    const seg = raw ? raw.split('/').map(dec) : [];
     try {
       if (!seg.length) return await showRepos();
       const repo = seg[0];
