@@ -431,45 +431,63 @@ const Console = (() => {
   const RESULT_TYPES = {}; // method -> nothing needed: replies are self-describing
 
   // --- signer (ICRC-25 over postMessage) ---
+  // Mirrors the reference relying party (dfinity/oisy-wallet-signer): the
+  // readiness ping is posted with target origin "*" because the popup may be
+  // on a login screen or mid-redirect, replies are accepted only from the
+  // popup window itself and from the signer's origin, and the user gets two
+  // minutes to log in before the connection is abandoned.
+  const CONNECT_TIMEOUT_MS = 180000, INTERACT_TIMEOUT_MS = 120000, PING_MS = 500;
   const signer = {
     win: null, ready: false, nextId: 1, pending: new Map(),
     listen() {
       if (this.listening) return; this.listening = true;
       window.addEventListener('message', e => {
-        if (e.origin !== SIGNER.origin) return;
+        if (e.source !== this.win || e.origin !== SIGNER.origin) return;
         const d = e.data; if (!d || d.jsonrpc !== '2.0' || !this.pending.has(d.id)) return;
         const { resolve, reject } = this.pending.get(d.id); this.pending.delete(d.id);
         if (d.error) reject(new Error(d.error.message || ('signer error ' + d.error.code))); else resolve(d.result);
       });
     },
-    request(method, params, timeoutMs) {
+    request(method, params, timeoutMs, targetOrigin) {
       const id = this.nextId++;
       return new Promise((resolve, reject) => {
         this.pending.set(id, { resolve, reject });
-        this.win.postMessage({ jsonrpc: '2.0', id, method, params }, SIGNER.origin);
+        const msg = { jsonrpc: '2.0', id, method };
+        if (params !== undefined) msg.params = params;
+        this.win.postMessage(msg, targetOrigin || SIGNER.origin);
         if (timeoutMs) setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error('timeout')); } }, timeoutMs);
       });
     },
-    async connect() {
+    async connect(progress) {
       this.listen();
       if (!this.win || this.win.closed) { this.win = window.open(SIGNER.url, 'ic-git-signer', 'width=480,height=720'); this.ready = false; }
       if (!this.win) throw new Error('popup blocked: allow popups for this site');
-      const until = Date.now() + 60000;
+      if (this.ready) { try { this.win.focus(); } catch (_) {} return this; }
+      const until = Date.now() + CONNECT_TIMEOUT_MS;
+      let n = 0;
       while (!this.ready) {
-        try { if (await this.request('icrc29_status', {}, 700) === 'ready') this.ready = true; } catch (_) {}
-        if (!this.ready && Date.now() > until) throw new Error('wallet did not answer');
+        if (this.win.closed) throw new Error('wallet window was closed');
+        if (Date.now() > until) throw new Error('wallet did not answer within ' + (CONNECT_TIMEOUT_MS / 1000) + 's');
+        if (progress && n++ % 10 === 0) progress('waiting for OISY' + (n > 10 ? ' (log in there if asked)' : '') + '...');
+        try { if (await this.request('icrc29_status', undefined, PING_MS, '*') === 'ready') this.ready = true; } catch (_) {}
       }
       return this;
     },
     async accounts() {
-      await this.request('icrc25_request_permissions', { scopes: [{ method: 'icrc27_accounts' }, { method: 'icrc49_call_canister' }] });
-      const r = await this.request('icrc27_accounts', {});
+      await this.request('icrc25_request_permissions', { scopes: [{ method: 'icrc27_accounts' }, { method: 'icrc49_call_canister' }] }, INTERACT_TIMEOUT_MS);
+      const r = await this.request('icrc27_accounts', undefined, INTERACT_TIMEOUT_MS);
       return (r.accounts || []).map(a => a.owner);
     },
     async call(canisterId, sender, method, types, values) {
       const arg = IC.b64enc(IC.encode(types, values));
-      const r = await this.request('icrc49_call_canister', { canisterId, sender, method, arg });
+      const r = await this.request('icrc49_call_canister', { canisterId, sender, method, arg }, INTERACT_TIMEOUT_MS);
       return (await IC.callResult(r))[0];
+    },
+    // Close the popup when an interaction is over; the next write reopens
+    // it. Left open, OISY sits on "waiting for the dapp".
+    disconnect() {
+      try { if (this.win && !this.win.closed) this.win.close(); } catch (_) {}
+      this.win = null; this.ready = false;
     },
   };
 
@@ -484,22 +502,33 @@ const Console = (() => {
       : '<button id="signin">connect wallet</button>';
     const si = document.getElementById('signin'), so = document.getElementById('signout');
     if (si) si.onclick = signIn;
-    if (so) so.onclick = () => { me = null; try { localStorage.removeItem('ic-git.principal'); } catch (_) {} paintWallet(); location.reload(); };
+    if (so) so.onclick = () => { me = null; try { localStorage.removeItem('ic-git.principal'); } catch (_) {} signer.disconnect(); paintWallet(); location.reload(); };
   }
   async function signIn() {
+    const el = walletEl();
+    const say = msg => { if (el) el.innerHTML = '<span class="muted">' + esc(msg) + '</span>'; };
     try {
-      await signer.connect();
+      say('opening OISY...');
+      await signer.connect(say);
+      say('approve the connection in OISY...');
       const accounts = await signer.accounts();
       if (!accounts.length) throw new Error('wallet returned no accounts');
       me = accounts[0]; try { localStorage.setItem('ic-git.principal', me); } catch (_) {}
+      signer.disconnect();
       paintWallet(); location.reload();
-    } catch (e) { alert('sign in failed: ' + e.message); }
+    } catch (e) {
+      signer.disconnect();
+      paintWallet();
+      if (el) el.insertAdjacentHTML('afterbegin', '<span class="bad">sign in failed: ' + esc(e.message) + '</span> ');
+    }
   }
   // Every write: connect (reuses the popup), sign, decode, unwrap Result.
   async function write(method, types, values, canister) {
     if (!me) throw new Error('connect a wallet first');
-    await signer.connect();
-    const r = await signer.call(canister || CANISTER, me, method, types, values);
+    await signer.connect(null);
+    let r;
+    try { r = await signer.call(canister || CANISTER, me, method, types, values); }
+    finally { signer.disconnect(); }
     if (r && typeof r === 'object' && 'Err' in r) throw new Error(typeof r.Err === 'string' ? r.Err : JSON.stringify(r.Err, (k, v) => typeof v === 'bigint' ? v.toString() : v));
     return r && typeof r === 'object' && 'Ok' in r ? r.Ok : r;
   }
