@@ -467,6 +467,7 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-timers",
  "ic-dev-kit-rs",
+ "ic-multisig",
  "ic-stable-structures",
  "k256",
  "serde",
@@ -609,6 +610,17 @@ dependencies = [
  "serde",
  "strum",
  "strum_macros",
+]
+
+[[package]]
+name = "ic-multisig"
+version = "0.1.0"
+source = "git+https://github.com/DrJesseGlass/ic-multisig?rev=1ce84cd3a010a9c3b32ec0a147fe88d1ec2a929f#1ce84cd3a010a9c3b32ec0a147fe88d1ec2a929f"
+dependencies = [
+ "candid",
+ "hex",
+ "serde",
+ "sha2",
 ]
 
 [[package]]

@@ -420,7 +420,15 @@ pub fn repos_of(p: &Principal) -> Vec<String> {
 }
 
 // --- votes ----------------------------------------------------------------------
+//
+// The rules -- who counts, one ballot per approver, threshold reached or not
+// -- live in the ic-multisig crate, shared with ic-vote. This module only
+// supplies the policy (owner plus voters, threshold = required_votes), the
+// subject (the commit), and storage over the VOTES stable map, scoped by repo.
 
+use ic_multisig::{Approval, Approver, Decision, Policy, Store, Subject};
+
+/// A ballot as the API reports it. Converted from the crate's record.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Ballot {
     pub principal: Principal,
@@ -428,8 +436,56 @@ pub struct Ballot {
     pub at_ns: u64,
 }
 
+fn policy(m: &RepoMeta) -> Policy {
+    let approvers = m
+        .owner
+        .iter()
+        .copied()
+        .chain(
+            m.members
+                .iter()
+                .filter(|x| x.role == Role::Voter)
+                .map(|x| x.principal),
+        )
+        .map(Approver::from);
+    Policy::new(approvers, m.required_votes)
+}
+
+fn subject(commit_hex: &str) -> Result<Subject, String> {
+    let oid = store::parse_oid(commit_hex)?;
+    Ok(Subject::of_short_hash("commit", oid.as_slice()))
+}
+
+/// Ballots of one repo, keyed in the VOTES map by the subject key.
+struct VoteStore<'a> {
+    repo: &'a str,
+}
+
+impl Store for VoteStore<'_> {
+    fn load(&self, subject: &Subject) -> Vec<Approval> {
+        store::votes_get(self.repo, &subject.key()).unwrap_or_default()
+    }
+
+    fn save(&mut self, subject: &Subject, ballots: &[Approval]) {
+        store::votes_set(self.repo, &subject.key(), &ballots.to_vec());
+    }
+}
+
 pub fn votes(repo: &str, commit_hex: &str) -> Vec<Ballot> {
-    store::votes_get(repo, commit_hex).unwrap_or_default()
+    let Ok(subject) = subject(commit_hex) else {
+        return Vec::new();
+    };
+    VoteStore { repo }
+        .load(&subject)
+        .into_iter()
+        .filter_map(|a| {
+            Some(Ballot {
+                principal: a.approver.principal()?,
+                approve: a.approves(),
+                at_ns: a.at_ns,
+            })
+        })
+        .collect()
 }
 
 /// Cast or replace a ballot. Returns the approvals so far and the threshold.
@@ -440,37 +496,29 @@ pub fn vote(
     approve: bool,
 ) -> Result<(u32, u32), String> {
     let m = can_vote(repo, who)?;
-    let oid = store::parse_oid(commit_hex)?;
-    if !store::has_object(&oid) {
+    let subject = subject(commit_hex)?;
+    if !store::has_object(&store::parse_oid(commit_hex)?) {
         return Err(format!("no such commit in {repo}: {commit_hex}"));
     }
-    let mut ballots = votes(repo, commit_hex);
-    ballots.retain(|b| &b.principal != who);
-    ballots.push(Ballot {
-        principal: *who,
-        approve,
-        at_ns: now_ns(),
-    });
-    store::votes_set(repo, commit_hex, &ballots);
-    Ok((approvals(&m, &ballots), m.required_votes))
-}
-
-/// Approvals that count: from the owner or a current voter.
-fn approvals(m: &RepoMeta, ballots: &[Ballot]) -> u32 {
-    ballots
-        .iter()
-        .filter(|b| b.approve && (is_owner(m, &b.principal) || has_role(m, &b.principal, Role::Voter)))
-        .count() as u32
+    let approval = Approval::new(
+        Approver::from(*who),
+        if approve { Decision::Approve } else { Decision::Reject },
+        now_ns(),
+    );
+    let tally = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject, approval)
+        .map_err(|e| e.to_string())?;
+    Ok((tally.approvals, tally.required))
 }
 
 /// May the deploy queue run this commit? Yes when the repo requires no votes
 /// (the default) or enough voters have approved.
 pub fn approved(repo: &str, commit_hex: &str) -> bool {
-    match meta(repo) {
-        None => true,
-        Some(m) if m.required_votes == 0 => true,
-        Some(m) => approvals(&m, &votes(repo, commit_hex)) >= m.required_votes,
+    let Some(m) = meta(repo) else { return true };
+    if m.required_votes == 0 {
+        return true;
     }
+    let Ok(subject) = subject(commit_hex) else { return false };
+    ic_multisig::tally(&policy(&m), &VoteStore { repo }.load(&subject)).reached
 }
 
 // --- charges ------------------------------------------------------------------------
