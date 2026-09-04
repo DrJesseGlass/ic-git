@@ -83,6 +83,13 @@ as before. This is the same K-of-N shape as the release attestations in
 docs/ATTESTATION.md, applied one level down: the people expected to approve
 a release are named on the repo, and the canister enforces the count.
 
+The rules live in the `ic-multisig` crate
+(https://github.com/DrJesseGlass/ic-multisig), shared with ic-vote:
+`tenancy.rs` only supplies the policy (owner plus voters, threshold =
+required votes), the subject (`Subject::of_short_hash("commit", oid)`), and
+a `Store` over the VOTES stable map scoped by repo. A signed flavor of the
+same record type is what the module-hash attestations will use.
+
 ## App canisters
 
 An app deployed to the IC should burn its own owner's cycles, not ic-git's.
