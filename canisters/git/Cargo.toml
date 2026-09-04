@@ -9,8 +9,8 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 ic-dev-kit-rs = { git = "https://github.com/DrJesseGlass/ic-dev-kit-rs", tag = "v0.3.0", features = ["storage"] }
 # K-of-N approvals (docs/TENANCY.md, "Votes"): the policy, ballot and tally
-# rules shared with ic-vote. Pinned by revision; Cargo.lock pins it too.
-ic-multisig = { git = "https://github.com/DrJesseGlass/ic-multisig", rev = "1ce84cd3a010a9c3b32ec0a147fe88d1ec2a929f", features = ["candid"] }
+# rules shared with ic-vote. Pinned by tag; Cargo.lock pins the exact revision.
+ic-multisig = { git = "https://github.com/DrJesseGlass/ic-multisig", tag = "v0.1.0", features = ["candid"] }
 
 # Keep these pinned to the versions ic-dev-kit-rs uses.
 ic-cdk = "0.20"

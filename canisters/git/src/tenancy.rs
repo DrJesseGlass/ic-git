@@ -466,8 +466,8 @@ impl Store for VoteStore<'_> {
         store::votes_get(self.repo, &subject.key()).unwrap_or_default()
     }
 
-    fn save(&mut self, subject: &Subject, ballots: &[Approval]) {
-        store::votes_set(self.repo, &subject.key(), &ballots.to_vec());
+    fn save(&mut self, subject: &Subject, ballots: Vec<Approval>) {
+        store::votes_set(self.repo, &subject.key(), &ballots);
     }
 }
 

@@ -615,7 +615,7 @@ dependencies = [
 [[package]]
 name = "ic-multisig"
 version = "0.1.0"
-source = "git+https://github.com/DrJesseGlass/ic-multisig?rev=1ce84cd3a010a9c3b32ec0a147fe88d1ec2a929f#1ce84cd3a010a9c3b32ec0a147fe88d1ec2a929f"
+source = "git+https://github.com/DrJesseGlass/ic-multisig?tag=v0.1.0#33111634b94ebad15c51614f7af722dc346ce63e"
 dependencies = [
  "candid",
  "hex",
