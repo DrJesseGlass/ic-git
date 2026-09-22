@@ -18,3 +18,7 @@ docs
 *.md
 .github
 verified.json
+
+# The demo canister is its own crate and its own workspace; nothing under
+# demo/ is compiled into git_canister, so it cannot reach the module hash.
+demo
