@@ -87,7 +87,8 @@ expected to approve a release are named on the repo, and the canister
 enforces the count.
 
 The rules live in the `ic-multisig` crate
-(https://github.com/DrJesseGlass/ic-multisig), shared with ic-vote:
+(https://crates.io/crates/ic-multisig, source at
+https://github.com/DrJesseGlass/ic-multisig), shared with ic-vote:
 `tenancy.rs` only supplies the policy (owner plus voters, threshold =
 required votes), the subject (`Subject::of_short_hash("commit", oid)`), and
 a `Store` over the VOTES stable map scoped by repo. Ballots are keyed by
