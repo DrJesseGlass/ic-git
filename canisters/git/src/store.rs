@@ -131,7 +131,8 @@ thread_local! {
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_REPO_META))),
     );
 
-    /// Tenancy: "<repo>\0<commit hex>" -> JSON ballot list.
+    /// Tenancy: "<repo>\0<subject key>" -> JSON list of ic_multisig::Approval
+    /// (tenancy.rs owns the key and the record shape).
     static VOTES: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_VOTES))),
     );
@@ -171,18 +172,18 @@ pub fn repo_meta_all<T: serde::de::DeserializeOwned>() -> Vec<(String, T)> {
     })
 }
 
-fn vote_key(repo: &str, commit_hex: &str) -> String {
-    format!("{repo}\0{commit_hex}")
+fn vote_key(repo: &str, subject_key: &str) -> String {
+    format!("{repo}\0{subject_key}")
 }
 
-pub fn votes_get<T: serde::de::DeserializeOwned>(repo: &str, commit_hex: &str) -> Option<T> {
-    VOTES.with(|v| v.borrow().get(&vote_key(repo, commit_hex)))
+pub fn votes_get<T: serde::de::DeserializeOwned>(repo: &str, subject_key: &str) -> Option<T> {
+    VOTES.with(|v| v.borrow().get(&vote_key(repo, subject_key)))
         .and_then(|b| serde_json::from_slice(&b).ok())
 }
 
-pub fn votes_set<T: serde::Serialize>(repo: &str, commit_hex: &str, value: &T) {
+pub fn votes_set<T: serde::Serialize>(repo: &str, subject_key: &str, value: &T) {
     if let Ok(b) = serde_json::to_vec(value) {
-        VOTES.with(|v| v.borrow_mut().insert(vote_key(repo, commit_hex), b));
+        VOTES.with(|v| v.borrow_mut().insert(vote_key(repo, subject_key), b));
     }
 }
 

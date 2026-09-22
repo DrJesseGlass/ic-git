@@ -305,10 +305,11 @@ pub fn can_write(repo: &str, p: &Principal, operator: bool) -> Result<RepoMeta, 
     }
 }
 
-/// Owner or voter: may cast a ballot.
+/// Owner or voter: may cast a ballot. Decided by the vote policy itself, so
+/// whoever passes here is exactly an approver `record` accepts.
 pub fn can_vote(repo: &str, p: &Principal) -> Result<RepoMeta, String> {
     let m = meta_or_legacy(repo)?;
-    if is_owner(&m, p) || has_role(&m, p, Role::Voter) {
+    if policy(&m).is_approver(&Approver::from(*p)) {
         Ok(m)
     } else {
         Err(format!("{p} is not a voter on repo {repo}"))
@@ -382,6 +383,7 @@ pub fn remove_member(
     if m.members.len() == before {
         return Err(format!("{target} is not a member of {repo}"));
     }
+    check_policy(&m)?;
     save_meta(repo, &m);
     Ok(m.members)
 }
@@ -399,13 +401,18 @@ pub fn transfer_repo(
     }
     m.owner = Some(new_owner);
     m.members.retain(|x| x.principal != new_owner);
+    check_policy(&m)?;
     save_meta(repo, &m);
     Ok(())
 }
 
+/// Approvals a commit needs before it deploys. A `k` above the owner plus
+/// voters is refused: a threshold nobody could reach is a configuration
+/// error, not a strict policy, and `vote` would refuse every ballot under it.
 pub fn set_required_votes(repo: &str, who: &Principal, operator: bool, k: u32) -> Result<(), String> {
     let mut m = can_admin(repo, who, operator)?;
     m.required_votes = k;
+    check_policy(&m)?;
     save_meta(repo, &m);
     Ok(())
 }
@@ -426,7 +433,7 @@ pub fn repos_of(p: &Principal) -> Vec<String> {
 // supplies the policy (owner plus voters, threshold = required_votes), the
 // subject (the commit), and storage over the VOTES stable map, scoped by repo.
 
-use ic_multisig::{Approval, Approver, Decision, Policy, Store, Subject};
+use ic_multisig::{Approval, Approver, Decision, Policy, Store, Subject, Tally};
 
 /// A ballot as the API reports it. Converted from the crate's record.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -434,6 +441,17 @@ pub struct Ballot {
     pub principal: Principal,
     pub approve: bool,
     pub at_ns: u64,
+}
+
+/// The API view of a stored record. `None` only for an approver that is not
+/// a principal, which this store never writes: every ballot here comes from
+/// an authenticated caller.
+fn ballot(a: Approval) -> Option<Ballot> {
+    Some(Ballot {
+        principal: a.approver.principal()?,
+        approve: a.approves(),
+        at_ns: a.at_ns,
+    })
 }
 
 fn policy(m: &RepoMeta) -> Policy {
@@ -451,9 +469,17 @@ fn policy(m: &RepoMeta) -> Policy {
     Policy::new(approvers, m.required_votes)
 }
 
-fn subject(commit_hex: &str) -> Result<Subject, String> {
-    let oid = store::parse_oid(commit_hex)?;
-    Ok(Subject::of_short_hash("commit", oid.as_slice()))
+/// The policy must stay reachable: `record` refuses every ballot under a
+/// threshold above the approver count, so the mutators that raise the
+/// threshold or shrink the approver set check here before saving.
+fn check_policy(m: &RepoMeta) -> Result<(), String> {
+    policy(m)
+        .validate()
+        .map_err(|e| format!("{e}; lower required_votes or add voters first"))
+}
+
+fn subject(oid: &store::Oid) -> Subject {
+    Subject::of_short_hash("commit", oid.as_slice())
 }
 
 /// Ballots of one repo, keyed in the VOTES map by the subject key.
@@ -472,32 +498,27 @@ impl Store for VoteStore<'_> {
 }
 
 pub fn votes(repo: &str, commit_hex: &str) -> Vec<Ballot> {
-    let Ok(subject) = subject(commit_hex) else {
+    let Ok(oid) = store::parse_oid(commit_hex) else {
         return Vec::new();
     };
     VoteStore { repo }
-        .load(&subject)
+        .load(&subject(&oid))
         .into_iter()
-        .filter_map(|a| {
-            Some(Ballot {
-                principal: a.approver.principal()?,
-                approve: a.approves(),
-                at_ns: a.at_ns,
-            })
-        })
+        .filter_map(ballot)
         .collect()
 }
 
-/// Cast or replace a ballot. Returns the approvals so far and the threshold.
+/// Cast or replace a ballot. Returns the tally: approvals so far, the
+/// threshold, and whether it is reached.
 pub fn vote(
     repo: &str,
     who: &Principal,
     commit_hex: &str,
     approve: bool,
-) -> Result<(u32, u32), String> {
+) -> Result<Tally, String> {
     let m = can_vote(repo, who)?;
-    let subject = subject(commit_hex)?;
-    if !store::has_object(&store::parse_oid(commit_hex)?) {
+    let oid = store::parse_oid(commit_hex)?;
+    if !store::has_object(&oid) {
         return Err(format!("no such commit in {repo}: {commit_hex}"));
     }
     let approval = Approval::new(
@@ -505,9 +526,8 @@ pub fn vote(
         if approve { Decision::Approve } else { Decision::Reject },
         now_ns(),
     );
-    let tally = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject, approval)
-        .map_err(|e| e.to_string())?;
-    Ok((tally.approvals, tally.required))
+    ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
+        .map_err(|e| e.to_string())
 }
 
 /// May the deploy queue run this commit? Yes when the repo requires no votes
@@ -517,8 +537,8 @@ pub fn approved(repo: &str, commit_hex: &str) -> bool {
     if m.required_votes == 0 {
         return true;
     }
-    let Ok(subject) = subject(commit_hex) else { return false };
-    ic_multisig::tally(&policy(&m), &VoteStore { repo }.load(&subject)).reached
+    let Ok(oid) = store::parse_oid(commit_hex) else { return false };
+    ic_multisig::tally(&policy(&m), &VoteStore { repo }.load(&subject(&oid))).reached
 }
 
 // --- charges ------------------------------------------------------------------------
@@ -646,6 +666,12 @@ mod tests {
         Principal::from_slice(&[n; 8])
     }
 
+    /// (approvals, required) of a successful vote.
+    fn counts(t: Result<Tally, String>) -> (u32, u32) {
+        let t = t.unwrap();
+        (t.approvals, t.required)
+    }
+
     #[test]
     fn create_requires_identity_and_fee() {
         let alice = p(1);
@@ -758,25 +784,33 @@ mod tests {
         let commit = store::oid_hex(&blob); // any stored object stands in for a commit here
         // No threshold: approved by default.
         assert!(approved("t-vote", &commit));
-        set_required_votes("t-vote", &alice, false, 2).unwrap();
-        assert!(!approved("t-vote", &commit));
+        // A threshold nobody could reach is refused; add voters first.
+        assert!(set_required_votes("t-vote", &alice, false, 2).is_err());
         add_member("t-vote", &alice, false, v1, Role::Voter).unwrap();
         add_member("t-vote", &alice, false, v2, Role::Voter).unwrap();
         add_member("t-vote", &alice, false, w, Role::Writer).unwrap();
+        set_required_votes("t-vote", &alice, false, 2).unwrap();
+        assert!(!approved("t-vote", &commit));
         // Writers cannot vote; unknown commits are refused.
         assert!(vote("t-vote", &w, &commit, true).is_err());
         assert!(vote("t-vote", &v1, &"0".repeat(40), true).is_err());
-        assert_eq!(vote("t-vote", &v1, &commit, true).unwrap(), (1, 2));
+        assert_eq!(counts(vote("t-vote", &v1, &commit, true)), (1, 2));
         assert!(!approved("t-vote", &commit));
         // The owner counts as a voter.
-        assert_eq!(vote("t-vote", &alice, &commit, true).unwrap(), (2, 2));
+        let t = vote("t-vote", &alice, &commit, true).unwrap();
+        assert_eq!((t.approvals, t.required, t.reached), (2, 2, true));
         assert!(approved("t-vote", &commit));
         // A ballot can be changed; a removed voter's ballot stops counting.
-        assert_eq!(vote("t-vote", &alice, &commit, false).unwrap(), (1, 2));
-        assert_eq!(vote("t-vote", &v2, &commit, true).unwrap(), (2, 2));
+        assert_eq!(counts(vote("t-vote", &alice, &commit, false)), (1, 2));
+        assert_eq!(counts(vote("t-vote", &v2, &commit, true)), (2, 2));
         remove_member("t-vote", &alice, false, v2).unwrap();
         assert!(!approved("t-vote", &commit));
         assert_eq!(votes("t-vote", &commit).len(), 3);
+        // Shrinking the approvers below the threshold is refused too, by
+        // removal or by a transfer that drops the new owner's voter row.
+        assert!(remove_member("t-vote", &alice, false, v1).is_err());
+        assert!(transfer_repo("t-vote", &alice, false, v1).is_err());
+        assert_eq!(meta("t-vote").unwrap().owner, Some(alice));
         assert_eq!(repos_of(&v1), vec!["t-vote".to_string()]);
     }
 }

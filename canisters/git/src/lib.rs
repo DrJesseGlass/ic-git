@@ -485,15 +485,17 @@ fn set_required_votes(repo: String, k: u32) -> Result<(), String> {
 /// deploy is queued.
 #[ic_cdk::update]
 fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
-    let (yes, need) = tenancy::vote(&repo, &caller(), &commit, approve)?;
-    if need > 0 && yes >= need {
+    let t = tenancy::vote(&repo, &caller(), &commit, approve)?;
+    // A zero threshold is always reached and deploys on push; a ballot cast
+    // there must not queue the tip again.
+    if t.required > 0 && t.reached {
         if let (Some(branch), Ok(oid)) = (store::head_target(&repo), store::parse_oid(&commit)) {
             if store::get_ref(&repo, &branch) == Some(oid) {
                 deploy::enqueue(&repo, oid);
             }
         }
     }
-    Ok((yes, need))
+    Ok((t.approvals, t.required))
 }
 
 #[ic_cdk::query]
