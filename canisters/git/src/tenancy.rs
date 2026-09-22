@@ -433,7 +433,7 @@ pub fn repos_of(p: &Principal) -> Vec<String> {
 // supplies the policy (owner plus voters, threshold = required_votes), the
 // subject (the commit), and storage over the VOTES stable map, scoped by repo.
 
-use ic_multisig::{Approval, Approver, Decision, Policy, Store, Subject, Tally};
+use ic_multisig::{Approval, Approver, Ballots, Decision, Policy, Store, Subject, Tally};
 
 /// A ballot as the API reports it. Converted from the crate's record.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -538,7 +538,13 @@ pub fn approved(repo: &str, commit_hex: &str) -> bool {
         return true;
     }
     let Ok(oid) = store::parse_oid(commit_hex) else { return false };
-    ic_multisig::tally(&policy(&m), &VoteStore { repo }.load(&subject(&oid))).reached
+    // These ballots came out of the store `record` wrote, and each was
+    // checked on the way in (the caller was authenticated by the IC; there
+    // is no signature to verify). The crate is told so, rather than asked
+    // to re-verify a list that has nothing to verify.
+    let subj = subject(&oid);
+    let ballots = Ballots::assume_checked(&subj, VoteStore { repo }.load(&subj));
+    ic_multisig::tally_checked(&policy(&m), &subj, &ballots).reached
 }
 
 // --- charges ------------------------------------------------------------------------
