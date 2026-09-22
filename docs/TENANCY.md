@@ -77,11 +77,23 @@ Balances are not refundable yet; that needs the reverse of the ledger flow.
 `set_required_votes(repo, k)` makes the deploy queue hold a commit until `k`
 voters (the owner counts as one) have approved it with
 `vote(repo, commit, true)`. Ballots can be changed; a removed voter's ballot
-stops counting. When the deploy-branch tip reaches the threshold, its deploy
-is queued from the vote call itself. `k = 0`, the default, deploys on push
-as before. This is the same K-of-N shape as the release attestations in
-docs/ATTESTATION.md, applied one level down: the people expected to approve
-a release are named on the repo, and the canister enforces the count.
+stops counting. A `k` above the owner plus voters is refused, and so is
+removing a voter or transferring the repo when that would leave `k` out of
+reach: lower `k` first. When the deploy-branch tip reaches the threshold,
+its deploy is queued from the vote call itself. `k = 0`, the default,
+deploys on push as before. This is the same K-of-N shape as the release
+attestations in docs/ATTESTATION.md, applied one level down: the people
+expected to approve a release are named on the repo, and the canister
+enforces the count.
+
+The rules live in the `ic-multisig` crate
+(https://github.com/DrJesseGlass/ic-multisig), shared with ic-vote:
+`tenancy.rs` only supplies the policy (owner plus voters, threshold =
+required votes), the subject (`Subject::of_short_hash("commit", oid)`), and
+a `Store` over the VOTES stable map scoped by repo. Ballots are keyed by
+the subject, so nothing written under the earlier per-commit key is read;
+no votes had been cast on mainnet when the adapter landed. A signed flavor
+of the same record type is what the module-hash attestations will use.
 
 ## App canisters
 
