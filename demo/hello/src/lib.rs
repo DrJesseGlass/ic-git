@@ -7,14 +7,20 @@
 //! page below can name the commit it came from and let a reader check it
 //! against the same canister that served the push.
 //!
-//! Build: demo/hello/build.sh (wasm32-unknown-unknown, release).
+//! Build: demo/hello/build.sh (wasm32-unknown-unknown, release), which
+//! also fixes the deployment coordinates below.
 
 use candid::{CandidType, Deserialize};
 
-/// The ic-git canister that hosts the repo and ran the deploy.
-const IC_GIT: &str = "umobs-yiaaa-aaaab-agyrq-cai";
-/// The repo this canister is deployed from.
-const REPO: &str = "hello";
+// Where this build is going, fixed at compile time by build.sh so the page
+// can only describe the deployment it is part of: the ic-git canister that
+// hosts the repo and runs the deploy, the origin its HTTP routes answer on
+// (raw.icp0.io on mainnet, raw.localhost on a replica), and the repo name.
+// A bare `cargo build` without them fails here rather than silently
+// describing some other canister.
+const IC_GIT: &str = env!("HELLO_IC_GIT", "set by demo/hello/build.sh: the ic-git canister id");
+const GIT_ORIGIN: &str = env!("HELLO_GIT_ORIGIN", "set by demo/hello/build.sh: the ic-git HTTP origin");
+const REPO: &str = env!("HELLO_REPO", "set by demo/hello/build.sh: the repo this canister deploys from");
 
 #[derive(CandidType, Deserialize, Clone)]
 struct HeaderField(String, String);
@@ -60,6 +66,7 @@ fn page() -> String {
     let me = ic_cdk::api::canister_self().to_text();
     HTML.replace("{{CANISTER}}", &me)
         .replace("{{IC_GIT}}", IC_GIT)
+        .replace("{{GIT_ORIGIN}}", GIT_ORIGIN)
         .replace("{{REPO}}", REPO)
 }
 

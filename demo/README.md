@@ -11,10 +11,17 @@ git push  ->  ic-git canister  ->  deploy queue  ->  install_code  ->  app canis
 ```
 
 `hello_canister` is a ~365 KB Rust canister that serves one page describing
-how it arrived, and reads its own commit back out of ic-git's `/api` to prove
-it. Its source and its compiled `app.wasm` are both in the pushed commit, so
-the repo browser shows exactly what was deployed and
-`get_deploy_history(repo)` binds that commit oid to the wasm sha256.
+how it arrived. It reads `GET /api/<repo>/deploys` on ic-git -- the deploy
+log, which records each install and the canister it went into -- and shows
+the last commit that was actually installed into it, not the branch tip: a
+push that is queued, held for votes, or failed is named as such, not
+credited. Its source and its compiled `app.wasm` are both in the pushed
+commit, so the repo browser shows exactly what was deployed.
+
+The ic-git canister id, its HTTP origin and the repo name are compiled into
+the module (`build.sh --git-canister --git-origin --repo`, read with `env!`
+in `lib.rs`), so a build for a local replica describes the local replica and
+a bare `cargo build` refuses rather than describing mainnet.
 
 ## Run it
 
@@ -41,7 +48,8 @@ demo/hello/Cargo.toml     standalone crate -- its own [workspace] table keeps
                           it out of the ic-git workspace and the attested build
 demo/hello/src/lib.rs     http_request serving one page, plus whoami
 demo/hello/src/index.html the page (self-contained; no external resources)
-demo/hello/build.sh       build + stage dist/ (the tree that gets pushed)
+demo/hello/build.sh       build for one deployment + stage dist/ (the tree
+                          that gets pushed)
 demo/hello/setup.sh       the whole demo against local or ic
 ```
 

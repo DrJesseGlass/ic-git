@@ -50,8 +50,8 @@ else
 fi
 origin="$scheme://$host"
 
-say "build the demo canister"
-./build.sh >/dev/null
+say "build the demo canister for $git_id / $repo"
+./build.sh --git-canister "$git_id" --git-origin "$origin" --repo "$repo" >/dev/null
 wasm_sha=$(shasum -a 256 dist/app.wasm | cut -d' ' -f1)
 echo "app.wasm $(wc -c < dist/app.wasm) bytes, sha256 $wasm_sha"
 
@@ -85,33 +85,53 @@ token=$("${dfxc[@]}" call git create_push_token "(\"$repo\")" 2>&1 | ok_text)
 echo "minted"
 
 say "git push"
-# A fresh history each run: the point of the demo is the push, and the repo
-# on the canister keeps whatever it was pushed before.
+# ic-git refuses non-fast-forward pushes, so each run commits on top of
+# whatever the canister already holds: dist/ is staged fresh, then HEAD is
+# moved to the remote tip (if there is one) before the commit, so the new
+# commit's parent is the remote's and its tree is exactly dist/.
 rm -rf dist/.git
 git -C dist init -q -b main
 git -C dist add -A
-git -C dist -c user.name="ic-git demo" -c user.email="demo@ic-git.invalid" \
+if git -C dist fetch -q "$origin/$repo.git" main 2>/dev/null; then
+  git -C dist reset -q --soft FETCH_HEAD
+fi
+if git -C dist -c user.name="ic-git demo" -c user.email="demo@ic-git.invalid" \
     commit -q -m "Hello from a canister deployed by git push
 
-app.wasm sha256 $wasm_sha"
-commit=$(git -C dist rev-parse HEAD)
-echo "commit $commit"
-# The token is the credential; it goes in the URL git is handed, not in
-# anything this script prints.
-git -C dist push -q --force "$scheme://ic:$token@$host/$repo.git" main
-echo "pushed to $origin/$repo.git"
+app.wasm sha256 $wasm_sha" >/dev/null 2>&1; then
+  commit=$(git -C dist rev-parse HEAD)
+  echo "commit $commit"
+  # The token is the credential; it goes in the URL git is handed, not in
+  # anything this script prints.
+  git -C dist push -q "$scheme://ic:$token@$host/$repo.git" main
+  echo "pushed to $origin/$repo.git"
+else
+  commit=$(git -C dist rev-parse HEAD)
+  echo "nothing new to push: $commit is already on the canister"
+fi
 
 say "deploy"
-for i in $(seq 1 30); do
+# Success is a status for the commit just pushed, not any ok: a previous
+# run's result would otherwise pass while this push is still queued.
+deployed=0
+for _ in $(seq 1 30); do
   st=$("${dfxc[@]}" call git get_deploy_status "(\"$repo\")" 2>&1 || true)
   case "$st" in
-    *deploying*) sleep 2; continue ;;
-    *"ok = true"*) echo "$st" | sed -n 's/.*message = "\([^"]*\)".*/deployed: \1/p'; break ;;
-    *"ok = false"*) echo "deploy failed:"; echo "$st"; exit 1 ;;
-    *) sleep 2 ;;
+    *"commit = \"$commit\""*"ok = true"*|*"ok = true"*"commit = \"$commit\""*)
+      echo "$st" | sed -n 's/.*message = "\([^"]*\)".*/deployed: \1/p'
+      deployed=1
+      break ;;
+    *"commit = \"$commit\""*"ok = false"*|*"ok = false"*"commit = \"$commit\""*)
+      case "$st" in
+        *deploying*) ;;   # in progress: the job writes ok = false with "deploying" first
+        *) echo "deploy failed:"; echo "$st"; exit 1 ;;
+      esac ;;
   esac
-  [ "$i" = 30 ] && { echo "timed out waiting for the deploy; last status:"; echo "$st"; exit 1; }
+  sleep 2
 done
+if [ "$deployed" != 1 ]; then
+  echo "timed out waiting for the deploy of $commit; last status:"; echo "$st"; exit 1
+fi
 
 url=$(app_origin "$app")
 say "done"

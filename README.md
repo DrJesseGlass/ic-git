@@ -110,7 +110,10 @@ dfx canister --network https://icp-api.io call $C create_push_token '("myapp")'
 ```
 
 `GET /api/account/<principal>`, `/api/<repo>/info`, `/api/<repo>/votes/<commit>`
-and `/api/pricing` expose the same state read-only.
+and `/api/pricing` expose the same state read-only. `GET /api/<repo>/deploys`
+returns the wasm deploy config, the last attempt, and the provenance log
+(commit, target, wasm sha256 per install), so a deployed app can name the
+commit it actually came from rather than the branch tip (demo/README.md).
 
 ## Development
 

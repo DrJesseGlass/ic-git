@@ -8,6 +8,7 @@
 //!   GET /api/<repo>/blob/<rev>/<path>
 //!   GET /api/<repo>/info                        tenancy: owner, members, rent state
 //!   GET /api/<repo>/votes/<commit>              ballots on a commit
+//!   GET /api/<repo>/deploys                     wasm deploy config, last status, provenance log
 //!   GET /api/account/<principal>                balance and repos of a principal
 //!   GET /api/pricing                            the fee table
 //!
@@ -22,6 +23,7 @@
 //! their extension: this is a data endpoint for a page that renders content
 //! itself, never a place from which markup executes.
 
+use crate::deploy;
 use crate::object;
 use crate::site;
 use crate::store::{self, ObjectType, Oid};
@@ -96,6 +98,18 @@ struct RepoTenancy {
     required_votes: u32,
     app_canister: Option<String>,
     exempt: bool,
+}
+
+/// What a deployed app can show about itself: the config that names its
+/// target, the most recent attempt, and the log binding each commit to the
+/// wasm that was installed from it. The log is the record of what actually
+/// ran; the branch tip is not, since a push can be queued, held for votes,
+/// or fail after the ref has moved.
+#[derive(Serialize)]
+struct DeployView {
+    config: Option<deploy::DeployConfig>,
+    status: Option<deploy::DeployStatus>,
+    history: Vec<deploy::DeployRecord>,
 }
 
 #[derive(Serialize)]
@@ -195,6 +209,15 @@ pub fn handle(url: &str) -> HttpResponse {
                 .collect();
             json(200, &ballots, None)
         }
+        ("deploys", None, None) => json(
+            200,
+            &DeployView {
+                config: deploy::get_config(&repo),
+                status: deploy::get_status(&repo),
+                history: deploy::get_history(&repo),
+            },
+            None,
+        ),
         ("refs", None, None) => {
             let refs: Vec<RefInfo> = store::list_refs(&repo)
                 .into_iter()
@@ -595,6 +618,48 @@ mod tests {
         // Votes on the seeded repo's tip (an object that exists): none yet.
         let v = body_json(&handle(&format!("/api/api-ten/votes/{}", store::oid_hex(&c2))));
         assert_eq!(v.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn deploys_report_what_was_installed_not_the_tip() {
+        let (c1, c2) = seed("api-dep");
+        let empty = body_json(&handle("/api/api-dep/deploys"));
+        assert!(empty["config"].is_null());
+        assert!(empty["status"].is_null());
+        assert_eq!(empty["history"].as_array().unwrap().len(), 0);
+
+        let target = Principal::from_slice(&[9; 8]).to_text();
+        deploy::set_config("api-dep", target.clone(), "app.wasm".into()).unwrap();
+        let cfg = deploy::get_config("api-dep").unwrap();
+        // c1 was installed; c2 (the tip) was pushed later and failed.
+        deploy::record("api-dep", &cfg, &deploy::DeployStatus {
+            commit: store::oid_hex(&c1),
+            ok: true,
+            message: format!("install to {target}"),
+            wasm_len: 7,
+            wasm_sha256: "ab".repeat(32),
+        });
+        deploy::record("api-dep", &cfg, &deploy::DeployStatus {
+            commit: store::oid_hex(&c2),
+            ok: false,
+            message: "install_code: rejected".into(),
+            wasm_len: 0,
+            wasm_sha256: String::new(),
+        });
+
+        let v = body_json(&handle("/api/api-dep/deploys"));
+        assert_eq!(v["config"]["target"], target);
+        assert_eq!(v["config"]["source_path"], "app.wasm");
+        assert_eq!(v["config"]["mode"], "upgrade");
+        let h = v["history"].as_array().unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0]["commit"], store::oid_hex(&c1));
+        assert_eq!(h[0]["target"], target);
+        assert_eq!(h[0]["ok"], true);
+        assert_eq!(h[0]["wasm_sha256"], "ab".repeat(32));
+        assert_eq!(h[1]["commit"], store::oid_hex(&c2));
+        assert_eq!(h[1]["ok"], false);
+        assert_eq!(handle("/api/nope/deploys").status_code, 404);
     }
 
     #[test]

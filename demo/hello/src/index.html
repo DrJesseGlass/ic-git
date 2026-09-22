@@ -72,7 +72,7 @@
   <h2>How this page got here</h2>
   <ol class="chain">
     <li><b>git push</b><span>A stock git client pushes to
-      <code class="mono">https://{{IC_GIT}}.raw.icp0.io/{{REPO}}.git</code> over smart-HTTP.</span></li>
+      <code class="mono">{{GIT_ORIGIN}}/{{REPO}}.git</code> over smart-HTTP.</span></li>
     <li><b>ic-git ingests the pack</b><span>Objects and refs land in the
       canister's stable memory. The push enqueues a deploy job.</span></li>
     <li><b>The queue reads the commit</b><span>It resolves
@@ -82,13 +82,17 @@
   </ol>
 
   <h2>The commit this came from</h2>
+  <p class="lede" style="font-size:15px">Read from ic-git's deploy log, not from
+  the branch tip: the log records each install and the canister it went into,
+  so a push that is still queued, held for votes, or failed does not get
+  credited here.</p>
   <div class="card"><dl id="commit"><div class="row"><dt>status</dt><dd>reading from the git canister&hellip;</dd></div></dl></div>
 
   <h2>Check it yourself</h2>
   <p>Everything above is readable from the same canister, without trusting this
   page. Browse the repo, its source and this commit at
   <a id="browse" href="#">the ic-git repo browser</a>, or ask the IC directly:</p>
-  <p><code class="mono">curl https://{{IC_GIT}}.raw.icp0.io/api/{{REPO}}/commits/HEAD</code></p>
+  <p><code class="mono">curl {{GIT_ORIGIN}}/api/{{REPO}}/deploys</code></p>
 
   <footer>
     Served by canister <span class="mono">{{CANISTER}}</span>.
@@ -96,8 +100,7 @@
   </footer>
 </div>
 <script>
-  var IC_GIT = "{{IC_GIT}}", REPO = "{{REPO}}";
-  var base = "https://" + IC_GIT + ".raw.icp0.io";
+  var ME = "{{CANISTER}}", REPO = "{{REPO}}", base = "{{GIT_ORIGIN}}";
   document.getElementById("browse").href = base + "/site/ic-git/#/" + REPO;
 
   function esc(s) {
@@ -108,21 +111,41 @@
   function row(k, v, cls) {
     return '<div class="row"><dt>' + k + '</dt><dd class="' + (cls || "") + '">' + v + "</dd></div>";
   }
-  fetch(base + "/api/" + REPO + "/commits/HEAD?n=1")
-    .then(function (r) { return r.json(); })
-    .then(function (list) {
-      var c = list && list[0];
-      if (!c) throw new Error("no commits");
-      var when = new Date(c.author.time * 1000).toUTCString();
-      document.getElementById("commit").innerHTML =
-        row("commit", '<span class="mono">' + esc(c.oid) + "</span>") +
-        row("author", esc(c.author.name)) +
-        row("date", esc(when)) +
-        row("message", esc(c.message.split("\n")[0]), "msg");
+  function getJson(path) {
+    return fetch(base + path).then(function (r) {
+      if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+      return r.json();
+    });
+  }
+  var out = document.getElementById("commit");
+  getJson("/api/" + REPO + "/deploys")
+    .then(function (d) {
+      // The last install that succeeded into this canister, by the log's
+      // own account. Records predate the target field only on repos
+      // deployed before it existed; those carry "".
+      var mine = d.history.filter(function (h) { return h.ok && h.target === ME; });
+      var last = mine[mine.length - 1];
+      if (!last) throw new Error("no install into " + ME + " is recorded for " + REPO);
+      var extra = "";
+      var st = d.status;
+      if (st && st.commit !== last.commit) {
+        extra = row("note", st.ok
+          ? "a later deploy of " + esc(st.commit.slice(0, 12)) + " went elsewhere"
+          : "a newer push, " + esc(st.commit.slice(0, 12)) + ", has not replaced this one (" + esc(st.message) + ")");
+      }
+      return getJson("/api/" + REPO + "/commit/" + last.commit).then(function (c) {
+        var when = new Date(c.author.time * 1000).toUTCString();
+        out.innerHTML =
+          row("commit", '<span class="mono">' + esc(c.oid) + "</span>") +
+          row("author", esc(c.author.name)) +
+          row("date", esc(when)) +
+          row("message", esc(c.message.split("\n")[0]), "msg") +
+          row("installed", '<span class="mono">' + esc(last.wasm_sha256) + "</span> (" + esc(String(last.wasm_len)) + " bytes, " + esc(last.source_path) + ")") +
+          extra;
+      });
     })
     .catch(function (e) {
-      document.getElementById("commit").innerHTML =
-        row("status", "could not reach the git canister: " + esc(e.message));
+      out.innerHTML = row("status", "could not read the deploy log: " + esc(e.message));
     });
 </script>
 </body>

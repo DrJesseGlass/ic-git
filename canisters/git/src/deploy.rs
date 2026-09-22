@@ -244,6 +244,10 @@ fn put_status(repo: &str, st: &DeployStatus) {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct DeployRecord {
     pub commit: String,
+    /// The canister the wasm was installed into (text principal). Records
+    /// written before this field existed load as "".
+    #[serde(default)]
+    pub target: String,
     pub source_path: String,
     pub wasm_sha256: String,
     pub wasm_len: u64,
@@ -261,16 +265,17 @@ pub fn get_history(repo: &str) -> Vec<DeployRecord> {
 }
 
 /// Append the binding for this deploy to the provenance log.
-fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
+pub(crate) fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
     let mut log = get_history(repo);
     log.push(DeployRecord {
         commit: st.commit.clone(),
+        target: cfg.target.clone(),
         source_path: cfg.source_path.clone(),
         wasm_sha256: st.wasm_sha256.clone(),
         wasm_len: st.wasm_len,
         ok: st.ok,
         message: st.message.clone(),
-        at_ns: ic_cdk::api::time(),
+        at_ns: crate::tenancy::now_ns(),
     });
     if log.len() > MAX_LOG {
         let drop = log.len() - MAX_LOG;
