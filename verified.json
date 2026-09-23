@@ -146,6 +146,14 @@
           "lineage": "pinned-container",
           "host": "macOS arm64, linux/amd64 image under emulation, docker 29.5.2",
           "date": "2026-09-22"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/35805482289",
+          "date": "2026-09-23",
+          "check": "identical hash (29e5ba3a...9c1a gz, 703563cd...1cfc raw); the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
         }
       ],
       "deployed": {
