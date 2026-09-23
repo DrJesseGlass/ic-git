@@ -126,6 +126,35 @@
         "note": "first gzipped install; single ingress message via https://icp-api.io"
       },
       "wasm_sha256": "f49a6d0428e7e6451038964c02341a7077333890d736be817085df72f1bf360c"
+    },
+    {
+      "commit": "bcd6f9bf27560fe39e1022353e5ff4bab0ade551",
+      "tag": "v0.2.1",
+      "module_hash": "29e5ba3aa7e2dc0c62519c5a9e7e609bf72493971947e565e68daf3d43d29c1a",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, linux/amd64 image under emulation, docker 29.5.2",
+          "date": "2026-09-22"
+        }
+      ],
+      "deployed": {
+        "date": "2026-09-22",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh",
+        "note": "upgrade from v0.2.0; Cargo.lock moved (ic-multisig from crates.io), which is what changed the hash"
+      },
+      "wasm_sha256": "703563cd14548dfb88c740f8f7d10d09d6a9f33976f49de2a7586490a02a1cfc"
     }
   ]
 }

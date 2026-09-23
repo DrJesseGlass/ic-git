@@ -13,6 +13,20 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-09-01 | `0707147` | `v0.1.1` | `a7156c6dc5eaa03adf9fd1a691550ac702b8adf2bcf8bb7f4d27e2651c601557` | MATCH, 2026-09-01 | deployer (pinned container, two fresh VMs agreed); GitHub Actions amd64 runner, [run 33563166779](https://github.com/DrJesseGlass/ic-git/actions/runs/33563166779), MATCH |
 | 2026-09-01 | `2dd941d` | `v0.1.2` | `268c18bbfeb0cda616a55fcd500e62fcfc267c77aa8f297ad046d69108718d8f` | MATCH, 2026-09-01 | deployer (pinned container) |
 | 2026-09-02 | `9cdc58c` | `v0.2.0` | `278ebec09bc4d353da718a2751ce01dd74bb44804d1f99abf72b0e08d4b3541a` (gz) | MATCH, 2026-09-02 | deployer (pinned container); GitHub Actions amd64 runner, [run 33653643555](https://github.com/DrJesseGlass/ic-git/actions/runs/33653643555), MATCH |
+| 2026-09-22 | `bcd6f9b` | `v0.2.1` | `29e5ba3aa7e2dc0c62519c5a9e7e609bf72493971947e565e68daf3d43d29c1a` (gz) | MATCH, 2026-09-22 | deployer (pinned container) |
+
+## v0.2.1 -- 2026-09-22
+
+Votes now go through the ic-multisig crate rather than a local rule set
+(#16), and the crate is taken from crates.io instead of a git tag (#18): the
+dependency is `ic-multisig = "0.1"`, resolved to 0.1.1, with Cargo.lock
+pinning the registry checksum. That lockfile change is what moved the hash;
+the voting behaviour is the same, counted on the crate's checked path since
+every ballot the canister stores was authenticated by the IC on the way in.
+Also in this tree, and deliberately hash-neutral: the deploy-on-push demo
+(#17) lives under `demo/`, outside the canister crate. Same recipe and base
+image digest as v0.2.0. The raw wasm inside the gzip hashes to
+`703563cd...1cfc`.
 
 ## v0.2.0 -- 2026-09-02
 
