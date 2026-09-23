@@ -1,0 +1,23 @@
+# Standalone: its own [workspace] table keeps this crate out of the ic-git
+# workspace, so nothing here reaches canisters/git's Cargo.lock or the
+# attested module hash (REPRODUCIBLE_BUILD.md).
+[workspace]
+
+[package]
+name = "hello_canister"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ic-cdk = "0.20"
+candid = "0.10"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

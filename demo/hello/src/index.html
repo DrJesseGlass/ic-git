@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deployed by git push</title>
+<style>
+  :root {
+    --bg: #fbfaf9; --panel: #ffffff; --line: #e4e0db; --ink: #1c1a18;
+    --muted: #6b6560; --accent: #b4491f; --ok: #2f7a4a; --code: #f4f1ed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17161a; --panel: #1f1e23; --line: #33313a; --ink: #eceaf0;
+      --muted: #9a94a3; --accent: #ff8a5c; --ok: #6ecf95; --code: #26252b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 56px 16px 72px; }
+  h1 { font-size: 30px; line-height: 1.25; margin: 0 0 12px; letter-spacing: -0.02em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+       color: var(--muted); margin: 40px 0 12px; font-weight: 600; }
+  p { margin: 0 0 16px; }
+  .lede { color: var(--muted); font-size: 17px; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  code { background: var(--code); padding: 2px 5px; border-radius: 4px; }
+  a { color: var(--accent); }
+  .badge {
+    display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--ok); border: 1px solid var(--ok);
+    border-radius: 999px; padding: 3px 10px; margin-bottom: 20px;
+  }
+  .chain { list-style: none; margin: 0; padding: 0; }
+  .chain li {
+    position: relative; padding: 0 0 22px 30px; border-left: 2px solid var(--line);
+  }
+  .chain li:last-child { border-left-color: transparent; padding-bottom: 0; }
+  .chain li::before {
+    content: ""; position: absolute; left: -7px; top: 5px; width: 12px; height: 12px;
+    border-radius: 50%; background: var(--bg); border: 2px solid var(--line);
+  }
+  .chain li:last-child::before { background: var(--ok); border-color: var(--ok); }
+  .chain b { display: block; font-weight: 600; }
+  .chain span { color: var(--muted); font-size: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .row { display: flex; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; padding-top: 0; }
+  .row dt { flex: 0 0 96px; color: var(--muted); font-size: 13px; margin: 0; }
+  .row dd { margin: 0; min-width: 0; word-break: break-all; }
+  dl { margin: 0; }
+  .msg { white-space: pre-wrap; }
+  footer { margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="badge">live on the internet computer</div>
+  <h1>This canister was put here by <code>git push</code>.</h1>
+  <p class="lede">No CI runner, no build server, no deploy key. The git remote
+  is itself a canister: it took the push, read the artifact out of the commit,
+  and installed it into the canister you are reading this from.</p>
+
+  <h2>How this page got here</h2>
+  <ol class="chain">
+    <li><b>git push</b><span>A stock git client pushes to
+      <code class="mono">{{GIT_ORIGIN}}/{{REPO}}.git</code> over smart-HTTP.</span></li>
+    <li><b>ic-git ingests the pack</b><span>Objects and refs land in the
+      canister's stable memory. The push enqueues a deploy job.</span></li>
+    <li><b>The queue reads the commit</b><span>It resolves
+      <code class="mono">app.wasm</code> in the pushed commit's tree and validates the module.</span></li>
+    <li><b>install_code</b><span>ic-git calls the management canister and
+      installs that wasm into <code class="mono">{{CANISTER}}</code> &mdash; this canister.</span></li>
+  </ol>
+
+  <h2>The commit this came from</h2>
+  <p class="lede" style="font-size:15px">Read from ic-git's deploy log, not from
+  the branch tip: the log records each install and the canister it went into,
+  so a push that is still queued, held for votes, or failed does not get
+  credited here.</p>
+  <div class="card"><dl id="commit"><div class="row"><dt>status</dt><dd>reading from the git canister&hellip;</dd></div></dl></div>
+
+  <h2>Check it yourself</h2>
+  <p>Everything above is readable from the same canister, without trusting this
+  page. Browse the repo, its source and this commit at
+  <a id="browse" href="#">the ic-git repo browser</a>, or ask the IC directly:</p>
+  <p><code class="mono">curl {{GIT_ORIGIN}}/api/{{REPO}}/deploys</code></p>
+
+  <footer>
+    Served by canister <span class="mono">{{CANISTER}}</span>.
+    Git remote: <span class="mono">{{IC_GIT}}</span>.
+  </footer>
+</div>
+<script>
+  var ME = "{{CANISTER}}", REPO = "{{REPO}}", base = "{{GIT_ORIGIN}}";
+  document.getElementById("browse").href = base + "/site/ic-git/#/" + REPO;
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function row(k, v, cls) {
+    return '<div class="row"><dt>' + k + '</dt><dd class="' + (cls || "") + '">' + v + "</dd></div>";
+  }
+  function getJson(path) {
+    return fetch(base + path).then(function (r) {
+      if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+      return r.json();
+    });
+  }
+  var out = document.getElementById("commit");
+  getJson("/api/" + REPO + "/deploys")
+    .then(function (d) {
+      // The last install that succeeded into this canister, by the log's
+      // own account. Records predate the target field only on repos
+      // deployed before it existed; those carry "".
+      var mine = d.history.filter(function (h) { return h.ok && h.target === ME; });
+      var last = mine[mine.length - 1];
+      if (!last) throw new Error("no install into " + ME + " is recorded for " + REPO);
+      var extra = "";
+      var st = d.status;
+      if (st && st.commit !== last.commit) {
+        extra = row("note", st.ok
+          ? "a later deploy of " + esc(st.commit.slice(0, 12)) + " went elsewhere"
+          : "a newer push, " + esc(st.commit.slice(0, 12)) + ", has not replaced this one (" + esc(st.message) + ")");
+      }
+      return getJson("/api/" + REPO + "/commit/" + last.commit).then(function (c) {
+        var when = new Date(c.author.time * 1000).toUTCString();
+        out.innerHTML =
+          row("commit", '<span class="mono">' + esc(c.oid) + "</span>") +
+          row("author", esc(c.author.name)) +
+          row("date", esc(when)) +
+          row("message", esc(c.message.split("\n")[0]), "msg") +
+          row("installed", '<span class="mono">' + esc(last.wasm_sha256) + "</span> (" + esc(String(last.wasm_len)) + " bytes, " + esc(last.source_path) + ")") +
+          extra;
+      });
+    })
+    .catch(function (e) {
+      out.innerHTML = row("status", "could not read the deploy log: " + esc(e.message));
+    });
+</script>
+</body>
+</html>
