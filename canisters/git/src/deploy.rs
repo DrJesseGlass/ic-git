@@ -687,6 +687,16 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
             }
             put_status(repo, &st);
             record(repo, cfg, &st);
+            // Optional ic-name-service hook (names.rs): announce the
+            // install. Never affects `ok`; the note lands in the message.
+            if st.ok {
+                if let Some(note) =
+                    crate::names::announce(repo, &cfg.target, &st.commit, &st.wasm_sha256).await
+                {
+                    st.message.push_str(&note);
+                    put_status(repo, &st);
+                }
+            }
         }
         // EVM-only repo: the wasm leg vacuously succeeds.
         None => st.ok = true,
