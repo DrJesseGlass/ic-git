@@ -72,4 +72,16 @@ assert.equal(IC.lookup(parsed.tree, ['request_status', id, 'nope']), undefined);
 const spec = { request_type: 'call', canister_id: Uint8Array.from([0, 0, 0, 0, 0, 0, 4, 210]), method_name: 'hello', arg: Uint8Array.from([68, 73, 68, 76, 0, 253, 42]) };
 assert.equal(hex(await IC.requestId(spec)), '8781291c347db32a9d8c10eb62b710fce5a93be676474c42babc74c51858f94b');
 
+// CBOR encoder: a query envelope round-trips through the decoder, and the
+// bytes match a hand-assembled encoding (self-describing tag, then a map).
+const envelope = { content: { request_type: 'query', sender: Uint8Array.of(4), canister_id: IC.principalFromText(CANISTER), method_name: 'icrc1_balance_of', arg: IC.encode([ACCOUNT], [{ owner: USER, subaccount: null }]), ingress_expiry: 1_700_000_000_000_000_000n } };
+const back = IC.cbor(IC.cborEnc(envelope));
+assert.equal(back.content.request_type, 'query');
+assert.deepEqual(Array.from(back.content.sender), [4]);
+assert.equal(IC.principalToText(back.content.canister_id), CANISTER);
+assert.deepEqual(IC.decode(back.content.arg), IC.decode(envelope.content.arg));
+assert.equal(back.content.ingress_expiry, 1_700_000_000_000_000_000n);
+assert.equal(hex(IC.cborEnc({ a: 1, b: 'x', c: Uint8Array.of(9), d: [23, 24, 256, 65536] })), 'd9d9f7a461610161626178616341096164841718181901001a00010000');
+assert.equal(hex(IC.cborEnc(4294967296n)), 'd9d9f71b0000000100000000');
+
 console.log('console codec: all vector checks passed');

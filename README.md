@@ -98,7 +98,8 @@ deploy action; an action that would overdraw is refused first. Apps deployed
 to the IC run in a canister the owner controls, created from their balance.
 
 From the browser: open `/site/ic-git/`, connect a wallet (OISY), and use
-the console panels. From the command line, the same calls through dfx:
+the console panels; the panel shows the wallet's ICP and cycles ledger
+balances next to its ic-git balance. From the command line, the same calls through dfx:
 
 ```sh
 C=umobs-yiaaa-aaaab-agyrq-cai

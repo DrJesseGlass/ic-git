@@ -113,6 +113,13 @@ Reads go through the canister's `/api` routes; every write is a canister call
 the wallet signs, so the page never holds a key. It stays one self-contained
 file, so its attestation still covers every byte that runs.
 
+The panel also shows what the wallet holds on the ICP and cycles ledgers, so
+a tenant can see what there is to deposit. Those two reads cannot go through
+`/api` (a query cannot make inter-canister calls), so the page posts anonymous
+`icrc1_balance_of` queries straight to the IC HTTP API at `icp-api.io` and
+takes the boundary node's reply as is. A ledger that does not answer shows as
+`?`; nothing else on the page depends on it.
+
 ## Operator notes
 
 - The canister now custodies tenant balances. That raises the stakes on the

@@ -203,6 +203,37 @@ const IC = (() => {
     }
     return item();
   }
+  // CBOR encoder, for query envelopes: non-negative ints, text, bytes,
+  // arrays and string-keyed maps, wrapped in the self-describing tag.
+  function cborEnc(v) {
+    const out = [];
+    const head = (mt, n) => { n = big(n); if (n < 24n) out.push((mt << 5) | Number(n)); else if (n < 256n) out.push((mt << 5) | 24, Number(n)); else if (n < 65536n) out.push((mt << 5) | 25, Number(n >> 8n), Number(n & 255n)); else if (n < 4294967296n) out.push((mt << 5) | 26, Number(n >> 24n) & 255, Number(n >> 16n) & 255, Number(n >> 8n) & 255, Number(n & 255n)); else { out.push((mt << 5) | 27); for (let i = 7n; i >= 0n; i--) out.push(Number((n >> (8n * i)) & 255n)); } };
+    function item(v) {
+      if (typeof v === 'number' || typeof v === 'bigint') { if (v < 0) throw new Error('cbor: negative'); head(0, v); }
+      else if (typeof v === 'string') { const b = te.encode(v); head(3, b.length); out.push(...b); }
+      else if (v instanceof Uint8Array) { head(2, v.length); out.push(...v); }
+      else if (Array.isArray(v)) { head(4, v.length); v.forEach(item); }
+      else if (v && typeof v === 'object') { const ks = Object.keys(v); head(5, ks.length); for (const k of ks) { item(k); item(v[k]); } }
+      else throw new Error('cbor: cannot encode ' + typeof v);
+    }
+    out.push(0xd9, 0xd9, 0xf7);
+    item(v);
+    return Uint8Array.from(out);
+  }
+
+  // --- queries ---
+  // An anonymous query straight to the IC HTTP API, for reads that need no
+  // signature (ledger balances). The reply is taken as the boundary node
+  // returns it, without checking node signatures, like the /api reads.
+  const API = 'https://icp-api.io';
+  async function query(canisterId, method, types, values) {
+    const content = { request_type: 'query', sender: Uint8Array.of(4), canister_id: principalFromText(canisterId), method_name: method, arg: encode(types, values), ingress_expiry: BigInt(Date.now() + 240_000) * 1_000_000n };
+    const r = await fetch(API + '/api/v2/canister/' + canisterId + '/query', { method: 'POST', headers: { 'Content-Type': 'application/cbor' }, body: cborEnc({ content }) });
+    if (!r.ok) throw new Error(method + ': HTTP ' + r.status);
+    const res = cbor(new Uint8Array(await r.arrayBuffer()));
+    if (res.status !== 'replied') throw new Error(method + ' rejected: ' + (res.reject_message || res.status));
+    return decode(res.reply.arg);
+  }
 
   // --- certificates ---
   const sha256 = async b => new Uint8Array(await crypto.subtle.digest('SHA-256', b));
@@ -253,7 +284,7 @@ const IC = (() => {
   const b64enc = bytes => btoa(String.fromCharCode(...bytes));
   const b64dec = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
   const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-  return { encode, decode, cbor, requestId, lookup, callResult, principalToText, principalFromText, idlHash, b64enc, b64dec, hex };
+  return { encode, decode, cbor, cborEnc, query, requestId, lookup, callResult, principalToText, principalFromText, idlHash, b64enc, b64dec, hex };
 })();
 // === end candid ===
 </script>
@@ -423,11 +454,16 @@ const Console = (() => {
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const CANISTER = location.hostname.split('.')[0];
   const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
+  const ICP_LEDGER = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+  const ACCOUNT = { record: { owner: 'principal', subaccount: { opt: 'blob' } } };
   const SIGNER = { url: 'https://oisy.com/sign', origin: 'https://oisy.com' };
   const T = 1_000_000_000_000n;
   // Cycles for humans: T above 0.01 T, otherwise B or M.
   const fmtT = n => { n = BigInt(n); if (n >= 10_000_000_000n) { const whole = n / T, frac = (n % T) / 1_000_000_000n; return whole + '.' + String(frac).padStart(3, '0') + ' T'; } if (n >= 1_000_000_000n) return (Number(n) / 1e9).toFixed(1) + ' B cycles'; return (Number(n) / 1e6).toFixed(0) + ' M cycles'; };
   const short = p => p.length > 20 ? p.slice(0, 5) + '...' + p.slice(-3) : p;
+  const fmtCycles = n => { const s = fmtT(n); return s.endsWith(' T') ? s + ' cycles' : s; };
+  // ICP for humans: e8s to a decimal with the trailing zeros trimmed (at least two places).
+  const fmtIcp = n => { n = BigInt(n); const s = (n % 100_000_000n).toString().padStart(8, '0').replace(/0+$/, '').padEnd(2, '0'); return (n / 100_000_000n) + '.' + s + ' ICP'; };
   const RESULT_TYPES = {}; // method -> nothing needed: replies are self-describing
 
   // --- signer (ICRC-25 over postMessage) ---
@@ -545,7 +581,11 @@ const Console = (() => {
     if (!me) { html += '<p class="muted">Connect a wallet to create repositories, mint push tokens, manage members and votes, and deposit cycles. Reads need no sign-in.</p></div>'; return html; }
     const pricing = await get('pricing');
     let acct; try { acct = await get('account/' + encodeURIComponent(me)); } catch (_) { acct = { balance: 0, repos: [] }; }
-    html += '<p>balance <b>' + fmtT(acct.balance) + '</b> <span class="muted">(' + acct.balance + ' cycles)</span>' +
+    // What the wallet holds on the ledgers, read anonymously; null when a ledger did not answer.
+    const held = ledger => IC.query(ledger, 'icrc1_balance_of', [ACCOUNT], [{ owner: me, subaccount: null }]).then(r => r[0], () => null);
+    const [icp, cyc] = await Promise.all([held(ICP_LEDGER), held(CYCLES_LEDGER)]);
+    html += '<p>wallet holds <b>' + (icp === null ? '?' : fmtIcp(icp)) + '</b> and <b>' + (cyc === null ? '?' : fmtCycles(cyc)) + '</b> <span class="muted">(on the ledgers, ' + esc(short(me)) + ')</span></p>' +
+      '<p>ic-git balance <b>' + fmtT(acct.balance) + '</b> <span class="muted">(' + acct.balance + ' cycles)</span>' +
       (acct.repos.length ? ' &middot; your repos: ' + acct.repos.map(r => '<a href="#/' + encodeURIComponent(r) + '">' + esc(r) + '</a>').join(', ') : '') + '</p>' +
       '<p class="muted">creating a repo costs ' + fmtT(pricing.create_repo) + '; a push costs ' + fmtT(pricing.push_base) + ' + ' + pricing.push_per_byte + ' cycles/byte; storage rent ' + pricing.rent_per_byte_year + ' cycles per byte-year.</p>' +
       form('f-deposit', [{ name: 'amount', placeholder: 'deposit, in T cycles (e.g. 2)' }], 'deposit from cycles ledger') + '<p id="f-deposit-st" class="status"></p>' +
