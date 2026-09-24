@@ -227,8 +227,11 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "deploy_now" => {
             let (repo,): (String,) = args(arg, m)?;
             format!(
-                "Deploy the current tip of \"{repo}\" now, without a push, in the repository's \
-                 configured install mode. The deploy fee is charged to your ic-git balance."
+                "Deploy the current tip of \"{repo}\" now, without a push. Every deploy leg the \
+                 repository has configured runs: a wasm leg installs in the configured install \
+                 mode, and an EVM leg broadcasts a NEW contract creation transaction on the \
+                 configured chain even if this commit was already deployed there. The fee for \
+                 each leg is charged to your ic-git balance."
             )
         }
         "set_site" => {
@@ -271,9 +274,12 @@ fn cycles(n: u64) -> String {
     }
 }
 
+/// The first `n` characters of `s` with an ellipsis, or all of it if it is
+/// that short. Counts characters, not bytes: the arguments this trims come
+/// from the caller and need not be ASCII.
 fn prefix(s: &str, n: usize) -> String {
-    if s.len() > n {
-        format!("{}...", &s[..n])
+    if s.chars().count() > n {
+        format!("{}...", s.chars().take(n).collect::<String>())
     } else {
         s.to_string()
     }
@@ -282,27 +288,35 @@ fn prefix(s: &str, n: usize) -> String {
 /// Wrap `text` at word boundaries into lines of at most `width` characters
 /// and group them into pages of `per_page` lines. A word longer than a line
 /// is split rather than dropped; a zero width or page size is treated as one.
+/// Width is counted in characters, never bytes: interpolated arguments such
+/// as a wasm path or a repo name may be non-ASCII, and slicing one inside a
+/// multibyte character would trap the whole consent call.
 fn paginate(text: &str, width: usize, per_page: usize) -> Vec<Page> {
     let width = width.max(1);
     let per_page = per_page.max(1);
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
+    let mut line_chars = 0usize;
     for word in text.split_whitespace() {
-        let mut word = word;
+        let mut word: Vec<char> = word.chars().collect();
         while word.len() > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
+                line_chars = 0;
             }
-            lines.push(word[..width].to_string());
-            word = &word[width..];
+            lines.push(word[..width].iter().collect());
+            word.drain(..width);
         }
         if line.is_empty() {
-            line.push_str(word);
-        } else if line.len() + 1 + word.len() <= width {
+            line.extend(word.iter());
+            line_chars = word.len();
+        } else if line_chars + 1 + word.len() <= width {
             line.push(' ');
-            line.push_str(word);
+            line.extend(word.iter());
+            line_chars += 1 + word.len();
         } else {
-            lines.push(std::mem::replace(&mut line, word.to_string()));
+            lines.push(std::mem::replace(&mut line, word.iter().collect()));
+            line_chars = word.len();
         }
     }
     if !line.is_empty() {
@@ -357,7 +371,7 @@ mod tests {
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
             ("set_deploy_mode", encode_args(("ic-vote", "upgrade")).unwrap(), &["keeps its state"]),
-            ("deploy_now", encode_args(("ic-vote",)).unwrap(), &["now, without a push"]),
+            ("deploy_now", encode_args(("ic-vote",)).unwrap(), &["now, without a push", "NEW contract creation", "already deployed", "fee for each leg"]),
             ("set_site", encode_args(("ic-vote", "site")).unwrap(), &["site/", "/site/ic-vote/"]),
             ("set_site", encode_args(("ic-vote", "")).unwrap(), &["repository root"]),
             ("evm_registry_publish_site", encode_args(("ic-vote",)).unwrap(), &["provenance record", "EVM action fee"]),
@@ -413,7 +427,7 @@ mod tests {
         for page in &pages {
             assert!(page.lines.len() <= 3);
             for l in &page.lines {
-                assert!(l.len() <= 20, "line too long: {l:?}");
+                assert!(l.chars().count() <= 20, "line too long: {l:?}");
                 assert!(!l.starts_with(' ') && !l.ends_with(' '));
                 all.push(l.clone());
             }
@@ -424,6 +438,25 @@ mod tests {
         // A word longer than a line is split, not dropped.
         let pages = paginate("abcdefghijklmnopqrstuvwxyz end", 10, 5);
         assert_eq!(pages[0].lines, vec!["abcdefghij", "klmnopqrst", "uvwxyz end"]);
+    }
+
+    #[test]
+    fn line_display_splits_non_ascii_text_on_character_boundaries() {
+        // A wasm path or repo name is whatever the caller typed. Wrapping
+        // must count characters: a byte index landing inside a multibyte
+        // character would trap the consent call and leave the wallet blind.
+        let path = "\u{e9}t\u{e9}/\u{4f60}\u{597d}/\u{1f680}\u{1f680}app.wasm";
+        let text = generic("set_wasm_deploy", encode_args(("ic-vote", "app", path)).unwrap()).unwrap();
+        for width in 1..=12 {
+            let pages = paginate(&text, width, 4);
+            let lines: Vec<&String> = pages.iter().flat_map(|p| p.lines.iter()).collect();
+            assert!(lines.iter().all(|l| l.chars().count() <= width), "width {width}: {lines:?}");
+            let rejoined: String = lines.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(" ");
+            assert_eq!(rejoined.replace(' ', ""), text.replace(' ', ""), "width {width}");
+        }
+        // The same goes for the trimmed identifiers.
+        assert_eq!(prefix("\u{4f60}\u{597d}\u{1f680}\u{e9}t\u{e9}", 4), "\u{4f60}\u{597d}\u{1f680}\u{e9}...");
+        assert_eq!(prefix("\u{4f60}\u{597d}", 4), "\u{4f60}\u{597d}");
     }
 
     #[test]
