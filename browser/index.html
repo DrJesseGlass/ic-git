@@ -380,6 +380,9 @@ const IC = (() => {
     try {
       [{ data: refs }, { data: t, commit }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/tree/' + encodeURIComponent(rev) + (path ? '/' + enc(path) : ''))]);
     } catch (e) {
+      // Only an unborn HEAD means "no commits yet". A stale rev, a bad path
+      // or a failed /refs read is a real error and goes to route()'s fail().
+      if (!/HEAD points at an unborn branch/.test(e.message || '')) throw e;
       // A repository with no commits yet: nothing to browse, everything to
       // configure. The ownership panel is what turns an empty repository
       // into one that can be pushed to at all -- the app canister, the
@@ -387,7 +390,7 @@ const IC = (() => {
       // still show it. Until it did, a repository created from a wallet
       // was a dead end: no token could be minted, so no first commit.
       render(crumbs(repo, rev, 'tree', path) +
-        '<p class="muted">' + esc(e.message || e) + '. This repository has no commits yet; push a first one and its files appear here.</p>');
+        '<p class="muted">This repository has no commits yet; push a first one and its files appear here.</p>');
       Console.mount('repo', repo);
       return;
     }
