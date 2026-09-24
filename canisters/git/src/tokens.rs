@@ -182,14 +182,26 @@ pub fn mint(repo: &str, token: &str, minted_by: Principal, days: Option<u32>) ->
 }
 
 /// The repo a presented token authorizes right now, if any. An expired
-/// token authorizes nothing. A legacy value only exists between an upgrade's
-/// install and its post_upgrade, which migrates them all; it is honored
-/// rather than refused so that window cannot lock anyone out.
-pub fn authorize(token: &str) -> Option<String> {
+/// token authorizes nothing, and neither does one whose minter fails
+/// `may_write(repo, minter)`: a token lasts only as long as its minter may
+/// write, however that access was lost (a membership change, or an operator
+/// leaving the allowlist). A legacy value is honored only until `migrate`
+/// has run; one written after that (by a rolled-back wasm) would otherwise
+/// authorize forever, unlisted and unswept.
+pub fn authorize_if(token: &str, may_write: impl Fn(&str, &Principal) -> bool) -> Option<String> {
     match parse(store::token_get(&store::token_key(token))?) {
-        Entry::Stored(s) => (now_ns() < s.expires_ns).then_some(s.repo),
-        e => e.repo(),
+        Entry::Stored(s) => (now_ns() < s.expires_ns
+            && s.minted_by.as_ref().is_none_or(|p| may_write(&s.repo, p)))
+        .then_some(s.repo),
+        Entry::Legacy(repo) => (!migrated()).then_some(repo),
+        Entry::Unreadable => None,
     }
+}
+
+/// `authorize_if` with every minter still a writer.
+#[cfg(test)]
+pub fn authorize(token: &str) -> Option<String> {
+    authorize_if(token, |_, _| true)
 }
 
 /// The repo a token belongs to, expired or not: who may revoke it.
@@ -251,12 +263,18 @@ pub fn revoke_unless(repo: &str, keep: impl Fn(&Principal) -> bool) -> usize {
         .count()
 }
 
-/// The key and repo of the token with this id. Refused unless it names
-/// exactly one token.
-pub fn find_id(id: &str) -> Result<(String, String), String> {
+/// Refused unless `id` has the shape of a token id.
+pub fn check_id(id: &str) -> Result<(), String> {
     if id.len() != ID_LEN || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("a token id is {ID_LEN} hex characters"));
     }
+    Ok(())
+}
+
+/// The key and repo of the token with this id. Refused unless it names
+/// exactly one token.
+pub fn find_id(id: &str) -> Result<(String, String), String> {
+    check_id(id)?;
     let mut hits = store::token_entries(&id.to_ascii_lowercase()).into_iter();
     let (key, value) = hits.next().ok_or("no push token with that id")?;
     if hits.next().is_some() {
@@ -277,7 +295,15 @@ pub fn purge_expired() {
     let end = format!("e\0{:020}", now_ns().saturating_add(1));
     for ik in store::token_index_range("e\0", &end, PURGE_BATCH) {
         remove_key(key_of(&ik));
+        // Drop the entry itself too, in case it outlived its record: a stale
+        // entry left here would hold a slot of every later sweep.
+        store::token_index_remove(&ik);
     }
+}
+
+/// Has `migrate` run on this canister?
+fn migrated() -> bool {
+    store::meta_get_json::<bool>(MIGRATED_KEY) == Some(true)
 }
 
 /// For post_upgrade: give every token minted before expiry existed
@@ -285,7 +311,7 @@ pub fn purge_expired() {
 /// scan covers the legacy tokens of the upgrade that introduces the record
 /// format, and every later upgrade finds the marker and returns.
 pub fn migrate() {
-    if store::meta_get_json::<bool>(MIGRATED_KEY) == Some(true) {
+    if migrated() {
         return;
     }
     let expires_ns = now_ns().saturating_add(u64::from(LEGACY_GRACE_DAYS) * DAY_NS);
@@ -501,8 +527,19 @@ mod tests {
         migrate();
         store::token_put(&store::token_key("tok-late"), "late".to_string());
         migrate();
-        // Not rewritten: still the legacy value.
+        // Not rewritten: still the legacy value, and it authorizes nothing.
         assert_eq!(store::token_get(&store::token_key("tok-late")).as_deref(), Some("late"));
+        assert_eq!(authorize("tok-late"), None);
+    }
+
+    /// A token stops authorizing once its minter may no longer write, even
+    /// when no membership change swept it (an operator leaving the allowlist).
+    #[test]
+    fn a_token_needs_a_minter_who_may_still_write() {
+        set_test_now(T0);
+        mint("mw", "tok-mw", alice(), None).unwrap();
+        assert_eq!(authorize_if("tok-mw", |_, p| *p == alice()).as_deref(), Some("mw"));
+        assert_eq!(authorize_if("tok-mw", |_, p| *p != alice()), None);
     }
 
     /// Records written before the index existed are indexed by migrate.

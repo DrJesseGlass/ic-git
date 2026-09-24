@@ -141,8 +141,8 @@ pub(crate) fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) 
     }
 }
 
-/// The repo a Basic-auth push token authorizes, if the header carries one
-/// and the token has not expired.
+/// The repo a Basic-auth push token authorizes, if the header carries one,
+/// the token has not expired, and its minter may still write to the repo.
 fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
     let value = http::get_header(headers, "authorization")?;
     let b64 = value.strip_prefix("Basic ")?;
@@ -152,7 +152,7 @@ fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
     let creds = String::from_utf8(decoded).ok()?;
     // Username is ignored; the password slot carries the token.
     let token = creds.split_once(':').map(|(_, p)| p).unwrap_or(&creds);
-    tokens::authorize(token)
+    tokens::authorize_if(token, |repo, minter| tenancy::can_write(repo, minter, is_operator(minter)).is_ok())
 }
 
 fn push_authorized(repo: &str, headers: &[(String, String)]) -> bool {

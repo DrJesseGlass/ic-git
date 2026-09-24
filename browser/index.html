@@ -739,9 +739,12 @@ const Console = (() => {
         // The expiry comes from the canister, not from a default copied
         // here: a token's id is the first 16 hex characters of the sha256 of
         // its text, so the new token can be found in the refreshed list.
-        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
-        const id = Array.from(digest.slice(0, 8), b => b.toString(16).padStart(2, '0')).join('');
-        const mine = ((await tokens()) || []).find(t => t.id === id);
+        // The token is shown once, so a failure here must not hide it.
+        let mine;
+        try {
+          const id = IC.hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))).slice(0, 8));
+          mine = ((await tokens()) || []).find(t => t.id === id);
+        } catch (e) { console.warn('push token list: ' + e.message); }
         return 'token (shown once' + (mine ? ', valid until ' + nsDate(mine.expires_ns) : '') + '): ' + token + '  -> git push https://ic:<token>@' + location.host + '/' + repo + '.git main';
       });
       onsubmit('f-member', async v => { await write('add_member', ['text', 'principal', 'text'], [repo, v.principal.trim(), v.role.trim()]); setTimeout(() => location.reload(), 800); return 'added'; });

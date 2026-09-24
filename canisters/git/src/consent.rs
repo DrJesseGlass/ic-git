@@ -175,6 +175,10 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         }
         "revoke_push_token_id" => {
             let (id,): (String,) = args(arg, m)?;
+            // Describe only an id the call would accept, not arbitrary text.
+            crate::tokens::check_id(&id).map_err(|e| {
+                Icrc21Error::ConsentMessageUnavailable(ErrorInfo { description: format!("{m}: {e}") })
+            })?;
             format!("Revoke the push token with id {id}. Pushes with it will be refused.")
         }
         "add_member" => {
