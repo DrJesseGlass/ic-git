@@ -25,6 +25,7 @@ mod smart_http;
 mod sol;
 mod store;
 mod tenancy;
+mod tokens;
 
 use base64::Engine;
 use ic_dev_kit_rs::auth;
@@ -58,6 +59,7 @@ fn post_upgrade() {
     deploy::resume_pending();
     tenancy::arm_rent_timer();
     site::record_gated_repos();
+    tokens::migrate_legacy();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -139,7 +141,8 @@ pub(crate) fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) 
     }
 }
 
-/// The repo a Basic-auth push token authorizes, if the header carries one.
+/// The repo a Basic-auth push token authorizes, if the header carries one
+/// and the token has not expired.
 fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
     let value = http::get_header(headers, "authorization")?;
     let b64 = value.strip_prefix("Basic ")?;
@@ -149,7 +152,7 @@ fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
     let creds = String::from_utf8(decoded).ok()?;
     // Username is ignored; the password slot carries the token.
     let token = creds.split_once(':').map(|(_, p)| p).unwrap_or(&creds);
-    store::push_token_repo(token)
+    tokens::authorize(token)
 }
 
 fn push_authorized(repo: &str, headers: &[(String, String)]) -> bool {
@@ -372,31 +375,53 @@ fn list_authorized() -> Vec<candid::Principal> {
     auth::list_principals().unwrap_or_default()
 }
 
-/// Mint a push token for a repo. Returned once, in the clear; only its
-/// sha256 is stored. Use as the password in the remote URL:
+/// Mint a push token for a repo, valid for `days` (default 30, at most
+/// 365; see tokens.rs). Returned once, in the clear; only its sha256 is
+/// stored. Use as the password in the remote URL:
 /// https://ic:<token>@<canister>.raw.icp0.io/<repo>.git
+/// `days` is a trailing opt, so a caller passing only the repo still works.
 #[ic_cdk::update]
-async fn create_push_token(repo: String) -> Result<String, String> {
+async fn create_push_token(repo: String, days: Option<u32>) -> Result<String, String> {
     tenancy::can_write(&repo, &caller(), operator())?;
+    // Refuse a bad lifetime before paying for randomness.
+    if days.is_some_and(|d| d == 0 || d > tokens::MAX_DAYS) {
+        return Err(format!("a push token lives 1 to {} days", tokens::MAX_DAYS));
+    }
     let bytes: Vec<u8> = ic_dev_kit_rs::intercanister::call_no_args(
         candid::Principal::management_canister(),
         "raw_rand",
     )
     .await?;
     let token = hex::encode(&bytes[..16]);
-    store::add_push_token(&repo, &token);
+    tokens::mint(&repo, &token, caller(), days)?;
     Ok(token)
+}
+
+/// The live push tokens of a repo, by id, soonest to expire first. Public:
+/// an id is a prefix of the token's hash, not the token, and says nothing a
+/// holder could push with.
+#[ic_cdk::query]
+fn list_push_tokens(repo: String) -> Vec<tokens::PushTokenInfo> {
+    tokens::list(&repo)
 }
 
 /// Revoke a token you could have minted: writers of its repo, or operators.
 #[ic_cdk::update]
 fn revoke_push_token(token: String) -> bool {
-    match store::push_token_repo(&token) {
-        Some(repo) if tenancy::can_write(&repo, &caller(), operator()).is_ok() => {
-            store::revoke_push_token(&token)
-        }
+    match tokens::repo_of(&token) {
+        Some(repo) if tenancy::can_write(&repo, &caller(), operator()).is_ok() => tokens::revoke(&token),
         _ => false,
     }
+}
+
+/// Revoke a token by the id `list_push_tokens` shows, without holding the
+/// token. Same permission as `revoke_push_token`.
+#[ic_cdk::update]
+fn revoke_push_token_id(id: String) -> Result<(), String> {
+    let (key, repo) = tokens::find_id(&id)?;
+    tenancy::can_write(&repo, &caller(), operator())?;
+    tokens::revoke_key(&key);
+    Ok(())
 }
 
 #[ic_cdk::query]

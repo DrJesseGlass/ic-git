@@ -354,21 +354,33 @@ pub fn delete_ref(repo: &str, refname: &str) {
 // --- push tokens -------------------------------------------------------------
 
 /// TOKENS key for a plaintext token; tokens are never stored in the clear.
-fn token_key(token: &str) -> String {
+/// Push-token policy (lifetimes, listing, the value format) lives in
+/// `tokens.rs`; these are the raw map operations under it.
+pub fn token_key(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-pub fn add_push_token(repo: &str, token: &str) {
-    TOKENS.with(|t| t.borrow_mut().insert(token_key(token), repo.to_string()));
+pub fn token_put(key: &str, value: String) {
+    TOKENS.with(|t| t.borrow_mut().insert(key.to_string(), value));
 }
 
-/// The repo a presented token authorizes, if any.
-pub fn push_token_repo(token: &str) -> Option<String> {
-    TOKENS.with(|t| t.borrow().get(&token_key(token)))
+pub fn token_get(key: &str) -> Option<String> {
+    TOKENS.with(|t| t.borrow().get(&key.to_string()))
 }
 
-pub fn revoke_push_token(token: &str) -> bool {
-    TOKENS.with(|t| t.borrow_mut().remove(&token_key(token)).is_some())
+pub fn token_remove(key: &str) -> bool {
+    TOKENS.with(|t| t.borrow_mut().remove(&key.to_string()).is_some())
+}
+
+/// Every (key, value) whose key starts with `prefix`; "" for all of them.
+pub fn token_entries(prefix: &str) -> Vec<(String, String)> {
+    TOKENS.with(|t| {
+        t.borrow()
+            .range(prefix.to_string()..)
+            .take_while(|e| e.key().starts_with(prefix))
+            .map(|e| (e.key().clone(), e.value()))
+            .collect()
+    })
 }
 
 /// All refs of a repo, sorted by refname (git requires sorted advertisement).

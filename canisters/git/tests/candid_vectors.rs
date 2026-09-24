@@ -54,6 +54,14 @@ struct DeployStatus {
     wasm_len: u64,
     wasm_sha256: String,
 }
+#[derive(CandidType, Deserialize)]
+struct PushTokenInfo {
+    id: String,
+    repo: String,
+    minted_by: Option<Principal>,
+    created_ns: Option<u64>,
+    expires_ns: u64,
+}
 #[derive(CandidType)]
 struct IcrcAccount {
     owner: Principal,
@@ -82,6 +90,8 @@ fn print_vectors() {
         ("args:nat64", encode_args((1_000_000_000_000u64,)).unwrap()),
         ("args:text,text,bool", encode_args(("r", "0123456789abcdef0123456789abcdef01234567", true)).unwrap()),
         ("args:text,nat32", encode_args(("r", 2u32)).unwrap()),
+        ("args:text,opt_nat32_some", encode_args(("r", Some(30u32))).unwrap()),
+        ("args:text,opt_nat32_none", encode_args(("r", None::<u32>)).unwrap()),
         ("args:approve", encode_args((ApproveArgs {
             from_subaccount: None,
             spender: IcrcAccount { owner: p, subaccount: None },
@@ -106,6 +116,10 @@ fn print_vectors() {
         ("reply:opt_site_some", encode_one(Some(SiteConfig { root: "browser".into() })).unwrap()),
         ("reply:result_deploy_status_ok", encode_one(Ok::<DeployStatus, String>(DeployStatus { commit: "0123456789abcdef0123456789abcdef01234567".into(), ok: true, message: "installed".into(), wasm_len: 365_000, wasm_sha256: "ab".repeat(32) })).unwrap()),
         ("reply:opt_evm_deploy_config_some", encode_one(Some(EvmDeployConfig { source_path: "build/Registry.hex".into(), gas_limit: 1_500_000 })).unwrap()),
+        ("reply:push_tokens", encode_one(vec![
+            PushTokenInfo { id: "0123456789abcdef".into(), repo: "r".into(), minted_by: Some(q), created_ns: Some(1), expires_ns: 2 },
+            PushTokenInfo { id: "fedcba9876543210".into(), repo: "r".into(), minted_by: None, created_ns: None, expires_ns: 3 },
+        ]).unwrap()),
         ("reply:opt_site_reinstall_mode", encode_one(Some(DeployConfig { target: p.to_text(), source_path: "x.wat".into(), mode: DeployMode::Reinstall })).unwrap()),
     ];
     println!("VECTORS_BEGIN");

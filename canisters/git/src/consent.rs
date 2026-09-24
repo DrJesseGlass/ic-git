@@ -157,15 +157,22 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
             format!("Send {} from your ic-git balance to the app canister of \"{repo}\".", cycles(amount))
         }
         "create_push_token" => {
-            let (repo,): (String,) = args(arg, m)?;
+            // `days` is a trailing opt: an argument without it decodes as None.
+            let (repo, days): (String, Option<u32>) = args(arg, m)?;
+            let days = days.unwrap_or(crate::tokens::DEFAULT_DAYS);
             format!(
                 "Mint a push token for \"{repo}\". Anyone holding the token can push to the \
-                 repository until it is revoked."
+                 repository for {days} day{} from now, or until it is revoked if that is sooner.",
+                if days == 1 { "" } else { "s" }
             )
         }
         "revoke_push_token" => {
             let (token,): (String,) = args(arg, m)?;
             format!("Revoke the push token beginning {}. Pushes with it will be refused.", prefix(&token, 8))
+        }
+        "revoke_push_token_id" => {
+            let (id,): (String,) = args(arg, m)?;
+            format!("Revoke the push token with id {id}. Pushes with it will be refused.")
         }
         "add_member" => {
             let (repo, who, role): (String, Principal, String) = args(arg, m)?;
@@ -366,7 +373,10 @@ mod tests {
             ("create_repo", encode_args(("ic-vote",)).unwrap(), &["\"ic-vote\"", "owner"]),
             ("create_app_canister", encode_args(("ic-vote", 1_000_000_000_000u64)).unwrap(), &["1.000 T cycles", "both control"]),
             ("top_up_app_canister", encode_args(("ic-vote", 500_000_000_000u64)).unwrap(), &["0.500 T cycles", "app canister"]),
-            ("create_push_token", encode_args(("ic-vote",)).unwrap(), &["push token", "until it is revoked"]),
+            ("create_push_token", encode_args(("ic-vote",)).unwrap(), &["push token", "for 30 days", "revoked"]),
+            ("create_push_token", encode_args(("ic-vote", Some(1u32))).unwrap(), &["for 1 day from now"]),
+            ("create_push_token", encode_args(("ic-vote", Some(90u32))).unwrap(), &["for 90 days"]),
+            ("revoke_push_token_id", encode_args(("0123456789abcdef",)).unwrap(), &["id 0123456789abcdef", "refused"]),
             ("revoke_push_token", encode_args(("0123456789abcdef0123456789abcdef",)).unwrap(), &["01234567...", "refused"]),
             ("add_member", encode_args(("ic-vote", p, "voter")).unwrap(), &["3kq6u-eptpm", "voter", "approve or reject"]),
             ("remove_member", encode_args(("ic-vote", p)).unwrap(), &["Remove 3kq6u-eptpm", "every role"]),

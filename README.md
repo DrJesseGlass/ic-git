@@ -107,7 +107,8 @@ dfx canister --network https://icp-api.io call $C deposit_from_cycles_ledger '(2
 dfx canister --network https://icp-api.io call $C create_repo '("myapp")'
 dfx canister --network https://icp-api.io call $C add_member '("myapp", principal "<friend>", "voter")'
 dfx canister --network https://icp-api.io call $C set_required_votes '("myapp", 1)'
-dfx canister --network https://icp-api.io call $C create_push_token '("myapp")'
+dfx canister --network https://icp-api.io call $C create_push_token '("myapp", opt 90)'   # lifetime in days: default 30, max 365
+dfx canister --network https://icp-api.io call $C list_push_tokens '("myapp")'
 ```
 
 `GET /api/account/<principal>`, `/api/<repo>/info`, `/api/<repo>/votes/<commit>`
