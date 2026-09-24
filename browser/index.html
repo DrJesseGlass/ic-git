@@ -142,7 +142,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -681,7 +681,8 @@ const Console = (() => {
       (info.app_canister ? ' &middot; app canister <span class="oid">' + esc(info.app_canister) + '</span>' : '') + '</p>' +
       '<p>on push, deploys <b id="cfg-deploy">...</b> &middot; site <b id="cfg-site">...</b></p>';
     if (info.members.length) html += '<table><tr><th>member</th><th>role</th>' + (isOwner ? '<th></th>' : '') + '</tr>' + info.members.map(m => '<tr><td class="oid">' + esc(m.principal) + '</td><td>' + esc(m.role) + '</td>' + (isOwner ? '<td><button class="rm" data-p="' + esc(m.principal) + '">remove</button></td>' : '') + '</tr>').join('') + '</table>';
-    if (isWriter) html += form('f-token', [], 'mint push token') + '<p id="f-token-st" class="status tok"></p>';
+    if (isWriter) html += form('f-token', [{ name: 'days', placeholder: 'lifetime in days (1-365, default 30)' }], 'mint push token') + '<p id="f-token-st" class="status tok"></p>' +
+      '<div id="tok-list"><p class="muted">push tokens: ...</p></div><p id="tok-list-st" class="status"></p>';
     if (isOwner) html += form('f-member', [{ name: 'principal', placeholder: 'principal' }, { name: 'role', placeholder: 'writer or voter', value: 'writer' }], 'add member') + '<p id="f-member-st" class="status"></p>' +
       form('f-votes', [{ name: 'k', placeholder: 'approvals required before deploy', value: String(info.required_votes) }], 'set required votes') + '<p id="f-votes-st" class="status"></p>' +
       (info.app_canister
@@ -707,7 +708,42 @@ const Console = (() => {
     if (!me) html += '<p class="muted">connect a wallet to manage this repo.</p>';
     html += '</div>';
     setTimeout(() => {
-      onsubmit('f-token', async () => 'token (shown once): ' + await write('create_push_token', ['text'], [repo]) + '  -> git push https://ic:<token>@' + location.host + '/' + repo + '.git main');
+      // Live tokens by id, with a revoke button each. Redrawn in place after
+      // a mint or a revoke: a reload would wipe the minted token, which is
+      // shown once.
+      const nsDate = ns => new Date(Number(BigInt(ns) / 1_000_000n)).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+      // Resolves to the list (or undefined if it could not be read), so the
+      // mint can find its own token in it.
+      const tokens = () => IC.query(CANISTER, 'list_push_tokens', ['text'], [repo]).then(r => {
+        const ts = r[0];
+        const el = document.getElementById('tok-list');
+        if (!el) return ts;
+        el.innerHTML = !ts.length ? '<p class="muted">no live push tokens.</p>'
+          : '<table><tr><th>push token</th><th>minted by</th><th>expires</th><th></th></tr>' + ts.map(t => '<tr><td class="oid">' + esc(t.id) + '</td><td class="oid">' +
+            (t.minted_by ? esc(short(t.minted_by)) : '<span class="muted">before expiry existed</span>') + '</td><td>' + esc(nsDate(t.expires_ns)) +
+            '</td><td><button class="tok-rm" type="button" data-id="' + esc(t.id) + '">revoke</button></td></tr>').join('') + '</table>';
+        el.querySelectorAll('button.tok-rm').forEach(b => { b.onclick = async () => {
+          b.disabled = true;
+          status('tok-list-st', 'waiting for wallet...', true);
+          try { await write('revoke_push_token_id', ['text'], [b.dataset.id]); status('tok-list-st', 'revoked ' + b.dataset.id, true); tokens(); }
+          catch (e) { b.disabled = false; status('tok-list-st', e.message, false); }
+        }; });
+        return ts;
+      }, e => { const el = document.getElementById('tok-list'); if (el) el.innerHTML = '<p class="muted">push tokens: could not be read (' + esc(e.message) + ')</p>'; });
+      if (isWriter) tokens();
+      onsubmit('f-token', async v => {
+        const d = v.days.trim();
+        const days = d ? Number(d) : null;
+        if (days !== null && !(Number.isInteger(days) && days >= 1 && days <= 365)) throw new Error('lifetime is a whole number of days, 1 to 365');
+        const token = await write('create_push_token', ['text', { opt: 'nat32' }], [repo, days]);
+        // The expiry comes from the canister, not from a default copied
+        // here: a token's id is the first 16 hex characters of the sha256 of
+        // its text, so the new token can be found in the refreshed list.
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
+        const id = Array.from(digest.slice(0, 8), b => b.toString(16).padStart(2, '0')).join('');
+        const mine = ((await tokens()) || []).find(t => t.id === id);
+        return 'token (shown once' + (mine ? ', valid until ' + nsDate(mine.expires_ns) : '') + '): ' + token + '  -> git push https://ic:<token>@' + location.host + '/' + repo + '.git main';
+      });
       onsubmit('f-member', async v => { await write('add_member', ['text', 'principal', 'text'], [repo, v.principal.trim(), v.role.trim()]); setTimeout(() => location.reload(), 800); return 'added'; });
       onsubmit('f-votes', async v => { await write('set_required_votes', ['text', 'nat32'], [repo, Number(v.k)]); setTimeout(() => location.reload(), 800); return 'saved'; });
       onsubmit('f-app', async v => 'created app canister ' + await write('create_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]));

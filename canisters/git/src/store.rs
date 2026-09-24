@@ -88,6 +88,7 @@ const MEM_TOKENS: MemoryId = MemoryId::new(4);
 const MEM_ACCOUNTS: MemoryId = MemoryId::new(5);
 const MEM_REPO_META: MemoryId = MemoryId::new(6);
 const MEM_VOTES: MemoryId = MemoryId::new(7);
+const MEM_TOKEN_INDEX: MemoryId = MemoryId::new(8);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -116,7 +117,8 @@ thread_local! {
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_META))),
     );
 
-    /// hex(sha256(push token)) -> repo name the token may push to.
+    /// hex(sha256(push token)) -> the token's record (tokens.rs owns the
+    /// value format; a bare repo name before expiry existed).
     static TOKENS: RefCell<StableBTreeMap<String, String, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_TOKENS))),
     );
@@ -135,6 +137,13 @@ thread_local! {
     /// (tenancy.rs owns the key and the record shape).
     static VOTES: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_VOTES))),
+    );
+
+    /// Secondary keys over TOKENS, so a repo's tokens and the expired ones
+    /// are range reads rather than scans of every token (tokens.rs owns the
+    /// key format).
+    static TOKEN_INDEX: RefCell<StableBTreeMap<String, (), Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_TOKEN_INDEX))),
     );
 }
 
@@ -354,21 +363,52 @@ pub fn delete_ref(repo: &str, refname: &str) {
 // --- push tokens -------------------------------------------------------------
 
 /// TOKENS key for a plaintext token; tokens are never stored in the clear.
-fn token_key(token: &str) -> String {
+/// Push-token policy (lifetimes, listing, the value format) lives in
+/// `tokens.rs`; these are the raw map operations under it.
+pub fn token_key(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-pub fn add_push_token(repo: &str, token: &str) {
-    TOKENS.with(|t| t.borrow_mut().insert(token_key(token), repo.to_string()));
+pub fn token_put(key: &str, value: String) {
+    TOKENS.with(|t| t.borrow_mut().insert(key.to_string(), value));
 }
 
-/// The repo a presented token authorizes, if any.
-pub fn push_token_repo(token: &str) -> Option<String> {
-    TOKENS.with(|t| t.borrow().get(&token_key(token)))
+pub fn token_get(key: &str) -> Option<String> {
+    TOKENS.with(|t| t.borrow().get(&key.to_string()))
 }
 
-pub fn revoke_push_token(token: &str) -> bool {
-    TOKENS.with(|t| t.borrow_mut().remove(&token_key(token)).is_some())
+pub fn token_remove(key: &str) -> bool {
+    TOKENS.with(|t| t.borrow_mut().remove(&key.to_string()).is_some())
+}
+
+pub fn token_index_put(key: String) {
+    TOKEN_INDEX.with(|t| t.borrow_mut().insert(key, ()));
+}
+
+pub fn token_index_remove(key: &str) {
+    TOKEN_INDEX.with(|t| t.borrow_mut().remove(&key.to_string()));
+}
+
+/// At most `limit` index keys in `start..end`, in order.
+pub fn token_index_range(start: &str, end: &str, limit: usize) -> Vec<String> {
+    TOKEN_INDEX.with(|t| {
+        t.borrow()
+            .range(start.to_string()..end.to_string())
+            .take(limit)
+            .map(|e| e.key().clone())
+            .collect()
+    })
+}
+
+/// Every (key, value) whose key starts with `prefix`; "" for all of them.
+pub fn token_entries(prefix: &str) -> Vec<(String, String)> {
+    TOKENS.with(|t| {
+        t.borrow()
+            .range(prefix.to_string()..)
+            .take_while(|e| e.key().starts_with(prefix))
+            .map(|e| (e.key().clone(), e.value()))
+            .collect()
+    })
 }
 
 /// All refs of a repo, sorted by refname (git requires sorted advertisement).

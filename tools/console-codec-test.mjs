@@ -32,6 +32,9 @@ assert.equal(enc(['text', 'principal', 'text'], ['ic-git', USER, 'writer']), vec
 assert.equal(enc(['nat64'], [1_000_000_000_000n]), vectors['args:nat64']);
 assert.equal(enc(['text', 'text', 'bool'], ['r', '0123456789abcdef0123456789abcdef01234567', true]), vectors['args:text,text,bool']);
 assert.equal(enc(['text', 'nat32'], ['r', 2]), vectors['args:text,nat32']);
+// create_push_token's lifetime, a trailing opt nat32.
+assert.deepEqual(IC.decode(IC.encode(['text', { opt: 'nat32' }], ['r', 30])), IC.decode(unhex(vectors['args:text,opt_nat32_some'])));
+assert.deepEqual(IC.decode(IC.encode(['text', { opt: 'nat32' }], ['r', null])), IC.decode(unhex(vectors['args:text,opt_nat32_none'])));
 // Composite types: the Rust crate orders its type table differently (both
 // are valid Candid), so compare structurally after decoding both.
 const approve = { from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: 5_000_000_000n, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null };
@@ -59,6 +62,10 @@ assert.deepEqual(dec('reply:opt_site_some'), { root: 'browser' });
 // The EVM leg's config, which the panel names (with its cost) before a deploy.
 assert.deepEqual(dec('reply:opt_evm_deploy_config_some'), { source_path: 'build/Registry.hex', gas_limit: 1_500_000n });
 assert.deepEqual(dec('reply:opt_site_reinstall_mode'), { target: CANISTER, source_path: 'x.wat', mode: { reinstall: null } });
+// list_push_tokens: legacy tokens have no minter or creation time.
+assert.deepEqual(dec('reply:push_tokens'), [
+  { id: '0123456789abcdef', repo: 'r', minted_by: USER, created_ns: 1n, expires_ns: 2n },
+  { id: 'fedcba9876543210', repo: 'r', minted_by: null, created_ns: null, expires_ns: 3n }]);
 // deploy_now's reply, which the deploy-now and reinstall controls report.
 assert.deepEqual(dec('reply:result_deploy_status_ok'), { Ok: { commit: '0123456789abcdef0123456789abcdef01234567', ok: true, message: 'installed', wasm_len: 365_000n, wasm_sha256: 'ab'.repeat(32) } });
 

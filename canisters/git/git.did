@@ -36,6 +36,13 @@ type HttpResponse = record {
 
 type Result = variant { Ok; Err : text };
 type ResultText = variant { Ok : text; Err : text };
+type PushTokenInfo = record {
+  id : text;
+  repo : text;
+  minted_by : opt principal;
+  created_ns : opt nat64;
+  expires_ns : nat64;
+};
 
 // tenancy (docs/TENANCY.md)
 type Account = record { balance : nat64; deposited : nat64; spent : nat64; created_ns : nat64 };
@@ -232,8 +239,10 @@ service : {
   create_repo : (text) -> (Result);
   put_object : (text, blob) -> (ResultText);
   set_ref : (text, text, text) -> (Result);
-  create_push_token : (text) -> (ResultText);
+  create_push_token : (text, opt nat32) -> (ResultText);
+  list_push_tokens : (text) -> (vec PushTokenInfo) query;
   revoke_push_token : (text) -> (bool);
+  revoke_push_token_id : (text) -> (Result);
 
   // tenancy: accounts, ownership, membership, votes (docs/TENANCY.md)
   deposit : () -> (ResultAccount);

@@ -25,6 +25,7 @@ mod smart_http;
 mod sol;
 mod store;
 mod tenancy;
+mod tokens;
 
 use base64::Engine;
 use ic_dev_kit_rs::auth;
@@ -58,6 +59,7 @@ fn post_upgrade() {
     deploy::resume_pending();
     tenancy::arm_rent_timer();
     site::record_gated_repos();
+    tokens::migrate();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -139,7 +141,8 @@ pub(crate) fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) 
     }
 }
 
-/// The repo a Basic-auth push token authorizes, if the header carries one.
+/// The repo a Basic-auth push token authorizes, if the header carries one
+/// and the token has not expired.
 fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
     let value = http::get_header(headers, "authorization")?;
     let b64 = value.strip_prefix("Basic ")?;
@@ -149,7 +152,7 @@ fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
     let creds = String::from_utf8(decoded).ok()?;
     // Username is ignored; the password slot carries the token.
     let token = creds.split_once(':').map(|(_, p)| p).unwrap_or(&creds);
-    store::push_token_repo(token)
+    tokens::authorize(token)
 }
 
 fn push_authorized(repo: &str, headers: &[(String, String)]) -> bool {
@@ -372,31 +375,55 @@ fn list_authorized() -> Vec<candid::Principal> {
     auth::list_principals().unwrap_or_default()
 }
 
-/// Mint a push token for a repo. Returned once, in the clear; only its
-/// sha256 is stored. Use as the password in the remote URL:
+/// Mint a push token for a repo, valid for `days` (default 30, at most
+/// 365; see tokens.rs). Returned once, in the clear; only its sha256 is
+/// stored. Use as the password in the remote URL:
 /// https://ic:<token>@<canister>.raw.icp0.io/<repo>.git
+/// `days` is a trailing opt, so a caller passing only the repo still works.
 #[ic_cdk::update]
-async fn create_push_token(repo: String) -> Result<String, String> {
+async fn create_push_token(repo: String, days: Option<u32>) -> Result<String, String> {
     tenancy::can_write(&repo, &caller(), operator())?;
+    // Refuse a bad lifetime, or a repo at its token cap, before paying for
+    // randomness; mint checks the cap again after the await.
+    tokens::lifetime(days)?;
+    tokens::check_room(&repo)?;
     let bytes: Vec<u8> = ic_dev_kit_rs::intercanister::call_no_args(
         candid::Principal::management_canister(),
         "raw_rand",
     )
     .await?;
+    // Membership may have changed while raw_rand was in flight.
+    tenancy::can_write(&repo, &caller(), operator())?;
     let token = hex::encode(&bytes[..16]);
-    store::add_push_token(&repo, &token);
+    tokens::mint(&repo, &token, caller(), days)?;
     Ok(token)
+}
+
+/// The live push tokens of a repo, by id, soonest to expire first. Public:
+/// an id is a prefix of the token's hash, not the token, and says nothing a
+/// holder could push with.
+#[ic_cdk::query]
+fn list_push_tokens(repo: String) -> Vec<tokens::PushTokenInfo> {
+    tokens::list(&repo)
 }
 
 /// Revoke a token you could have minted: writers of its repo, or operators.
 #[ic_cdk::update]
 fn revoke_push_token(token: String) -> bool {
-    match store::push_token_repo(&token) {
-        Some(repo) if tenancy::can_write(&repo, &caller(), operator()).is_ok() => {
-            store::revoke_push_token(&token)
-        }
+    match tokens::repo_of(&token) {
+        Some(repo) if tenancy::can_write(&repo, &caller(), operator()).is_ok() => tokens::revoke(&token),
         _ => false,
     }
+}
+
+/// Revoke a token by the id `list_push_tokens` shows, without holding the
+/// token. Same permission as `revoke_push_token`.
+#[ic_cdk::update]
+fn revoke_push_token_id(id: String) -> Result<(), String> {
+    let (key, repo) = tokens::find_id(&id)?;
+    tenancy::can_write(&repo, &caller(), operator())?;
+    tokens::revoke_key(&key);
+    Ok(())
 }
 
 #[ic_cdk::query]
@@ -469,6 +496,8 @@ fn add_member(repo: String, principal: candid::Principal, role: String) -> Resul
     let members = tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?)?;
     // A voter added back brings their earlier ballots back into the count.
     follow_approvals(&repo, false);
+    // Re-adding a writer as a voter is a demotion.
+    revoke_tokens_of_non_writers(&repo);
     Ok(members)
 }
 
@@ -476,6 +505,7 @@ fn add_member(repo: String, principal: candid::Principal, role: String) -> Resul
 fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
     let members = tenancy::remove_member(&repo, &caller(), operator(), principal)?;
     follow_approvals(&repo, false);
+    revoke_tokens_of_non_writers(&repo);
     Ok(members)
 }
 
@@ -485,7 +515,23 @@ fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), Strin
     tenancy::transfer_repo(&repo, &caller(), operator(), new_owner)?;
     // The owner is an approver, so a new owner changes whose ballots count.
     follow_approvals(&repo, false);
+    // The previous owner's tokens go with the repo, unless they can still
+    // write (an operator).
+    revoke_tokens_of_non_writers(&repo);
     Ok(())
+}
+
+/// Controllers and the admin allowlist: who `operator()` admits, for any
+/// principal rather than the caller.
+fn is_operator(p: &candid::Principal) -> bool {
+    ic_cdk::api::is_controller(p) || auth::is_principal_authorized(*p).unwrap_or(false)
+}
+
+/// After a membership change: a push token lasts only as long as its
+/// minter may write, so revoke the repo's tokens minted by anyone who no
+/// longer can (see tokens::revoke_unless).
+fn revoke_tokens_of_non_writers(repo: &str) {
+    tokens::revoke_unless(repo, |p| tenancy::can_write(repo, p, is_operator(p)).is_ok());
 }
 
 /// Approvals a commit needs from voters before the deploy queue runs it, and

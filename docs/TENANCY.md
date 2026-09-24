@@ -22,6 +22,31 @@ Git itself stays on HTTPS with per-repo push tokens; a canister cannot speak
 SSH, and a relay that could would hold exactly the standing credential this
 design refuses to have.
 
+### Push tokens
+
+A push token is the password git presents; `create_push_token(repo, days)`
+mints one for a writer of the repo, returns it once, and stores only its
+sha256. Every token expires: `days` defaults to 30 and is capped at 365, so
+a token that leaks stops working on its own even if nobody notices the
+leak. Tokens minted before expiry existed were given 30 days from the
+upgrade that introduced it. `list_push_tokens(repo)` shows the live ones
+by id -- the first 16 hex characters of the hash, which names a token
+without being usable as one, so the list is public -- with who minted
+each and when it expires, and `revoke_push_token_id(id)` revokes one
+without holding it (`revoke_push_token(token)` still works for a holder).
+A repo holds at most 20 live tokens at once; mint past that and the
+call asks you to revoke one first. Expired tokens are swept out, up to 64
+at a time, whenever a token is minted, so the shared token map stays
+bounded by the number of repos and no single call does unbounded work. The console shows
+the list, with a revoke button on each, under the mint form, and after a
+mint says when the new token expires.
+
+A token lasts only as long as its minter may write. Removing a writer,
+re-adding one as a voter, or transferring the repo revokes the tokens
+minted by whoever lost write access (a previous owner keeps theirs only
+if they are an operator). Tokens from before expiry existed record no
+minter, so they run out their 30 days instead.
+
 ## Roles
 
 | Role | Granted by | May |
@@ -147,7 +172,7 @@ can also top it up from any wallet, since it is theirs.
 ## Console
 
 The repo browser page gains a signed-in mode: connect a wallet, see balance
-and repos, create repos, mint tokens, manage members and votes, deposit,
+and repos, create repos, mint, list and revoke push tokens, manage members and votes, deposit,
 and set what a push deploys (`set_wasm_deploy`, into the repo's app
 canister) and what is served as a site (`set_site`), run the configured
 deploy without a push (`deploy_now`), and reinstall. That is the whole
