@@ -116,7 +116,8 @@ thread_local! {
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_META))),
     );
 
-    /// hex(sha256(push token)) -> repo name the token may push to.
+    /// hex(sha256(push token)) -> the token's record (tokens.rs owns the
+    /// value format; a bare repo name before expiry existed).
     static TOKENS: RefCell<StableBTreeMap<String, String, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_TOKENS))),
     );

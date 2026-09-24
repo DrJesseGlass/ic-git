@@ -384,14 +384,14 @@ fn list_authorized() -> Vec<candid::Principal> {
 async fn create_push_token(repo: String, days: Option<u32>) -> Result<String, String> {
     tenancy::can_write(&repo, &caller(), operator())?;
     // Refuse a bad lifetime before paying for randomness.
-    if days.is_some_and(|d| d == 0 || d > tokens::MAX_DAYS) {
-        return Err(format!("a push token lives 1 to {} days", tokens::MAX_DAYS));
-    }
+    tokens::lifetime(days)?;
     let bytes: Vec<u8> = ic_dev_kit_rs::intercanister::call_no_args(
         candid::Principal::management_canister(),
         "raw_rand",
     )
     .await?;
+    // Membership may have changed while raw_rand was in flight.
+    tenancy::can_write(&repo, &caller(), operator())?;
     let token = hex::encode(&bytes[..16]);
     tokens::mint(&repo, &token, caller(), days)?;
     Ok(token)

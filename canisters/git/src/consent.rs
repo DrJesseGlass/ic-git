@@ -159,7 +159,10 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "create_push_token" => {
             // `days` is a trailing opt: an argument without it decodes as None.
             let (repo, days): (String, Option<u32>) = args(arg, m)?;
-            let days = days.unwrap_or(crate::tokens::DEFAULT_DAYS);
+            // Describe only a lifetime the call would accept.
+            let days = crate::tokens::lifetime(days).map_err(|e| {
+                Icrc21Error::ConsentMessageUnavailable(ErrorInfo { description: format!("{m}: {e}") })
+            })?;
             format!(
                 "Mint a push token for \"{repo}\". Anyone holding the token can push to the \
                  repository for {days} day{} from now, or until it is revoked if that is sooner.",

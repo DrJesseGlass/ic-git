@@ -28,7 +28,8 @@ const DAY_NS: u64 = 86_400 * 1_000_000_000;
 pub const ID_LEN: usize = 16;
 
 /// A TOKENS value. Values written before expiry existed are the bare repo
-/// name; repo names cannot start with '{', so the two never collide.
+/// name; repo names cannot start with '{', so the first byte tells the two
+/// apart.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct Stored {
     repo: String,
@@ -41,13 +42,26 @@ struct Stored {
 enum Entry {
     Legacy(String),
     Stored(Stored),
+    /// A record that does not decode. It authorizes nothing, and is never
+    /// mistaken for a legacy repo name (which would authorize forever).
+    Unreadable,
+}
+
+impl Entry {
+    /// The repo this entry belongs to, expired or not.
+    fn repo(self) -> Option<String> {
+        match self {
+            Entry::Legacy(repo) | Entry::Stored(Stored { repo, .. }) => Some(repo),
+            Entry::Unreadable => None,
+        }
+    }
 }
 
 fn parse(value: String) -> Entry {
-    match serde_json::from_str::<Stored>(&value) {
-        Ok(s) => Entry::Stored(s),
-        Err(_) => Entry::Legacy(value),
+    if !value.starts_with('{') {
+        return Entry::Legacy(value);
     }
+    serde_json::from_str::<Stored>(&value).map_or(Entry::Unreadable, Entry::Stored)
 }
 
 fn put(key: &str, s: &Stored) {
@@ -76,14 +90,20 @@ fn info(key: &str, s: Stored) -> PushTokenInfo {
     }
 }
 
+/// A requested lifetime in days: `DEFAULT_DAYS` when unset, refused outside
+/// 1..=`MAX_DAYS`.
+pub fn lifetime(days: Option<u32>) -> Result<u32, String> {
+    match days.unwrap_or(DEFAULT_DAYS) {
+        d @ 1..=MAX_DAYS => Ok(d),
+        _ => Err(format!("a push token lives 1 to {MAX_DAYS} days")),
+    }
+}
+
 /// Store a freshly minted token for `repo`, valid for `days` (default
 /// `DEFAULT_DAYS`). Returns its info. Expired tokens are swept out first, so
 /// the map does not grow with every token ever minted.
 pub fn mint(repo: &str, token: &str, minted_by: Principal, days: Option<u32>) -> Result<PushTokenInfo, String> {
-    let days = days.unwrap_or(DEFAULT_DAYS);
-    if days == 0 || days > MAX_DAYS {
-        return Err(format!("a push token lives 1 to {MAX_DAYS} days"));
-    }
+    let days = lifetime(days)?;
     purge_expired();
     let now = now_ns();
     let key = store::token_key(token);
@@ -103,17 +123,14 @@ pub fn mint(repo: &str, token: &str, minted_by: Principal, days: Option<u32>) ->
 /// rather than refused so that window cannot lock anyone out.
 pub fn authorize(token: &str) -> Option<String> {
     match parse(store::token_get(&store::token_key(token))?) {
-        Entry::Legacy(repo) => Some(repo),
         Entry::Stored(s) => (now_ns() < s.expires_ns).then_some(s.repo),
+        e => e.repo(),
     }
 }
 
 /// The repo a token belongs to, expired or not: who may revoke it.
 pub fn repo_of(token: &str) -> Option<String> {
-    Some(match parse(store::token_get(&store::token_key(token))?) {
-        Entry::Legacy(repo) => repo,
-        Entry::Stored(s) => s.repo,
-    })
+    parse(store::token_get(&store::token_key(token))?).repo()
 }
 
 pub fn revoke(token: &str) -> bool {
@@ -145,10 +162,7 @@ pub fn find_id(id: &str) -> Result<(String, String), String> {
     if hits.next().is_some() {
         return Err("that id names more than one token; revoke it with the token itself".into());
     }
-    let repo = match parse(value) {
-        Entry::Legacy(repo) => repo,
-        Entry::Stored(s) => s.repo,
-    };
+    let repo = parse(value).repo().ok_or("that push token's record is unreadable")?;
     Ok((key, repo))
 }
 
@@ -251,6 +265,15 @@ mod tests {
         assert_eq!(repo_of("tok-old"), None);
         assert_eq!(authorize("tok-new").as_deref(), Some("swp"));
         set_test_now(T0);
+    }
+
+    #[test]
+    fn an_unreadable_record_authorizes_nothing() {
+        let key = store::token_key("tok-bad");
+        store::token_put(&key, "{\"repo\":\"bad\"}".to_string());
+        assert_eq!(authorize("tok-bad"), None);
+        migrate_legacy();
+        assert_eq!(store::token_get(&key).as_deref(), Some("{\"repo\":\"bad\"}"));
     }
 
     #[test]

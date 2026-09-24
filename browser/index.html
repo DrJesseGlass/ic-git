@@ -721,9 +721,10 @@ const Console = (() => {
             (t.minted_by ? esc(short(t.minted_by)) : '<span class="muted">before expiry existed</span>') + '</td><td>' + esc(nsDate(t.expires_ns)) +
             '</td><td><button class="tok-rm" type="button" data-id="' + esc(t.id) + '">revoke</button></td></tr>').join('') + '</table>';
         el.querySelectorAll('button.tok-rm').forEach(b => { b.onclick = async () => {
+          b.disabled = true;
           status('tok-list-st', 'waiting for wallet...', true);
           try { await write('revoke_push_token_id', ['text'], [b.dataset.id]); status('tok-list-st', 'revoked ' + b.dataset.id, true); tokens(); }
-          catch (e) { status('tok-list-st', e.message, false); }
+          catch (e) { b.disabled = false; status('tok-list-st', e.message, false); }
         }; });
       }, e => { const el = document.getElementById('tok-list'); if (el) el.innerHTML = '<p class="muted">push tokens: could not be read (' + esc(e.message) + ')</p>'; });
       if (isWriter) tokens();
