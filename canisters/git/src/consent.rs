@@ -241,7 +241,11 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
             } else {
                 format!("its directory {root}/")
             };
-            format!("Serve \"{repo}\" as a website from {from}, at /site/{repo}/, always at the tip of its deploy branch.")
+            format!(
+                "Serve \"{repo}\" as a website at /site/{repo}/, from {from} in the newest \
+                 commit on its deploy branch that has the approvals the repo requires (the \
+                 tip, when none are required)."
+            )
         }
         "evm_registry_publish_site" => {
             let (repo,): (String,) = args(arg, m)?;

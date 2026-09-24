@@ -72,14 +72,15 @@ fn deploy_record(repo: &str, commit_oid: &Oid, bundle: [u8; 32]) -> Result<Recor
     })
 }
 
-/// Resolve the served-site record: the deploy-branch tip and the sha256 of the
+/// Resolve the served-site record: the served commit (the deploy-branch tip,
+/// or with votes required the newest approved commit) and the sha256 of the
 /// served entrypoint blob (site root + index.html fallback -- byte-identical to
 /// what `/site/<repo>/` returns). Needs no EVM deploy config, because the
 /// artifact is a frontend file hashed as raw bytes, matching how the F2
 /// verifier hashes a served non-hex artifact.
 fn site_record(repo: &str) -> Result<Record, String> {
     let (tip, served, body) = site::resolve_entry(repo, "")
-        .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html)")?;
+        .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html, approved if the repo requires votes)")?;
     // Refuse to attest bytes `site::serve` would answer 413 for. Publishing
     // one costs a real registry transaction and produces a record no verifier
     // can ever check -- every fetch of the entrypoint fails before it can be

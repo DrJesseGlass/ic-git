@@ -88,7 +88,19 @@ stops counting. A `k` above the owner plus voters is refused, and so is
 removing a voter or transferring the repo when that would leave `k` out of
 reach: lower `k` first. When the deploy-branch tip reaches the threshold,
 its deploy is queued from the vote call itself. `k = 0`, the default,
-deploys on push as before. This is the same K-of-N shape as the release
+deploys on push as before.
+
+The same approval gates what a repo serves as a site. `/site/<repo>/`
+serves the newest commit on the deploy branch's first-parent line that
+has reached the threshold, looking back at most 64 commits; with `k = 0`
+that is the tip. An unapproved push is therefore not served: the last
+approved commit stays up until the new one is approved, and a site with
+no approved commit in range answers 404. It is judged against the
+current ballots on every request, so withdrawing an approval, removing a
+voter, or raising `k` takes a commit down as it stops it deploying.
+Setting `k` above 0 on a live site takes the site down until a commit is
+approved, so approve the tip right after. `evm_registry_publish_site`
+attests the same served commit, never an unapproved tip. This is the same K-of-N shape as the release
 attestations in docs/ATTESTATION.md, applied one level down: the people
 expected to approve a release are named on the repo, and the canister
 enforces the count.

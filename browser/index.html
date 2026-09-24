@@ -715,7 +715,7 @@ const Console = (() => {
       const wasmLeg = c => c.source_path + ' into ' + (c.target === info.app_canister ? 'the app canister' : short(c.target)) + ' (' + Object.keys(c.mode)[0] + ')';
       const evmLeg = c => 'a contract from ' + c.source_path + ' on the EVM chain (gas limit ' + c.gas_limit + ')';
       land('cfg-deploy', Promise.all([deployCfg, evmCfg]), ([w, e]) => w === undefined || e === undefined ? '?' : [w && wasmLeg(w), e && evmLeg(e)].filter(Boolean).join(' and ') || 'nothing (not configured)');
-      land('cfg-site', siteCfg, c => c === null ? 'not served' : 'served from ' + (c.root ? c.root + '/' : 'the repo root') + ' at /site/' + repo + '/');
+      land('cfg-site', siteCfg, c => c === null ? 'not served' : 'served from ' + (c.root ? c.root + '/' : 'the repo root') + ' at /site/' + repo + '/' + (info.required_votes ? ', from the newest approved commit' : ''));
       // "app" names the repo's own app canister; the canister resolves it.
       onsubmit('f-deploy', async v => { await write('set_wasm_deploy', ['text', 'text', 'text'], [repo, 'app', v.path.trim()]); setTimeout(() => location.reload(), 800); return 'each push to the deploy branch now installs ' + v.path.trim(); });
       onsubmit('f-site', async v => { const root = v.root.trim().replace(/^\/+|\/+$/g, ''); await write('set_site', ['text', 'text'], [repo, root]); setTimeout(() => location.reload(), 800); return 'serving ' + (root || 'the repo root') + ' at /site/' + repo + '/'; });
