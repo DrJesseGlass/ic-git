@@ -160,7 +160,7 @@
         "date": "2026-09-22",
         "on_chain_match": "match",
         "checked_by": "tools/check-module-hash.sh",
-        "note": "upgrade from v0.2.0; Cargo.lock moved (ic-multisig from crates.io), which is what changed the hash"
+        "note": "upgrade from v0.2.0; the canister crate changed in three merges: votes through the ic-multisig crate (#16), ic-multisig from crates.io with Cargo.lock pinning 0.1.1 (#18), and the /api/<repo>/deploys route plus a target field on deploy records (#17)"
       },
       "wasm_sha256": "703563cd14548dfb88c740f8f7d10d09d6a9f33976f49de2a7586490a02a1cfc"
     }

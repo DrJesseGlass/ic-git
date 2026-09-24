@@ -583,18 +583,22 @@ const Console = (() => {
     let html = '<div class="panel"><h3>console</h3>';
     if (!me) { html += '<p class="muted">Connect a wallet to create repositories, mint push tokens, manage members and votes, and deposit cycles. Reads need no sign-in.</p></div>'; return html; }
     // What the wallet holds on the ledgers, read anonymously; null when a ledger did not answer.
+    // They start now and land in the panel when they answer; the controls
+    // below wait only for the same-origin reads.
     const held = ledger => IC.query(ledger, 'icrc1_balance_of', [ACCOUNT], [{ owner: me, subaccount: null }]).then(r => r[0], e => { console.warn('ledger ' + ledger + ': ' + e.message); return null; });
-    const [pricing, acct, icp, cyc] = await Promise.all([
+    const icp = held(ICP_LEDGER), cyc = held(CYCLES_LEDGER);
+    const [pricing, acct] = await Promise.all([
       get('pricing'),
-      get('account/' + encodeURIComponent(me)).catch(() => ({ balance: 0, repos: [] })),
-      held(ICP_LEDGER), held(CYCLES_LEDGER)]);
-    html += '<p>wallet holds <b>' + (icp === null ? '?' : fmtIcp(icp)) + '</b> and <b>' + (cyc === null ? '?' : fmtCycles(cyc)) + '</b> <span class="muted">(on the ledgers, ' + esc(short(me)) + ')</span></p>' +
+      get('account/' + encodeURIComponent(me)).catch(() => ({ balance: 0, repos: [] }))]);
+    html += '<p>wallet holds <b id="held-icp">...</b> and <b id="held-cyc">...</b> <span class="muted">(on the ledgers, ' + esc(short(me)) + ')</span></p>' +
       '<p>ic-git balance <b>' + fmtT(acct.balance) + '</b> <span class="muted">(' + acct.balance + ' cycles)</span>' +
       (acct.repos.length ? ' &middot; your repos: ' + acct.repos.map(r => '<a href="#/' + encodeURIComponent(r) + '">' + esc(r) + '</a>').join(', ') : '') + '</p>' +
       '<p class="muted">creating a repo costs ' + fmtT(pricing.create_repo) + '; a push costs ' + fmtT(pricing.push_base) + ' + ' + pricing.push_per_byte + ' cycles/byte; storage rent ' + pricing.rent_per_byte_year + ' cycles per byte-year.</p>' +
       form('f-deposit', [{ name: 'amount', placeholder: 'deposit, in T cycles (e.g. 2)' }], 'deposit from cycles ledger') + '<p id="f-deposit-st" class="status"></p>' +
       form('f-create', [{ name: 'name', placeholder: 'new repo name' }], 'create repo') + '<p id="f-create-st" class="status"></p></div>';
     setTimeout(() => {
+      const land = (id, p, fmt) => p.then(v => { const el = document.getElementById(id); if (el) el.textContent = v === null ? '?' : fmt(v); });
+      land('held-icp', icp, fmtIcp); land('held-cyc', cyc, fmtCycles);
       onsubmit('f-deposit', async v => {
         const amount = cycles(v.amount);
         const fee = 100_000_000n;

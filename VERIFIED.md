@@ -17,15 +17,17 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 
 ## v0.2.1 -- 2026-09-22
 
-Votes now go through the ic-multisig crate rather than a local rule set
-(#16), and the crate is taken from crates.io instead of a git tag (#18): the
-dependency is `ic-multisig = "0.1"`, resolved to 0.1.1, with Cargo.lock
-pinning the registry checksum. That lockfile change is what moved the hash;
-the voting behaviour is the same, counted on the crate's checked path since
-every ballot the canister stores was authenticated by the IC on the way in.
-Also in this tree, and deliberately hash-neutral: the deploy-on-push demo
-(#17) lives under `demo/`, outside the canister crate. Same recipe and base
-image digest as v0.2.0. The raw wasm inside the gzip hashes to
+Three merges changed the canister crate since v0.2.0, and all three are in
+the hash. Votes now go through the ic-multisig crate rather than a local
+rule set (#16: tenancy.rs, store.rs, lib.rs and the new dependency). The
+crate is taken from crates.io instead of a git tag (#18): the dependency is
+`ic-multisig = "0.1"`, resolved to 0.1.1, with Cargo.lock pinning the
+registry checksum. The deploy-on-push demo (#17) added the
+`GET /api/<repo>/deploys` route in api.rs and a `target` field on persisted
+deploy records in deploy.rs; the demo's own files under `demo/` are outside
+the crate. The voting behaviour is the same, counted on the crate's checked
+path since every ballot the canister stores was authenticated by the IC on
+the way in. Same recipe and base image digest as v0.2.0. The raw wasm inside the gzip hashes to
 `703563cd...1cfc`. Two hosts agreed byte-for-byte: the deployer's arm64
 machine running the amd64 image under emulation, and a native x86_64
 GitHub runner triggered by the tag push.
