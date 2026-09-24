@@ -342,10 +342,11 @@ pub fn label_holder(label: &str) -> Option<String> {
     meta_get_json(&label_key(label))
 }
 
-/// Create a repo. Its name must be new, and so must its label: once
-/// "my-app" exists, "My_App" and "my.app" are refused, so every repo maps
-/// to a label no other repo can take.
-pub fn create_repo(name: &str) -> Result<(), String> {
+/// Check that `name` could be created now, returning its label: a valid
+/// name, not taken, whose label is not held either. `tenancy::create_repo`
+/// runs this before charging the creation fee, so a refused name costs
+/// nothing.
+pub fn check_new_repo(name: &str) -> Result<String, String> {
     if name.is_empty()
         || !name
             .chars()
@@ -363,6 +364,14 @@ pub fn create_repo(name: &str) -> Result<(), String> {
             "repo name '{name}' maps to the label '{label}', which repo '{holder}' already holds"
         ));
     }
+    Ok(label)
+}
+
+/// Create a repo. Its name must be new, and so must its label: once
+/// "my-app" exists, "My_App" and "my.app" are refused, so every repo maps
+/// to a label no other repo can take.
+pub fn create_repo(name: &str) -> Result<(), String> {
+    let label = check_new_repo(name)?;
     REPOS.with(|r| r.borrow_mut().insert(name.to_string(), "refs/heads/main".to_string()));
     meta_set_json(&label_key(&label), &name);
     Ok(())

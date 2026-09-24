@@ -325,9 +325,10 @@ pub fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), St
     if *who == Principal::anonymous() {
         return Err("sign in first: the anonymous principal cannot own a repo".into());
     }
-    if store::repo_exists(name) {
-        return Err(format!("repo '{name}' already exists"));
-    }
+    // Every refusal store::create_repo can make, before the fee is taken:
+    // an update that returns Err keeps its state changes, so a debit
+    // followed by a refused name would keep the fee.
+    store::check_new_repo(name)?;
     if !operator {
         debit(who, pricing().create_repo, "create_repo")?;
     }
@@ -714,6 +715,12 @@ mod tests {
         let op = p(9);
         create_repo("t-op", &op, true).unwrap();
         assert_eq!(meta("t-op").unwrap().owner, Some(op));
+        // A name store refuses (bad, or a taken label) costs nothing.
+        credit(&alice, pricing().create_repo);
+        for refused in [".dot", "T_OK", "_"] {
+            assert!(create_repo(refused, &alice, false).is_err(), "{refused}");
+            assert_eq!(balance(&alice), pricing().create_repo, "{refused}");
+        }
     }
 
     #[test]

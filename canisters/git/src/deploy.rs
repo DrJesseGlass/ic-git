@@ -689,12 +689,18 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
             record(repo, cfg, &st);
             // Optional ic-name-service hook (names.rs): announce the
             // install. Never affects `ok`; the note lands in the message.
+            // deploy_now runs outside the queue, so a newer deploy of this
+            // repo may have written its status during the await: annotate
+            // only while the stored status is still this one.
             if st.ok {
+                let before = st.message.clone();
                 if let Some(note) =
                     crate::names::announce(repo, &cfg.target, &st.commit, &st.wasm_sha256).await
                 {
                     st.message.push_str(&note);
-                    put_status(repo, &st);
+                    if get_status(repo).is_some_and(|s| s.commit == st.commit && s.message == before) {
+                        put_status(repo, &st);
+                    }
                 }
             }
         }

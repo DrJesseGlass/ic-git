@@ -11,11 +11,12 @@
 //! announced under: repo "foo" becomes "<handle>/foo". A failed announce is
 //! appended to the deploy status message and never fails the deploy.
 //!
-//! The call runs inside the deploy queue, which deploys one job at a time
-//! for every repo, so it is a bounded-wait call with `ANNOUNCE_TIMEOUT_S`:
-//! a name service that hangs costs one deploy that long, not the queue
-//! forever, and cannot hold an open call context that blocks stopping this
-//! canister for an upgrade.
+//! The call runs inside a deploy (the queue, which deploys one job at a
+//! time for every repo, or `deploy_now`), so it is a bounded-wait call with
+//! `ANNOUNCE_TIMEOUT_S`: a name service that hangs costs one deploy that
+//! long, not the queue forever, and cannot hold an open call context that
+//! blocks stopping this canister for an upgrade. A timeout leaves the
+//! outcome unknown, and the note says so rather than "failed".
 //!
 //! ic-name-service names are lower kebab case only. The handle is checked
 //! against its segment rule (`check_segment`, a copy of ic-name-service's)
@@ -27,16 +28,16 @@
 //! Direction of dependency: nothing here depends on ic-name-service code;
 //! the argument record is a candid mirror of its `Announcement` type.
 
-use crate::kv;
+use crate::store;
 use candid::{CandidType, Principal};
-use ic_cdk::call::Call;
+use ic_cdk::call::{Call, CallFailed, RejectCode};
 use serde::{Deserialize, Serialize};
 
 const CONFIG_KEY: &str = "names:config";
 /// How long a deploy waits on the name service before giving up.
 const ANNOUNCE_TIMEOUT_S: u32 = 60;
-/// ic-name-service's MAX_SEGMENT.
-const MAX_SEGMENT: usize = 63;
+/// ic-name-service's MAX_SEGMENT, which repo labels share.
+const MAX_SEGMENT: usize = store::MAX_LABEL;
 
 /// ic-name-service's rule for a handle or a label: 1 to 63 bytes of a-z,
 /// 0-9 and '-', not starting or ending with '-'.
@@ -75,16 +76,16 @@ struct Announcement {
 pub fn set_config(canister: String, handle: String) -> Result<(), String> {
     Principal::from_text(&canister).map_err(|e| format!("bad names canister principal: {e}"))?;
     check_segment("handle", &handle)?;
-    kv::set_json(CONFIG_KEY, &NamesConfig { canister, handle });
+    store::meta_set_json(CONFIG_KEY, &Some(NamesConfig { canister, handle }));
     Ok(())
 }
 
 pub fn clear_config() {
-    kv::set_json(CONFIG_KEY, &Option::<NamesConfig>::None);
+    store::meta_set_json(CONFIG_KEY, &Option::<NamesConfig>::None);
 }
 
 pub fn get_config() -> Option<NamesConfig> {
-    kv::get_json(CONFIG_KEY)
+    store::meta_get_json::<Option<NamesConfig>>(CONFIG_KEY).flatten()
 }
 
 /// Announce a successful deploy. Returns a note to append to the deploy
@@ -99,8 +100,8 @@ pub async fn announce(repo: &str, target: &str, commit: &str, module_hash: &str)
         Ok(p) => p,
         Err(e) => return Some(format!(" (announce skipped: bad target: {e})")),
     };
-    let label = match crate::store::repo_label(repo) {
-        Ok(l) if crate::store::label_holder(&l).as_deref() == Some(repo) => l,
+    let label = match store::repo_label(repo) {
+        Ok(l) if store::label_holder(&l).as_deref() == Some(repo) => l,
         Ok(l) => return Some(format!(" (announce skipped: label '{l}' is not held by this repo)")),
         Err(e) => return Some(format!(" (announce skipped: {e})")),
     };
@@ -120,6 +121,9 @@ pub async fn announce(repo: &str, target: &str, commit: &str, module_hash: &str)
         Ok(Ok(Ok(()))) => Some(format!(" (announced as {name})")),
         Ok(Ok(Err(e))) => Some(format!(" (announce refused: {e})")),
         Ok(Err(e)) => Some(format!(" (announce reply undecodable: {e})")),
+        Err(CallFailed::CallRejected(e)) if e.reject_code() == Ok(RejectCode::SysUnknown) => {
+            Some(format!(" (announce outcome unknown: {e})"))
+        }
         Err(e) => Some(format!(" (announce failed: {e})")),
     }
 }
