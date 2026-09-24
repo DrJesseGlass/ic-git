@@ -714,21 +714,39 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     // Optional ic-name-service hook (names.rs): announce the wasm install,
     // last, so a deploy is announced only when every leg succeeded and the
     // EVM leg never waits on the name service. Never affects `ok`; the note
-    // lands in the message. deploy_now runs outside the queue, so a newer
-    // deploy of this repo may have written its status during the await:
-    // annotate only while the stored status is still this one.
+    // lands in the message.
+    //
+    // deploy_now runs outside the queue, so a newer deploy of this repo can
+    // start while this one awaits. Every deploy writes its status (DEPLOYING)
+    // before it installs, so:
+    // - before sending: if the stored status is no longer this one, a newer
+    //   deploy has started and owns the announce; skip, or the name service
+    //   could end up on an older commit than the target runs. announce() has
+    //   no await before its call, so this check and the send are one message
+    //   execution, and a deploy starting after it announces later, which the
+    //   IC delivers after ours (calls between two canisters stay in order).
+    // - after the reply: annotate only while the status is still this one.
     if let (Some(cfg), true) = (&wasm_cfg, st.ok) {
-        let before = st.message.clone();
+        if !is_current(repo, &st) {
+            return st;
+        }
+        let before = st.clone();
         if let Some(note) =
             crate::names::announce(repo, &cfg.target, &st.commit, &st.wasm_sha256).await
         {
             st.message.push_str(&note);
-            if get_status(repo).is_some_and(|s| s.commit == st.commit && s.message == before) {
+            if is_current(repo, &before) {
                 put_status(repo, &st);
             }
         }
     }
     st
+}
+
+/// Whether the repo's stored deploy status is still `st`, i.e. no other
+/// deploy of the repo has written its status since `st` was stored.
+fn is_current(repo: &str, st: &DeployStatus) -> bool {
+    get_status(repo).is_some_and(|s| s.commit == st.commit && s.message == st.message)
 }
 
 /// The branch whose pushes trigger deploys: the repo's HEAD symref target
