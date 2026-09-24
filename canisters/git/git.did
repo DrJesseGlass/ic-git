@@ -194,7 +194,35 @@ type SolSigStatus = record {
 };
 type ResultSolSigStatus = variant { Ok : opt SolSigStatus; Err : text };
 
+// ICRC-21 consent messages: what a wallet shows its user before signing a
+// call to this canister. Field and variant names are the standard's.
+type icrc21_consent_message_metadata = record { language : text; utc_offset_minutes : opt int16 };
+type icrc21_device_spec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+type icrc21_consent_message_spec = record { metadata : icrc21_consent_message_metadata; device_spec : opt icrc21_device_spec };
+type icrc21_consent_message_request = record { method : text; arg : blob; user_preferences : icrc21_consent_message_spec };
+type icrc21_consent_message = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record { pages : vec record { lines : vec text } };
+};
+type icrc21_consent_info = record { consent_message : icrc21_consent_message; metadata : icrc21_consent_message_metadata };
+type icrc21_error_info = record { description : text };
+type icrc21_error = variant {
+  UnsupportedCanisterCall : icrc21_error_info;
+  ConsentMessageUnavailable : icrc21_error_info;
+  InsufficientPayment : icrc21_error_info;
+  GenericError : record { error_code : nat; description : text };
+};
+type icrc21_consent_message_response = variant { Ok : icrc21_consent_info; Err : icrc21_error };
+type icrc10_standard = record { name : text; url : text };
 service : {
+  // wallet standards (ICRC-10, ICRC-21): a signer asks for a readable
+  // description of a call before signing it; unlisted methods are refused
+  icrc10_supported_standards : () -> (vec icrc10_standard) query;
+  icrc21_canister_call_consent_message : (icrc21_consent_message_request) -> (icrc21_consent_message_response);
+
   // git smart-HTTP surface (called by the HTTP gateway)
   http_request : (HttpRequest) -> (HttpResponse) query;
   http_request_update : (HttpRequest) -> (HttpResponse);
