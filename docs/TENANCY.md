@@ -35,7 +35,14 @@ without being usable as one, so the list is public -- with who minted
 each and when it expires, and `revoke_push_token_id(id)` revokes one
 without holding it (`revoke_push_token(token)` still works for a holder).
 Expired tokens are swept out whenever a token is minted. The console shows
-the list, with a revoke button on each, under the mint form.
+the list, with a revoke button on each, under the mint form, and after a
+mint says when the new token expires.
+
+A token lasts only as long as its minter may write. Removing a writer,
+re-adding one as a voter, or transferring the repo revokes the tokens
+minted by whoever lost write access (a previous owner keeps theirs only
+if they are an operator). Tokens from before expiry existed record no
+minter, so they run out their 30 days instead.
 
 ## Roles
 

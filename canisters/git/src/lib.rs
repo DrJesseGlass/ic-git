@@ -59,7 +59,7 @@ fn post_upgrade() {
     deploy::resume_pending();
     tenancy::arm_rent_timer();
     site::record_gated_repos();
-    tokens::migrate_legacy();
+    tokens::migrate();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -494,6 +494,8 @@ fn add_member(repo: String, principal: candid::Principal, role: String) -> Resul
     let members = tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?)?;
     // A voter added back brings their earlier ballots back into the count.
     follow_approvals(&repo, false);
+    // Re-adding a writer as a voter is a demotion.
+    revoke_tokens_of_non_writers(&repo);
     Ok(members)
 }
 
@@ -501,6 +503,7 @@ fn add_member(repo: String, principal: candid::Principal, role: String) -> Resul
 fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
     let members = tenancy::remove_member(&repo, &caller(), operator(), principal)?;
     follow_approvals(&repo, false);
+    revoke_tokens_of_non_writers(&repo);
     Ok(members)
 }
 
@@ -510,7 +513,23 @@ fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), Strin
     tenancy::transfer_repo(&repo, &caller(), operator(), new_owner)?;
     // The owner is an approver, so a new owner changes whose ballots count.
     follow_approvals(&repo, false);
+    // The previous owner's tokens go with the repo, unless they can still
+    // write (an operator).
+    revoke_tokens_of_non_writers(&repo);
     Ok(())
+}
+
+/// Controllers and the admin allowlist: who `operator()` admits, for any
+/// principal rather than the caller.
+fn is_operator(p: &candid::Principal) -> bool {
+    ic_cdk::api::is_controller(p) || auth::is_principal_authorized(*p).unwrap_or(false)
+}
+
+/// After a membership change: a push token lasts only as long as its
+/// minter may write, so revoke the repo's tokens minted by anyone who no
+/// longer can (see tokens::revoke_unless).
+fn revoke_tokens_of_non_writers(repo: &str) {
+    tokens::revoke_unless(repo, |p| tenancy::can_write(repo, p, is_operator(p)).is_ok());
 }
 
 /// Approvals a commit needs from voters before the deploy queue runs it, and
