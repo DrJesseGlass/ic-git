@@ -624,12 +624,14 @@ const Console = (() => {
       onsubmit('f-deposit', async v => {
         const amount = cycles(v.amount);
         const fee = 100_000_000n;
-        // Two ledger fees stand between the wallet and the balance. ic-git
-        // pulls (amount + fee) with transfer_from, and the ledger takes its
-        // own fee on top of what it moves, out of the same allowance; then
-        // ic-git withdraws the cycles into itself, which costs the second
+        // Three ledger fees stand between the wallet and the balance. The
+        // approve itself costs one, paid straight from the wallet. ic-git
+        // then pulls (amount + fee) with transfer_from, and the ledger takes
+        // its own fee on top of what it moves, out of the allowance; then
+        // ic-git withdraws the cycles into itself, which costs the third
         // fee, and credits the rest -- exactly `amount`. So the allowance is
-        // amount + 2 fees, and the deposit call names amount + 1 fee.
+        // amount + 2 fees, the deposit call names amount + 1 fee, and the
+        // wallet needs amount + 3 fees.
         // 1. approve ic-git on the cycles ledger, 2. ic-git pulls it.
         const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
         const balance = await session(async s => {
