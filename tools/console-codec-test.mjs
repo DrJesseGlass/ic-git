@@ -57,6 +57,8 @@ assert.deepEqual(dec('reply:opt_deploy_config_some'), { target: CANISTER, source
 assert.equal(dec('reply:opt_deploy_config_none'), null);
 assert.deepEqual(dec('reply:opt_site_some'), { root: 'browser' });
 assert.deepEqual(dec('reply:opt_site_reinstall_mode'), { target: CANISTER, source_path: 'x.wat', mode: { reinstall: null } });
+// deploy_now's reply, which the deploy-now and reinstall controls report.
+assert.deepEqual(dec('reply:result_deploy_status_ok'), { Ok: { commit: '0123456789abcdef0123456789abcdef01234567', ok: true, message: 'installed', wasm_len: 365_000n, wasm_sha256: 'ab'.repeat(32) } });
 
 // CBOR + hash tree: build a certificate-shaped structure by hand and look up a reply.
 // CBOR bytes: {"tree": [2, "request_status", [2, <id>, [1, [2, "reply", [3, <candid>]], [2, "status", [3, "replied"]]]]]}

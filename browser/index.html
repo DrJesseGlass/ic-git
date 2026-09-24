@@ -53,6 +53,10 @@
   .panel button:hover, header button:hover { border-color:var(--link); }
   .panel .status { margin:.4rem 0 0; min-height:1.2em; }
   .panel .ok { color:#1a7f37; } .panel .bad { color:#b3261e; }
+button.danger { border-color:#b3261e; color:#b3261e; }
+button.danger:disabled { opacity:.45; cursor:not-allowed; }
+.confirm { border:1px solid #b3261e; border-radius:4px; padding:.6rem .8rem; margin:.5rem 0; }
+.confirm input { width:16rem; }
   .tok { user-select:all; }
 </style>
 </head>
@@ -138,7 +142,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -641,7 +645,16 @@ const Console = (() => {
     if (isOwner) html += (info.app_canister
         ? form('f-deploy', [{ name: 'path', placeholder: 'path in the commit, e.g. app.wasm (.wasm, .wat or .lang)' }], 'deploy on push into the app canister') + '<p id="f-deploy-st" class="status"></p>'
         : '<p class="muted">create the app canister above, then choose what each push deploys into it.</p>') +
-      form('f-site', [{ name: 'root', placeholder: 'directory to serve, e.g. site (empty = repo root)' }], 'serve as site') + '<p id="f-site-st" class="status"></p>';
+      form('f-site', [{ name: 'root', placeholder: 'directory to serve, e.g. site (empty = repo root)' }], 'serve as site') + '<p id="f-site-st" class="status"></p>' +
+      (info.app_canister
+        ? form('f-deploynow', [], 'deploy now') + ' <button id="btn-reinstall" class="danger" type="button">reinstall...</button><p id="f-deploynow-st" class="status"></p>' +
+          // The guard: no native dialog (those block the page), a box the
+          // owner has to read, and a run button that stays disabled until
+          // the typed name is the repo's. Reinstall wipes the app canister's
+          // state; there is no undo on the other side of it.
+          '<div id="box-reinstall" class="confirm" hidden><p class="bad"><b>Reinstall wipes every byte of state in app canister ' + esc(info.app_canister) + '</b> and installs the configured source from the deploy-branch tip. Ballots, balances, anything the app stored: gone. There is no undo.</p>' +
+          '<p>Type the repository name <b>' + esc(repo) + '</b> to confirm: <input id="in-reinstall" autocomplete="off"> <button id="go-reinstall" class="danger" type="button" disabled>reinstall now</button> <button id="cancel-reinstall" type="button">cancel</button></p><p id="reinstall-st" class="status"></p></div>'
+        : '');
     if (!me) html += '<p class="muted">connect a wallet to manage this repo.</p>';
     html += '</div>';
     setTimeout(() => {
@@ -655,6 +668,34 @@ const Console = (() => {
       // "app" names the repo's own app canister; the canister resolves it.
       onsubmit('f-deploy', async v => { await write('set_wasm_deploy', ['text', 'text', 'text'], [repo, 'app', v.path.trim()]); setTimeout(() => location.reload(), 800); return 'each push to the deploy branch now installs ' + v.path.trim(); });
       onsubmit('f-site', async v => { const root = v.root.trim().replace(/^\/+|\/+$/g, ''); await write('set_site', ['text', 'text'], [repo, root]); setTimeout(() => location.reload(), 800); return 'serving ' + (root || 'the repo root') + ' at /site/' + repo + '/'; });
+      const outcome = d => (d.ok ? 'deployed ' : 'deploy failed: ') + d.message + ' (commit ' + short(d.commit) + (d.wasm_sha256 ? ', wasm sha256 ' + d.wasm_sha256.slice(0, 12) + ')' : ')');
+      onsubmit('f-deploynow', async () => outcome(await write('deploy_now', ['text'], [repo])));
+      const box = document.getElementById('box-reinstall'), inp = document.getElementById('in-reinstall'), go = document.getElementById('go-reinstall');
+      const btn = document.getElementById('btn-reinstall'), cancel = document.getElementById('cancel-reinstall');
+      if (btn) btn.onclick = () => { box.hidden = false; inp.value = ''; go.disabled = true; inp.focus(); };
+      if (cancel) cancel.onclick = () => { box.hidden = true; };
+      if (inp) inp.oninput = () => { go.disabled = inp.value.trim() !== repo; };
+      if (go) go.onclick = async () => {
+        if (inp.value.trim() !== repo) return;
+        go.disabled = true; btn.disabled = true;
+        // The mode is a setting, not an action: it stays until changed. So
+        // switch, deploy, and switch back, and say so loudly if the switch
+        // back did not happen -- every later push would wipe state again.
+        let restored = false;
+        try {
+          status('reinstall-st', 'switching the install mode to reinstall...', true);
+          await write('set_deploy_mode', ['text', 'text'], [repo, 'reinstall']);
+          status('reinstall-st', 'reinstalling from the deploy-branch tip...', true);
+          const d = await write('deploy_now', ['text'], [repo]);
+          status('reinstall-st', 'switching the install mode back to upgrade...', true);
+          await write('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']);
+          restored = true;
+          status('reinstall-st', outcome(d) + '; install mode is back to upgrade', d.ok);
+        } catch (e) {
+          if (!restored) { try { await write('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']); restored = true; } catch (_) {} }
+          status('reinstall-st', e.message + (restored ? '; install mode is back to upgrade' : '. INSTALL MODE IS STILL REINSTALL: every push will wipe the app canister until you set it back'), false);
+        } finally { btn.disabled = false; }
+      };
       document.querySelectorAll('button.rm').forEach(b => { b.onclick = async () => { try { await write('remove_member', ['text', 'principal'], [repo, b.dataset.p]); location.reload(); } catch (e) { alert(e.message); } }; });
     }, 0);
     return html;
