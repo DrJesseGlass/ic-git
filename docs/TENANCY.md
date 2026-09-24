@@ -114,6 +114,17 @@ canister) and what is served as a site (`set_site`), run the configured
 deploy without a push (`deploy_now`), and reinstall. That is the whole
 tenant flow: nothing between a funded wallet and a deployed push needs dfx.
 
+A wallet that signs for its user asks this canister, before signing, for a
+readable description of the call (ICRC-21, `icrc21_canister_call_consent_
+message`; advertised through ICRC-10) and refuses to sign without one. The
+canister answers for every method the console signs, with the call's
+actual arguments decoded into the text -- the amount of a deposit, the
+repository a token is minted for, the words WIPE ALL STATE on a reinstall
+-- and refuses any other method rather than describe it vaguely, so a
+wallet never signs this canister blind. Until this existed, no console
+write to the canister could be signed at all: the wallet asked, got "no
+such method", and stopped.
+
 Reinstall is the one destructive control, and it is built to be hard to
 do by accident: a red button opens a box naming the configured deploy
 target (which is normally the app canister, but `set_wasm_deploy` accepts

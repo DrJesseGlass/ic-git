@@ -7,6 +7,7 @@
 mod api;
 mod apps;
 mod compile;
+mod consent;
 mod deploy;
 mod evm;
 mod fleet;
@@ -1031,6 +1032,23 @@ fn run_wasm(module: Vec<u8>) -> Result<RunReport, String> {
 fn run_wat(text: String) -> Result<RunReport, String> {
     let wasm = compile::compile_wat_checked(&text)?;
     run_and_measure(&wasm)
+}
+
+// --- wallet standards: ICRC-10 and ICRC-21 -----------------------------------
+//
+// A wallet signing for a user asks the target canister for a readable
+// description of the call first, and refuses to sign without one. See
+// consent.rs for the messages; a method absent there is refused, not
+// signed blind.
+
+#[ic_cdk::query]
+fn icrc10_supported_standards() -> Vec<consent::Standard> {
+    consent::supported_standards()
+}
+
+#[ic_cdk::update]
+fn icrc21_canister_call_consent_message(req: consent::ConsentMessageRequest) -> consent::ConsentMessageResponse {
+    consent::consent_message(req)
 }
 
 ic_cdk::export_candid!();
