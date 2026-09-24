@@ -1,7 +1,7 @@
 //! Optional hook into ic-name-service (its DESIGN.md, section 8).
 //!
-//! After a successful wasm install, tell the name service what was
-//! deployed: `announce(name, canister, repo, commit, module_hash)`. The
+//! After a successful deploy with a wasm leg (and its EVM leg, if the repo
+//! has one), tell the name service what was deployed: `announce(name, canister, repo, commit, module_hash)`. The
 //! name service trusts the call because THIS canister's principal is on its
 //! deployer list, not because of anything in the payload, so there is no
 //! secret here and nothing to verify on our side.

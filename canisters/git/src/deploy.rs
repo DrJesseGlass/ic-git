@@ -687,22 +687,6 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
             }
             put_status(repo, &st);
             record(repo, cfg, &st);
-            // Optional ic-name-service hook (names.rs): announce the
-            // install. Never affects `ok`; the note lands in the message.
-            // deploy_now runs outside the queue, so a newer deploy of this
-            // repo may have written its status during the await: annotate
-            // only while the stored status is still this one.
-            if st.ok {
-                let before = st.message.clone();
-                if let Some(note) =
-                    crate::names::announce(repo, &cfg.target, &st.commit, &st.wasm_sha256).await
-                {
-                    st.message.push_str(&note);
-                    if get_status(repo).is_some_and(|s| s.commit == st.commit && s.message == before) {
-                        put_status(repo, &st);
-                    }
-                }
-            }
         }
         // EVM-only repo: the wasm leg vacuously succeeds.
         None => st.ok = true,
@@ -725,6 +709,24 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         // the return value: without this write, get_deploy_status would report
         // ok even when the EVM leg failed.
         put_status(repo, &st);
+    }
+
+    // Optional ic-name-service hook (names.rs): announce the wasm install,
+    // last, so a deploy is announced only when every leg succeeded and the
+    // EVM leg never waits on the name service. Never affects `ok`; the note
+    // lands in the message. deploy_now runs outside the queue, so a newer
+    // deploy of this repo may have written its status during the await:
+    // annotate only while the stored status is still this one.
+    if let (Some(cfg), true) = (&wasm_cfg, st.ok) {
+        let before = st.message.clone();
+        if let Some(note) =
+            crate::names::announce(repo, &cfg.target, &st.commit, &st.wasm_sha256).await
+        {
+            st.message.push_str(&note);
+            if get_status(repo).is_some_and(|s| s.commit == st.commit && s.message == before) {
+                put_status(repo, &st);
+            }
+        }
     }
     st
 }
