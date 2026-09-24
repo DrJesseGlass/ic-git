@@ -448,7 +448,7 @@ pub fn check_schema_version() {
         .map(|b| u32::from_le_bytes(b.try_into().expect("schema marker is 4 bytes")));
     match stored {
         Some(v) if v == SCHEMA_VERSION => {}
-        Some(v) => ic_cdk::trap(&format!(
+        Some(v) => ic_cdk::trap(format!(
             "object store schema {v}, code expects {SCHEMA_VERSION}: migrate before upgrading"
         )),
         None if OBJECTS.with(|o| o.borrow().is_empty()) => init_schema_version(),

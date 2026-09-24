@@ -323,7 +323,7 @@ pub mod job {
 
     thread_local! {
         static JOBS: RefCell<HashMap<u64, Compiler>> = RefCell::new(HashMap::new());
-        static NEXT_ID: Cell<u64> = Cell::new(1);
+        static NEXT_ID: Cell<u64> = const { Cell::new(1) };
     }
 
     /// Parse and prepare a job; returns its id. No codegen happens yet.

@@ -206,6 +206,7 @@ fn char_ref_free<'a>(tag: &str, name: &str, value: &'a str) -> Result<&'a str, S
 ///   an inline `<script type=module>` imports files no integrity can pin.
 /// - A tag that never closes, a keyword value hiding behind a character
 ///   reference, or a body that is not UTF-8, is refused rather than skipped.
+///
 /// A false refusal costs the operator one inline-or-add-integrity edit; a false
 /// accept costs a user their funds. That asymmetry is the whole design.
 /// Comments get no full tracking: `<!` constructs are skipped only to their
