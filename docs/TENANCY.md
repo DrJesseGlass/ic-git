@@ -86,9 +86,41 @@ voters (the owner counts as one) have approved it with
 `vote(repo, commit, true)`. Ballots can be changed; a removed voter's ballot
 stops counting. A `k` above the owner plus voters is refused, and so is
 removing a voter or transferring the repo when that would leave `k` out of
-reach: lower `k` first. When the deploy-branch tip reaches the threshold,
-its deploy is queued from the vote call itself. `k = 0`, the default,
-deploys on push as before. This is the same K-of-N shape as the release
+reach: lower `k` first. `k = 0`, the default, deploys on push as before.
+
+With `k > 0` the repo has one approved commit, and both the app and the
+site follow it: the newest commit on the deploy branch's first-parent line
+that has reached the threshold, looking back up to 10,000 commits from
+the tip. The canister records it after every call that can move it -- a
+ballot, `set_required_votes`, adding or removing a member, a transfer, a
+push -- and when it moves, `/site/<repo>/` serves it from then on and its
+deploy is queued. That holds whichever way it moves: approving a commit
+below the tip deploys and serves it, and withdrawing the approval on the
+served commit rolls both the site and the app back to the approved commit
+before it. An unapproved push is not served and does not deploy. Only a
+commit on the branch counts: deleting the branch, or replacing it with
+history nobody approved, serves nothing rather than leaving an old commit
+live, and burying an approved commit under 10,000 unapproved ones takes
+it down too. Every site request re-checks the recorded commit's ballots,
+so a site never serves a commit that is not approved now; with nothing
+approved it answers 404. Approvals on history a merge brought in through
+its second parent are not seen.
+
+If the approved commit's deploy fails (the balance ran out, the install
+was refused), the site is ahead of the app until it is retried: any
+ballot on the repo re-queues the approved commit when the app is not
+running it, and `deploy_now` deploys the approved commit, not the tip.
+Pushes do not retry, so a deploy that keeps failing is not charged again
+on every push.
+
+Setting `k` above 0 on a live site takes the site down until a commit is
+approved, so approve the tip right after. Setting it back to 0 serves the
+tip and deploys it if the held pushes never did. `evm_registry_publish_site`
+attests the served commit, never an unapproved tip; `evm_registry_publish`
+likewise attests the approved commit's artifact, and both charge only
+once the record resolves.
+
+This is the same K-of-N shape as the release
 attestations in docs/ATTESTATION.md, applied one level down: the people
 expected to approve a release are named on the repo, and the canister
 enforces the count.

@@ -187,7 +187,8 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
             } else {
                 format!(
                     "Require {k} approval{} from the voters of \"{repo}\" before a pushed \
-                     commit is deployed.",
+                     commit is deployed or served as its site. A site served today goes \
+                     down until a commit is approved.",
                     if k == 1 { "" } else { "s" }
                 )
             }
@@ -195,7 +196,7 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "vote" => {
             let (repo, commit, approve): (String, String, bool) = args(arg, m)?;
             format!(
-                "{} commit {} in \"{repo}\" for deployment.",
+                "{} commit {} in \"{repo}\" for deployment and for serving as its site.",
                 if approve { "Approve" } else { "Reject" },
                 prefix(&commit, 12)
             )
@@ -227,7 +228,8 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "deploy_now" => {
             let (repo,): (String,) = args(arg, m)?;
             format!(
-                "Deploy the current tip of \"{repo}\" now, without a push. Every deploy leg the \
+                "Deploy \"{repo}\" now, without a push, from the tip of its deploy branch, or \
+                 from its newest approved commit if it requires votes. Every deploy leg the \
                  repository has configured runs: a wasm leg installs in the configured install \
                  mode, and an EVM leg broadcasts a NEW contract creation transaction on the \
                  configured chain even if this commit was already deployed there. The fee for \
@@ -241,7 +243,11 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
             } else {
                 format!("its directory {root}/")
             };
-            format!("Serve \"{repo}\" as a website from {from}, at /site/{repo}/, always at the tip of its deploy branch.")
+            format!(
+                "Serve \"{repo}\" as a website at /site/{repo}/, from {from} in the newest \
+                 commit on its deploy branch that has the approvals the repo requires (the \
+                 tip, when none are required)."
+            )
         }
         "evm_registry_publish_site" => {
             let (repo,): (String,) = args(arg, m)?;
