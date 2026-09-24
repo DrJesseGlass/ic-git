@@ -430,10 +430,11 @@ fn resolve_blob(commit: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<(St
 
 /// How far back from the tip `advance` looks for the newest approved commit.
 /// It runs in update calls (a vote, a push, a policy change), never in a
-/// site request, so it can look further than a request could afford; a
-/// branch that has run further than this past its last approval keeps
-/// serving the recorded commit rather than losing it.
-pub const APPROVAL_WALK: usize = 1024;
+/// site request, so it can afford a long walk. Only commits the walk
+/// reaches can be served, so this bound is also what an approved site
+/// withstands: a writer would have to push this many unapproved commits on
+/// top of it, each charged as a push, to take it down.
+pub const APPROVAL_WALK: usize = 10_000;
 
 /// What a votes-gated repo serves and deploys (META key `served:{repo}`).
 /// Absent while the repo requires no votes. `commit` is `None` when no
@@ -451,9 +452,15 @@ fn required_votes(repo: &str) -> u32 {
     crate::tenancy::meta(repo).map_or(0, |m| m.required_votes)
 }
 
+/// Does the repo require votes, so that what it serves and deploys is the
+/// recorded approved commit rather than the tip?
+pub fn gated(repo: &str) -> bool {
+    required_votes(repo) > 0
+}
+
 fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
     let branch = store::head_target(repo).ok_or("no such repo")?;
-    store::get_ref(repo, &branch).ok_or("site branch has no commits")
+    store::get_ref(repo, &branch).ok_or("deploy branch has no commits")
 }
 
 /// Recompute what a repo serves after anything that can change it: a
@@ -462,11 +469,12 @@ fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
 /// queues its deploy and the app follows the site.
 ///
 /// With votes required: the newest commit within `APPROVAL_WALK` first
-/// parents of the tip that has reached the threshold. If none is in range,
-/// the recorded commit stays as long as it is still approved -- so no pile
-/// of unapproved pushes can take an approved site down -- and otherwise
-/// nothing is served. First parents only: approvals on history a merge
-/// brought in through its second parent are not seen.
+/// parents of the tip that has reached the threshold, and otherwise
+/// nothing. Only a commit on the branch now qualifies: deleting the branch,
+/// or replacing it with history the voters never approved, takes the site
+/// down rather than leaving an off-branch commit live. First parents only:
+/// approvals on history a merge brought in through its second parent are
+/// not seen.
 ///
 /// With no votes required the tip is served and deploys on push. Leaving
 /// the gated regime returns the tip once, since pushes held for approval
@@ -492,8 +500,7 @@ pub fn advance(repo: &str) -> Option<store::Oid> {
             })
             .take(APPROVAL_WALK);
             crate::tenancy::first_approved(repo, first_parents)
-        })
-        .or_else(|| recorded_if_approved(repo, &prev));
+        });
     let now = Served {
         commit: next.as_ref().map(store::oid_hex),
     };
@@ -738,11 +745,11 @@ mod tests {
         assert_eq!(serve("recheck", "").status_code, 404);
     }
 
-    /// No stack of unapproved pushes takes an approved site down: past
-    /// APPROVAL_WALK commits the walk stops seeing the approval, and the
-    /// recorded commit keeps serving.
+    /// Unapproved pushes on top of an approved commit keep it served for as
+    /// long as the walk still reaches it: APPROVAL_WALK - 1 of them, and one
+    /// more takes the site down.
     #[test]
-    fn unapproved_pushes_cannot_bury_the_served_commit() {
+    fn unapproved_pushes_bury_the_served_commit_only_past_the_walk() {
         use crate::tenancy;
         let (owner, push) = gated_repo("deep", 78);
         let c1 = push(b"approved", None);
@@ -750,12 +757,44 @@ mod tests {
         tenancy::vote("deep", &owner, &store::oid_hex(&c1), true).unwrap();
         assert_eq!(advance("deep"), Some(c1));
         let mut tip = c1;
-        for i in 0..APPROVAL_WALK {
+        for i in 0..APPROVAL_WALK - 1 {
             tip = push(format!("unapproved {i}").as_bytes(), Some(tip));
         }
         assert_eq!(advance("deep"), None);
         assert_eq!(served_commit("deep").unwrap(), c1);
         assert_eq!(serve("deep", "").body, b"approved");
+        push(b"one too many", Some(tip));
+        assert_eq!(advance("deep"), None);
+        assert_eq!(serve("deep", "").status_code, 404);
+    }
+
+    /// The recorded commit must still be on the branch. Deleting the branch,
+    /// or replacing it with history nobody approved, takes the site down; it
+    /// does not leave the old approved commit live off the branch.
+    #[test]
+    fn an_approved_commit_off_the_branch_is_not_served() {
+        use crate::tenancy;
+        let (owner, push) = gated_repo("rewrite", 81);
+        let c1 = push(b"approved", None);
+        tenancy::set_required_votes("rewrite", &owner, false, 1).unwrap();
+        tenancy::vote("rewrite", &owner, &store::oid_hex(&c1), true).unwrap();
+        assert_eq!(advance("rewrite"), Some(c1));
+
+        // Deleted branch.
+        let branch = store::head_target("rewrite").unwrap();
+        store::delete_ref("rewrite", &branch);
+        assert_eq!(advance("rewrite"), None);
+        assert_eq!(serve("rewrite", "").status_code, 404);
+
+        // Recreated with unrelated, unapproved history.
+        push(b"unrelated", None);
+        assert_eq!(advance("rewrite"), None);
+        assert_eq!(serve("rewrite", "").status_code, 404);
+
+        // The approved commit back on the branch serves again.
+        push(b"on top", Some(c1));
+        assert_eq!(advance("rewrite"), Some(c1));
+        assert_eq!(serve("rewrite", "").body, b"approved");
     }
 
     /// A repo gated before `advance` existed has nothing recorded; the

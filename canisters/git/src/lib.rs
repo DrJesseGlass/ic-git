@@ -277,7 +277,7 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             // A push never approves anything, but it moves the tip the
             // approval walk starts from (a force push can drop the served
             // commit off the branch).
-            follow_approvals(&repo);
+            follow_approvals(&repo, false);
             git_response(
                 200,
                 "application/x-git-receive-pack-result",
@@ -468,14 +468,14 @@ fn get_repo_info(repo: String) -> Option<tenancy::RepoInfo> {
 fn add_member(repo: String, principal: candid::Principal, role: String) -> Result<Vec<tenancy::Member>, String> {
     let members = tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?)?;
     // A voter added back brings their earlier ballots back into the count.
-    follow_approvals(&repo);
+    follow_approvals(&repo, false);
     Ok(members)
 }
 
 #[ic_cdk::update]
 fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
     let members = tenancy::remove_member(&repo, &caller(), operator(), principal)?;
-    follow_approvals(&repo);
+    follow_approvals(&repo, false);
     Ok(members)
 }
 
@@ -484,7 +484,7 @@ fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenan
 fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), String> {
     tenancy::transfer_repo(&repo, &caller(), operator(), new_owner)?;
     // The owner is an approver, so a new owner changes whose ballots count.
-    follow_approvals(&repo);
+    follow_approvals(&repo, false);
     Ok(())
 }
 
@@ -494,33 +494,43 @@ fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), Strin
 #[ic_cdk::update]
 fn set_required_votes(repo: String, k: u32) -> Result<(), String> {
     tenancy::set_required_votes(&repo, &caller(), operator(), k)?;
-    follow_approvals(&repo);
+    follow_approvals(&repo, false);
     Ok(())
 }
 
 /// Cast (or change) a ballot on a commit. Returns (approvals, required).
 /// When the ballot changes which commit is the newest approved one -- tip
 /// or not, approving or withdrawing -- the site moves to it and its deploy
-/// is queued.
+/// is queued. Any ballot also retries the approved commit's deploy if the
+/// app is not running it (an earlier attempt failed), so voters can get the
+/// app back in step with the site without first taking the site down.
 #[ic_cdk::update]
 fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
     let t = tenancy::vote(&repo, &caller(), &commit, approve)?;
-    follow_approvals(&repo);
+    follow_approvals(&repo, true);
     Ok((t.approvals, t.required))
 }
 
 /// After anything that can change a votes-gated repo's newest approved
 /// commit: record it as what the site serves (`site::advance`) and, when it
-/// moved, queue its deploy, so the site and the app follow the same
-/// approvals. A commit already deployed is not queued again, and a repo
-/// with nothing to deploy only moves its site. A repo that requires no
+/// moved -- or on `retry`, when it did not -- queue its deploy, so the site
+/// and the app follow the same approvals. Nothing is queued when the app
+/// already runs the commit, a deploy of it is already queued or running, or
+/// the repo has nothing to deploy. Pushes do not retry: a deploy that keeps
+/// failing would be charged again on every push. A repo that requires no
 /// votes deploys on push, so this does nothing for it.
-fn follow_approvals(repo: &str) {
-    let Some(commit) = site::advance(repo) else { return };
-    let configured = deploy::get_config(repo).is_some() || deploy::get_evm_config(repo).is_some();
+fn follow_approvals(repo: &str, retry: bool) {
+    let moved = site::advance(repo);
+    let commit = match moved {
+        Some(c) => c,
+        None if retry && site::gated(repo) => match site::served_commit(repo) {
+            Ok(c) => c,
+            Err(_) => return,
+        },
+        None => return,
+    };
     let hex = store::oid_hex(&commit);
-    let deployed = deploy::get_status(repo).is_some_and(|s| s.ok && s.commit == hex);
-    if configured && !deployed {
+    if !deploy::is_live(repo, &hex) && !deploy::in_flight(repo, &hex) {
         deploy::enqueue(repo, commit);
     }
 }
@@ -800,9 +810,11 @@ fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
     deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
 }
 
-/// Run the configured deploy now against the repo's current deploy-branch tip,
-/// without waiting for a push. Returns the outcome. Redeploys even when the
-/// tip commit is already in the EVM provenance log (the push path dedupes).
+/// Run the configured deploy now against the repo's release commit -- the
+/// deploy-branch tip, or with votes required the approved commit the site
+/// serves -- without waiting for a push. Returns the outcome. Redeploys even
+/// when the commit is already in the EVM provenance log (the push path
+/// dedupes).
 #[ic_cdk::update]
 async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;

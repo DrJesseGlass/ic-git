@@ -130,7 +130,8 @@ pub async fn publish_commit(
     deploy_record(repo, commit_oid, bundle)?.publish().await
 }
 
-/// The repo's current deploy-branch tip as its deploy-artifact record, ready
+/// The repo's release commit (`deploy::release_commit`: the tip, or with
+/// votes required the approved commit) as its deploy-artifact record, ready
 /// to publish. The operator entry point, and the only deploy-artifact path
 /// that resolves the hash out of the repo: there is no deploy in flight to
 /// inherit bytes from. Resolved before anything is charged, so every way the
@@ -139,7 +140,7 @@ pub fn tip_record(repo: &str) -> Result<Record, String> {
     evm::require_publish_target()?;
     let cfg =
         deploy::get_evm_config(repo).ok_or("repo has no EVM deploy config (nothing to hash)")?;
-    let commit_oid = deploy::current_tip(repo)?;
+    let commit_oid = deploy::release_commit(repo)?;
     let bundle = deploy::evm_artifact_hash(&commit_oid, &cfg.source_path)?;
     deploy_record(repo, &commit_oid, bundle)
 }

@@ -719,19 +719,90 @@ pub fn deploy_branch(repo: &str) -> Option<String> {
     store::head_target(repo)
 }
 
-/// The commit the deploy branch currently points at. The one resolution path
-/// for "what would deploy right now", shared by the explicit-redeploy escape
+/// The commit that would deploy right now: the deploy-branch tip, or with
+/// votes required the approved commit the site serves (`site::served_commit`).
+/// The one resolution path for it, shared by the explicit-redeploy escape
 /// hatch and the registry publisher, so the two cannot disagree about which
 /// commit -- or about how to phrase not finding one.
-pub fn current_tip(repo: &str) -> Result<Oid, String> {
-    let branch = deploy_branch(repo).ok_or(format!("no such repo: {repo}"))?;
-    store::get_ref(repo, &branch).ok_or_else(|| "deploy branch has no commits".to_string())
+pub fn release_commit(repo: &str) -> Result<Oid, String> {
+    crate::site::served_commit(repo).map_err(str::to_string)
 }
 
-/// Run the configured deploy against the repo's current deploy-branch tip,
-/// without waiting for a push. Always deploys, even if the tip commit is
-/// already in the provenance log -- the explicit-redeploy escape hatch.
+/// Run the configured deploy against the repo's release commit, without
+/// waiting for a push. Always deploys, even if the commit is already in the
+/// provenance log -- the explicit-redeploy escape hatch, and the retry for a
+/// failed deploy of an approved commit below an unapproved tip.
 pub async fn run_current(repo: &str) -> Result<DeployStatus, String> {
-    Ok(run(repo, current_tip(repo)?, true).await)
+    Ok(run(repo, release_commit(repo)?, true).await)
 }
 
+/// Is the app already running `commit`? The wasm leg is when the latest
+/// successful install recorded for the repo is that commit -- a failed
+/// attempt does not count, so a retry is not mistaken for a no-op; the EVM
+/// leg is when that commit's contract was deployed. A leg that is not
+/// configured has nothing to run.
+pub fn is_live(repo: &str, commit_hex: &str) -> bool {
+    let wasm = get_config(repo).is_none()
+        || get_history(repo).iter().rev().find(|r| r.ok).is_some_and(|r| r.commit == commit_hex);
+    let evm = get_evm_config(repo).is_none() || evm::latest_deploy(repo, commit_hex).is_some();
+    wasm && evm
+}
+
+/// Is a deploy of `commit` waiting in the queue or running now? Queueing it
+/// again would install it twice and charge twice.
+pub fn in_flight(repo: &str, commit_hex: &str) -> bool {
+    queue_load().iter().any(|j| j.repo == repo && j.commit == commit_hex)
+        || get_status(repo).is_some_and(|s| s.commit == commit_hex && s.message == DEPLOYING)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(commit: &str, ok: bool, message: &str) -> DeployStatus {
+        DeployStatus {
+            commit: commit.into(),
+            ok,
+            message: message.into(),
+            wasm_len: 0,
+            wasm_sha256: String::new(),
+        }
+    }
+
+    /// What the app runs is the latest *successful* install: a failed
+    /// attempt at a commit must not read as live, or an approval could
+    /// never retry it. Rolling back to an older commit is not live until it
+    /// is installed again.
+    #[test]
+    fn live_means_last_successful_install() {
+        store::create_repo("live").unwrap();
+        // Nothing configured: nothing to run, so any commit is live.
+        assert!(is_live("live", "c1"));
+        set_config("live", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        let cfg = get_config("live").unwrap();
+        assert!(!is_live("live", "c1"));
+        record("live", &cfg, &status("c1", true, "installed"));
+        assert!(is_live("live", "c1"));
+        record("live", &cfg, &status("c2", false, "install_code failed"));
+        assert!(!is_live("live", "c2"));
+        assert!(is_live("live", "c1"));
+        record("live", &cfg, &status("c2", true, "installed"));
+        assert!(is_live("live", "c2"));
+        assert!(!is_live("live", "c1"));
+    }
+
+    /// A deploy already queued or running is not queued again.
+    #[test]
+    fn in_flight_covers_queued_and_running() {
+        assert!(!in_flight("fly", "c1"));
+        queue_save(&[DeployJob { repo: "fly".into(), commit: "c1".into() }]);
+        assert!(in_flight("fly", "c1"));
+        assert!(!in_flight("fly", "c2"));
+        queue_save(&[]);
+        put_status("fly", &status("c2", false, DEPLOYING));
+        assert!(in_flight("fly", "c2"));
+        put_status("fly", &status("c2", false, "install_code failed"));
+        assert!(!in_flight("fly", "c2"));
+    }
+}

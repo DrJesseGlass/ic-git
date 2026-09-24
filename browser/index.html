@@ -719,6 +719,9 @@ const Console = (() => {
       // "app" names the repo's own app canister; the canister resolves it.
       onsubmit('f-deploy', async v => { await write('set_wasm_deploy', ['text', 'text', 'text'], [repo, 'app', v.path.trim()]); setTimeout(() => location.reload(), 800); return 'each push to the deploy branch now installs ' + v.path.trim(); });
       onsubmit('f-site', async v => { const root = v.root.trim().replace(/^\/+|\/+$/g, ''); await write('set_site', ['text', 'text'], [repo, root]); setTimeout(() => location.reload(), 800); return 'serving ' + (root || 'the repo root') + ' at /site/' + repo + '/'; });
+      // What deploy now and reinstall install: with votes required, the
+      // approved commit the site serves, not the tip.
+      const release = info.required_votes ? 'the newest approved commit' : 'the deploy-branch tip';
       const outcome = d => (d.ok ? 'deployed ' : 'deploy failed: ') + d.message + ' (commit ' + short(d.commit) + (d.wasm_sha256 ? ', wasm sha256 ' + d.wasm_sha256.slice(0, 12) + ')' : ')');
       onsubmit('f-deploynow', async () => outcome(await write('deploy_now', ['text'], [repo])));
       const box = document.getElementById('box-reinstall'), inp = document.getElementById('in-reinstall'), go = document.getElementById('go-reinstall');
@@ -733,12 +736,12 @@ const Console = (() => {
         const fee = (w ? pr.ic_deploy : 0) + (e ? pr.evm_action : 0);
         const evmNote = e ? 'a new CREATE transaction for ' + e.source_path + ' on the EVM chain (gas limit ' + e.gas_limit + '): a fresh contract at a new address, gas paid on that chain by the signer, not in cycles.' : '';
         cost.textContent = !w && !e ? 'nothing is configured to deploy.'
-          : 'deploy now runs every configured leg against the deploy-branch tip and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '');
+          : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '');
         if (!w) { btn.title = 'nothing is configured to deploy into a canister'; return; }
         const target = w.target === info.app_canister
           ? 'app canister ' + w.target
           : 'canister ' + w.target + ', the configured deploy target, which is NOT this repo\'s app canister (' + info.app_canister + ')';
-        what.innerHTML = '<b>Reinstall wipes every byte of state in ' + esc(target) + '</b> and installs ' + esc(w.source_path) + ' from the deploy-branch tip. Ballots, balances, anything the app stored: gone. There is no undo.' +
+        what.innerHTML = '<b>Reinstall wipes every byte of state in ' + esc(target) + '</b> and installs ' + esc(w.source_path) + ' from ' + release + '. Ballots, balances, anything the app stored: gone. There is no undo.' +
           (e ? '<br><b>It also redeploys the EVM contract</b>, broadcasting ' + esc(evmNote) : '') + '<br>ic-git charges ' + esc(fmtT(fee)) + ' for the deploy.';
         btn.disabled = false;
       });
@@ -759,7 +762,7 @@ const Console = (() => {
             try {
               status('reinstall-st', 'switching the install mode to reinstall...', true);
               await s('set_deploy_mode', ['text', 'text'], [repo, 'reinstall']);
-              status('reinstall-st', 'reinstalling from the deploy-branch tip...', true);
+              status('reinstall-st', 'reinstalling from ' + release + '...', true);
               const d = await s('deploy_now', ['text'], [repo]);
               status('reinstall-st', 'switching the install mode back to upgrade...', true);
               await s('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']);

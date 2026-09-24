@@ -228,7 +228,8 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "deploy_now" => {
             let (repo,): (String,) = args(arg, m)?;
             format!(
-                "Deploy the current tip of \"{repo}\" now, without a push. Every deploy leg the \
+                "Deploy \"{repo}\" now, without a push, from the tip of its deploy branch, or \
+                 from its newest approved commit if it requires votes. Every deploy leg the \
                  repository has configured runs: a wasm leg installs in the configured install \
                  mode, and an EVM leg broadcasts a NEW contract creation transaction on the \
                  configured chain even if this commit was already deployed there. The fee for \
