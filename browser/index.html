@@ -376,7 +376,21 @@ const IC = (() => {
   }
 
   async function showTree(repo, rev, path) {
-    const [{ data: refs }, { data: t, commit }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/tree/' + encodeURIComponent(rev) + (path ? '/' + enc(path) : ''))]);
+    let refs, t, commit;
+    try {
+      [{ data: refs }, { data: t, commit }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/tree/' + encodeURIComponent(rev) + (path ? '/' + enc(path) : ''))]);
+    } catch (e) {
+      // A repository with no commits yet: nothing to browse, everything to
+      // configure. The ownership panel is what turns an empty repository
+      // into one that can be pushed to at all -- the app canister, the
+      // deploy config, the push token -- so this page, of all pages, must
+      // still show it. Until it did, a repository created from a wallet
+      // was a dead end: no token could be minted, so no first commit.
+      render(crumbs(repo, rev, 'tree', path) +
+        '<p class="muted">' + esc(e.message || e) + '. This repository has no commits yet; push a first one and its files appear here.</p>');
+      Console.mount('repo', repo);
+      return;
+    }
     const rows = t.entries.map(e => {
       const p = (path ? path + '/' : '') + e.name;
       const href = e.kind === 'tree' ? H(repo, 'tree', rev, p) : e.kind === 'blob' ? H(repo, 'blob', rev, p) : null;
