@@ -302,7 +302,51 @@ pub fn has_object(oid: &Oid) -> bool {
 
 // --- repos & refs -----------------------------------------------------------
 
-pub fn create_repo(name: &str) -> Result<(), String> {
+/// Longest label a repo name may map to: ic-name-service's segment limit,
+/// and DNS's.
+pub const MAX_LABEL: usize = 63;
+
+/// The lower-kebab label a repo name maps to: lowercased, '.' and '_' made
+/// '-', runs of '-' collapsed, and '-' trimmed from both ends. "My_App"
+/// and "my-app" map to the same "my-app". Refused when that leaves nothing
+/// or more than MAX_LABEL bytes. It is what the repo is announced under in
+/// ic-name-service (names.rs), whose names are lower kebab case only.
+pub fn repo_label(name: &str) -> Result<String, String> {
+    let mut label = String::with_capacity(name.len());
+    for c in name.chars() {
+        let c = match c {
+            '.' | '_' | '-' => '-',
+            c => c.to_ascii_lowercase(),
+        };
+        if !(c == '-' && label.ends_with('-')) {
+            label.push(c);
+        }
+    }
+    let label = label.trim_matches('-').to_string();
+    if label.is_empty() || label.len() > MAX_LABEL {
+        return Err(format!(
+            "repo name '{name}' must map to a label of 1 to {MAX_LABEL} of a-z, 0-9 and '-' \
+             (lowercased, '.' and '_' as '-')"
+        ));
+    }
+    Ok(label)
+}
+
+fn label_key(label: &str) -> String {
+    format!("label:{label}")
+}
+
+/// The repo holding a label, if any. Every repo created since labels
+/// existed holds its own; `index_repo_labels` gives the older ones theirs.
+pub fn label_holder(label: &str) -> Option<String> {
+    meta_get_json(&label_key(label))
+}
+
+/// Check that `name` could be created now, returning its label: a valid
+/// name, not taken, whose label is not held either. `tenancy::create_repo`
+/// runs this before charging the creation fee, so a refused name costs
+/// nothing.
+pub fn check_new_repo(name: &str) -> Result<String, String> {
     if name.is_empty()
         || !name
             .chars()
@@ -311,15 +355,45 @@ pub fn create_repo(name: &str) -> Result<(), String> {
     {
         return Err("repo names: [A-Za-z0-9._-]+, not starting with '.'".into());
     }
-    REPOS.with(|r| {
-        let mut repos = r.borrow_mut();
-        let key = name.to_string();
-        if repos.contains_key(&key) {
-            return Err(format!("repo '{name}' already exists"));
+    if repo_exists(name) {
+        return Err(format!("repo '{name}' already exists"));
+    }
+    let label = repo_label(name)?;
+    if let Some(holder) = label_holder(&label) {
+        return Err(format!(
+            "repo name '{name}' maps to the label '{label}', which repo '{holder}' already holds"
+        ));
+    }
+    Ok(label)
+}
+
+/// Create a repo. Its name must be new, and so must its label: once
+/// "my-app" exists, "My_App" and "my.app" are refused, so every repo maps
+/// to a label no other repo can take.
+pub fn create_repo(name: &str) -> Result<(), String> {
+    let label = check_new_repo(name)?;
+    REPOS.with(|r| r.borrow_mut().insert(name.to_string(), "refs/heads/main".to_string()));
+    meta_set_json(&label_key(&label), &name);
+    Ok(())
+}
+
+/// For post_upgrade: give every repo created before labels existed its
+/// label, first by name order where two would share one (none do on
+/// mainnet at the upgrade that introduces this). A repo left without a
+/// label is not announced. Runs once, behind a marker.
+pub fn index_repo_labels() {
+    const MARKER: &str = "labels:indexed";
+    if meta_get_json::<bool>(MARKER) == Some(true) {
+        return;
+    }
+    for name in list_repos() {
+        if let Ok(label) = repo_label(&name) {
+            if label_holder(&label).is_none() {
+                meta_set_json(&label_key(&label), &name);
+            }
         }
-        repos.insert(key, "refs/heads/main".to_string());
-        Ok(())
-    })
+    }
+    meta_set_json(MARKER, &true);
 }
 
 pub fn repo_exists(name: &str) -> bool {
@@ -502,6 +576,54 @@ pub fn check_schema_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_names_map_to_lower_kebab_labels() {
+        for (name, label) in [
+            ("ic-git", "ic-git"),
+            ("My_App", "my-app"),
+            ("app.v2", "app-v2"),
+            ("a__b..c", "a-b-c"),
+            ("_lead-", "lead"),
+            ("X", "x"),
+        ] {
+            assert_eq!(repo_label(name).unwrap(), label, "{name}");
+        }
+        assert!(repo_label("_").is_err());
+        assert!(repo_label("--").is_err());
+        assert!(repo_label(&"a".repeat(MAX_LABEL)).is_ok());
+        assert!(repo_label(&"a".repeat(MAX_LABEL + 1)).is_err());
+    }
+
+    /// A label is taken by the first repo that maps to it; every other
+    /// spelling of it is refused, and a refused name leaves no trace.
+    #[test]
+    fn a_repo_label_is_unique() {
+        create_repo("my-app").unwrap();
+        assert_eq!(label_holder("my-app").as_deref(), Some("my-app"));
+        for clash in ["My_App", "my.app", "MY-APP", "my__app"] {
+            let err = create_repo(clash).unwrap_err();
+            assert!(err.contains("'my-app'"), "{clash}: {err}");
+            assert!(!repo_exists(clash));
+        }
+        assert!(create_repo("my-app").unwrap_err().contains("already exists"));
+        create_repo("Other.Thing").unwrap();
+        assert_eq!(label_holder("other-thing").as_deref(), Some("Other.Thing"));
+    }
+
+    /// Repos from before labels get theirs on upgrade, first by name order.
+    #[test]
+    fn upgrade_indexes_labels_of_older_repos() {
+        REPOS.with(|r| {
+            let mut r = r.borrow_mut();
+            for n in ["Foo", "foo", "bar_baz"] {
+                r.insert(n.to_string(), "refs/heads/main".to_string());
+            }
+        });
+        index_repo_labels();
+        assert_eq!(label_holder("foo").as_deref(), Some("Foo"));
+        assert_eq!(label_holder("bar-baz").as_deref(), Some("bar_baz"));
+    }
 
     #[test]
     fn object_roundtrip_and_oid() {

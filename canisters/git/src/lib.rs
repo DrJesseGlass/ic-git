@@ -15,6 +15,7 @@ mod interp;
 mod kv;
 mod lang;
 mod ledger;
+mod names;
 mod object;
 mod pack;
 mod provenance;
@@ -60,6 +61,7 @@ fn post_upgrade() {
     tenancy::arm_rent_timer();
     site::record_gated_repos();
     tokens::migrate();
+    store::index_repo_labels();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -949,6 +951,25 @@ fn evm_set_config(
 #[ic_cdk::query]
 fn evm_get_config() -> Option<evm::EvmConfig> {
     evm::get_config()
+}
+
+// --- ic-name-service hook (names.rs) -----------------------------------------
+
+/// Turn on the announce hook: after each successful install, tell the
+/// name service canister `canister` about it under `<handle>/<repo>`.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn names_set_config(canister: String, handle: String) -> Result<(), String> {
+    names::set_config(canister, handle)
+}
+
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn names_clear_config() {
+    names::clear_config()
+}
+
+#[ic_cdk::query]
+fn names_get_config() -> Option<names::NamesConfig> {
+    names::get_config()
 }
 
 /// The canister's own EOA (EIP-55). Derived from the threshold ECDSA public

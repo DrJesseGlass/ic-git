@@ -145,6 +145,13 @@ type EvmDeployStatus = record {
   contract_address : text;
   tx_hash : text;
 };
+// ic-name-service hook: announce each successful install under
+// <handle>/<repo> to the named canister. Off until set.
+type NamesConfig = record {
+  canister : text;
+  handle : text;
+};
+
 type EvmConfig = record {
   evm_rpc : text;
   key_name : text;
@@ -316,6 +323,9 @@ service : {
   // Track A: EVM deployment (E0 signing spine, E1 CREATE)
   evm_set_config : (text, text, nat64, vec text) -> (Result);
   evm_get_config : () -> (opt EvmConfig) query;
+  names_set_config : (text, text) -> (Result);
+  names_clear_config : () -> ();
+  names_get_config : () -> (opt NamesConfig) query;
   evm_address : () -> (ResultText);
   evm_send : (text, text) -> (ResultTxOutcome);
   evm_deploy : (text, nat64) -> (ResultTxOutcome);
