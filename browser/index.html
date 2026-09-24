@@ -8,7 +8,9 @@
   ic-git repo browser. One file, no external resources: every byte that runs
   is inside the blob the ProvenanceRegistry attests, so a verifier that
   matches this file's hash has covered the whole app (VISION.md section 2,
-  "SRI hashes"). Reads go to the canister's /api routes on the same origin.
+  "SRI hashes"). Reads go to the canister's /api routes on the same origin,
+  except the two ledger balances, which are anonymous queries to the IC HTTP
+  API (docs/TENANCY.md, "Console").
 -->
 <style>
   :root { --fg:#1c1c1c; --muted:#6b6b6b; --bg:#fafaf8; --line:#e2e0da; --link:#0b57a4; --code:#f1efe9; }
@@ -179,7 +181,7 @@ const IC = (() => {
     return types.map(value);
   }
 
-  // --- CBOR (decode only: certificates and content maps) ---
+  // --- CBOR: decoder for certificates and content maps, encoder for query envelopes ---
   function cbor(bytes) {
     let pos = 0;
     function item() {
@@ -202,6 +204,37 @@ const IC = (() => {
       }
     }
     return item();
+  }
+  // CBOR encoder, for query envelopes: non-negative ints, text, bytes,
+  // arrays and string-keyed maps, wrapped in the self-describing tag.
+  function cborEnc(v) {
+    const out = [];
+    const head = (mt, n) => { n = big(n); if (n < 24n) out.push((mt << 5) | Number(n)); else if (n < 256n) out.push((mt << 5) | 24, Number(n)); else if (n < 65536n) out.push((mt << 5) | 25, Number(n >> 8n), Number(n & 255n)); else if (n < 4294967296n) out.push((mt << 5) | 26, Number(n >> 24n) & 255, Number(n >> 16n) & 255, Number(n >> 8n) & 255, Number(n & 255n)); else if (n < 18446744073709551616n) { out.push((mt << 5) | 27); for (let i = 7n; i >= 0n; i--) out.push(Number((n >> (8n * i)) & 255n)); } else throw new Error('cbor: over 64 bits'); };
+    function item(v) {
+      if (typeof v === 'number' || typeof v === 'bigint') { if (v < 0) throw new Error('cbor: negative'); head(0, v); }
+      else if (typeof v === 'string') { const b = te.encode(v); head(3, b.length); out.push(...b); }
+      else if (v instanceof Uint8Array) { head(2, v.length); out.push(...v); }
+      else if (Array.isArray(v)) { head(4, v.length); v.forEach(item); }
+      else if (v && typeof v === 'object') { const ks = Object.keys(v); head(5, ks.length); for (const k of ks) { item(k); item(v[k]); } }
+      else throw new Error('cbor: cannot encode ' + typeof v);
+    }
+    out.push(0xd9, 0xd9, 0xf7);
+    item(v);
+    return Uint8Array.from(out);
+  }
+
+  // --- queries ---
+  // An anonymous query straight to the IC HTTP API, for reads that need no
+  // signature (ledger balances). The reply is taken as the boundary node
+  // returns it, without checking node signatures, like the /api reads.
+  const API = 'https://icp-api.io', QUERY_TIMEOUT_MS = 15_000;
+  async function query(canisterId, method, types, values) {
+    const content = { request_type: 'query', sender: Uint8Array.of(4), canister_id: principalFromText(canisterId), method_name: method, arg: encode(types, values), ingress_expiry: BigInt(Date.now() + 240_000) * 1_000_000n };
+    const r = await fetch(API + '/api/v2/canister/' + canisterId + '/query', { method: 'POST', headers: { 'Content-Type': 'application/cbor' }, body: cborEnc({ content }), signal: AbortSignal.timeout(QUERY_TIMEOUT_MS) });
+    if (!r.ok) throw new Error(method + ': HTTP ' + r.status);
+    const res = cbor(new Uint8Array(await r.arrayBuffer()));
+    if (res.status !== 'replied') throw new Error(method + ' rejected: ' + (res.reject_message || res.status));
+    return decode(res.reply.arg);
   }
 
   // --- certificates ---
@@ -253,7 +286,7 @@ const IC = (() => {
   const b64enc = bytes => btoa(String.fromCharCode(...bytes));
   const b64dec = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
   const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-  return { encode, decode, cbor, requestId, lookup, callResult, principalToText, principalFromText, idlHash, b64enc, b64dec, hex };
+  return { encode, decode, cbor, cborEnc, query, requestId, lookup, callResult, principalToText, principalFromText, idlHash, b64enc, b64dec, hex };
 })();
 // === end candid ===
 </script>
@@ -413,7 +446,8 @@ const IC = (() => {
 <script>
 // === console ===
 // Signed-in mode (docs/TENANCY.md, "Console"). Reads come from /api like the
-// rest of the page; every write is a canister call signed by the user's
+// rest of the page, except the wallet's ledger balances, which are anonymous
+// queries to the IC HTTP API; every write is a canister call signed by the user's
 // wallet through the IC signer standards (ICRC-25/27/29/49), which OISY
 // implements. The page never holds a key: it encodes arguments, the wallet
 // signs and submits, and the page decodes the reply from the certificate the
@@ -423,11 +457,16 @@ const Console = (() => {
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const CANISTER = location.hostname.split('.')[0];
   const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
+  const ICP_LEDGER = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+  const ACCOUNT = { record: { owner: 'principal', subaccount: { opt: 'blob' } } };
   const SIGNER = { url: 'https://oisy.com/sign', origin: 'https://oisy.com' };
   const T = 1_000_000_000_000n;
   // Cycles for humans: T above 0.01 T, otherwise B or M.
   const fmtT = n => { n = BigInt(n); if (n >= 10_000_000_000n) { const whole = n / T, frac = (n % T) / 1_000_000_000n; return whole + '.' + String(frac).padStart(3, '0') + ' T'; } if (n >= 1_000_000_000n) return (Number(n) / 1e9).toFixed(1) + ' B cycles'; return (Number(n) / 1e6).toFixed(0) + ' M cycles'; };
   const short = p => p.length > 20 ? p.slice(0, 5) + '...' + p.slice(-3) : p;
+  const fmtCycles = n => { const s = fmtT(n); return s.endsWith(' T') ? s + ' cycles' : s; };
+  // ICP for humans: e8s to a decimal with the trailing zeros trimmed (at least two places).
+  const fmtIcp = n => { n = BigInt(n); const s = (n % 100_000_000n).toString().padStart(8, '0').replace(/0+$/, '').padEnd(2, '0'); return (n / 100_000_000n) + '.' + s + ' ICP'; };
   const RESULT_TYPES = {}; // method -> nothing needed: replies are self-describing
 
   // --- signer (ICRC-25 over postMessage) ---
@@ -543,19 +582,28 @@ const Console = (() => {
   async function reposPanel() {
     let html = '<div class="panel"><h3>console</h3>';
     if (!me) { html += '<p class="muted">Connect a wallet to create repositories, mint push tokens, manage members and votes, and deposit cycles. Reads need no sign-in.</p></div>'; return html; }
-    const pricing = await get('pricing');
-    let acct; try { acct = await get('account/' + encodeURIComponent(me)); } catch (_) { acct = { balance: 0, repos: [] }; }
-    html += '<p>balance <b>' + fmtT(acct.balance) + '</b> <span class="muted">(' + acct.balance + ' cycles)</span>' +
+    // What the wallet holds on the ledgers, read anonymously; null when a ledger did not answer.
+    // They start now and land in the panel when they answer; the controls
+    // below wait only for the same-origin reads.
+    const held = ledger => IC.query(ledger, 'icrc1_balance_of', [ACCOUNT], [{ owner: me, subaccount: null }]).then(r => r[0], e => { console.warn('ledger ' + ledger + ': ' + e.message); return null; });
+    const icp = held(ICP_LEDGER), cyc = held(CYCLES_LEDGER);
+    const [pricing, acct] = await Promise.all([
+      get('pricing'),
+      get('account/' + encodeURIComponent(me)).catch(() => ({ balance: 0, repos: [] }))]);
+    html += '<p>wallet holds <b id="held-icp">...</b> and <b id="held-cyc">...</b> <span class="muted">(on the ledgers, ' + esc(short(me)) + ')</span></p>' +
+      '<p>ic-git balance <b>' + fmtT(acct.balance) + '</b> <span class="muted">(' + acct.balance + ' cycles)</span>' +
       (acct.repos.length ? ' &middot; your repos: ' + acct.repos.map(r => '<a href="#/' + encodeURIComponent(r) + '">' + esc(r) + '</a>').join(', ') : '') + '</p>' +
       '<p class="muted">creating a repo costs ' + fmtT(pricing.create_repo) + '; a push costs ' + fmtT(pricing.push_base) + ' + ' + pricing.push_per_byte + ' cycles/byte; storage rent ' + pricing.rent_per_byte_year + ' cycles per byte-year.</p>' +
       form('f-deposit', [{ name: 'amount', placeholder: 'deposit, in T cycles (e.g. 2)' }], 'deposit from cycles ledger') + '<p id="f-deposit-st" class="status"></p>' +
       form('f-create', [{ name: 'name', placeholder: 'new repo name' }], 'create repo') + '<p id="f-create-st" class="status"></p></div>';
     setTimeout(() => {
+      const land = (id, p, fmt) => p.then(v => { const el = document.getElementById(id); if (el) el.textContent = v === null ? '?' : fmt(v); });
+      land('held-icp', icp, fmtIcp); land('held-cyc', cyc, fmtCycles);
       onsubmit('f-deposit', async v => {
         const amount = cycles(v.amount);
         const fee = 100_000_000n;
         // 1. approve ic-git on the cycles ledger (amount + the withdraw fee), 2. ic-git pulls it.
-        const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: { record: { owner: 'principal', subaccount: { opt: 'blob' } } }, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
+        const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
         await write('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
         const balance = await write('deposit_from_cycles_ledger', ['nat64'], [amount + fee]);
         setTimeout(() => location.reload(), 1200);
