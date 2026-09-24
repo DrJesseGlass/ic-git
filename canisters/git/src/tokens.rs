@@ -63,6 +63,11 @@ struct Stored {
     minted_by: Option<Principal>,
     created_ns: Option<u64>,
     expires_ns: u64,
+    /// The SSH public key the token is bound to (canonical
+    /// `ssh-ed25519 <base64>`), if any: a push with the token must then
+    /// carry a certificate that key signed (signed_push.rs).
+    #[serde(default)]
+    key: Option<String>,
 }
 
 enum Entry {
@@ -141,6 +146,8 @@ pub struct PushTokenInfo {
     pub minted_by: Option<Principal>,
     pub created_ns: Option<u64>,
     pub expires_ns: u64,
+    /// The bound SSH public key, if any. Public, like the rest of this.
+    pub key: Option<String>,
 }
 
 fn info(key: &str, s: Stored) -> PushTokenInfo {
@@ -150,6 +157,7 @@ fn info(key: &str, s: Stored) -> PushTokenInfo {
         minted_by: s.minted_by,
         created_ns: s.created_ns,
         expires_ns: s.expires_ns,
+        key: s.key,
     }
 }
 
@@ -162,46 +170,69 @@ pub fn lifetime(days: Option<u32>) -> Result<u32, String> {
     }
 }
 
+/// The canonical form of a key to bind, refused unless it is an
+/// ssh-ed25519 public key.
+pub fn bindable_key(key: Option<&str>) -> Result<Option<String>, String> {
+    key.map(|k| crate::signed_push::parse_public_key(k).map(|k| k.text)).transpose()
+}
+
 /// Store a freshly minted token for `repo`, valid for `days` (default
-/// `DEFAULT_DAYS`). Returns its info. Expired tokens are swept out first, so
-/// the map does not grow with every token ever minted.
-pub fn mint(repo: &str, token: &str, minted_by: Principal, days: Option<u32>) -> Result<PushTokenInfo, String> {
+/// `DEFAULT_DAYS`), bound to the SSH public key `key` if one is given.
+/// Returns its info. Expired tokens are swept out first, so the map does
+/// not grow with every token ever minted.
+pub fn mint(
+    repo: &str,
+    token: &str,
+    minted_by: Principal,
+    days: Option<u32>,
+    key: Option<&str>,
+) -> Result<PushTokenInfo, String> {
     let days = lifetime(days)?;
+    let key = bindable_key(key)?;
     purge_expired();
     check_room(repo)?;
     let now = now_ns();
-    let key = store::token_key(token);
     let s = Stored {
         repo: repo.to_string(),
         minted_by: Some(minted_by),
         created_ns: Some(now),
         expires_ns: now.saturating_add(u64::from(days) * DAY_NS),
+        key,
     };
-    store_record(&key, &s);
-    Ok(info(&key, s))
+    let id = store::token_key(token);
+    store_record(&id, &s);
+    Ok(info(&id, s))
 }
 
-/// The repo a presented token authorizes right now, if any. An expired
+/// What a token lets its holder do: push to `repo`, and only with a
+/// certificate `key` signed when it is bound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Grant {
+    pub repo: String,
+    pub key: Option<String>,
+}
+
+/// What a presented token authorizes right now, if anything. An expired
 /// token authorizes nothing, and neither does one whose minter fails
 /// `may_write(repo, minter)`: a token lasts only as long as its minter may
 /// write, however that access was lost (a membership change, or an operator
 /// leaving the allowlist). A legacy value is honored only until `migrate`
 /// has run; one written after that (by a rolled-back wasm) would otherwise
 /// authorize forever, unlisted and unswept.
-pub fn authorize_if(token: &str, may_write: impl Fn(&str, &Principal) -> bool) -> Option<String> {
+pub fn authorize_if(token: &str, may_write: impl Fn(&str, &Principal) -> bool) -> Option<Grant> {
     match parse(store::token_get(&store::token_key(token))?) {
         Entry::Stored(s) => (now_ns() < s.expires_ns
             && s.minted_by.as_ref().is_none_or(|p| may_write(&s.repo, p)))
-        .then_some(s.repo),
-        Entry::Legacy(repo) => (!migrated()).then_some(repo),
+        .then_some(Grant { repo: s.repo, key: s.key }),
+        Entry::Legacy(repo) => (!migrated()).then_some(Grant { repo, key: None }),
         Entry::Unreadable => None,
     }
 }
 
-/// `authorize_if` with every minter still a writer.
+/// The repo `authorize_if` grants, with every minter still a writer.
 #[cfg(test)]
 pub fn authorize(token: &str) -> Option<String> {
-    authorize_if(token, |_, _| true)
+    authorize_if(token, |_, _| true).map(|g| g.repo)
 }
 
 /// The repo a token belongs to, expired or not: who may revoke it.
@@ -324,6 +355,7 @@ pub fn migrate() {
                     minted_by: None,
                     created_ns: None,
                     expires_ns,
+                    key: None,
                 },
             ),
             Entry::Stored(s) => {
@@ -351,7 +383,7 @@ mod tests {
     #[test]
     fn a_token_authorizes_its_repo_until_it_expires() {
         set_test_now(T0);
-        let t = mint("exp", "tok-exp", alice(), Some(2)).unwrap();
+        let t = mint("exp", "tok-exp", alice(), Some(2), None).unwrap();
         assert_eq!(t.expires_ns, T0 + 2 * DAY_NS);
         assert_eq!(t.minted_by, Some(alice()));
         assert_eq!(authorize("tok-exp").as_deref(), Some("exp"));
@@ -368,20 +400,20 @@ mod tests {
     #[test]
     fn lifetime_defaults_and_is_bounded() {
         set_test_now(T0);
-        let t = mint("life", "tok-life", alice(), None).unwrap();
+        let t = mint("life", "tok-life", alice(), None, None).unwrap();
         assert_eq!(t.expires_ns, T0 + u64::from(DEFAULT_DAYS) * DAY_NS);
-        assert!(mint("life", "tok-zero", alice(), Some(0)).is_err());
-        assert!(mint("life", "tok-long", alice(), Some(MAX_DAYS + 1)).is_err());
-        assert!(mint("life", "tok-max", alice(), Some(MAX_DAYS)).is_ok());
+        assert!(mint("life", "tok-zero", alice(), Some(0), None).is_err());
+        assert!(mint("life", "tok-long", alice(), Some(MAX_DAYS + 1), None).is_err());
+        assert!(mint("life", "tok-max", alice(), Some(MAX_DAYS), None).is_ok());
         assert_eq!(authorize("tok-zero"), None);
     }
 
     #[test]
     fn listing_shows_live_tokens_of_one_repo_by_id() {
         set_test_now(T0);
-        let a = mint("lst", "tok-a", alice(), Some(5)).unwrap();
-        let b = mint("lst", "tok-b", alice(), Some(1)).unwrap();
-        mint("other", "tok-c", alice(), Some(1)).unwrap();
+        let a = mint("lst", "tok-a", alice(), Some(5), None).unwrap();
+        let b = mint("lst", "tok-b", alice(), Some(1), None).unwrap();
+        mint("other", "tok-c", alice(), Some(1), None).unwrap();
         let ids: Vec<String> = list("lst").into_iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![b.id.clone(), a.id.clone()]);
         assert_eq!(a.id, store::token_key("tok-a")[..ID_LEN]);
@@ -397,9 +429,9 @@ mod tests {
     #[test]
     fn minting_sweeps_expired_tokens() {
         set_test_now(T0);
-        mint("swp", "tok-old", alice(), Some(1)).unwrap();
+        mint("swp", "tok-old", alice(), Some(1), None).unwrap();
         set_test_now(T0 + 2 * DAY_NS);
-        mint("swp", "tok-new", alice(), Some(1)).unwrap();
+        mint("swp", "tok-new", alice(), Some(1), None).unwrap();
         assert_eq!(repo_of("tok-old"), None);
         assert_eq!(authorize("tok-new").as_deref(), Some("swp"));
         set_test_now(T0);
@@ -415,9 +447,9 @@ mod tests {
     #[test]
     fn the_index_follows_mint_revoke_and_sweep() {
         set_test_now(T0);
-        mint("idx", "tok-1", alice(), Some(1)).unwrap();
-        mint("idx", "tok-2", alice(), Some(3)).unwrap();
-        mint("idx-other", "tok-3", alice(), Some(1)).unwrap();
+        mint("idx", "tok-1", alice(), Some(1), None).unwrap();
+        mint("idx", "tok-2", alice(), Some(3), None).unwrap();
+        mint("idx-other", "tok-3", alice(), Some(1), None).unwrap();
         assert_eq!(list("idx").len(), 2);
         assert_eq!(list("idx-other").len(), 1);
         assert!(revoke("tok-2"));
@@ -436,9 +468,9 @@ mod tests {
     #[test]
     fn revoke_unless_drops_only_the_named_minters_tokens() {
         set_test_now(T0);
-        mint("mem", "tok-alice", alice(), Some(5)).unwrap();
-        mint("mem", "tok-bob", bob(), Some(5)).unwrap();
-        mint("mem-other", "tok-alice-2", alice(), Some(5)).unwrap();
+        mint("mem", "tok-alice", alice(), Some(5), None).unwrap();
+        mint("mem", "tok-bob", bob(), Some(5), None).unwrap();
+        mint("mem-other", "tok-alice-2", alice(), Some(5), None).unwrap();
         store::token_put(&store::token_key("tok-old"), "mem".to_string());
         migrate();
         assert_eq!(revoke_unless("mem", |p| *p != alice()), 1);
@@ -461,9 +493,9 @@ mod tests {
         tenancy::create_repo("acl", &owner, false).unwrap();
         tenancy::add_member("acl", &owner, false, w1, Role::Writer).unwrap();
         tenancy::add_member("acl", &owner, false, w2, Role::Writer).unwrap();
-        mint("acl", "tok-owner", owner, None).unwrap();
-        mint("acl", "tok-w1", w1, None).unwrap();
-        mint("acl", "tok-w2", w2, None).unwrap();
+        mint("acl", "tok-owner", owner, None, None).unwrap();
+        mint("acl", "tok-w1", w1, None, None).unwrap();
+        mint("acl", "tok-w2", w2, None, None).unwrap();
         let sweep = || revoke_unless("acl", |p| tenancy::can_write("acl", p, false).is_ok());
 
         tenancy::remove_member("acl", &owner, false, w1).unwrap();
@@ -486,18 +518,18 @@ mod tests {
     fn live_tokens_per_repo_are_capped() {
         set_test_now(T0);
         for i in 0..MAX_LIVE_PER_REPO {
-            mint("cap", &format!("tok-cap-{i}"), alice(), Some(1 + (i == 0) as u32 * 9)).unwrap();
+            mint("cap", &format!("tok-cap-{i}"), alice(), Some(1 + (i == 0) as u32 * 9), None).unwrap();
         }
-        let err = mint("cap", "tok-over", alice(), None).unwrap_err();
+        let err = mint("cap", "tok-over", alice(), None, None).unwrap_err();
         assert!(err.contains("revoke one first"), "{err}");
         assert!(check_room("cap").is_err());
-        assert!(mint("cap-other", "tok-elsewhere", alice(), None).is_ok());
+        assert!(mint("cap-other", "tok-elsewhere", alice(), None, None).is_ok());
         assert!(revoke("tok-cap-1"));
-        assert!(mint("cap", "tok-over", alice(), None).is_ok());
+        assert!(mint("cap", "tok-over", alice(), None, None).is_ok());
         // All but tok-cap-0 expire after a day, which frees their slots.
         set_test_now(T0 + DAY_NS);
         assert!(check_room("cap").is_ok());
-        assert!(mint("cap", "tok-later", alice(), None).is_ok());
+        assert!(mint("cap", "tok-later", alice(), None, None).is_ok());
         set_test_now(T0);
     }
 
@@ -509,7 +541,7 @@ mod tests {
         let n = PURGE_BATCH + 10;
         for i in 0..n {
             // Spread over repos to stay under the per-repo cap.
-            mint(&format!("sw{}", i / MAX_LIVE_PER_REPO), &format!("tok-sw-{i}"), alice(), Some(1)).unwrap();
+            mint(&format!("sw{}", i / MAX_LIVE_PER_REPO), &format!("tok-sw-{i}"), alice(), Some(1), None).unwrap();
         }
         set_test_now(T0 + DAY_NS);
         purge_expired();
@@ -537,16 +569,34 @@ mod tests {
     #[test]
     fn a_token_needs_a_minter_who_may_still_write() {
         set_test_now(T0);
-        mint("mw", "tok-mw", alice(), None).unwrap();
-        assert_eq!(authorize_if("tok-mw", |_, p| *p == alice()).as_deref(), Some("mw"));
+        mint("mw", "tok-mw", alice(), None, None).unwrap();
+        assert_eq!(authorize_if("tok-mw", |_, p| *p == alice()).map(|g| g.repo).as_deref(), Some("mw"));
         assert_eq!(authorize_if("tok-mw", |_, p| *p != alice()), None);
+    }
+
+    /// A token can be bound to an ssh-ed25519 key, which its grant carries
+    /// and its listing shows; anything else is refused at mint.
+    #[test]
+    fn a_token_can_be_bound_to_an_ssh_key() {
+        set_test_now(T0);
+        const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKX+WM3RHsIaqzeD1rg3zUF4Y9Py92QmWG7n+3f2051F";
+        let t = mint("bound", "tok-bound", alice(), None, Some(&format!("{KEY} me@laptop"))).unwrap();
+        // Stored canonical: the comment is dropped.
+        assert_eq!(t.key.as_deref(), Some(KEY));
+        assert_eq!(list("bound")[0].key.as_deref(), Some(KEY));
+        let g = authorize_if("tok-bound", |_, _| true).unwrap();
+        assert_eq!((g.repo.as_str(), g.key.as_deref()), ("bound", Some(KEY)));
+        let plain = authorize_if(&{ mint("bound", "tok-plain", alice(), None, None).unwrap(); "tok-plain".to_string() }, |_, _| true);
+        assert_eq!(plain.unwrap().key, None);
+        assert!(mint("bound", "tok-rsa", alice(), None, Some("ssh-rsa AAAAB3NzaC1yc2E x")).is_err());
+        assert!(authorize("tok-rsa").is_none());
     }
 
     /// Records written before the index existed are indexed by migrate.
     #[test]
     fn migrate_indexes_unindexed_records() {
         set_test_now(T0);
-        let s = Stored { repo: "unidx".into(), minted_by: Some(alice()), created_ns: Some(T0), expires_ns: T0 + DAY_NS };
+        let s = Stored { repo: "unidx".into(), minted_by: Some(alice()), created_ns: Some(T0), expires_ns: T0 + DAY_NS, key: None };
         store::token_put(&store::token_key("tok-u"), serde_json::to_string(&s).unwrap());
         assert!(list("unidx").is_empty());
         migrate();

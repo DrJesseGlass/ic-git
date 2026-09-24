@@ -98,6 +98,7 @@ struct RepoTenancy {
     required_votes: u32,
     app_canister: Option<String>,
     exempt: bool,
+    require_signed_push: bool,
 }
 
 /// What a deployed app can show about itself: the config that names its
@@ -193,6 +194,7 @@ pub fn handle(url: &str) -> HttpResponse {
                     required_votes: i.required_votes,
                     app_canister: i.app_canister.map(|p| p.to_text()),
                     exempt: i.exempt,
+                    require_signed_push: i.require_signed_push,
                 },
                 None,
             ),

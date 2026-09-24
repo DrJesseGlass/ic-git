@@ -89,6 +89,14 @@ pub fn parse_pkt_lines(buf: &[u8]) -> Result<(Vec<Vec<u8>>, usize), String> {
 /// caps.
 pub fn advertisement(repo: &str, service: Service, head_target: &str) -> Vec<u8> {
     let mut caps = service.caps().to_string();
+    // Offer signed pushes (signed_push.rs): a client with push.gpgSign set
+    // signs a certificate carrying this nonce.
+    if service == Service::ReceivePack {
+        let now_s = crate::tenancy::now_ns() / 1_000_000_000;
+        if let Some(nonce) = crate::signed_push::nonce(repo, now_s) {
+            caps.push_str(&format!(" push-cert={nonce}"));
+        }
+    }
     let mut entries = store::list_refs(repo);
     if let Some(oid) = entries
         .iter()

@@ -42,6 +42,7 @@ type PushTokenInfo = record {
   minted_by : opt principal;
   created_ns : opt nat64;
   expires_ns : nat64;
+  key : opt text;
 };
 
 // tenancy (docs/TENANCY.md)
@@ -56,6 +57,7 @@ type RepoInfo = record {
   required_votes : nat32;
   app_canister : opt principal;
   exempt : bool;
+  require_signed_push : bool;
 };
 type Ballot = record { "principal" : principal; approve : bool; at_ns : nat64 };
 type Pricing = record {
@@ -246,7 +248,8 @@ service : {
   create_repo : (text) -> (Result);
   put_object : (text, blob) -> (ResultText);
   set_ref : (text, text, text) -> (Result);
-  create_push_token : (text, opt nat32) -> (ResultText);
+  create_push_token : (text, opt nat32, opt text) -> (ResultText);
+  set_require_signed_push : (text, bool) -> (Result);
   list_push_tokens : (text) -> (vec PushTokenInfo) query;
   revoke_push_token : (text) -> (bool);
   revoke_push_token_id : (text) -> (Result);

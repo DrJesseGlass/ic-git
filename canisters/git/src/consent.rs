@@ -157,17 +157,31 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
             format!("Send {} from your ic-git balance to the app canister of \"{repo}\".", cycles(amount))
         }
         "create_push_token" => {
-            // `days` is a trailing opt: an argument without it decodes as None.
-            let (repo, days): (String, Option<u32>) = args(arg, m)?;
-            // Describe only a lifetime the call would accept.
-            let days = crate::tokens::lifetime(days).map_err(|e| {
-                Icrc21Error::ConsentMessageUnavailable(ErrorInfo { description: format!("{m}: {e}") })
-            })?;
-            format!(
-                "Mint a push token for \"{repo}\". Anyone holding the token can push to the \
-                 repository for {days} day{} from now, or until it is revoked if that is sooner.",
+            // `days` and `key` are trailing opts: an argument without them
+            // decodes as None.
+            let (repo, days, key): (String, Option<u32>, Option<String>) = args(arg, m)?;
+            let refuse = |e: String| Icrc21Error::ConsentMessageUnavailable(ErrorInfo { description: format!("{m}: {e}") });
+            // Describe only a lifetime and a key the call would accept.
+            let days = crate::tokens::lifetime(days).map_err(refuse)?;
+            let key = key
+                .map(|k| crate::signed_push::parse_public_key(&k))
+                .transpose()
+                .map_err(refuse)?;
+            let lasts = format!(
+                "for {days} day{} from now, or until it is revoked if that is sooner",
                 if days == 1 { "" } else { "s" }
-            )
+            );
+            match key {
+                None => format!(
+                    "Mint a push token for \"{repo}\". Anyone holding the token can push to the \
+                     repository {lasts}."
+                ),
+                Some(k) => format!(
+                    "Mint a push token for \"{repo}\" bound to the SSH key {}. A push with it must \
+                     also be signed by that key; it works {lasts}.",
+                    crate::signed_push::fingerprint(&k)
+                ),
+            }
         }
         "revoke_push_token" => {
             let (token,): (String,) = args(arg, m)?;
@@ -193,6 +207,17 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "remove_member" => {
             let (repo, who): (String, Principal) = args(arg, m)?;
             format!("Remove {who} from \"{repo}\". They lose every role they held there.")
+        }
+        "set_require_signed_push" => {
+            let (repo, on): (String, bool) = args(arg, m)?;
+            if on {
+                format!(
+                    "Require every push to \"{repo}\" to be signed: a push with a push token \
+                     that is not bound to an SSH key will be refused."
+                )
+            } else {
+                format!("Stop requiring signed pushes to \"{repo}\": any valid push token can push.")
+            }
         }
         "set_required_votes" => {
             let (repo, k): (String, u32) = args(arg, m)?;
@@ -383,6 +408,13 @@ mod tests {
             ("create_push_token", encode_args(("ic-vote",)).unwrap(), &["push token", "for 30 days", "revoked"]),
             ("create_push_token", encode_args(("ic-vote", Some(1u32))).unwrap(), &["for 1 day from now"]),
             ("create_push_token", encode_args(("ic-vote", Some(90u32))).unwrap(), &["for 90 days"]),
+            (
+                "create_push_token",
+                encode_args(("ic-vote", None::<u32>, Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKX+WM3RHsIaqzeD1rg3zUF4Y9Py92QmWG7n+3f2051F me@laptop"))).unwrap(),
+                &["bound to the SSH key SHA256:AJwEzIG2jf+W4YxJdLVmVNYmuyYEjyZpuDAtIkdMTw8", "signed by that key", "30 days"],
+            ),
+            ("set_require_signed_push", encode_args(("ic-vote", true)).unwrap(), &["Require every push", "refused"]),
+            ("set_require_signed_push", encode_args(("ic-vote", false)).unwrap(), &["Stop requiring"]),
             ("revoke_push_token_id", encode_args(("0123456789abcdef",)).unwrap(), &["id 0123456789abcdef", "refused"]),
             ("revoke_push_token", encode_args(("0123456789abcdef0123456789abcdef",)).unwrap(), &["01234567...", "refused"]),
             ("add_member", encode_args(("ic-vote", p, "voter")).unwrap(), &["3kq6u-eptpm", "voter", "approve or reject"]),
