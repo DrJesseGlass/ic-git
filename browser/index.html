@@ -8,7 +8,9 @@
   ic-git repo browser. One file, no external resources: every byte that runs
   is inside the blob the ProvenanceRegistry attests, so a verifier that
   matches this file's hash has covered the whole app (VISION.md section 2,
-  "SRI hashes"). Reads go to the canister's /api routes on the same origin.
+  "SRI hashes"). Reads go to the canister's /api routes on the same origin,
+  except the two ledger balances, which are anonymous queries to the IC HTTP
+  API (docs/TENANCY.md, "Console").
 -->
 <style>
   :root { --fg:#1c1c1c; --muted:#6b6b6b; --bg:#fafaf8; --line:#e2e0da; --link:#0b57a4; --code:#f1efe9; }
@@ -179,7 +181,7 @@ const IC = (() => {
     return types.map(value);
   }
 
-  // --- CBOR (decode only: certificates and content maps) ---
+  // --- CBOR: decoder for certificates and content maps, encoder for query envelopes ---
   function cbor(bytes) {
     let pos = 0;
     function item() {
@@ -207,7 +209,7 @@ const IC = (() => {
   // arrays and string-keyed maps, wrapped in the self-describing tag.
   function cborEnc(v) {
     const out = [];
-    const head = (mt, n) => { n = big(n); if (n < 24n) out.push((mt << 5) | Number(n)); else if (n < 256n) out.push((mt << 5) | 24, Number(n)); else if (n < 65536n) out.push((mt << 5) | 25, Number(n >> 8n), Number(n & 255n)); else if (n < 4294967296n) out.push((mt << 5) | 26, Number(n >> 24n) & 255, Number(n >> 16n) & 255, Number(n >> 8n) & 255, Number(n & 255n)); else { out.push((mt << 5) | 27); for (let i = 7n; i >= 0n; i--) out.push(Number((n >> (8n * i)) & 255n)); } };
+    const head = (mt, n) => { n = big(n); if (n < 24n) out.push((mt << 5) | Number(n)); else if (n < 256n) out.push((mt << 5) | 24, Number(n)); else if (n < 65536n) out.push((mt << 5) | 25, Number(n >> 8n), Number(n & 255n)); else if (n < 4294967296n) out.push((mt << 5) | 26, Number(n >> 24n) & 255, Number(n >> 16n) & 255, Number(n >> 8n) & 255, Number(n & 255n)); else if (n < 18446744073709551616n) { out.push((mt << 5) | 27); for (let i = 7n; i >= 0n; i--) out.push(Number((n >> (8n * i)) & 255n)); } else throw new Error('cbor: over 64 bits'); };
     function item(v) {
       if (typeof v === 'number' || typeof v === 'bigint') { if (v < 0) throw new Error('cbor: negative'); head(0, v); }
       else if (typeof v === 'string') { const b = te.encode(v); head(3, b.length); out.push(...b); }
@@ -225,10 +227,10 @@ const IC = (() => {
   // An anonymous query straight to the IC HTTP API, for reads that need no
   // signature (ledger balances). The reply is taken as the boundary node
   // returns it, without checking node signatures, like the /api reads.
-  const API = 'https://icp-api.io';
+  const API = 'https://icp-api.io', QUERY_TIMEOUT_MS = 15_000;
   async function query(canisterId, method, types, values) {
     const content = { request_type: 'query', sender: Uint8Array.of(4), canister_id: principalFromText(canisterId), method_name: method, arg: encode(types, values), ingress_expiry: BigInt(Date.now() + 240_000) * 1_000_000n };
-    const r = await fetch(API + '/api/v2/canister/' + canisterId + '/query', { method: 'POST', headers: { 'Content-Type': 'application/cbor' }, body: cborEnc({ content }) });
+    const r = await fetch(API + '/api/v2/canister/' + canisterId + '/query', { method: 'POST', headers: { 'Content-Type': 'application/cbor' }, body: cborEnc({ content }), signal: AbortSignal.timeout(QUERY_TIMEOUT_MS) });
     if (!r.ok) throw new Error(method + ': HTTP ' + r.status);
     const res = cbor(new Uint8Array(await r.arrayBuffer()));
     if (res.status !== 'replied') throw new Error(method + ' rejected: ' + (res.reject_message || res.status));
@@ -444,7 +446,8 @@ const IC = (() => {
 <script>
 // === console ===
 // Signed-in mode (docs/TENANCY.md, "Console"). Reads come from /api like the
-// rest of the page; every write is a canister call signed by the user's
+// rest of the page, except the wallet's ledger balances, which are anonymous
+// queries to the IC HTTP API; every write is a canister call signed by the user's
 // wallet through the IC signer standards (ICRC-25/27/29/49), which OISY
 // implements. The page never holds a key: it encodes arguments, the wallet
 // signs and submits, and the page decodes the reply from the certificate the
@@ -579,11 +582,12 @@ const Console = (() => {
   async function reposPanel() {
     let html = '<div class="panel"><h3>console</h3>';
     if (!me) { html += '<p class="muted">Connect a wallet to create repositories, mint push tokens, manage members and votes, and deposit cycles. Reads need no sign-in.</p></div>'; return html; }
-    const pricing = await get('pricing');
-    let acct; try { acct = await get('account/' + encodeURIComponent(me)); } catch (_) { acct = { balance: 0, repos: [] }; }
     // What the wallet holds on the ledgers, read anonymously; null when a ledger did not answer.
-    const held = ledger => IC.query(ledger, 'icrc1_balance_of', [ACCOUNT], [{ owner: me, subaccount: null }]).then(r => r[0], () => null);
-    const [icp, cyc] = await Promise.all([held(ICP_LEDGER), held(CYCLES_LEDGER)]);
+    const held = ledger => IC.query(ledger, 'icrc1_balance_of', [ACCOUNT], [{ owner: me, subaccount: null }]).then(r => r[0], e => { console.warn('ledger ' + ledger + ': ' + e.message); return null; });
+    const [pricing, acct, icp, cyc] = await Promise.all([
+      get('pricing'),
+      get('account/' + encodeURIComponent(me)).catch(() => ({ balance: 0, repos: [] })),
+      held(ICP_LEDGER), held(CYCLES_LEDGER)]);
     html += '<p>wallet holds <b>' + (icp === null ? '?' : fmtIcp(icp)) + '</b> and <b>' + (cyc === null ? '?' : fmtCycles(cyc)) + '</b> <span class="muted">(on the ledgers, ' + esc(short(me)) + ')</span></p>' +
       '<p>ic-git balance <b>' + fmtT(acct.balance) + '</b> <span class="muted">(' + acct.balance + ' cycles)</span>' +
       (acct.repos.length ? ' &middot; your repos: ' + acct.repos.map(r => '<a href="#/' + encodeURIComponent(r) + '">' + esc(r) + '</a>').join(', ') : '') + '</p>' +
@@ -595,7 +599,7 @@ const Console = (() => {
         const amount = cycles(v.amount);
         const fee = 100_000_000n;
         // 1. approve ic-git on the cycles ledger (amount + the withdraw fee), 2. ic-git pulls it.
-        const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: { record: { owner: 'principal', subaccount: { opt: 'blob' } } }, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
+        const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
         await write('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
         const balance = await write('deposit_from_cycles_ledger', ['nat64'], [amount + fee]);
         setTimeout(() => location.reload(), 1200);
