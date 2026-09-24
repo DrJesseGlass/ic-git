@@ -108,7 +108,29 @@ can also top it up from any wallet, since it is theirs.
 ## Console
 
 The repo browser page gains a signed-in mode: connect a wallet, see balance
-and repos, create repos, mint tokens, manage members and votes, deposit.
+and repos, create repos, mint tokens, manage members and votes, deposit,
+and set what a push deploys (`set_wasm_deploy`, into the repo's app
+canister) and what is served as a site (`set_site`), run the configured
+deploy without a push (`deploy_now`), and reinstall. That is the whole
+tenant flow: nothing between a funded wallet and a deployed push needs dfx.
+
+Reinstall is the one destructive control, and it is built to be hard to
+do by accident: a red button opens a box naming the configured deploy
+target (which is normally the app canister, but `set_wasm_deploy` accepts
+any canister, so the box names the one the config holds and says so when
+it is not the app canister) and what will be wiped, and the run button
+stays disabled until the owner has typed the repository name. Because the
+install mode is a setting rather than an action, the control switches to
+reinstall, deploys, and switches back to upgrade, and reports in red if
+the switch back did not happen.
+
+A deploy runs every configured leg, and `deploy_now` does not dedupe: a
+repo with an EVM leg broadcasts a new CREATE transaction each time, a
+fresh contract at a new address, paid for in ic-git's `evm_action` fee and
+in gas on the other chain. That is the right behavior (the contract is
+meant to track the app), but it is money outside cycles, so both the
+deploy-now line and the reinstall box say what the deploy charges and
+that the EVM contract will be redeployed, before the owner signs.
 Reads go through the canister's `/api` routes; every write is a canister call
 the wallet signs, so the page never holds a key. It stays one self-contained
 file, so its attestation still covers every byte that runs.

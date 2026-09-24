@@ -53,6 +53,10 @@
   .panel button:hover, header button:hover { border-color:var(--link); }
   .panel .status { margin:.4rem 0 0; min-height:1.2em; }
   .panel .ok { color:#1a7f37; } .panel .bad { color:#b3261e; }
+button.danger { border-color:#b3261e; color:#b3261e; }
+button.danger:disabled { opacity:.45; cursor:not-allowed; }
+.confirm { border:1px solid #b3261e; border-radius:4px; padding:.6rem .8rem; margin:.5rem 0; }
+.confirm input { width:16rem; }
   .tok { user-select:all; }
 </style>
 </head>
@@ -138,7 +142,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -576,6 +580,9 @@ const Console = (() => {
   const get = async path => { const r = await fetch('/api/' + path); if (!r.ok) throw new Error((await r.json()).error || r.statusText); return r.json(); };
   const status = (id, msg, ok) => { const el = document.getElementById(id); if (el) { el.textContent = msg; el.className = 'status ' + (ok ? 'ok' : 'bad'); } };
   const form = (id, fields, label) => '<form id="' + id + '">' + fields.map(f => '<input name="' + f.name + '" placeholder="' + esc(f.placeholder) + '"' + (f.value ? ' value="' + esc(f.value) + '"' : '') + (f.list ? ' list="' + f.list + '"' : '') + '>').join('') + '<button>' + esc(label) + '</button></form>';
+  // A read that arrives after the panel is on screen: fill its slot when it
+  // answers, `?` when it does not. Nothing else on the page waits for it.
+  const land = (id, p, fmt) => p.then(v => { const el = document.getElementById(id); if (el) el.textContent = v === undefined ? '?' : fmt(v); });
   const onsubmit = (id, fn) => { const f = document.getElementById(id); if (f) f.onsubmit = async e => { e.preventDefault(); const st = id + '-st'; status(st, 'waiting for wallet...', true); try { status(st, await fn(Object.fromEntries(new FormData(f))), true); } catch (err) { status(st, err.message, false); } }; };
   const cycles = s => { const t = Number(s); if (!(t > 0)) throw new Error('enter an amount in T cycles'); return BigInt(Math.round(t * 1e9)) * 1_000n; };
 
@@ -585,7 +592,7 @@ const Console = (() => {
     // What the wallet holds on the ledgers, read anonymously; null when a ledger did not answer.
     // They start now and land in the panel when they answer; the controls
     // below wait only for the same-origin reads.
-    const held = ledger => IC.query(ledger, 'icrc1_balance_of', [ACCOUNT], [{ owner: me, subaccount: null }]).then(r => r[0], e => { console.warn('ledger ' + ledger + ': ' + e.message); return null; });
+    const held = ledger => IC.query(ledger, 'icrc1_balance_of', [ACCOUNT], [{ owner: me, subaccount: null }]).then(r => r[0], e => { console.warn('ledger ' + ledger + ': ' + e.message); return undefined; });
     const icp = held(ICP_LEDGER), cyc = held(CYCLES_LEDGER);
     const [pricing, acct] = await Promise.all([
       get('pricing'),
@@ -597,7 +604,6 @@ const Console = (() => {
       form('f-deposit', [{ name: 'amount', placeholder: 'deposit, in T cycles (e.g. 2)' }], 'deposit from cycles ledger') + '<p id="f-deposit-st" class="status"></p>' +
       form('f-create', [{ name: 'name', placeholder: 'new repo name' }], 'create repo') + '<p id="f-create-st" class="status"></p></div>';
     setTimeout(() => {
-      const land = (id, p, fmt) => p.then(v => { const el = document.getElementById(id); if (el) el.textContent = v === null ? '?' : fmt(v); });
       land('held-icp', icp, fmtIcp); land('held-cyc', cyc, fmtCycles);
       onsubmit('f-deposit', async v => {
         const amount = cycles(v.amount);
@@ -617,11 +623,20 @@ const Console = (() => {
   async function repoPanel(repo) {
     const info = await get(encodeURIComponent(repo) + '/info');
     const isOwner = me && info.owner === me, isWriter = isOwner || (me && info.members.some(m => m.principal === me && m.role === 'writer'));
+    // What the repo deploys and serves. Both are canister queries with no
+    // /api route, so they go to the IC HTTP API like the ledger reads and
+    // must not hold the panel: null means not configured, undefined means
+    // the read failed.
+    const cfg = method => IC.query(CANISTER, method, ['text'], [repo]).then(r => r[0], e => { console.warn(method + ': ' + e.message); return undefined; });
+    const deployCfg = cfg('get_deploy_config'), evmCfg = cfg('get_evm_deploy_config'), siteCfg = cfg('get_site');
+    // The fee table, for saying what a deploy costs before it is run.
+    const pricing = get('pricing').catch(e => { console.warn('pricing: ' + e.message); return undefined; });
     let html = '<div class="panel"><h3>ownership</h3>' +
       '<p>owner: ' + (info.owner ? '<span class="oid" title="' + esc(info.owner) + '">' + esc(short(info.owner)) + '</span>' : '<span class="muted">operator (exempt)</span>') +
       ' &middot; storage ' + info.storage_bytes + ' bytes' + (info.delinquent ? ' &middot; <b class="bad">behind on rent</b>' : '') +
       ' &middot; deploys need ' + info.required_votes + ' approval' + (info.required_votes === 1 ? '' : 's') +
-      (info.app_canister ? ' &middot; app canister <span class="oid">' + esc(info.app_canister) + '</span>' : '') + '</p>';
+      (info.app_canister ? ' &middot; app canister <span class="oid">' + esc(info.app_canister) + '</span>' : '') + '</p>' +
+      '<p>on push, deploys <b id="cfg-deploy">...</b> &middot; site <b id="cfg-site">...</b></p>';
     if (info.members.length) html += '<table><tr><th>member</th><th>role</th>' + (isOwner ? '<th></th>' : '') + '</tr>' + info.members.map(m => '<tr><td class="oid">' + esc(m.principal) + '</td><td>' + esc(m.role) + '</td>' + (isOwner ? '<td><button class="rm" data-p="' + esc(m.principal) + '">remove</button></td>' : '') + '</tr>').join('') + '</table>';
     if (isWriter) html += form('f-token', [], 'mint push token') + '<p id="f-token-st" class="status tok"></p>';
     if (isOwner) html += form('f-member', [{ name: 'principal', placeholder: 'principal' }, { name: 'role', placeholder: 'writer or voter', value: 'writer' }], 'add member') + '<p id="f-member-st" class="status"></p>' +
@@ -629,6 +644,23 @@ const Console = (() => {
       (info.app_canister
         ? form('f-topup', [{ name: 'amount', placeholder: 'T cycles to add' }], 'top up app canister') + '<p id="f-topup-st" class="status"></p>'
         : form('f-app', [{ name: 'amount', placeholder: 'T cycles (min 1)' }], 'create app canister') + '<p id="f-app-st" class="status"></p>');
+    if (isOwner) html += (info.app_canister
+        ? form('f-deploy', [{ name: 'path', placeholder: 'path in the commit, e.g. app.wasm (.wasm, .wat or .lang)' }], 'deploy on push into the app canister') + '<p id="f-deploy-st" class="status"></p>'
+        : '<p class="muted">create the app canister above, then choose what each push deploys into it.</p>') +
+      form('f-site', [{ name: 'root', placeholder: 'directory to serve, e.g. site (empty = repo root)' }], 'serve as site') + '<p id="f-site-st" class="status"></p>' +
+      (info.app_canister
+        ? form('f-deploynow', [], 'deploy now') + ' <button id="btn-reinstall" class="danger" type="button" disabled>reinstall...</button>' +
+          '<p id="deploy-cost" class="muted">...</p><p id="f-deploynow-st" class="status"></p>' +
+          // The guard: no native dialog (those block the page), a box the
+          // owner has to read, and a run button that stays disabled until
+          // the typed name is the repo's. The box is written from the deploy
+          // config once it lands, because what a reinstall wipes is the
+          // configured target, which need not be this repo's app canister;
+          // and a deploy runs every configured leg, so an EVM contract
+          // deploy and its cost are named too. No undo on either side.
+          '<div id="box-reinstall" class="confirm" hidden><p id="reinstall-what" class="bad"></p>' +
+          '<p>Type the repository name <b>' + esc(repo) + '</b> to confirm: <input id="in-reinstall" autocomplete="off"> <button id="go-reinstall" class="danger" type="button" disabled>reinstall now</button> <button id="cancel-reinstall" type="button">cancel</button></p><p id="reinstall-st" class="status"></p></div>'
+        : '');
     if (!me) html += '<p class="muted">connect a wallet to manage this repo.</p>';
     html += '</div>';
     setTimeout(() => {
@@ -637,6 +669,60 @@ const Console = (() => {
       onsubmit('f-votes', async v => { await write('set_required_votes', ['text', 'nat32'], [repo, Number(v.k)]); setTimeout(() => location.reload(), 800); return 'saved'; });
       onsubmit('f-app', async v => 'created app canister ' + await write('create_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]));
       onsubmit('f-topup', async v => { await write('top_up_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]); return 'topped up'; });
+      const wasmLeg = c => c.source_path + ' into ' + (c.target === info.app_canister ? 'the app canister' : short(c.target)) + ' (' + Object.keys(c.mode)[0] + ')';
+      const evmLeg = c => 'a contract from ' + c.source_path + ' on the EVM chain (gas limit ' + c.gas_limit + ')';
+      land('cfg-deploy', Promise.all([deployCfg, evmCfg]), ([w, e]) => w === undefined || e === undefined ? '?' : [w && wasmLeg(w), e && evmLeg(e)].filter(Boolean).join(' and ') || 'nothing (not configured)');
+      land('cfg-site', siteCfg, c => c === null ? 'not served' : 'served from ' + (c.root ? c.root + '/' : 'the repo root') + ' at /site/' + repo + '/');
+      // "app" names the repo's own app canister; the canister resolves it.
+      onsubmit('f-deploy', async v => { await write('set_wasm_deploy', ['text', 'text', 'text'], [repo, 'app', v.path.trim()]); setTimeout(() => location.reload(), 800); return 'each push to the deploy branch now installs ' + v.path.trim(); });
+      onsubmit('f-site', async v => { const root = v.root.trim().replace(/^\/+|\/+$/g, ''); await write('set_site', ['text', 'text'], [repo, root]); setTimeout(() => location.reload(), 800); return 'serving ' + (root || 'the repo root') + ' at /site/' + repo + '/'; });
+      const outcome = d => (d.ok ? 'deployed ' : 'deploy failed: ') + d.message + ' (commit ' + short(d.commit) + (d.wasm_sha256 ? ', wasm sha256 ' + d.wasm_sha256.slice(0, 12) + ')' : ')');
+      onsubmit('f-deploynow', async () => outcome(await write('deploy_now', ['text'], [repo])));
+      const box = document.getElementById('box-reinstall'), inp = document.getElementById('in-reinstall'), go = document.getElementById('go-reinstall');
+      const btn = document.getElementById('btn-reinstall'), cancel = document.getElementById('cancel-reinstall');
+      // What deploy now and reinstall will do and charge, from the configs.
+      // A deploy runs every configured leg: the EVM leg broadcasts a new
+      // CREATE transaction each time, which costs ic-git's fee here and gas
+      // on the other chain, and is not undone by anything on this side.
+      if (btn) Promise.all([deployCfg, evmCfg, pricing]).then(([w, e, pr]) => {
+        const cost = document.getElementById('deploy-cost'), what = document.getElementById('reinstall-what');
+        if (w === undefined || e === undefined || pr === undefined) { cost.textContent = 'could not read the deploy config or the fee table; reload before deploying.'; return; }
+        const fee = (w ? pr.ic_deploy : 0) + (e ? pr.evm_action : 0);
+        const evmNote = e ? 'a new CREATE transaction for ' + e.source_path + ' on the EVM chain (gas limit ' + e.gas_limit + '): a fresh contract at a new address, gas paid on that chain by the signer, not in cycles.' : '';
+        cost.textContent = !w && !e ? 'nothing is configured to deploy.'
+          : 'deploy now runs every configured leg against the deploy-branch tip and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '');
+        if (!w) { btn.title = 'nothing is configured to deploy into a canister'; return; }
+        const target = w.target === info.app_canister
+          ? 'app canister ' + w.target
+          : 'canister ' + w.target + ', the configured deploy target, which is NOT this repo\'s app canister (' + info.app_canister + ')';
+        what.innerHTML = '<b>Reinstall wipes every byte of state in ' + esc(target) + '</b> and installs ' + esc(w.source_path) + ' from the deploy-branch tip. Ballots, balances, anything the app stored: gone. There is no undo.' +
+          (e ? '<br><b>It also redeploys the EVM contract</b>, broadcasting ' + esc(evmNote) : '') + '<br>ic-git charges ' + esc(fmtT(fee)) + ' for the deploy.';
+        btn.disabled = false;
+      });
+      if (btn) btn.onclick = () => { box.hidden = false; inp.value = ''; go.disabled = true; inp.focus(); };
+      if (cancel) cancel.onclick = () => { box.hidden = true; };
+      if (inp) inp.oninput = () => { go.disabled = inp.value.trim() !== repo; };
+      if (go) go.onclick = async () => {
+        if (inp.value.trim() !== repo) return;
+        go.disabled = true; btn.disabled = true;
+        // The mode is a setting, not an action: it stays until changed. So
+        // switch, deploy, and switch back, and say so loudly if the switch
+        // back did not happen -- every later push would wipe state again.
+        let restored = false;
+        try {
+          status('reinstall-st', 'switching the install mode to reinstall...', true);
+          await write('set_deploy_mode', ['text', 'text'], [repo, 'reinstall']);
+          status('reinstall-st', 'reinstalling from the deploy-branch tip...', true);
+          const d = await write('deploy_now', ['text'], [repo]);
+          status('reinstall-st', 'switching the install mode back to upgrade...', true);
+          await write('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']);
+          restored = true;
+          status('reinstall-st', outcome(d) + '; install mode is back to upgrade', d.ok);
+        } catch (e) {
+          if (!restored) { try { await write('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']); restored = true; } catch (_) {} }
+          status('reinstall-st', e.message + (restored ? '; install mode is back to upgrade' : '. INSTALL MODE IS STILL REINSTALL: every push will wipe the deploy target until you set it back'), false);
+        } finally { btn.disabled = false; }
+      };
       document.querySelectorAll('button.rm').forEach(b => { b.onclick = async () => { try { await write('remove_member', ['text', 'principal'], [repo, b.dataset.p]); location.reload(); } catch (e) { alert(e.message); } }; });
     }, 0);
     return html;
