@@ -565,16 +565,29 @@ const Console = (() => {
       if (el) el.insertAdjacentHTML('afterbegin', '<span class="bad">sign in failed: ' + esc(e.message) + '</span> ');
     }
   }
-  // Every write: connect (reuses the popup), sign, decode, unwrap Result.
-  async function write(method, types, values, canister) {
+  // One wallet session per user action. The popup is opened once, inside
+  // the click that asked for it, and closed when the outermost action is
+  // over. An action that signs more than once (deposit is two calls,
+  // reinstall is three) must not reopen the popup between them: a
+  // window.open that runs after an await has left the user's click behind,
+  // and the browser's popup blocker refuses it -- which is how the first
+  // half of a deposit could succeed and the second half never happen.
+  let sessions = 0;
+  async function session(fn) {
     if (!me) throw new Error('connect a wallet first');
     await signer.connect(null);
-    let r;
-    try { r = await signer.call(canister || CANISTER, me, method, types, values); }
-    finally { signer.disconnect(); }
+    sessions++;
+    try { return await fn(sign); }
+    finally { if (--sessions === 0) signer.disconnect(); }
+  }
+  // Sign one call in the open session, decode, unwrap Result.
+  async function sign(method, types, values, canister) {
+    const r = await signer.call(canister || CANISTER, me, method, types, values);
     if (r && typeof r === 'object' && 'Err' in r) throw new Error(typeof r.Err === 'string' ? r.Err : JSON.stringify(r.Err, (k, v) => typeof v === 'bigint' ? v.toString() : v));
     return r && typeof r === 'object' && 'Ok' in r ? r.Ok : r;
   }
+  // A single-call action.
+  const write = (method, types, values, canister) => session(s => s(method, types, values, canister));
 
   // --- panels ---
   const get = async path => { const r = await fetch('/api/' + path); if (!r.ok) throw new Error((await r.json()).error || r.statusText); return r.json(); };
@@ -610,8 +623,10 @@ const Console = (() => {
         const fee = 100_000_000n;
         // 1. approve ic-git on the cycles ledger (amount + the withdraw fee), 2. ic-git pulls it.
         const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
-        await write('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
-        const balance = await write('deposit_from_cycles_ledger', ['nat64'], [amount + fee]);
+        const balance = await session(async s => {
+          await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
+          return s('deposit_from_cycles_ledger', ['nat64'], [amount + fee]);
+        });
         setTimeout(() => location.reload(), 1200);
         return 'deposited; balance now ' + fmtT(balance);
       });
@@ -710,16 +725,24 @@ const Console = (() => {
         // back did not happen -- every later push would wipe state again.
         let restored = false;
         try {
-          status('reinstall-st', 'switching the install mode to reinstall...', true);
-          await write('set_deploy_mode', ['text', 'text'], [repo, 'reinstall']);
-          status('reinstall-st', 'reinstalling from the deploy-branch tip...', true);
-          const d = await write('deploy_now', ['text'], [repo]);
-          status('reinstall-st', 'switching the install mode back to upgrade...', true);
-          await write('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']);
-          restored = true;
-          status('reinstall-st', outcome(d) + '; install mode is back to upgrade', d.ok);
+          // All three calls in one wallet session: the popup opened by this
+          // click stays open, so no call is refused by the popup blocker.
+          await session(async s => {
+            try {
+              status('reinstall-st', 'switching the install mode to reinstall...', true);
+              await s('set_deploy_mode', ['text', 'text'], [repo, 'reinstall']);
+              status('reinstall-st', 'reinstalling from the deploy-branch tip...', true);
+              const d = await s('deploy_now', ['text'], [repo]);
+              status('reinstall-st', 'switching the install mode back to upgrade...', true);
+              await s('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']);
+              restored = true;
+              status('reinstall-st', outcome(d) + '; install mode is back to upgrade', d.ok);
+            } catch (e) {
+              if (!restored) { try { await s('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']); restored = true; } catch (_) {} }
+              throw e;
+            }
+          });
         } catch (e) {
-          if (!restored) { try { await write('set_deploy_mode', ['text', 'text'], [repo, 'upgrade']); restored = true; } catch (_) {} }
           status('reinstall-st', e.message + (restored ? '; install mode is back to upgrade' : '. INSTALL MODE IS STILL REINSTALL: every push will wipe the deploy target until you set it back'), false);
         } finally { btn.disabled = false; }
       };
