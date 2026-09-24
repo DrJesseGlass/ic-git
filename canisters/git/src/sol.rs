@@ -52,7 +52,7 @@ mod base58 {
         }
         let zeros = input.iter().take_while(|&&b| b == 0).count();
         let mut s = String::with_capacity(zeros + digits.len());
-        s.extend(std::iter::repeat('1').take(zeros));
+        s.extend(std::iter::repeat_n('1', zeros));
         s.extend(digits.iter().rev().map(|&d| ALPHABET[d as usize] as char));
         s
     }
@@ -318,6 +318,9 @@ enum ProviderError {
     UnsupportedCluster(String),
 }
 
+/// Mirrors the RPC canister's Candid interface: Candid matches variants by
+/// name, so these names are wire format and cannot lose their suffix.
+#[allow(clippy::enum_variant_names)]
 #[derive(CandidType, Deserialize, Debug, Clone)]
 enum RpcError {
     JsonRpcError(JsonRpcError),

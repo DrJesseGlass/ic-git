@@ -243,7 +243,7 @@ fn upload_pack(repo: &str, body: &[u8]) -> HttpResponse {
 fn http_request_streaming_callback(token: StreamingCallbackToken) -> StreamingCallbackHttpResponse {
     match pack::next_chunk(&token) {
         Ok(chunk) => chunk,
-        Err(e) => ic_cdk::trap(&format!("streaming callback: {e}")),
+        Err(e) => ic_cdk::trap(format!("streaming callback: {e}")),
     }
 }
 

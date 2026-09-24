@@ -382,6 +382,9 @@ enum ValidationError {
     InvalidHex(String),
 }
 
+/// Mirrors the RPC canister's Candid interface: Candid matches variants by
+/// name, so these names are wire format and cannot lose their suffix.
+#[allow(clippy::enum_variant_names)]
 #[derive(CandidType, Deserialize, Debug, Clone)]
 enum RpcError {
     JsonRpcError(JsonRpcError),
@@ -1073,7 +1076,7 @@ fn abi_encode_set(record_key: &str, commit: &[u8; 20], bundle: &[u8; 32]) -> Vec
     word[24..].copy_from_slice(&(record_key.len() as u64).to_be_bytes());
     out.extend_from_slice(&word);
     out.extend_from_slice(record_key.as_bytes());
-    out.extend(std::iter::repeat(0u8).take((32 - record_key.len() % 32) % 32));
+    out.extend(std::iter::repeat_n(0u8, (32 - record_key.len() % 32) % 32));
     out
 }
 
