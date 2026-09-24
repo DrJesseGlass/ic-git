@@ -50,6 +50,13 @@ assert.deepEqual(dec('reply:result_members_ok'), { Ok: [{ principal: USER, role:
 assert.deepEqual(dec('reply:result_account_ok'), { Ok: { balance: 7n, deposited: 8n, spent: 1n, created_ns: 1_700_000_000_000_000_000n } });
 assert.deepEqual(dec('reply:result_principal_ok'), { Ok: CANISTER });
 assert.deepEqual(dec('reply:icrc2_approve_ok'), { Ok: 42n });
+// The two per-repo configs the ownership panel reads: opt records, with a
+// variant for the install mode. Field and variant names must resolve, or
+// the panel would print hashes.
+assert.deepEqual(dec('reply:opt_deploy_config_some'), { target: CANISTER, source_path: 'app.wasm', mode: { upgrade: null } });
+assert.equal(dec('reply:opt_deploy_config_none'), null);
+assert.deepEqual(dec('reply:opt_site_some'), { root: 'browser' });
+assert.deepEqual(dec('reply:opt_site_reinstall_mode'), { target: CANISTER, source_path: 'x.wat', mode: { reinstall: null } });
 
 // CBOR + hash tree: build a certificate-shaped structure by hand and look up a reply.
 // CBOR bytes: {"tree": [2, "request_status", [2, <id>, [1, [2, "reply", [3, <candid>]], [2, "status", [3, "replied"]]]]]}

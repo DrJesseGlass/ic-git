@@ -108,7 +108,10 @@ can also top it up from any wallet, since it is theirs.
 ## Console
 
 The repo browser page gains a signed-in mode: connect a wallet, see balance
-and repos, create repos, mint tokens, manage members and votes, deposit.
+and repos, create repos, mint tokens, manage members and votes, deposit,
+and set what a push deploys (`set_wasm_deploy`, into the repo's app
+canister) and what is served as a site (`set_site`). That is the whole
+tenant flow: nothing between a funded wallet and a deployed push needs dfx.
 Reads go through the canister's `/api` routes; every write is a canister call
 the wallet signs, so the page never holds a key. It stays one self-contained
 file, so its attestation still covers every byte that runs.

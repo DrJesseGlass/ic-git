@@ -24,6 +24,23 @@ struct Member {
     role: Role,
 }
 
+#[derive(CandidType, Deserialize)]
+enum DeployMode {
+    #[serde(rename = "upgrade")]
+    Upgrade,
+    #[serde(rename = "reinstall")]
+    Reinstall,
+}
+#[derive(CandidType, Deserialize)]
+struct DeployConfig {
+    target: String,
+    source_path: String,
+    mode: DeployMode,
+}
+#[derive(CandidType, Deserialize)]
+struct SiteConfig {
+    root: String,
+}
 #[derive(CandidType)]
 struct IcrcAccount {
     owner: Principal,
@@ -71,6 +88,10 @@ fn print_vectors() {
         ("reply:result_account_ok", encode_one(Ok::<Account, String>(Account { balance: 7, deposited: 8, spent: 1, created_ns: 1_700_000_000_000_000_000 })).unwrap()),
         ("reply:result_principal_ok", encode_one(Ok::<Principal, String>(p)).unwrap()),
         ("reply:icrc2_approve_ok", encode_one(Ok::<Nat, ()>(Nat::from(42u64))).unwrap()),
+        ("reply:opt_deploy_config_some", encode_one(Some(DeployConfig { target: p.to_text(), source_path: "app.wasm".into(), mode: DeployMode::Upgrade })).unwrap()),
+        ("reply:opt_deploy_config_none", encode_one(None::<DeployConfig>).unwrap()),
+        ("reply:opt_site_some", encode_one(Some(SiteConfig { root: "browser".into() })).unwrap()),
+        ("reply:opt_site_reinstall_mode", encode_one(Some(DeployConfig { target: p.to_text(), source_path: "x.wat".into(), mode: DeployMode::Reinstall })).unwrap()),
     ];
     println!("VECTORS_BEGIN");
     for (name, bytes) in v {
