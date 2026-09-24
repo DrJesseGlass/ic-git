@@ -11,15 +11,47 @@
 //! announced under: repo "foo" becomes "<handle>/foo". A failed announce is
 //! appended to the deploy status message and never fails the deploy.
 //!
+//! The call runs inside the deploy queue, which deploys one job at a time
+//! for every repo, so it is a bounded-wait call with `ANNOUNCE_TIMEOUT_S`:
+//! a name service that hangs costs one deploy that long, not the queue
+//! forever, and cannot hold an open call context that blocks stopping this
+//! canister for an upgrade.
+//!
+//! ic-name-service names are lower kebab case only. The handle is checked
+//! against its segment rule (`check_segment`, a copy of ic-name-service's)
+//! when it is configured; a repo is announced under its label
+//! (`store::repo_label`: "My_App" -> "my-app"), which `create_repo` makes
+//! unique across repos, so two repos can never announce the same name. A
+//! repo from before labels existed that holds none is skipped with a note.
+//!
 //! Direction of dependency: nothing here depends on ic-name-service code;
 //! the argument record is a candid mirror of its `Announcement` type.
 
 use crate::kv;
 use candid::{CandidType, Principal};
-use ic_dev_kit_rs::intercanister;
+use ic_cdk::call::Call;
 use serde::{Deserialize, Serialize};
 
 const CONFIG_KEY: &str = "names:config";
+/// How long a deploy waits on the name service before giving up.
+const ANNOUNCE_TIMEOUT_S: u32 = 60;
+/// ic-name-service's MAX_SEGMENT.
+const MAX_SEGMENT: usize = 63;
+
+/// ic-name-service's rule for a handle or a label: 1 to 63 bytes of a-z,
+/// 0-9 and '-', not starting or ending with '-'.
+fn check_segment(what: &str, s: &str) -> Result<(), String> {
+    if s.is_empty() || s.len() > MAX_SEGMENT {
+        return Err(format!("{what} must be 1 to {MAX_SEGMENT} bytes"));
+    }
+    if !s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return Err(format!("{what} may only contain a-z, 0-9 and '-'"));
+    }
+    if s.starts_with('-') || s.ends_with('-') {
+        return Err(format!("{what} may not start or end with '-'"));
+    }
+    Ok(())
+}
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct NamesConfig {
@@ -29,7 +61,8 @@ pub struct NamesConfig {
     pub handle: String,
 }
 
-/// Mirror of ic-name-service's `Announcement`.
+/// Mirror of ic-name-service's `Announcement`. `name` is
+/// `<handle>/<label>`; `repo` is the repo's own name.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 struct Announcement {
     name: String,
@@ -41,9 +74,7 @@ struct Announcement {
 
 pub fn set_config(canister: String, handle: String) -> Result<(), String> {
     Principal::from_text(&canister).map_err(|e| format!("bad names canister principal: {e}"))?;
-    if handle.is_empty() || handle.contains('/') {
-        return Err("handle must be non-empty and contain no '/'".into());
-    }
+    check_segment("handle", &handle)?;
     kv::set_json(CONFIG_KEY, &NamesConfig { canister, handle });
     Ok(())
 }
@@ -68,7 +99,12 @@ pub async fn announce(repo: &str, target: &str, commit: &str, module_hash: &str)
         Ok(p) => p,
         Err(e) => return Some(format!(" (announce skipped: bad target: {e})")),
     };
-    let name = format!("{}/{}", cfg.handle, repo);
+    let label = match crate::store::repo_label(repo) {
+        Ok(l) if crate::store::label_holder(&l).as_deref() == Some(repo) => l,
+        Ok(l) => return Some(format!(" (announce skipped: label '{l}' is not held by this repo)")),
+        Err(e) => return Some(format!(" (announce skipped: {e})")),
+    };
+    let name = format!("{}/{}", cfg.handle, label);
     let arg = Announcement {
         name: name.clone(),
         canister,
@@ -76,11 +112,41 @@ pub async fn announce(repo: &str, target: &str, commit: &str, module_hash: &str)
         commit: commit.to_string(),
         module_hash: module_hash.to_string(),
     };
-    match intercanister::call::<(Announcement,), (Result<(), String>,)>(names, "announce", (arg,))
-        .await
-    {
-        Ok((Ok(()),)) => Some(format!(" (announced as {name})")),
-        Ok((Err(e),)) => Some(format!(" (announce refused: {e})")),
+    let reply = Call::bounded_wait(names, "announce")
+        .with_arg(arg)
+        .change_timeout(ANNOUNCE_TIMEOUT_S)
+        .await;
+    match reply.map(|r| r.candid::<Result<(), String>>()) {
+        Ok(Ok(Ok(()))) => Some(format!(" (announced as {name})")),
+        Ok(Ok(Err(e))) => Some(format!(" (announce refused: {e})")),
+        Ok(Err(e)) => Some(format!(" (announce reply undecodable: {e})")),
         Err(e) => Some(format!(" (announce failed: {e})")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segments_follow_the_name_service_rule() {
+        for ok in ["ic-git", "ic-vote", "a", "x1", &"a".repeat(MAX_SEGMENT)] {
+            assert!(check_segment("s", ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "My_App", "app.v2", "Upper", "-lead", "trail-", "a/b", &"a".repeat(MAX_SEGMENT + 1)] {
+            assert!(check_segment("s", bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn config_refuses_a_handle_the_name_service_would() {
+        let names = "aaaaa-aa".to_string();
+        assert!(set_config(names.clone(), "Solo".into()).is_err());
+        assert!(set_config(names.clone(), "a/b".into()).is_err());
+        assert!(set_config("not a principal".into(), "solo".into()).is_err());
+        set_config(names.clone(), "solo".into()).unwrap();
+        assert_eq!(get_config().unwrap().handle, "solo");
+        clear_config();
+        assert!(get_config().is_none());
     }
 }

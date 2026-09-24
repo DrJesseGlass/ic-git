@@ -61,6 +61,7 @@ fn post_upgrade() {
     tenancy::arm_rent_timer();
     site::record_gated_repos();
     tokens::migrate();
+    store::index_repo_labels();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
