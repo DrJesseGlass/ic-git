@@ -24,7 +24,7 @@ const SITE_KEY_SUFFIX: &str = "#site";
 
 /// A resolved provenance record: the registry key, the commit being attested,
 /// and the artifact hash bound to it.
-struct Record {
+pub struct Record {
     key: String,
     commit: [u8; 20],
     bundle: [u8; 32],
@@ -32,7 +32,7 @@ struct Record {
 
 impl Record {
     /// The module's single exit point to the signing side.
-    async fn publish(&self) -> Result<TxOutcome, String> {
+    pub async fn publish(&self) -> Result<TxOutcome, String> {
         evm::registry_publish_record(&self.key, &self.commit, &self.bundle).await
     }
 }
@@ -79,7 +79,7 @@ fn deploy_record(repo: &str, commit_oid: &Oid, bundle: [u8; 32]) -> Result<Recor
 /// artifact is a frontend file hashed as raw bytes, matching how the F2
 /// verifier hashes a served non-hex artifact.
 fn site_record(repo: &str) -> Result<Record, String> {
-    let (tip, served, body) = site::resolve_entry(repo, "")
+    let (commit, served, body) = site::resolve_entry(repo, "")
         .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html, approved if the repo requires votes)")?;
     // Refuse to attest bytes `site::serve` would answer 413 for. Publishing
     // one costs a real registry transaction and produces a record no verifier
@@ -109,7 +109,7 @@ fn site_record(repo: &str) -> Result<Record, String> {
     }
     Ok(Record {
         key: format!("{repo}{SITE_KEY_SUFFIX}"),
-        commit: commit20(&tip)?,
+        commit: commit20(&commit)?,
         bundle: sha2::Sha256::digest(&body).into(),
     })
 }
@@ -130,22 +130,25 @@ pub async fn publish_commit(
     deploy_record(repo, commit_oid, bundle)?.publish().await
 }
 
-/// Publish the repo's current deploy-branch tip as its deploy-artifact record.
-/// The operator entry point, and the only deploy-artifact path that resolves
-/// the hash out of the repo: there is no deploy in flight to inherit bytes from.
-pub async fn publish_tip(repo: &str) -> Result<TxOutcome, String> {
+/// The repo's current deploy-branch tip as its deploy-artifact record, ready
+/// to publish. The operator entry point, and the only deploy-artifact path
+/// that resolves the hash out of the repo: there is no deploy in flight to
+/// inherit bytes from. Resolved before anything is charged, so every way the
+/// publish can fail short of the transaction itself fails for free.
+pub fn tip_record(repo: &str) -> Result<Record, String> {
     evm::require_publish_target()?;
     let cfg =
         deploy::get_evm_config(repo).ok_or("repo has no EVM deploy config (nothing to hash)")?;
     let commit_oid = deploy::current_tip(repo)?;
     let bundle = deploy::evm_artifact_hash(&commit_oid, &cfg.source_path)?;
-    publish_commit(repo, &commit_oid, bundle).await
+    deploy_record(repo, &commit_oid, bundle)
 }
 
-/// Publish the repo's served-site record.
-pub async fn publish_site(repo: &str) -> Result<TxOutcome, String> {
+/// The repo's served-site record, ready to publish; resolved before anything
+/// is charged, like `tip_record`.
+pub fn served_site_record(repo: &str) -> Result<Record, String> {
     evm::require_publish_target()?;
-    site_record(repo)?.publish().await
+    site_record(repo)
 }
 
 #[cfg(test)]

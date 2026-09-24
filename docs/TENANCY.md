@@ -86,21 +86,32 @@ voters (the owner counts as one) have approved it with
 `vote(repo, commit, true)`. Ballots can be changed; a removed voter's ballot
 stops counting. A `k` above the owner plus voters is refused, and so is
 removing a voter or transferring the repo when that would leave `k` out of
-reach: lower `k` first. When the deploy-branch tip reaches the threshold,
-its deploy is queued from the vote call itself. `k = 0`, the default,
-deploys on push as before.
+reach: lower `k` first. `k = 0`, the default, deploys on push as before.
 
-The same approval gates what a repo serves as a site. `/site/<repo>/`
-serves the newest commit on the deploy branch's first-parent line that
-has reached the threshold, looking back at most 64 commits; with `k = 0`
-that is the tip. An unapproved push is therefore not served: the last
-approved commit stays up until the new one is approved, and a site with
-no approved commit in range answers 404. It is judged against the
-current ballots on every request, so withdrawing an approval, removing a
-voter, or raising `k` takes a commit down as it stops it deploying.
+With `k > 0` the repo has one approved commit, and both the app and the
+site follow it: the newest commit on the deploy branch's first-parent line
+that has reached the threshold, looking back up to 1024 commits from the
+tip. The canister records it after every call that can move it -- a
+ballot, `set_required_votes`, adding or removing a member, a transfer, a
+push -- and when it moves, `/site/<repo>/` serves it from then on and its
+deploy is queued. That holds whichever way it moves: approving a commit
+below the tip deploys and serves it, and withdrawing the approval on the
+served commit rolls both the site and the app back to the approved commit
+before it. An unapproved push is not served and does not deploy. No
+number of unapproved pushes buries the approved commit: once it is out of
+the walk's reach the recorded one stays until a newer one is approved.
+Every site request re-checks the recorded commit's ballots, so a site
+never serves a commit that is not approved now; with nothing approved it
+answers 404. Approvals on history a merge brought in through its second
+parent are not seen.
+
 Setting `k` above 0 on a live site takes the site down until a commit is
-approved, so approve the tip right after. `evm_registry_publish_site`
-attests the same served commit, never an unapproved tip. This is the same K-of-N shape as the release
+approved, so approve the tip right after. Setting it back to 0 serves the
+tip and deploys it if the held pushes never did. `evm_registry_publish_site`
+attests the served commit, never an unapproved tip, and like
+`evm_registry_publish` it charges only once the record resolves.
+
+This is the same K-of-N shape as the release
 attestations in docs/ATTESTATION.md, applied one level down: the people
 expected to approve a release are named on the repo, and the canister
 enforces the count.

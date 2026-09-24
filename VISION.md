@@ -88,7 +88,7 @@ The path here, in shippable order:
   gateway cannot forge or suppress.
 - **F1 -- attest on update.** On push, publish `(commit, sha256(bundle))` to
   the ProvenanceRegistry. The machinery exists today
-  (`provenance::publish_tip`); F1 is wiring it into the deploy queue.
+  (`provenance::tip_record`); F1 is wiring it into the deploy queue.
 - **F2 -- verify at the client.** A verifier in the user's trust domain
   (extension, or the wallet itself) hashes what was served and compares to
   the registry. Section 3's reviewer subsumes this.

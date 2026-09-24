@@ -4,8 +4,9 @@
 //! GET /site/<repo>/<path> resolves <path> within the tree of the repo's
 //! served commit (under the configured root directory) and serves the blob.
 //! The served commit is the deploy-branch tip when the repo requires no
-//! votes, and otherwise the newest commit on that branch the voters have
-//! approved (`served_commit`): a push goes live when its deploy would. The
+//! votes, and otherwise the newest approved commit on that branch, which
+//! `advance` records whenever the approvals change and the deploy queue is
+//! sent the same commit: the site and the app follow the same approvals. The
 //! serving code and the source of truth are the same audited canister: what
 //! is served IS what is committed, and every response names the commit it
 //! came from (X-Ic-Git-Commit) -- the binding a client-side verifier (F2)
@@ -402,14 +403,14 @@ fn plain(status_code: u16, msg: &str) -> HttpResponse {
 /// config: its tree location (site root prefix and index.html fallback
 /// applied) and bytes. One walk from the root -- a blob serves directly; a
 /// directory (including "" for the bundle root) serves the index.html inside.
-fn resolve_blob(tip: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<(String, Vec<u8>)> {
+fn resolve_blob(commit: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<(String, Vec<u8>)> {
     let rel = path.trim_matches('/');
     let full = match (cfg.root.is_empty(), rel.is_empty()) {
         (true, _) => rel.to_string(),
         (false, true) => cfg.root.clone(),
         (false, false) => format!("{}/{rel}", cfg.root),
     };
-    match object::node_at_path(tip, &full) {
+    match object::node_at_path(commit, &full) {
         Ok((ObjectType::Blob, body)) => Some((full, body)),
         Ok((ObjectType::Tree, tree)) => object::tree_entries(&tree)
             .ok()
@@ -427,44 +428,115 @@ fn resolve_blob(tip: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<(Strin
     }
 }
 
-/// How many commits back from the tip `served_commit` looks for one the
-/// voters approved. The walk runs inside every site request, so it is
-/// bounded; a branch that has run further than this past its last approval
-/// serves nothing until a recent commit is approved.
-pub const APPROVAL_WALK: usize = 64;
+/// How far back from the tip `advance` looks for the newest approved commit.
+/// It runs in update calls (a vote, a push, a policy change), never in a
+/// site request, so it can look further than a request could afford; a
+/// branch that has run further than this past its last approval keeps
+/// serving the recorded commit rather than losing it.
+pub const APPROVAL_WALK: usize = 1024;
 
-/// The commit a site serves: the newest commit on the deploy branch's
-/// first-parent line that the repo's vote policy approves right now. With no
-/// votes required (the default, and every legacy repo) that is the tip. With
-/// votes required, an unapproved push is not served; the last approved
-/// commit before it stays up. Evaluated against the current ballots and
-/// threshold, never cached, so raising the threshold or removing a voter
-/// takes a commit down as surely as it stops that commit deploying.
-pub fn served_commit(repo: &str) -> Result<store::Oid, &'static str> {
+/// What a votes-gated repo serves and deploys (META key `served:{repo}`).
+/// Absent while the repo requires no votes. `commit` is `None` when no
+/// commit is approved.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+struct Served {
+    commit: Option<String>,
+}
+
+fn served_key(repo: &str) -> String {
+    format!("served:{repo}")
+}
+
+fn required_votes(repo: &str) -> u32 {
+    crate::tenancy::meta(repo).map_or(0, |m| m.required_votes)
+}
+
+fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
     let branch = store::head_target(repo).ok_or("no such repo")?;
-    let mut cur = store::get_ref(repo, &branch).ok_or("site branch has no commits")?;
-    for _ in 0..APPROVAL_WALK {
-        if crate::tenancy::approved(repo, &store::oid_hex(&cur)) {
-            return Ok(cur);
-        }
-        let parent = match store::get_object_parsed(&cur) {
-            Some((ObjectType::Commit, body)) => object::commit_refs(&body)
-                .ok()
-                .and_then(|r| r.parents.first().copied()),
-            _ => None,
-        };
-        match parent {
-            Some(p) => cur = p,
-            None => break,
+    store::get_ref(repo, &branch).ok_or("site branch has no commits")
+}
+
+/// Recompute what a repo serves after anything that can change it: a
+/// ballot, the threshold, the voter set, the owner, or a push. Returns the
+/// commit the app should now be deployed at, when that moved, so the caller
+/// queues its deploy and the app follows the site.
+///
+/// With votes required: the newest commit within `APPROVAL_WALK` first
+/// parents of the tip that has reached the threshold. If none is in range,
+/// the recorded commit stays as long as it is still approved -- so no pile
+/// of unapproved pushes can take an approved site down -- and otherwise
+/// nothing is served. First parents only: approvals on history a merge
+/// brought in through its second parent are not seen.
+///
+/// With no votes required the tip is served and deploys on push. Leaving
+/// the gated regime returns the tip once, since pushes held for approval
+/// never deployed it.
+pub fn advance(repo: &str) -> Option<store::Oid> {
+    let key = served_key(repo);
+    let prev: Option<Served> = store::meta_get_json(&key);
+    if required_votes(repo) == 0 {
+        let prev = prev?;
+        store::meta_set_json(&key, &Option::<Served>::None);
+        let tip = tip_of(repo).ok()?;
+        return (prev.commit != Some(store::oid_hex(&tip))).then_some(tip);
+    }
+    let prev = prev.unwrap_or_default();
+    let next = tip_of(repo)
+        .ok()
+        .and_then(|tip| {
+            let first_parents = std::iter::successors(Some(tip), |c| match store::get_object_parsed(c) {
+                Some((ObjectType::Commit, body)) => object::commit_refs(&body)
+                    .ok()
+                    .and_then(|r| r.parents.first().copied()),
+                _ => None,
+            })
+            .take(APPROVAL_WALK);
+            crate::tenancy::first_approved(repo, first_parents)
+        })
+        .or_else(|| recorded_if_approved(repo, &prev));
+    let now = Served {
+        commit: next.as_ref().map(store::oid_hex),
+    };
+    let moved = now.commit != prev.commit;
+    store::meta_set_json(&key, &Some(now));
+    next.filter(|_| moved)
+}
+
+fn recorded_if_approved(repo: &str, served: &Served) -> Option<store::Oid> {
+    let oid = store::parse_oid(served.commit.as_deref()?).ok()?;
+    crate::tenancy::first_approved(repo, std::iter::once(oid))
+}
+
+/// Record what every votes-gated repo serves. For post_upgrade: a repo that
+/// set its threshold before `advance` existed has nothing recorded, and would
+/// serve nothing until its next vote. Queues no deploys; the apps are left
+/// where they are.
+pub fn record_gated_repos() {
+    for (repo, m) in store::repo_meta_all::<crate::tenancy::RepoMeta>() {
+        if m.required_votes > 0 && store::meta_get_json::<Served>(&served_key(&repo)).is_none() {
+            advance(&repo);
         }
     }
-    Err("no approved commit on the site branch")
+}
+
+/// The commit a site serves. With no votes required (the default, and every
+/// legacy repo) that is the deploy-branch tip. With votes required it is the
+/// commit `advance` last recorded, re-checked against the current ballots on
+/// every request so a withdrawn approval can never be served; an unapproved
+/// push is not served, and the last approved commit stays up.
+pub fn served_commit(repo: &str) -> Result<store::Oid, &'static str> {
+    if required_votes(repo) == 0 {
+        return tip_of(repo);
+    }
+    store::meta_get_json::<Served>(&served_key(repo))
+        .and_then(|s| recorded_if_approved(repo, &s))
+        .ok_or("no approved commit on the site branch")
 }
 
 /// What a verifier attests for `path` (site root when `path` is ""): the
 /// served commit (`served_commit`), the served blob's tree location, and its
-/// raw bytes -- exactly what `serve` would return as the body. `None` mirrors the cases `serve` turns
-/// into a 404. Used by the registry publisher so the attested bytes are byte-
+/// raw bytes -- exactly what `serve` would return as the body. `None` mirrors
+/// the cases `serve` turns into a 404. Used by the registry publisher so the attested bytes are byte-
 /// identical to what the network serves.
 pub fn resolve_entry(repo: &str, path: &str) -> Option<(store::Oid, String, Vec<u8>)> {
     let cfg = get_config(repo)?;
@@ -562,30 +634,39 @@ mod tests {
         assert_eq!(serve("web", "").status_code, 404);
     }
 
-    /// With votes required, a push is not served until it is approved: the
-    /// site stays on the last approved commit, walking first parents back
-    /// from the tip, and the registry publisher attests that same commit.
-    #[test]
-    fn serves_the_newest_approved_commit_when_votes_are_required() {
+    /// A fresh repo with an index.html commit per push, owned by `owner`.
+    fn gated_repo(repo: &str, owner: u8) -> (candid::Principal, impl Fn(&[u8], Option<store::Oid>) -> store::Oid + '_) {
         use crate::tenancy;
-        let owner = candid::Principal::from_slice(&[77; 8]);
+        let owner = candid::Principal::from_slice(&[owner; 8]);
         tenancy::credit(&owner, 10_000_000_000);
-        tenancy::create_repo("gated", &owner, false).unwrap();
-        set_config("gated", String::new()).unwrap();
-        let branch = store::head_target("gated").unwrap();
-        let push = |html: &[u8], parent: Option<store::Oid>| {
+        tenancy::create_repo(repo, &owner, false).unwrap();
+        set_config(repo, String::new()).unwrap();
+        let push = move |html: &[u8], parent: Option<store::Oid>| {
             let index = store::put_object(ObjectType::Blob, html);
             let mut root = Vec::new();
             root.extend_from_slice(b"100644 index.html\0");
             root.extend_from_slice(index.as_slice());
             let tree = store::put_object(ObjectType::Tree, &root);
-            let parent = parent.map_or(String::new(), |p| {
-                format!("parent {}\n", store::oid_hex(&p))
-            });
-            let commit = format!("tree {}\n{parent}\nmsg\n", store::oid_hex(&tree));
+            let parent = parent.map_or(String::new(), |p| format!("parent {}\n", store::oid_hex(&p)));
+            let commit = format!("tree {}\n{parent}\n{}\n", store::oid_hex(&tree), html.len());
             let oid = store::put_object(ObjectType::Commit, commit.as_bytes());
-            store::set_ref("gated", &branch, oid).unwrap();
+            let branch = store::head_target(repo).unwrap();
+            store::set_ref(repo, &branch, oid).unwrap();
             oid
+        };
+        (owner, push)
+    }
+
+    /// With votes required, a push is not served until it is approved; the
+    /// site stays on the last approved commit, and `advance` hands the deploy
+    /// queue each commit the site moves to, so the app follows the site.
+    #[test]
+    fn serves_and_deploys_the_newest_approved_commit() {
+        use crate::tenancy;
+        let (owner, push) = gated_repo("gated", 77);
+        let vote = |c: &store::Oid, yes: bool| {
+            tenancy::vote("gated", &owner, &store::oid_hex(c), yes).unwrap();
+            advance("gated")
         };
         let served_by = |res: &HttpResponse| {
             res.headers
@@ -594,74 +675,101 @@ mod tests {
                 .map(|(_, v)| v.clone())
         };
 
-        // No votes required: the tip serves as soon as it is pushed.
+        // No votes required: the tip serves as soon as it is pushed, and
+        // advance leaves deploys to the push path.
         let c1 = push(b"one", None);
         assert_eq!(serve("gated", "").body, b"one");
+        assert_eq!(advance("gated"), None);
 
         // Votes required and nothing approved: nothing is served.
         tenancy::set_required_votes("gated", &owner, false, 1).unwrap();
+        assert_eq!(advance("gated"), None);
         let res = serve("gated", "");
         assert_eq!(res.status_code, 404);
         assert!(String::from_utf8_lossy(&res.body).contains("no approved commit"));
         assert!(resolve_entry("gated", "").is_none());
 
-        // Approve c1; push c2 and c3 on top. c1 stays up.
-        tenancy::vote("gated", &owner, &store::oid_hex(&c1), true).unwrap();
+        // Approving c1 serves it and deploys it.
+        assert_eq!(vote(&c1, true), Some(c1));
+        // c2 and c3 pushed on top: c1 stays up, nothing new deploys.
         let c2 = push(b"two", Some(c1));
         let c3 = push(b"three", Some(c2));
+        assert_eq!(advance("gated"), None);
         let res = serve("gated", "");
         assert_eq!(res.body, b"one");
         assert_eq!(served_by(&res), Some(store::oid_hex(&c1)));
         assert_eq!(resolve_entry("gated", "").unwrap().0, c1);
 
-        // Approving c2 moves the site to c2 while c3 still waits.
-        tenancy::vote("gated", &owner, &store::oid_hex(&c2), true).unwrap();
+        // Approving c2, below the tip, moves the site and the app to c2.
+        assert_eq!(vote(&c2, true), Some(c2));
         assert_eq!(serve("gated", "").body, b"two");
+        // Approving an older commit again moves nothing.
+        assert_eq!(vote(&c1, true), None);
 
-        // Approving the tip serves the tip.
-        tenancy::vote("gated", &owner, &store::oid_hex(&c3), true).unwrap();
+        // Approving the tip serves and deploys the tip.
+        assert_eq!(vote(&c3, true), Some(c3));
         assert_eq!(serve("gated", "").body, b"three");
         assert_eq!(resolve_entry("gated", "").unwrap().0, c3);
 
-        // A withdrawn approval takes the commit down again.
-        tenancy::vote("gated", &owner, &store::oid_hex(&c3), false).unwrap();
+        // A withdrawn approval rolls the site and the app back together.
+        assert_eq!(vote(&c3, false), Some(c2));
         assert_eq!(serve("gated", "").body, b"two");
+
+        // Dropping the threshold serves the tip and deploys it, once.
+        tenancy::set_required_votes("gated", &owner, false, 0).unwrap();
+        assert_eq!(advance("gated"), Some(c3));
+        assert_eq!(serve("gated", "").body, b"three");
+        assert_eq!(advance("gated"), None);
     }
 
-    /// The walk is bounded: an approval further back than APPROVAL_WALK
-    /// commits is not found, and the site answers 404 rather than walking
-    /// the whole history inside a request.
+    /// A served commit re-checks its approval on every request: a ballot
+    /// withdrawn without an `advance` (which every canister entry point
+    /// runs) still takes the commit down rather than serving it.
     #[test]
-    fn approval_walk_is_bounded() {
+    fn a_recorded_commit_is_served_only_while_approved() {
         use crate::tenancy;
-        let owner = candid::Principal::from_slice(&[78; 8]);
-        tenancy::credit(&owner, 10_000_000_000);
-        tenancy::create_repo("deep", &owner, false).unwrap();
-        set_config("deep", String::new()).unwrap();
-        let branch = store::head_target("deep").unwrap();
-        let index = store::put_object(ObjectType::Blob, b"x");
-        let mut root = Vec::new();
-        root.extend_from_slice(b"100644 index.html\0");
-        root.extend_from_slice(index.as_slice());
-        let tree = store::oid_hex(&store::put_object(ObjectType::Tree, &root));
-        let mut commits = Vec::new();
-        let mut parent = String::new();
-        for i in 0..=APPROVAL_WALK {
-            let c = format!("tree {tree}\n{parent}\n{i}\n");
-            let oid = store::put_object(ObjectType::Commit, c.as_bytes());
-            parent = format!("parent {}\n", store::oid_hex(&oid));
-            commits.push(oid);
-        }
-        store::set_ref("deep", &branch, *commits.last().unwrap()).unwrap();
+        let (owner, push) = gated_repo("recheck", 79);
+        let c1 = push(b"one", None);
+        tenancy::set_required_votes("recheck", &owner, false, 1).unwrap();
+        tenancy::vote("recheck", &owner, &store::oid_hex(&c1), true).unwrap();
+        advance("recheck");
+        assert_eq!(serve("recheck", "").status_code, 200);
+        tenancy::vote("recheck", &owner, &store::oid_hex(&c1), false).unwrap();
+        assert_eq!(serve("recheck", "").status_code, 404);
+    }
+
+    /// No stack of unapproved pushes takes an approved site down: past
+    /// APPROVAL_WALK commits the walk stops seeing the approval, and the
+    /// recorded commit keeps serving.
+    #[test]
+    fn unapproved_pushes_cannot_bury_the_served_commit() {
+        use crate::tenancy;
+        let (owner, push) = gated_repo("deep", 78);
+        let c1 = push(b"approved", None);
         tenancy::set_required_votes("deep", &owner, false, 1).unwrap();
-        // The root commit is APPROVAL_WALK first parents behind the tip: one
-        // past the last commit the walk examines.
-        tenancy::vote("deep", &owner, &store::oid_hex(&commits[0]), true).unwrap();
-        assert_eq!(serve("deep", "").status_code, 404);
-        // One commit nearer is inside the window.
-        tenancy::vote("deep", &owner, &store::oid_hex(&commits[1]), true).unwrap();
-        assert_eq!(serve("deep", "").status_code, 200);
-        assert_eq!(served_commit("deep").unwrap(), commits[1]);
+        tenancy::vote("deep", &owner, &store::oid_hex(&c1), true).unwrap();
+        assert_eq!(advance("deep"), Some(c1));
+        let mut tip = c1;
+        for i in 0..APPROVAL_WALK {
+            tip = push(format!("unapproved {i}").as_bytes(), Some(tip));
+        }
+        assert_eq!(advance("deep"), None);
+        assert_eq!(served_commit("deep").unwrap(), c1);
+        assert_eq!(serve("deep", "").body, b"approved");
+    }
+
+    /// A repo gated before `advance` existed has nothing recorded; the
+    /// upgrade hook records it so the site keeps serving.
+    #[test]
+    fn upgrade_records_repos_gated_before_advance() {
+        use crate::tenancy;
+        let (owner, push) = gated_repo("legacy-gated", 80);
+        let c1 = push(b"one", None);
+        tenancy::set_required_votes("legacy-gated", &owner, false, 1).unwrap();
+        tenancy::vote("legacy-gated", &owner, &store::oid_hex(&c1), true).unwrap();
+        assert_eq!(serve("legacy-gated", "").status_code, 404);
+        record_gated_repos();
+        assert_eq!(served_commit("legacy-gated").unwrap(), c1);
     }
 
     /// The repo browser is the first page ic-git serves about itself; it

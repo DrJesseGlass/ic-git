@@ -538,13 +538,32 @@ pub fn approved(repo: &str, commit_hex: &str) -> bool {
         return true;
     }
     let Ok(oid) = store::parse_oid(commit_hex) else { return false };
+    reached(repo, &policy(&m), &oid)
+}
+
+/// The first of `commits` that `approved` would accept, judged against one
+/// load of the repo's policy -- for a caller weighing many candidates (the
+/// site's first-parent walk). With no votes required that is the first one.
+pub fn first_approved(
+    repo: &str,
+    mut commits: impl Iterator<Item = store::Oid>,
+) -> Option<store::Oid> {
+    let m = match meta(repo) {
+        Some(m) if m.required_votes > 0 => m,
+        _ => return commits.next(),
+    };
+    let pol = policy(&m);
+    commits.find(|oid| reached(repo, &pol, oid))
+}
+
+fn reached(repo: &str, pol: &Policy, oid: &store::Oid) -> bool {
     // These ballots came out of the store `record` wrote, and each was
     // checked on the way in (the caller was authenticated by the IC; there
     // is no signature to verify). The crate is told so, rather than asked
     // to re-verify a list that has nothing to verify.
-    let subj = subject(&oid);
+    let subj = subject(oid);
     let ballots = Ballots::assume_checked(&subj, VoteStore { repo }.load(&subj));
-    ic_multisig::tally_checked(&policy(&m), &subj, &ballots).reached
+    ic_multisig::tally_checked(pol, &subj, &ballots).reached
 }
 
 // --- charges ------------------------------------------------------------------------

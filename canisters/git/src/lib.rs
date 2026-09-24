@@ -57,6 +57,7 @@ fn post_upgrade() {
     // (which does survive, in stable memory) still holds pending deploys.
     deploy::resume_pending();
     tenancy::arm_rent_timer();
+    site::record_gated_repos();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -273,6 +274,10 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             if let Some(commit) = outcome.deploy_commit {
                 deploy::enqueue(&repo, commit);
             }
+            // A push never approves anything, but it moves the tip the
+            // approval walk starts from (a force push can drop the served
+            // commit off the branch).
+            follow_approvals(&repo);
             git_response(
                 200,
                 "application/x-git-receive-pack-result",
@@ -461,42 +466,63 @@ fn get_repo_info(repo: String) -> Option<tenancy::RepoInfo> {
 /// "voter" (approve commits for deploy). Owner or operator only.
 #[ic_cdk::update]
 fn add_member(repo: String, principal: candid::Principal, role: String) -> Result<Vec<tenancy::Member>, String> {
-    tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?)
+    let members = tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?)?;
+    // A voter added back brings their earlier ballots back into the count.
+    follow_approvals(&repo);
+    Ok(members)
 }
 
 #[ic_cdk::update]
 fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
-    tenancy::remove_member(&repo, &caller(), operator(), principal)
+    let members = tenancy::remove_member(&repo, &caller(), operator(), principal)?;
+    follow_approvals(&repo);
+    Ok(members)
 }
 
 /// Hand a repo to a new owner, who pays for it from then on.
 #[ic_cdk::update]
 fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), String> {
-    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner)
+    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner)?;
+    // The owner is an approver, so a new owner changes whose ballots count.
+    follow_approvals(&repo);
+    Ok(())
 }
 
-/// Approvals a commit needs from voters before the deploy queue runs it.
+/// Approvals a commit needs from voters before the deploy queue runs it, and
+/// before a site serves it (see `site::served_commit`): raising it from 0 on
+/// a live site takes the site down until a commit is approved.
 #[ic_cdk::update]
 fn set_required_votes(repo: String, k: u32) -> Result<(), String> {
-    tenancy::set_required_votes(&repo, &caller(), operator(), k)
+    tenancy::set_required_votes(&repo, &caller(), operator(), k)?;
+    follow_approvals(&repo);
+    Ok(())
 }
 
-/// Cast (or change) a ballot on a commit. Returns (approvals, required). When
-/// the commit is the deploy-branch tip and just reached the threshold, its
-/// deploy is queued.
+/// Cast (or change) a ballot on a commit. Returns (approvals, required).
+/// When the ballot changes which commit is the newest approved one -- tip
+/// or not, approving or withdrawing -- the site moves to it and its deploy
+/// is queued.
 #[ic_cdk::update]
 fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
     let t = tenancy::vote(&repo, &caller(), &commit, approve)?;
-    // A zero threshold is always reached and deploys on push; a ballot cast
-    // there must not queue the tip again.
-    if t.required > 0 && t.reached {
-        if let (Some(branch), Ok(oid)) = (store::head_target(&repo), store::parse_oid(&commit)) {
-            if store::get_ref(&repo, &branch) == Some(oid) {
-                deploy::enqueue(&repo, oid);
-            }
-        }
-    }
+    follow_approvals(&repo);
     Ok((t.approvals, t.required))
+}
+
+/// After anything that can change a votes-gated repo's newest approved
+/// commit: record it as what the site serves (`site::advance`) and, when it
+/// moved, queue its deploy, so the site and the app follow the same
+/// approvals. A commit already deployed is not queued again, and a repo
+/// with nothing to deploy only moves its site. A repo that requires no
+/// votes deploys on push, so this does nothing for it.
+fn follow_approvals(repo: &str) {
+    let Some(commit) = site::advance(repo) else { return };
+    let configured = deploy::get_config(repo).is_some() || deploy::get_evm_config(repo).is_some();
+    let hex = store::oid_hex(&commit);
+    let deployed = deploy::get_status(repo).is_some_and(|s| s.ok && s.commit == hex);
+    if configured && !deployed {
+        deploy::enqueue(repo, commit);
+    }
 }
 
 #[ic_cdk::query]
@@ -832,8 +858,9 @@ fn get_evm_deploy_status(repo: String) -> Option<deploy::EvmDeployStatus> {
 // --- F0: verifiable frontend serving (see VISION.md section 2) ---------------
 
 /// Turn on bundle serving for a repo: GET /site/<repo>/<path> serves blobs
-/// from `root` (a directory in the repo tree; "" = repo root) at the
-/// deploy-branch tip, each response bound to its commit via X-Ic-Git-Commit.
+/// from `root` (a directory in the repo tree; "" = repo root) at the served
+/// commit (the deploy-branch tip, or with votes required the newest approved
+/// commit), each response bound to its commit via X-Ic-Git-Commit.
 #[ic_cdk::update]
 fn set_site(repo: String, root: String) -> Result<(), String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
@@ -927,13 +954,16 @@ fn evm_get_registry() -> Option<String> {
 #[ic_cdk::update]
 async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
+    // Resolve the record before charging: a publish that cannot happen costs
+    // nothing.
+    let record = provenance::tip_record(&repo)?;
     tenancy::charge_action(&repo, tenancy::pricing().evm_action, "registry publish")?;
-    provenance::publish_tip(&repo).await
+    record.publish().await
 }
 
 /// Write a *site* repo's provenance to the registry under the key
 /// `<repo>#site` -- NOT the bare repo name, which belongs to the repo's
-/// deploy-artifact record: set("<repo>#site", tip commit, sha256 of the served
+/// deploy-artifact record: set("<repo>#site", served commit, sha256 of the served
 /// entrypoint blob). Read it back with `get("<repo>#site")`; `get("<repo>")`
 /// returns the deploy record, or an all-zero struct if there is none.
 /// No EVM deploy config needed -- the attested artifact is the frontend file
@@ -942,8 +972,9 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
 #[ic_cdk::update]
 async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
+    let record = provenance::served_site_record(&repo)?;
     tenancy::charge_action(&repo, tenancy::pricing().evm_action, "registry publish")?;
-    provenance::publish_site(&repo).await
+    record.publish().await
 }
 
 // --- Track S: Solana signing spine (phase S0; see VISION.md section 4) -------

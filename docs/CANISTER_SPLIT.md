@@ -165,7 +165,7 @@ What was built:
 - `provenance.rs` (new) -- the git-side resolver. Walks refs/trees/blobs to
   produce a `Record { key, commit[20], bundle[32] }`, and owns
   `SITE_KEY_SUFFIX` (record-key naming is a repo concern, not a chain one).
-  Exposes `publish_commit`, `publish_tip`, `publish_site`.
+  Exposes `publish_commit`, `tip_record`, `served_site_record`.
 - `evm.rs` -- the three git-aware publishers (`registry_publish`,
   `registry_publish_commit`, `registry_publish_site`) collapse into one
   `registry_publish_record(record_key, commit, bundle)`, which is exactly the

@@ -187,7 +187,8 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
             } else {
                 format!(
                     "Require {k} approval{} from the voters of \"{repo}\" before a pushed \
-                     commit is deployed.",
+                     commit is deployed or served as its site. A site served today goes \
+                     down until a commit is approved.",
                     if k == 1 { "" } else { "s" }
                 )
             }
@@ -195,7 +196,7 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "vote" => {
             let (repo, commit, approve): (String, String, bool) = args(arg, m)?;
             format!(
-                "{} commit {} in \"{repo}\" for deployment.",
+                "{} commit {} in \"{repo}\" for deployment and for serving as its site.",
                 if approve { "Approve" } else { "Reject" },
                 prefix(&commit, 12)
             )
