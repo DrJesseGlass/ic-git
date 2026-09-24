@@ -62,7 +62,12 @@ rent tick clear it.
 - `deposit_from_cycles_ledger(amount)`: the tenant first approves this
   canister on the cycles ledger (`icrc2_approve`), then calls this; ic-git
   pulls the cycles with `icrc2_transfer_from` and `withdraw`s them into
-  itself, crediting the amount net of the ledger fee. If the withdraw fails
+  itself, crediting the amount net of the withdraw fee. Two ledger fees are
+  paid in all: `transfer_from` charges its fee on top of `amount`, out of
+  the allowance, and `withdraw` charges the second out of what was moved.
+  The allowance must therefore be `amount` plus one fee; the console
+  approves the wanted deposit plus two fees and names it plus one, so the
+  balance gains exactly what was typed. If the withdraw fails
   after the transfer, the tenant is still credited (the cycles are ours,
   just parked on the ledger) and the event is listed in `stranded_deposits`
   for the operator to sweep.

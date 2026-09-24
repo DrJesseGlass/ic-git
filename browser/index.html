@@ -624,10 +624,16 @@ const Console = (() => {
       onsubmit('f-deposit', async v => {
         const amount = cycles(v.amount);
         const fee = 100_000_000n;
-        // 1. approve ic-git on the cycles ledger (amount + the withdraw fee), 2. ic-git pulls it.
+        // Two ledger fees stand between the wallet and the balance. ic-git
+        // pulls (amount + fee) with transfer_from, and the ledger takes its
+        // own fee on top of what it moves, out of the same allowance; then
+        // ic-git withdraws the cycles into itself, which costs the second
+        // fee, and credits the rest -- exactly `amount`. So the allowance is
+        // amount + 2 fees, and the deposit call names amount + 1 fee.
+        // 1. approve ic-git on the cycles ledger, 2. ic-git pulls it.
         const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
         const balance = await session(async s => {
-          await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
+          await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + 2n * fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
           return s('deposit_from_cycles_ledger', ['nat64'], [amount + fee]);
         });
         setTimeout(() => location.reload(), 1200);
