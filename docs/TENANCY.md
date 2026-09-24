@@ -34,7 +34,10 @@ by id -- the first 16 hex characters of the hash, which names a token
 without being usable as one, so the list is public -- with who minted
 each and when it expires, and `revoke_push_token_id(id)` revokes one
 without holding it (`revoke_push_token(token)` still works for a holder).
-Expired tokens are swept out whenever a token is minted. The console shows
+A repo holds at most 20 live tokens at once; mint past that and the
+call asks you to revoke one first. Expired tokens are swept out, up to 64
+at a time, whenever a token is minted, so the shared token map stays
+bounded by the number of repos and no single call does unbounded work. The console shows
 the list, with a revoke button on each, under the mint form, and after a
 mint says when the new token expires.
 

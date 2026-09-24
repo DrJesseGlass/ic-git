@@ -389,11 +389,12 @@ pub fn token_index_remove(key: &str) {
     TOKEN_INDEX.with(|t| t.borrow_mut().remove(&key.to_string()));
 }
 
-/// Index keys in `start..end`.
-pub fn token_index_range(start: &str, end: &str) -> Vec<String> {
+/// At most `limit` index keys in `start..end`, in order.
+pub fn token_index_range(start: &str, end: &str, limit: usize) -> Vec<String> {
     TOKEN_INDEX.with(|t| {
         t.borrow()
             .range(start.to_string()..end.to_string())
+            .take(limit)
             .map(|e| e.key().clone())
             .collect()
     })

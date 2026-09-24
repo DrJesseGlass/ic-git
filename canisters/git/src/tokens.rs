@@ -20,6 +20,14 @@
 //! Every write goes through `store_record` and `remove_key`, which keep the
 //! two in step.
 //!
+//! Nothing here reads an amount of the map that one tenant controls in a
+//! single message. A repo holds at most `MAX_LIVE_PER_REPO` live tokens, so
+//! the map is bounded by the number of repos (each paid for); a sweep
+//! removes at most `PURGE_BATCH` expired tokens per mint, which outpaces the
+//! one token a mint adds; and the full scan in `migrate` runs once, on the
+//! upgrade that introduces the record format, over the legacy tokens that
+//! existed then.
+//!
 //! A token's id is the first 16 hex characters of its key. It names the
 //! token without being it -- the key is a hash, and the id a prefix of the
 //! hash -- so the list of a repo's tokens is public and a writer can revoke
@@ -36,6 +44,14 @@ pub const LEGACY_GRACE_DAYS: u32 = 30;
 const DAY_NS: u64 = 86_400 * 1_000_000_000;
 /// Hex characters of the key that make up a token's id: 64 bits.
 pub const ID_LEN: usize = 16;
+/// Live tokens one repo may hold at once. A person needs a handful (a
+/// laptop, CI, a deploy script); the cap is what keeps one tenant from
+/// growing the shared map without bound.
+pub const MAX_LIVE_PER_REPO: usize = 20;
+/// Expired tokens one sweep removes at most.
+const PURGE_BATCH: usize = 64;
+/// META key recording that `migrate` has run.
+const MIGRATED_KEY: &str = "tokens:migrated";
 
 /// A TOKENS value. Values written before expiry existed are the bare repo
 /// name; repo names cannot start with '{', so the first byte tells the two
@@ -152,6 +168,7 @@ pub fn lifetime(days: Option<u32>) -> Result<u32, String> {
 pub fn mint(repo: &str, token: &str, minted_by: Principal, days: Option<u32>) -> Result<PushTokenInfo, String> {
     let days = lifetime(days)?;
     purge_expired();
+    check_room(repo)?;
     let now = now_ns();
     let key = store::token_key(token);
     let s = Stored {
@@ -184,10 +201,24 @@ pub fn revoke(token: &str) -> bool {
     remove_key(&store::token_key(token))
 }
 
-/// Every token of `repo`, expired or not, as (key, record).
+/// Refused when `repo` already holds `MAX_LIVE_PER_REPO` live tokens.
+/// `create_push_token` asks before paying for randomness; `mint` asks again.
+pub fn check_room(repo: &str) -> Result<(), String> {
+    let now = now_ns();
+    let live = of_repo(repo).iter().filter(|(_, s)| now < s.expires_ns).count();
+    if live >= MAX_LIVE_PER_REPO {
+        return Err(format!(
+            "{repo} already has {MAX_LIVE_PER_REPO} live push tokens; revoke one first"
+        ));
+    }
+    Ok(())
+}
+
+/// Every token of `repo`, expired or not, as (key, record). Bounded: the
+/// repo's live tokens are capped, and its expired ones are swept.
 fn of_repo(repo: &str) -> Vec<(String, Stored)> {
     let (start, end) = repo_prefix(repo);
-    store::token_index_range(&start, &end)
+    store::token_index_range(&start, &end, usize::MAX)
         .iter()
         .filter_map(|ik| {
             let key = key_of(ik);
@@ -239,19 +270,24 @@ pub fn revoke_key(key: &str) -> bool {
     remove_key(key)
 }
 
-/// Drop every expired token: those whose expiry is at or before now, read
-/// off the front of the expiry index.
+/// Drop up to `PURGE_BATCH` expired tokens, oldest expiry first, read off
+/// the front of the expiry index. Run on every mint; a backlog drains over
+/// several mints rather than in one message.
 pub fn purge_expired() {
     let end = format!("e\0{:020}", now_ns().saturating_add(1));
-    for ik in store::token_index_range("e\0", &end) {
+    for ik in store::token_index_range("e\0", &end, PURGE_BATCH) {
         remove_key(key_of(&ik));
     }
 }
 
 /// For post_upgrade: give every token minted before expiry existed
-/// `LEGACY_GRACE_DAYS` from now, and index every record. Idempotent: a
-/// migrated token keeps its expiry and re-indexing writes the same keys.
+/// `LEGACY_GRACE_DAYS` from now, and index every record. Runs once: the
+/// scan covers the legacy tokens of the upgrade that introduces the record
+/// format, and every later upgrade finds the marker and returns.
 pub fn migrate() {
+    if store::meta_get_json::<bool>(MIGRATED_KEY) == Some(true) {
+        return;
+    }
     let expires_ns = now_ns().saturating_add(u64::from(LEGACY_GRACE_DAYS) * DAY_NS);
     for (key, value) in store::token_entries("") {
         match parse(value) {
@@ -272,6 +308,7 @@ pub fn migrate() {
             Entry::Unreadable => {}
         }
     }
+    store::meta_set_json(MIGRATED_KEY, &true);
 }
 
 #[cfg(test)]
@@ -359,12 +396,12 @@ mod tests {
         assert_eq!(list("idx-other").len(), 1);
         assert!(revoke("tok-2"));
         assert_eq!(list("idx").len(), 1);
-        assert_eq!(store::token_index_range("", "\u{7f}").len(), 4);
+        assert_eq!(store::token_index_range("", "\u{7f}", usize::MAX).len(), 4);
         set_test_now(T0 + DAY_NS);
         purge_expired();
         assert_eq!(repo_of("tok-1"), None);
         assert_eq!(repo_of("tok-3"), None);
-        assert!(store::token_index_range("", "\u{7f}").is_empty());
+        assert!(store::token_index_range("", "\u{7f}", usize::MAX).is_empty());
         set_test_now(T0);
     }
 
@@ -415,6 +452,57 @@ mod tests {
         tenancy::transfer_repo("acl", &owner, false, next).unwrap();
         assert_eq!(sweep(), 1);
         assert_eq!(authorize("tok-owner"), None);
+    }
+
+    /// A repo holds at most MAX_LIVE_PER_REPO live tokens; revoking one or
+    /// letting one expire makes room again, and other repos are unaffected.
+    #[test]
+    fn live_tokens_per_repo_are_capped() {
+        set_test_now(T0);
+        for i in 0..MAX_LIVE_PER_REPO {
+            mint("cap", &format!("tok-cap-{i}"), alice(), Some(1 + (i == 0) as u32 * 9)).unwrap();
+        }
+        let err = mint("cap", "tok-over", alice(), None).unwrap_err();
+        assert!(err.contains("revoke one first"), "{err}");
+        assert!(check_room("cap").is_err());
+        assert!(mint("cap-other", "tok-elsewhere", alice(), None).is_ok());
+        assert!(revoke("tok-cap-1"));
+        assert!(mint("cap", "tok-over", alice(), None).is_ok());
+        // All but tok-cap-0 expire after a day, which frees their slots.
+        set_test_now(T0 + DAY_NS);
+        assert!(check_room("cap").is_ok());
+        assert!(mint("cap", "tok-later", alice(), None).is_ok());
+        set_test_now(T0);
+    }
+
+    /// A sweep removes at most PURGE_BATCH expired tokens, oldest first; a
+    /// backlog drains over several mints.
+    #[test]
+    fn a_sweep_is_bounded() {
+        set_test_now(T0);
+        let n = PURGE_BATCH + 10;
+        for i in 0..n {
+            // Spread over repos to stay under the per-repo cap.
+            mint(&format!("sw{}", i / MAX_LIVE_PER_REPO), &format!("tok-sw-{i}"), alice(), Some(1)).unwrap();
+        }
+        set_test_now(T0 + DAY_NS);
+        purge_expired();
+        let left = (0..n).filter(|i| repo_of(&format!("tok-sw-{i}")).is_some()).count();
+        assert_eq!(left, 10);
+        purge_expired();
+        assert!((0..n).all(|i| repo_of(&format!("tok-sw-{i}")).is_none()));
+        set_test_now(T0);
+    }
+
+    /// The migration's full scan runs once; later upgrades skip it.
+    #[test]
+    fn migrate_runs_once() {
+        set_test_now(T0);
+        migrate();
+        store::token_put(&store::token_key("tok-late"), "late".to_string());
+        migrate();
+        // Not rewritten: still the legacy value.
+        assert_eq!(store::token_get(&store::token_key("tok-late")).as_deref(), Some("late"));
     }
 
     /// Records written before the index existed are indexed by migrate.

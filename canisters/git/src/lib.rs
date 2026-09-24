@@ -383,8 +383,10 @@ fn list_authorized() -> Vec<candid::Principal> {
 #[ic_cdk::update]
 async fn create_push_token(repo: String, days: Option<u32>) -> Result<String, String> {
     tenancy::can_write(&repo, &caller(), operator())?;
-    // Refuse a bad lifetime before paying for randomness.
+    // Refuse a bad lifetime, or a repo at its token cap, before paying for
+    // randomness; mint checks the cap again after the await.
     tokens::lifetime(days)?;
+    tokens::check_room(&repo)?;
     let bytes: Vec<u8> = ic_dev_kit_rs::intercanister::call_no_args(
         candid::Principal::management_canister(),
         "raw_rand",
