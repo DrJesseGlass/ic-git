@@ -572,12 +572,15 @@ const Console = (() => {
   // window.open that runs after an await has left the user's click behind,
   // and the browser's popup blocker refuses it -- which is how the first
   // half of a deposit could succeed and the second half never happen.
+  // An action counts itself in before it waits for the connection, not
+  // after: otherwise an action that finishes while a second one is still
+  // waiting for OISY to answer would see no other session and close the
+  // popup the second one is waiting on.
   let sessions = 0;
   async function session(fn) {
     if (!me) throw new Error('connect a wallet first');
-    await signer.connect(null);
     sessions++;
-    try { return await fn(sign); }
+    try { await signer.connect(null); return await fn(sign); }
     finally { if (--sessions === 0) signer.disconnect(); }
   }
   // Sign one call in the open session, decode, unwrap Result.
