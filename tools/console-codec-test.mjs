@@ -56,6 +56,8 @@ assert.deepEqual(dec('reply:icrc2_approve_ok'), { Ok: 42n });
 assert.deepEqual(dec('reply:opt_deploy_config_some'), { target: CANISTER, source_path: 'app.wasm', mode: { upgrade: null } });
 assert.equal(dec('reply:opt_deploy_config_none'), null);
 assert.deepEqual(dec('reply:opt_site_some'), { root: 'browser' });
+// The EVM leg's config, which the panel names (with its cost) before a deploy.
+assert.deepEqual(dec('reply:opt_evm_deploy_config_some'), { source_path: 'build/Registry.hex', gas_limit: 1_500_000n });
 assert.deepEqual(dec('reply:opt_site_reinstall_mode'), { target: CANISTER, source_path: 'x.wat', mode: { reinstall: null } });
 // deploy_now's reply, which the deploy-now and reinstall controls report.
 assert.deepEqual(dec('reply:result_deploy_status_ok'), { Ok: { commit: '0123456789abcdef0123456789abcdef01234567', ok: true, message: 'installed', wasm_len: 365_000n, wasm_sha256: 'ab'.repeat(32) } });
