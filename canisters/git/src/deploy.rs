@@ -729,7 +729,7 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     //   order).
     // - after the reply: annotate only while the status is still this one.
     if let (Some(cfg), true, Some(names_cfg)) = (&wasm_cfg, st.ok, crate::names::get_config()) {
-        if !is_latest_install(repo, &st) {
+        if !is_latest_install(repo, &cfg.target, &st) {
             return st;
         }
         let before = st.clone();
@@ -749,10 +749,14 @@ fn latest_install(repo: &str) -> Option<DeployRecord> {
     get_history(repo).into_iter().rev().find(|r| r.ok)
 }
 
-/// Whether `st`'s install is still the repo's latest successful one, i.e.
-/// no other deploy of the repo has installed since.
-fn is_latest_install(repo: &str, st: &DeployStatus) -> bool {
-    latest_install(repo).is_some_and(|r| r.commit == st.commit && r.wasm_sha256 == st.wasm_sha256)
+/// Whether `st`'s install into `target` is still the repo's latest
+/// successful one, i.e. no other deploy of the repo has installed since.
+/// The target counts too: after a config change, the same commit installed
+/// into a new target takes the announce over from the old one.
+fn is_latest_install(repo: &str, target: &str, st: &DeployStatus) -> bool {
+    latest_install(repo).is_some_and(|r| {
+        r.target == target && r.commit == st.commit && r.wasm_sha256 == st.wasm_sha256
+    })
 }
 
 /// Whether the repo's stored deploy status is still `st`, i.e. no other
@@ -849,14 +853,22 @@ mod tests {
         set_config("ann", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
         let cfg = get_config("ann").unwrap();
         let older = status("c1", true, "installed");
-        assert!(!is_latest_install("ann", &older));
+        assert!(!is_latest_install("ann", &cfg.target, &older));
         record("ann", &cfg, &older);
-        assert!(is_latest_install("ann", &older));
+        assert!(is_latest_install("ann", &cfg.target, &older));
         put_status("ann", &status("c2", false, "awaiting voter approval; see get_votes"));
         record("ann", &cfg, &status("c2", false, "install_code failed"));
-        assert!(is_latest_install("ann", &older));
+        assert!(is_latest_install("ann", &cfg.target, &older));
         record("ann", &cfg, &status("c2", true, "installed"));
-        assert!(!is_latest_install("ann", &older));
+        assert!(!is_latest_install("ann", &cfg.target, &older));
+        // The same commit installed into a new target takes it over too.
+        record("ann", &cfg, &older);
+        assert!(is_latest_install("ann", &cfg.target, &older));
+        set_config("ann", "2vxsx-fae".into(), "app.wasm".into()).unwrap();
+        let moved = get_config("ann").unwrap();
+        record("ann", &moved, &older);
+        assert!(!is_latest_install("ann", &cfg.target, &older));
+        assert!(is_latest_install("ann", &moved.target, &older));
     }
 
     /// A deploy already queued or running is not queued again.

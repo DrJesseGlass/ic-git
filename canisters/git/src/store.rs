@@ -355,19 +355,16 @@ pub fn label_holder(label: &str) -> Option<String> {
     meta_get_json(&label_key(label))
 }
 
-/// Check that `name` could be created now, returning its label: a valid
-/// name, not taken, whose label is not held either. `tenancy::create_repo`
-/// runs this before charging the creation fee, so a refused name costs
-/// nothing.
 /// Longest repo name, in bytes. Generous for a git repo name, and well
 /// under the 512 bytes ic-name-service accepts for the `repo` text an
 /// announce carries, so every repo that can be created can be announced.
 pub const MAX_REPO_NAME: usize = 100;
 
+/// Check that `name` could be created now, returning its label: a valid
+/// name, not taken, whose label is not held either. `tenancy::create_repo`
+/// runs this before charging the creation fee, so a refused name costs
+/// nothing.
 pub fn check_new_repo(name: &str) -> Result<String, String> {
-    if name.len() > MAX_REPO_NAME {
-        return Err(format!("repo names are at most {MAX_REPO_NAME} characters"));
-    }
     if name.is_empty()
         || !name
             .chars()
@@ -375,6 +372,10 @@ pub fn check_new_repo(name: &str) -> Result<String, String> {
         || name.starts_with('.')
     {
         return Err("repo names: [A-Za-z0-9._-]+, not starting with '.'".into());
+    }
+    // ASCII only by now, so bytes are characters.
+    if name.len() > MAX_REPO_NAME {
+        return Err(format!("repo names are at most {MAX_REPO_NAME} characters"));
     }
     if repo_exists(name) {
         return Err(format!("repo '{name}' already exists"));
@@ -616,8 +617,8 @@ mod tests {
         assert!(repo_label(&"a".repeat(MAX_LABEL + 1)).is_err());
     }
 
-    /// A label is taken by the first repo that maps to it; every other
-    /// spelling of it is refused, and a refused name leaves no trace.
+    /// A repo name is at most MAX_REPO_NAME characters, and a refused one
+    /// leaves no trace.
     #[test]
     fn repo_names_are_bounded() {
         // Both label as "a-b"; only the length differs.
@@ -627,6 +628,8 @@ mod tests {
         assert!(!repo_exists(&long));
     }
 
+    /// A label is taken by the first repo that maps to it; every other
+    /// spelling of it is refused, and a refused name leaves no trace.
     #[test]
     fn a_repo_label_is_unique() {
         create_repo("my-app").unwrap();

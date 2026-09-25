@@ -58,9 +58,11 @@ struct Announcement {
 
 pub fn set_config(canister: String, handle: String) -> Result<(), String> {
     let p = Principal::from_text(&canister).map_err(|e| format!("bad names canister principal: {e}"))?;
-    // A typo here would send every later announce nowhere: the anonymous
-    // principal and the management canister are never a name service.
-    if p == Principal::anonymous() || p == Principal::management_canister() {
+    // A slip here would send every later announce nowhere. Only a canister
+    // id (an opaque principal, class byte 0x01) can run ic-name-service;
+    // this refuses the anonymous principal, the management canister and
+    // user (self-authenticating) principals alike.
+    if p.as_slice().last() != Some(&0x01) {
         return Err(format!("{canister} is not a canister that can run ic-name-service"));
     }
     check_segment("handle", &handle)?;
@@ -140,6 +142,9 @@ mod tests {
         let names = "ryjl3-tyaaa-aaaaa-aaaba-cai".to_string();
         assert!(set_config("aaaaa-aa".into(), "solo".into()).is_err());
         assert!(set_config("2vxsx-fae".into(), "solo".into()).is_err());
+        // A user (self-authenticating) principal is not a canister either.
+        let user = Principal::self_authenticating([7u8; 32]).to_text();
+        assert!(set_config(user, "solo".into()).is_err());
         assert!(set_config(names.clone(), "Solo".into()).is_err());
         assert!(set_config(names.clone(), "a/b".into()).is_err());
         assert!(set_config("not a principal".into(), "solo".into()).is_err());
