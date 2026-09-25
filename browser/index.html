@@ -142,7 +142,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -616,7 +616,9 @@ const Console = (() => {
   // A read that arrives after the panel is on screen: fill its slot when it
   // answers, `?` when it does not. Nothing else on the page waits for it.
   const land = (id, p, fmt) => p.then(v => { const el = document.getElementById(id); if (el) el.textContent = v === undefined ? '?' : fmt(v); });
-  const onsubmit = (id, fn) => { const f = document.getElementById(id); if (f) f.onsubmit = async e => { e.preventDefault(); const st = id + '-st'; status(st, 'waiting for wallet...', true); try { status(st, await fn(Object.fromEntries(new FormData(f))), true); } catch (err) { status(st, err.message, false); } }; };
+  // The submit button stays disabled while its call is in flight: a second
+  // click would sign and pay for the same action twice.
+  const onsubmit = (id, fn) => { const f = document.getElementById(id); if (f) f.onsubmit = async e => { e.preventDefault(); const b = f.querySelector('button'); if (b.disabled) return; b.disabled = true; const st = id + '-st'; status(st, 'waiting for wallet...', true); try { status(st, await fn(Object.fromEntries(new FormData(f))), true); } catch (err) { status(st, err.message, false); } finally { b.disabled = false; } }; };
   const cycles = s => { const t = Number(s); if (!(t > 0)) throw new Error('enter an amount in T cycles'); return BigInt(Math.round(t * 1e9)) * 1_000n; };
 
   async function reposPanel() {
@@ -694,6 +696,10 @@ const Console = (() => {
         ? form('f-deploy', [{ name: 'path', placeholder: 'path in the commit, e.g. app.wasm (.wasm, .wat or .lang)' }], 'deploy on push into the app canister') + '<p id="f-deploy-st" class="status"></p>'
         : '<p class="muted">create the app canister above, then choose what each push deploys into it.</p>') +
       form('f-site', [{ name: 'root', placeholder: 'directory to serve, e.g. site (empty = repo root)' }], 'serve as site') + '<p id="f-site-st" class="status"></p>' +
+      // Shown once the site config lands and says the repo is served: the
+      // record attests the served entrypoint, so there is nothing to publish
+      // for a repo that serves no site.
+      '<div id="box-pubsite" hidden>' + form('f-pubsite', [], 'publish site record to the EVM registry') + '<p id="pubsite-cost" class="muted">...</p><p id="f-pubsite-st" class="status"></p></div>' +
       (info.app_canister
         ? form('f-deploynow', [], 'deploy now') + ' <button id="btn-reinstall" class="danger" type="button" disabled>reinstall...</button>' +
           '<p id="deploy-cost" class="muted">...</p><p id="f-deploynow-st" class="status"></p>' +
@@ -767,7 +773,7 @@ const Console = (() => {
       });
       onsubmit('f-member', async v => { await write('add_member', ['text', 'principal', 'text'], [repo, v.principal.trim(), v.role.trim()]); setTimeout(() => location.reload(), 800); return 'added'; });
       onsubmit('f-votes', async v => { await write('set_required_votes', ['text', 'nat32'], [repo, Number(v.k)]); setTimeout(() => location.reload(), 800); return 'saved'; });
-      onsubmit('f-app', async v => 'created app canister ' + await write('create_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]));
+      onsubmit('f-app', async v => { const id = await write('create_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]); setTimeout(() => location.reload(), 800); return 'created app canister ' + id; });
       onsubmit('f-topup', async v => { await write('top_up_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]); return 'topped up'; });
       const wasmLeg = c => c.source_path + ' into ' + (c.target === info.app_canister ? 'the app canister' : short(c.target)) + ' (' + Object.keys(c.mode)[0] + ')';
       const evmLeg = c => 'a contract from ' + c.source_path + ' on the EVM chain (gas limit ' + c.gas_limit + ')';
@@ -779,6 +785,19 @@ const Console = (() => {
       // What deploy now and reinstall install: with votes required, the
       // approved commit the site serves, not the tip.
       const release = info.required_votes ? 'the newest approved commit' : 'the deploy-branch tip';
+      // A failed read (undefined) still shows the box, with a warning: the
+      // canister refuses an unserved repo before charging anything.
+      Promise.all([siteCfg, pricing]).then(([c, pr]) => {
+        const box = document.getElementById('box-pubsite');
+        if (!box || c === null) return;
+        box.hidden = false;
+        document.getElementById('pubsite-cost').textContent = c === undefined || pr === undefined
+          ? 'could not read the site config or the fee table; reload before publishing.'
+          : 'writes set("' + repo + '#site", ' + release + ', sha256 of the served entrypoint) from the canister\'s EOA and charges ' +
+            fmtT(pr.evm_action) + ' from the repo balance; gas is paid on that chain by the signer, not in cycles.';
+      });
+      // The call returns once the transaction is broadcast, not mined.
+      onsubmit('f-pubsite', async () => { const t = await write('evm_registry_publish_site', ['text'], [repo]); return 'broadcast ' + repo + '#site: tx ' + t.tx_hash + ' (nonce ' + t.nonce + '); not yet confirmed on chain'; });
       const outcome = d => (d.ok ? 'deployed ' : 'deploy failed: ') + d.message + ' (commit ' + short(d.commit) + (d.wasm_sha256 ? ', wasm sha256 ' + d.wasm_sha256.slice(0, 12) + ')' : ')');
       onsubmit('f-deploynow', async () => outcome(await write('deploy_now', ['text'], [repo])));
       const box = document.getElementById('box-reinstall'), inp = document.getElementById('in-reinstall'), go = document.getElementById('go-reinstall');
