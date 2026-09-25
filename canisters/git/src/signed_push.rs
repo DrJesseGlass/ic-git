@@ -147,6 +147,9 @@ pub fn fingerprint(key: &PublicKey) -> String {
 /// Verify an armored SSHSIG signature over `message` by `key`, in the "git"
 /// namespace (PROTOCOL.sshsig in OpenSSH).
 pub fn verify_sshsig(armored: &str, message: &[u8], key: &PublicKey) -> Result<(), String> {
+    if !armored.trim_start().starts_with("-----BEGIN SSH SIGNATURE-----") {
+        return Err("the push certificate is not SSH-signed (gpg.format=ssh)".into());
+    }
     let body: String = armored
         .lines()
         .map(str::trim)
@@ -216,9 +219,14 @@ pub struct PushCert {
 
 pub fn parse_cert(text: &[u8]) -> Result<PushCert, String> {
     let text = std::str::from_utf8(text).map_err(|_| "non-utf8 push certificate")?;
+    // Any armored signature ends the payload, not only an SSH one: a client
+    // with push.gpgSign=if-asked and gpg.format=openpgp (or x509) signs too,
+    // and its commands must still parse for a token that needs no signature.
+    // verify_sshsig refuses a non-SSH signature where one is checked.
     let sig_at = text
-        .find("-----BEGIN SSH SIGNATURE-----")
-        .ok_or("the push certificate is not SSH-signed (gpg.format=ssh)")?;
+        .find("\n-----BEGIN ")
+        .map(|i| i + 1)
+        .ok_or("the push certificate carries no signature")?;
     let (payload, signature) = text.split_at(sig_at);
     let (header, commands) = payload
         .split_once("\n\n")
@@ -392,8 +400,14 @@ AAAAQF1lqTf6dv9XwNAg+gFDGBL8NyUgg/Q6yjhy4nW4+v8Cdl6M5NsRCf3gqSqvTggiEO\n\
     }
 
     #[test]
-    fn a_certificate_needs_an_ssh_signature_and_a_nonce() {
-        assert!(parse_cert(b"certificate version 0.1\nnonce x\n\ncmd\n-----BEGIN PGP SIGNATURE-----\n").is_err());
+    fn a_certificate_needs_a_signature_and_a_nonce() {
+        assert!(parse_cert(b"certificate version 0.1\nnonce x\n\ncmd\n").is_err());
+        // A PGP-signed certificate parses (an unbound token's push goes
+        // through), but it never verifies as an SSH signature.
+        let pgp = parse_cert(b"certificate version 0.1\nnonce x\n\ncmd\n-----BEGIN PGP SIGNATURE-----\n").unwrap();
+        assert_eq!(pgp.commands, vec!["cmd"]);
+        let key = parse_public_key(KEY).unwrap();
+        assert!(verify_sshsig(&pgp.signature, &pgp.payload, &key).unwrap_err().contains("not SSH-signed"));
         assert!(parse_cert(b"certificate version 0.1\n\ncmd\n-----BEGIN SSH SIGNATURE-----\n").is_err());
         assert!(parse_cert(b"certificate version 0.2\nnonce x\n\ncmd\n-----BEGIN SSH SIGNATURE-----\n").is_err());
     }

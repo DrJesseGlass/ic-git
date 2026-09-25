@@ -152,14 +152,20 @@ pub struct Outcome {
 /// `unpack refused`, then `ng <ref> <reason>` for every command. This is
 /// how a refusal reaches the pusher -- git prints each as
 /// `! [remote rejected] <ref> (<reason>)` -- whereas the body of a non-200
-/// reply is dropped for a bare "HTTP 403". `reason` must be one line.
+/// reply is dropped for a bare "HTTP 403". With no command to name (an
+/// unparseable request), the reason rides on the unpack line instead, which
+/// git prints as `unpack failed: <reason>`. Newlines in `reason` are folded.
 pub fn refuse(request: &Result<Request, String>, reason: &str) -> Vec<u8> {
     let reason = reason.replace('\n', " ");
+    let commands = request.as_ref().map(|r| r.commands.as_slice()).unwrap_or(&[]);
+    if commands.is_empty() {
+        let mut report = pkt_line(format!("unpack {reason}\n").as_bytes());
+        report.extend_from_slice(FLUSH_PKT);
+        return report;
+    }
     let mut report = pkt_line(b"unpack refused\n");
-    if let Ok(r) = request {
-        for cmd in &r.commands {
-            report.extend_from_slice(&pkt_line(format!("ng {} {reason}\n", cmd.refname).as_bytes()));
-        }
+    for cmd in commands {
+        report.extend_from_slice(&pkt_line(format!("ng {} {reason}\n", cmd.refname).as_bytes()));
     }
     report.extend_from_slice(FLUSH_PKT);
     report
@@ -279,9 +285,9 @@ mod tests {
         assert!(report.contains("ng refs/heads/main sign it please\n"));
         assert!(report.contains("ng refs/tags/v1 sign it please\n"));
         assert!(report.ends_with("0000"));
-        // Unparseable: the unpack line alone.
+        // Unparseable: no ref to name, so the reason rides on the unpack line.
         let report = String::from_utf8(refuse(&Err("bad".into()), "x")).unwrap();
-        assert_eq!(report, format!("{}0000", String::from_utf8(pkt_line(b"unpack refused\n")).unwrap()));
+        assert_eq!(report, format!("{}0000", String::from_utf8(pkt_line(b"unpack x\n")).unwrap()));
     }
 
     /// An unsigned request still parses to its plain command list.

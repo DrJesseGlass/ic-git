@@ -278,10 +278,17 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             // the certificate is checked before the push is charged or its
             // pack is read.
             let request = receive::parse_request(&req.body);
-            let cert = request.as_ref().ok().and_then(|r| r.cert.as_ref());
-            let now_s = ic_cdk::api::time() / 1_000_000_000;
+            // An unparseable request is refused as it is, uncharged: judging
+            // it as "unsigned" would tell a bound token's pusher to sign a
+            // push that may already be signed.
+            let parsed = match &request {
+                Ok(r) => r,
+                Err(e) => return git_response(200, RESULT, receive::refuse(&request, e)),
+            };
+            // The clock the advertisement's nonce was issued by.
+            let now_s = tenancy::now_ns() / 1_000_000_000;
             let required = tenancy::requires_signed_push(&repo);
-            if let Err(e) = signed_push::check(&repo, grant.key.as_deref(), cert, required, now_s) {
+            if let Err(e) = signed_push::check(&repo, grant.key.as_deref(), parsed.cert.as_ref(), required, now_s) {
                 return git_response(200, RESULT, receive::refuse(&request, &e));
             }
             // Tenancy: the owner pays for the push before anything is
@@ -428,19 +435,25 @@ fn set_require_signed_push(repo: String, on: bool) -> Result<(), String> {
 /// Create the secret seed push-certificate nonces are keyed with, once. From
 /// init and post_upgrade on a timer, since raw_rand is a call; until it
 /// lands the advertisement offers no push-cert, and a bound token's push is
-/// refused as unsigned.
+/// refused as unsigned. A failed raw_rand is retried a minute later rather
+/// than leaving bound tokens unusable until the next upgrade.
 fn arm_push_cert_seed() {
+    arm_push_cert_seed_after(std::time::Duration::ZERO);
+}
+
+fn arm_push_cert_seed_after(delay: std::time::Duration) {
     if signed_push::has_seed() {
         return;
     }
-    ic_cdk_timers::set_timer(std::time::Duration::ZERO, async {
+    ic_cdk_timers::set_timer(delay, async {
         let bytes: Result<Vec<u8>, String> = ic_dev_kit_rs::intercanister::call_no_args(
             candid::Principal::management_canister(),
             "raw_rand",
         )
         .await;
-        if let Ok(b) = bytes {
-            signed_push::set_seed_once(&b);
+        match bytes {
+            Ok(b) => signed_push::set_seed_once(&b),
+            Err(_) => arm_push_cert_seed_after(std::time::Duration::from_secs(60)),
         }
     });
 }
