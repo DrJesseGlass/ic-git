@@ -542,18 +542,25 @@ async fn deposit_from_icp(e8s: u64) -> Result<u64, String> {
     icp::deposit_from_icp(caller(), e8s).await
 }
 
-/// Finish an ICP deposit whose ICP reached the cycles minting canister but
-/// whose cycles were not credited (the notify failed). Anyone may call it;
-/// it credits the original depositor. Returns their new balance.
+/// Finish pending ICP deposit `id` (see pending_icp_deposits): replay its
+/// transfer if the outcome was unknown, then have the cycles minting
+/// canister convert it and credit the cycles. For the depositor or an
+/// operator; credits the depositor and returns their new balance.
 #[ic_cdk::update]
-async fn finish_icp_deposit(block_index: u64) -> Result<u64, String> {
-    icp::finish_icp_deposit(block_index).await
+async fn finish_icp_deposit(id: u64) -> Result<u64, String> {
+    icp::finish_icp_deposit(caller(), operator(), id).await
 }
 
-/// ICP deposits waiting on the cycles minting canister.
+/// ICP deposits not yet credited or settled.
 #[ic_cdk::query]
 fn pending_icp_deposits() -> Vec<icp::PendingIcpDeposit> {
     icp::pending()
+}
+
+/// ICP deposits no retry can finish, for the operator to resolve by hand.
+#[ic_cdk::query]
+fn failed_icp_deposits() -> Vec<icp::FailedIcpDeposit> {
+    icp::failed()
 }
 
 #[ic_cdk::query]

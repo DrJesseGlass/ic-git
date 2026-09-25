@@ -104,6 +104,8 @@ balances next to its ic-git balance. From the command line, the same calls throu
 ```sh
 C=umobs-yiaaa-aaaab-agyrq-cai
 dfx canister --network https://icp-api.io call $C deposit_from_cycles_ledger '(2_000_000_000_000)'   # after icrc2_approve on the cycles ledger
+dfx canister --network https://icp-api.io call $C deposit_from_icp '(50_000_000)'   # 0.5 ICP, after icrc2_approve on the ICP ledger for it plus 0.0001 ICP
+dfx canister --network https://icp-api.io call $C pending_icp_deposits   # finish_icp_deposit(id) completes one whose conversion did not finish
 dfx canister --network https://icp-api.io call $C create_repo '("myapp")'
 dfx canister --network https://icp-api.io call $C add_member '("myapp", principal "<friend>", "voter")'
 dfx canister --network https://icp-api.io call $C set_required_votes '("myapp", 1)'

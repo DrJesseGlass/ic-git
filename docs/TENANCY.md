@@ -136,11 +136,19 @@ rent tick clear it.
   canister's top-up account for ic-git (memo `TPUP`), then calls the CMC's
   `notify_top_up`, which converts it at the current rate and deposits the
   cycles into ic-git; the tenant is credited exactly what the CMC reports.
-  At least 0.01 ICP. Once the transfer lands the ICP is the CMC's, so the
-  deposit is recorded in `pending_icp_deposits` before the notify; if the
-  notify fails, `finish_icp_deposit(block)` retries it (anyone may call
-  it; it credits the original depositor, once). If the CMC refunds, the
-  ICP returns to the tenant less a fee and nothing is credited. The
+  At least 0.01 ICP. Each deposit is recorded in `pending_icp_deposits`
+  before anything moves, under an id that is also the transfer's
+  `created_at_time`, so the ICP ledger treats a replay of the transfer as
+  a duplicate and returns its block rather than moving the ICP twice.
+  `finish_icp_deposit(id)` (the depositor or an operator) takes a pending
+  deposit the rest of the way: it replays a transfer whose outcome was
+  unknown, and retries a notify that failed, crediting the depositor once;
+  a finish that arrives after the credit reports the balance. A definite
+  transfer refusal drops the deposit (nothing moved), and a CMC refund
+  returns the ICP to the tenant less a fee, uncredited. Errors no retry
+  can fix (the CMC's TransactionTooOld or InvalidTransaction, or a replay
+  past the ledger's 24-hour dedup window) move it to `failed_icp_deposits`
+  for the operator. The
   console's "deposit from ICP" does the approve and the call in one wallet
   session, estimates the cycles from the CMC's rate, and lists any pending
   deposit with a finish button. `set_icp_ledgers(ledger, cmc)` (operators)

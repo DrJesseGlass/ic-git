@@ -12,13 +12,27 @@
 //!    deposits into this canister and reports back.
 //! 3. The tenant is credited with exactly the cycles the CMC reported.
 //!
-//! Between 1 and 3 the ICP is already the CMC's, so the deposit is recorded
-//! as pending before the notify and removed only once the reply is in hand,
-//! just before crediting. `finish_icp_deposit(block)` retries a pending one
-//! (anyone may call it; it credits the original depositor). The CMC answers
-//! a repeated notify with the same result, and the removal happens after the
-//! await, so two concurrent retries credit once. If the CMC refunds instead
-//! (it returns the ICP, less a fee, to the tenant), nothing is credited.
+//! Every deposit is recorded as pending before anything moves, under an id
+//! that is also the transfer's `created_at_time`, and stays pending until
+//! its cycles are credited or it is settled otherwise:
+//!
+//! - The ICP ledger deduplicates a transfer with the same arguments and
+//!   `created_at_time` for 24 hours, answering `Duplicate { duplicate_of }`.
+//!   So a transfer whose outcome is unknown (its reply lost or undecodable)
+//!   is replayed safely: if it happened, the replay returns its block; if
+//!   not, the replay makes it. Only a definite refusal (insufficient
+//!   allowance, and the like: nothing moved) drops the entry.
+//! - Once the block is known the ICP is the CMC's. A failed notify stays
+//!   pending; `Processing` and transient errors are retried by
+//!   `finish_icp_deposit(id)`. A refund drops the entry (the CMC returns the
+//!   ICP, less a fee, to the tenant). Errors that no retry can fix --
+//!   `TransactionTooOld`, `InvalidTransaction`, a replay past the ledger's
+//!   dedup window -- move it to `failed_icp_deposits` for the operator.
+//! - `finish_icp_deposit(id)` is for the depositor or an operator, and
+//!   credits the depositor. The CMC answers a repeated notify with the same
+//!   result, and the entry is taken off the list after the reply and before
+//!   the credit, so concurrent finishes credit once; the one that finds it
+//!   already credited reports the depositor's balance, not an error.
 //!
 //! The candid below is hand-mirrored from the ICP ledger and the CMC, the
 //! same way ledger.rs mirrors the cycles ledger.
@@ -97,75 +111,248 @@ enum NotifyError {
     Other { error_code: u64, error_message: String },
 }
 
-// --- pending deposits ----------------------------------------------------------
+// --- deposits in flight -------------------------------------------------------
 
-/// A deposit whose ICP reached the CMC and whose cycles have not been
-/// credited yet.
+/// A deposit that has not been credited or settled yet.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PendingIcpDeposit {
-    pub block_index: u64,
+    /// Also the transfer's `created_at_time`, which makes a replay of it
+    /// idempotent on the ICP ledger.
+    pub id: u64,
+    /// The ledger block of the transfer to the CMC, once known.
+    pub block_index: Option<u64>,
     pub who: Principal,
     pub e8s: u64,
     pub at_ns: u64,
-    /// The last notify's failure, if one was tried.
+    /// The last failure, if a step failed.
     pub last_error: Option<String>,
 }
 
+/// A deposit no retry can finish, kept for the operator.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct FailedIcpDeposit {
+    pub id: u64,
+    pub block_index: Option<u64>,
+    pub who: Principal,
+    pub e8s: u64,
+    pub error: String,
+    pub at_ns: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Credited {
+    id: u64,
+    who: Principal,
+}
+
+const FAILED_KEY: &str = "tenancy:icp_failed";
+const CREDITED_KEY: &str = "tenancy:icp_credited";
+const LAST_ID_KEY: &str = "tenancy:icp_last_id";
+/// How many credited deposits are remembered, to answer a late finish.
+const CREDITED_KEEP: usize = 200;
+
 pub fn pending() -> Vec<PendingIcpDeposit> {
     store::meta_get_json(PENDING_KEY).unwrap_or_default()
+}
+
+pub fn failed() -> Vec<FailedIcpDeposit> {
+    store::meta_get_json(FAILED_KEY).unwrap_or_default()
 }
 
 fn save_pending(all: &[PendingIcpDeposit]) {
     store::meta_set_json(PENDING_KEY, &all);
 }
 
+/// A fresh id: the current time in ns, bumped past the last one issued, so
+/// two deposits never share a `created_at_time` (the ledger would take the
+/// second for a replay of the first). The bump is nanoseconds, well inside
+/// the ledger's allowance for a time slightly in the future.
+fn next_id() -> u64 {
+    let last = store::meta_get_json::<u64>(LAST_ID_KEY).unwrap_or(0);
+    let id = tenancy::now_ns().max(last.saturating_add(1));
+    store::meta_set_json(LAST_ID_KEY, &id);
+    id
+}
+
 fn add_pending(p: PendingIcpDeposit) {
     let mut all = pending();
-    all.retain(|x| x.block_index != p.block_index);
+    all.retain(|x| x.id != p.id);
     all.push(p);
     save_pending(&all);
 }
 
-/// Remove and return the pending deposit for `block`: the one step that
-/// hands a deposit to exactly one credit.
-fn take_pending(block: u64) -> Option<PendingIcpDeposit> {
+fn get_pending(id: u64) -> Option<PendingIcpDeposit> {
+    pending().into_iter().find(|p| p.id == id)
+}
+
+fn update_pending(id: u64, f: impl FnOnce(&mut PendingIcpDeposit)) {
     let mut all = pending();
-    let i = all.iter().position(|p| p.block_index == block)?;
+    if let Some(p) = all.iter_mut().find(|p| p.id == id) {
+        f(p);
+        save_pending(&all);
+    }
+}
+
+/// Remove and return the pending deposit `id`: the one step that hands a
+/// deposit to exactly one settlement.
+fn take_pending(id: u64) -> Option<PendingIcpDeposit> {
+    let mut all = pending();
+    let i = all.iter().position(|p| p.id == id)?;
     let p = all.remove(i);
     save_pending(&all);
     Some(p)
 }
 
-fn note_error(block: u64, error: &str) {
-    let mut all = pending();
-    if let Some(p) = all.iter_mut().find(|p| p.block_index == block) {
-        p.last_error = Some(error.to_string());
-        save_pending(&all);
+fn record_credit(id: u64, who: Principal) {
+    let mut all: Vec<Credited> = store::meta_get_json(CREDITED_KEY).unwrap_or_default();
+    all.push(Credited { id, who });
+    if all.len() > CREDITED_KEEP {
+        let drop = all.len() - CREDITED_KEEP;
+        all.drain(0..drop);
+    }
+    store::meta_set_json(CREDITED_KEY, &all);
+}
+
+fn credited_to(id: u64) -> Option<Principal> {
+    store::meta_get_json::<Vec<Credited>>(CREDITED_KEY)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|c| c.id == id)
+        .map(|c| c.who)
+}
+
+/// Move a pending deposit to the failed list.
+fn fail(id: u64, error: &str) {
+    if let Some(p) = take_pending(id) {
+        let mut all = failed();
+        all.push(FailedIcpDeposit {
+            id,
+            block_index: p.block_index,
+            who: p.who,
+            e8s: p.e8s,
+            error: error.to_string(),
+            at_ns: tenancy::now_ns(),
+        });
+        store::meta_set_json(FAILED_KEY, &all);
     }
 }
 
-/// Settle a notify outcome for `block`. `Ok(cycles)` credits the depositor
-/// if the deposit is still pending (a concurrent settle may have taken it);
-/// a refund drops it without credit; anything else leaves it pending with
-/// the error, for `finish_icp_deposit`. Returns the depositor's new balance.
-fn settle(block: u64, outcome: Result<u64, String>, refunded: bool) -> Result<u64, String> {
+// --- outcomes ------------------------------------------------------------------
+
+/// What an `icrc2_transfer_from` to the CMC came to.
+#[derive(Debug, PartialEq)]
+enum Transfer {
+    /// It happened (now or, for a replay, before) at this block.
+    Block(u64),
+    /// Definitely refused: nothing moved.
+    Refused(String),
+    /// The reply was lost or undecodable: replay it.
+    Unknown(String),
+    /// A replay past the ledger's dedup window: whether the first attempt
+    /// happened can no longer be told from here.
+    Lost(String),
+}
+
+fn classify_transfer(reply: Result<Result<Nat, TransferFromError>, String>) -> Transfer {
+    let block = |n: Nat| match u64::try_from(n.0) {
+        Ok(b) => Transfer::Block(b),
+        Err(_) => Transfer::Unknown("ledger block index out of range".into()),
+    };
+    match reply {
+        Ok(Ok(n)) => block(n),
+        Ok(Err(TransferFromError::Duplicate { duplicate_of })) => block(duplicate_of),
+        Ok(Err(TransferFromError::TooOld)) => Transfer::Lost("the transfer is too old to replay on the ICP ledger".into()),
+        Ok(Err(e)) => Transfer::Refused(format!("ICP ledger transfer_from: {e:?}")),
+        Err(e) => Transfer::Unknown(format!("ICP ledger transfer_from call: {e}")),
+    }
+}
+
+/// What a `notify_top_up` came to.
+#[derive(Debug, PartialEq)]
+enum Notified {
+    Cycles(u64),
+    Refunded(String),
+    /// Worth retrying: Processing, a transient or unknown error.
+    Retry(String),
+    /// No retry can succeed.
+    Permanent(String),
+}
+
+fn classify_notify(reply: Result<Result<Nat, NotifyError>, String>) -> Notified {
+    match reply {
+        Ok(Ok(n)) => match u64::try_from(n.0) {
+            Ok(c) => Notified::Cycles(c),
+            Err(_) => Notified::Retry("notify_top_up: cycles amount out of range".into()),
+        },
+        Ok(Err(NotifyError::Refunded { reason, .. })) => Notified::Refunded(reason),
+        Ok(Err(e @ (NotifyError::TransactionTooOld(_) | NotifyError::InvalidTransaction(_)))) => {
+            Notified::Permanent(format!("notify_top_up: {e:?}"))
+        }
+        Ok(Err(e)) => Notified::Retry(format!("notify_top_up: {e:?}")),
+        Err(e) => Notified::Retry(format!("notify_top_up call: {e}")),
+    }
+}
+
+/// Settle deposit `id` on its notify outcome. Returns the depositor's new
+/// balance when credited -- now, or already by a concurrent finish.
+fn settle(id: u64, outcome: Notified) -> Result<u64, String> {
     match outcome {
-        Ok(cycles) => {
-            let p = take_pending(block).ok_or_else(|| format!("ICP deposit {block} was already credited"))?;
-            Ok(tenancy::credit(&p.who, cycles).balance)
+        Notified::Cycles(cycles) => match take_pending(id) {
+            Some(p) => {
+                record_credit(id, p.who);
+                Ok(tenancy::credit(&p.who, cycles).balance)
+            }
+            None => credited_to(id)
+                .map(|who| tenancy::get_account(&who).balance)
+                .ok_or_else(|| format!("no pending ICP deposit {id}")),
+        },
+        Notified::Refunded(reason) => {
+            take_pending(id);
+            Err(format!("the cycles minting canister refunded the ICP (less a fee): {reason}"))
         }
-        Err(e) if refunded => {
-            take_pending(block);
-            Err(format!("the cycles minting canister refunded the ICP (less a fee): {e}"))
+        Notified::Retry(e) => {
+            update_pending(id, |p| p.last_error = Some(e.clone()));
+            Err(format!(
+                "{e}; the ICP is with the cycles minting canister, finish with finish_icp_deposit({id})"
+            ))
         }
-        Err(e) => {
-            note_error(block, &e);
-            Err(format!("{e}; the ICP is with the cycles minting canister, finish with finish_icp_deposit({block})"))
+        Notified::Permanent(e) => {
+            fail(id, &e);
+            Err(format!("{e}; recorded in failed_icp_deposits for the operator"))
         }
     }
 }
 
-async fn notify(block: u64) -> Result<u64, String> {
+// --- the calls -------------------------------------------------------------------
+
+async fn transfer(p: &PendingIcpDeposit) -> Transfer {
+    let (ledger, cmc) = ids();
+    let me = ic_cdk::api::canister_self();
+    let reply: Result<Result<Nat, TransferFromError>, String> = intercanister::call(
+        ledger,
+        "icrc2_transfer_from",
+        (TransferFromArgs {
+            spender_subaccount: None,
+            from: Account {
+                owner: p.who,
+                subaccount: None,
+            },
+            to: Account {
+                owner: cmc,
+                subaccount: Some(top_up_subaccount(&me)),
+            },
+            amount: Nat::from(p.e8s),
+            fee: None,
+            memo: Some(TOP_UP_MEMO.to_le_bytes().to_vec()),
+            // Identical on every replay: what makes a replay idempotent.
+            created_at_time: Some(p.id),
+        },),
+    )
+    .await;
+    classify_transfer(reply)
+}
+
+async fn notify(block: u64) -> Notified {
     let (_, cmc) = ids();
     let reply: Result<Result<Nat, NotifyError>, String> = intercanister::call(
         cmc,
@@ -176,17 +363,40 @@ async fn notify(block: u64) -> Result<u64, String> {
         },),
     )
     .await;
-    match reply {
-        Ok(Ok(cycles)) => {
-            // Out of range stays pending (with the error) rather than
-            // being taken and dropped uncredited.
-            let cycles = u64::try_from(cycles.0).map_err(|_| "notify_top_up: cycles amount out of range".to_string());
-            settle(block, cycles, false)
-        }
-        Ok(Err(NotifyError::Refunded { reason, .. })) => settle(block, Err(reason), true),
-        Ok(Err(e)) => settle(block, Err(format!("notify_top_up: {e:?}")), false),
-        Err(e) => settle(block, Err(format!("notify_top_up call: {e}")), false),
-    }
+    classify_notify(reply)
+}
+
+/// Take pending deposit `id` as far as it will go: the transfer if its
+/// block is not known yet, then the notify and the credit.
+async fn advance(id: u64) -> Result<u64, String> {
+    let p = get_pending(id).ok_or_else(|| format!("no pending ICP deposit {id}"))?;
+    let block = match p.block_index {
+        Some(b) => b,
+        None => match transfer(&p).await {
+            Transfer::Block(b) => {
+                update_pending(id, |p| {
+                    p.block_index = Some(b);
+                    p.last_error = None;
+                });
+                b
+            }
+            Transfer::Refused(e) => {
+                take_pending(id);
+                return Err(e);
+            }
+            Transfer::Unknown(e) => {
+                update_pending(id, |p| p.last_error = Some(e.clone()));
+                return Err(format!(
+                    "{e}; the transfer's outcome is unknown, finish_icp_deposit({id}) replays it safely"
+                ));
+            }
+            Transfer::Lost(e) => {
+                fail(id, &e);
+                return Err(format!("{e}; recorded in failed_icp_deposits for the operator"));
+            }
+        },
+    };
+    settle(id, notify(block).await)
 }
 
 /// Pull `e8s` ICP the caller approved on the ICP ledger, convert it to
@@ -198,48 +408,32 @@ pub async fn deposit_from_icp(who: Principal, e8s: u64) -> Result<u64, String> {
     if e8s < MIN_DEPOSIT {
         return Err(format!("deposit at least {MIN_DEPOSIT} e8s (0.01 ICP)"));
     }
-    let (ledger, cmc) = ids();
-    let me = ic_cdk::api::canister_self();
-    let moved: Result<Nat, TransferFromError> = intercanister::call(
-        ledger,
-        "icrc2_transfer_from",
-        (TransferFromArgs {
-            spender_subaccount: None,
-            from: Account {
-                owner: who,
-                subaccount: None,
-            },
-            to: Account {
-                owner: cmc,
-                subaccount: Some(top_up_subaccount(&me)),
-            },
-            amount: Nat::from(e8s),
-            fee: None,
-            memo: Some(TOP_UP_MEMO.to_le_bytes().to_vec()),
-            created_at_time: None,
-        },),
-    )
-    .await?;
-    let block = moved.map_err(|e| format!("ICP ledger transfer_from: {e:?}"))?;
-    let block = u64::try_from(block.0).map_err(|_| "ledger block index out of range".to_string())?;
-    // From here the ICP is the CMC's: record it before asking for cycles.
+    let id = next_id();
+    // Recorded before anything moves, so no outcome goes unrecorded.
     add_pending(PendingIcpDeposit {
-        block_index: block,
+        id,
+        block_index: None,
         who,
         e8s,
         at_ns: tenancy::now_ns(),
         last_error: None,
     });
-    notify(block).await
+    advance(id).await
 }
 
-/// Retry the notify for a pending deposit. Credits its depositor, whoever
-/// calls. Returns the depositor's new balance.
-pub async fn finish_icp_deposit(block: u64) -> Result<u64, String> {
-    if !pending().iter().any(|p| p.block_index == block) {
-        return Err(format!("no pending ICP deposit at block {block}"));
+/// Retry pending deposit `id`: replay its transfer if the outcome was
+/// unknown, then notify and credit. For the depositor or an operator, so no
+/// one else can spend this canister's cycles on retries. Credits the
+/// depositor; returns their balance.
+pub async fn finish_icp_deposit(caller: Principal, operator: bool, id: u64) -> Result<u64, String> {
+    match get_pending(id) {
+        Some(p) if p.who == caller || operator => advance(id).await,
+        Some(_) => Err("only the depositor or an operator may finish this ICP deposit".into()),
+        None => match credited_to(id) {
+            Some(who) if who == caller || operator => Ok(tenancy::get_account(&who).balance),
+            _ => Err(format!("no pending ICP deposit {id}")),
+        },
     }
-    notify(block).await
 }
 
 #[cfg(test)]
@@ -250,8 +444,8 @@ mod tests {
         Principal::from_slice(&[n; 8])
     }
 
-    fn pend(block: u64, who: Principal) {
-        add_pending(PendingIcpDeposit { block_index: block, who, e8s: MIN_DEPOSIT, at_ns: 0, last_error: None });
+    fn pend(id: u64, block: Option<u64>, who: Principal) {
+        add_pending(PendingIcpDeposit { id, block_index: block, who, e8s: MIN_DEPOSIT, at_ns: 0, last_error: None });
     }
 
     #[test]
@@ -269,27 +463,71 @@ mod tests {
     }
 
     #[test]
-    fn a_notified_deposit_credits_its_depositor_once() {
-        let who = p(61);
-        pend(7, who);
-        let before = tenancy::get_account(&who).balance;
-        assert_eq!(settle(7, Ok(3_000_000_000_000), false).unwrap(), before + 3_000_000_000_000);
-        // A second settle for the same block (a concurrent retry) credits nothing.
-        assert!(settle(7, Ok(3_000_000_000_000), false).unwrap_err().contains("already credited"));
-        assert_eq!(tenancy::get_account(&who).balance, before + 3_000_000_000_000);
-        assert!(pending().is_empty());
+    fn ids_are_unique_even_within_one_instant() {
+        tenancy::set_test_now(1_000);
+        let (a, b) = (next_id(), next_id());
+        assert_eq!((a, b), (1_000, 1_001));
+        tenancy::set_test_now(5_000);
+        assert_eq!(next_id(), 5_000);
     }
 
     #[test]
-    fn a_failed_notify_stays_pending_and_a_refund_drops_it() {
+    fn transfer_outcomes_are_told_apart() {
+        let n = |x: u64| Nat::from(x);
+        assert_eq!(classify_transfer(Ok(Ok(n(5)))), Transfer::Block(5));
+        // A replay of a transfer that happened returns its block.
+        assert_eq!(classify_transfer(Ok(Err(TransferFromError::Duplicate { duplicate_of: n(5) }))), Transfer::Block(5));
+        assert!(matches!(classify_transfer(Ok(Err(TransferFromError::InsufficientAllowance { allowance: n(0) }))), Transfer::Refused(_)));
+        assert!(matches!(classify_transfer(Ok(Err(TransferFromError::TemporarilyUnavailable))), Transfer::Refused(_)));
+        assert!(matches!(classify_transfer(Ok(Err(TransferFromError::TooOld))), Transfer::Lost(_)));
+        assert!(matches!(classify_transfer(Err("decode failed".into())), Transfer::Unknown(_)));
+    }
+
+    #[test]
+    fn notify_outcomes_are_told_apart() {
+        assert_eq!(classify_notify(Ok(Ok(Nat::from(9u64)))), Notified::Cycles(9));
+        assert!(matches!(classify_notify(Ok(Err(NotifyError::Processing))), Notified::Retry(_)));
+        assert!(matches!(
+            classify_notify(Ok(Err(NotifyError::Other { error_code: 1, error_message: "x".into() }))),
+            Notified::Retry(_)
+        ));
+        assert!(matches!(classify_notify(Ok(Err(NotifyError::TransactionTooOld(3)))), Notified::Permanent(_)));
+        assert!(matches!(classify_notify(Ok(Err(NotifyError::InvalidTransaction("bad".into())))), Notified::Permanent(_)));
+        assert!(matches!(
+            classify_notify(Ok(Err(NotifyError::Refunded { reason: "r".into(), block_index: None }))),
+            Notified::Refunded(_)
+        ));
+        assert!(matches!(classify_notify(Err("call failed".into())), Notified::Retry(_)));
+    }
+
+    #[test]
+    fn a_notified_deposit_credits_once_and_a_late_finish_sees_the_credit() {
+        let who = p(61);
+        pend(7, Some(70), who);
+        let before = tenancy::get_account(&who).balance;
+        assert_eq!(settle(7, Notified::Cycles(3_000)).unwrap(), before + 3_000);
+        // A concurrent finish settling the same deposit credits nothing more,
+        // and reports the balance rather than an error.
+        assert_eq!(settle(7, Notified::Cycles(3_000)).unwrap(), before + 3_000);
+        assert_eq!(tenancy::get_account(&who).balance, before + 3_000);
+        assert!(pending().is_empty());
+        assert!(settle(99, Notified::Cycles(1)).is_err());
+    }
+
+    #[test]
+    fn retry_stays_pending_refund_drops_permanent_moves_to_failed() {
         let who = p(62);
-        pend(8, who);
-        let err = settle(8, Err("Processing".into()), false).unwrap_err();
+        pend(8, Some(80), who);
+        let err = settle(8, Notified::Retry("Processing".into())).unwrap_err();
         assert!(err.contains("finish_icp_deposit(8)"), "{err}");
-        assert_eq!(pending()[0].last_error.as_deref(), Some("Processing"));
-        pend(9, who);
-        assert!(settle(9, Err("too small".into()), true).unwrap_err().contains("refunded"));
-        assert_eq!(pending().iter().map(|p| p.block_index).collect::<Vec<_>>(), vec![8]);
+        assert_eq!(get_pending(8).unwrap().last_error.as_deref(), Some("Processing"));
+        pend(9, Some(90), who);
+        assert!(settle(9, Notified::Refunded("too small".into())).unwrap_err().contains("refunded"));
+        pend(10, Some(100), who);
+        assert!(settle(10, Notified::Permanent("too old".into())).unwrap_err().contains("failed_icp_deposits"));
+        assert_eq!(pending().iter().map(|p| p.id).collect::<Vec<_>>(), vec![8]);
+        let f = failed();
+        assert_eq!((f.len(), f[0].id, f[0].block_index, f[0].error.as_str()), (1, 10, Some(100), "too old"));
         assert_eq!(tenancy::get_account(&who).balance, 0);
     }
 }

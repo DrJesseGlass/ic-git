@@ -660,28 +660,35 @@ const Console = (() => {
         // 1. approve ic-git on the ICP ledger for the amount plus the fee its
         // transfer_from takes out of the allowance; 2. ic-git pulls it to the
         // cycles minting canister and credits the cycles. One wallet session.
-        const balance = await session(async s => {
-          await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + ICP_FEE, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], ICP_LEDGER);
-          return s('deposit_from_icp', ['nat64'], [amount]);
-        });
+        let balance;
+        try {
+          balance = await session(async s => {
+            await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + ICP_FEE, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], ICP_LEDGER);
+            return s('deposit_from_icp', ['nat64'], [amount]);
+          });
+        } catch (e) { drawPending(); throw e; }
         setTimeout(() => location.reload(), 1200);
         return 'deposited ' + fmtIcp(amount) + '; balance now ' + fmtT(balance);
       });
-      // Deposits whose ICP reached the CMC but whose cycles were not
-      // credited: a finish button retries the notify.
-      IC.query(CANISTER, 'pending_icp_deposits', [], []).then(r => {
+      // Deposits not yet credited (icp.rs): a finish button replays the
+      // transfer if its outcome was unknown, then converts and credits.
+      // Drawn at load, and again after a deposit fails, so a deposit that
+      // needs finishing gets its button without a reload.
+      const drawPending = () => IC.query(CANISTER, 'pending_icp_deposits', [], []).then(r => {
         const mine = r[0].filter(p => p.who === me);
         const el = document.getElementById('icp-pending');
-        if (!el || !mine.length) return;
-        el.innerHTML = '<p class="bad">ICP deposits waiting on the cycles minting canister:</p><table>' + mine.map(p => '<tr><td>' + esc(fmtIcp(p.e8s)) + '</td><td class="muted">block ' + esc(p.block_index) +
-          (p.last_error ? ': ' + esc(p.last_error) : '') + '</td><td><button class="icp-finish" type="button" data-b="' + esc(p.block_index) + '">finish</button></td></tr>').join('') + '</table><p id="icp-pending-st" class="status"></p>';
+        if (!el) return;
+        el.innerHTML = !mine.length ? '' : '<p class="bad">ICP deposits not yet credited:</p><table>' + mine.map(p => '<tr><td>' + esc(fmtIcp(p.e8s)) + '</td><td class="muted">' +
+          (p.block_index === null ? 'transfer outcome unknown' : 'at the cycles minting canister, block ' + esc(p.block_index)) +
+          (p.last_error ? ': ' + esc(p.last_error) : '') + '</td><td><button class="icp-finish" type="button" data-id="' + esc(p.id) + '">finish</button></td></tr>').join('') + '</table><p id="icp-pending-st" class="status"></p>';
         el.querySelectorAll('button.icp-finish').forEach(b => { b.onclick = async () => {
           b.disabled = true;
           status('icp-pending-st', 'waiting for wallet...', true);
-          try { const bal = await write('finish_icp_deposit', ['nat64'], [BigInt(b.dataset.b)]); status('icp-pending-st', 'credited; balance now ' + fmtT(bal), true); setTimeout(() => location.reload(), 1200); }
+          try { const bal = await write('finish_icp_deposit', ['nat64'], [BigInt(b.dataset.id)]); status('icp-pending-st', 'credited; balance now ' + fmtT(bal), true); setTimeout(() => location.reload(), 1200); }
           catch (e) { b.disabled = false; status('icp-pending-st', e.message, false); }
         }; });
       }, e => console.warn('pending_icp_deposits: ' + e.message));
+      drawPending();
       onsubmit('f-deposit', async v => {
         const amount = cycles(v.amount);
         const fee = 100_000_000n;

@@ -147,10 +147,11 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
             )
         }
         "finish_icp_deposit" => {
-            let (block,): (u64,) = args(arg, m)?;
+            let (id,): (u64,) = args(arg, m)?;
             format!(
-                "Finish the ICP deposit at ICP ledger block {block}: ask the cycles minting \
-                 canister for its cycles and credit them to whoever made that deposit."
+                "Finish pending ICP deposit {id}: complete its transfer to the cycles minting \
+                 canister if that did not go through, then convert it to cycles and credit \
+                 them to the depositor."
             )
         }
         "create_repo" => {
@@ -432,7 +433,7 @@ mod tests {
             ("deposit_from_cycles_ledger", encode_args((2_100_000_000_000u64,)).unwrap(), &["2.100 T cycles", "allowance"]),
             ("deposit_from_icp", encode_args((150_000_000u64,)).unwrap(), &["Deposit 1.5 ICP", "0.0001 ICP fee", "cycles minting canister"]),
             ("deposit_from_icp", encode_args((2_000_000u64,)).unwrap(), &["Deposit 0.02 ICP"]),
-            ("finish_icp_deposit", encode_args((42u64,)).unwrap(), &["block 42", "whoever made that deposit"]),
+            ("finish_icp_deposit", encode_args((42u64,)).unwrap(), &["pending ICP deposit 42", "credit them to the depositor"]),
             ("create_repo", encode_args(("ic-vote",)).unwrap(), &["\"ic-vote\"", "owner"]),
             ("create_app_canister", encode_args(("ic-vote", 1_000_000_000_000u64)).unwrap(), &["1.000 T cycles", "both control"]),
             ("top_up_app_canister", encode_args(("ic-vote", 500_000_000_000u64)).unwrap(), &["0.500 T cycles", "app canister"]),

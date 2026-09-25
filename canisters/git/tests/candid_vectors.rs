@@ -76,7 +76,8 @@ struct IcpXdrConversionRateResponse {
 }
 #[derive(CandidType, Deserialize)]
 struct PendingIcpDeposit {
-    block_index: u64,
+    id: u64,
+    block_index: Option<u64>,
     who: Principal,
     e8s: u64,
     at_ns: u64,
@@ -146,7 +147,10 @@ fn print_vectors() {
             data: IcpXdrConversionRate { xdr_permyriad_per_icp: 45_000, timestamp_seconds: 1_790_000_000 },
             hash_tree: vec![4],
         }).unwrap()),
-        ("reply:pending_icp", encode_one(vec![PendingIcpDeposit { block_index: 42, who: q, e8s: 50_000_000, at_ns: 7, last_error: Some("Processing".into()) }]).unwrap()),
+        ("reply:pending_icp", encode_one(vec![
+            PendingIcpDeposit { id: 1_790_000_000_000_000_000, block_index: Some(42), who: q, e8s: 50_000_000, at_ns: 7, last_error: Some("Processing".into()) },
+            PendingIcpDeposit { id: 1_790_000_000_000_000_001, block_index: None, who: q, e8s: 1_000_000, at_ns: 8, last_error: None },
+        ]).unwrap()),
         ("reply:opt_site_reinstall_mode", encode_one(Some(DeployConfig { target: p.to_text(), source_path: "x.wat".into(), mode: DeployMode::Reinstall })).unwrap()),
     ];
     println!("VECTORS_BEGIN");

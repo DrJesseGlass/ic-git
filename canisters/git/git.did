@@ -70,11 +70,20 @@ type Pricing = record {
 };
 type Stranded = record { who : principal; amount : nat64; error : text; at_ns : nat64 };
 type PendingIcpDeposit = record {
-  block_index : nat64;
+  id : nat64;
+  block_index : opt nat64;
   who : principal;
   e8s : nat64;
   at_ns : nat64;
   last_error : opt text;
+};
+type FailedIcpDeposit = record {
+  id : nat64;
+  block_index : opt nat64;
+  who : principal;
+  e8s : nat64;
+  error : text;
+  at_ns : nat64;
 };
 type ResultAccount = variant { Ok : Account; Err : text };
 type ResultMembers = variant { Ok : vec Member; Err : text };
@@ -268,6 +277,7 @@ service : {
   deposit_from_icp : (nat64) -> (ResultNat64);
   finish_icp_deposit : (nat64) -> (ResultNat64);
   pending_icp_deposits : () -> (vec PendingIcpDeposit) query;
+  failed_icp_deposits : () -> (vec FailedIcpDeposit) query;
   get_account : (principal) -> (Account) query;
   my_repos : (principal) -> (vec text) query;
   get_repo_info : (text) -> (opt RepoInfo) query;

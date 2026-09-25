@@ -72,7 +72,9 @@ assert.deepEqual(dec('reply:push_tokens'), [
 const rate = dec('reply:cmc_rate');
 assert.equal(rate.data.xdr_permyriad_per_icp, 45_000n);
 assert.equal(rate.data.timestamp_seconds, 1_790_000_000n);
-assert.deepEqual(dec('reply:pending_icp'), [{ block_index: 42n, who: USER, e8s: 50_000_000n, at_ns: 7n, last_error: 'Processing' }]);
+assert.deepEqual(dec('reply:pending_icp'), [
+  { id: 1_790_000_000_000_000_000n, block_index: 42n, who: USER, e8s: 50_000_000n, at_ns: 7n, last_error: 'Processing' },
+  { id: 1_790_000_000_000_000_001n, block_index: null, who: USER, e8s: 1_000_000n, at_ns: 8n, last_error: null }]);
 // deploy_now's reply, which the deploy-now and reinstall controls report.
 assert.deepEqual(dec('reply:result_deploy_status_ok'), { Ok: { commit: '0123456789abcdef0123456789abcdef01234567', ok: true, message: 'installed', wasm_len: 365_000n, wasm_sha256: 'ab'.repeat(32) } });
 
