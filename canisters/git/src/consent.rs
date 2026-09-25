@@ -321,8 +321,6 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
     })
 }
 
-/// Cycles for a person: T with three decimals from 10 B up, B with one
-/// decimal from 1 B, M below. Integer arithmetic only, so 2 T is "2.000 T".
 /// e8s as ICP, to 8 places with trailing zeros dropped: "1.5 ICP".
 fn icp(e8s: u64) -> String {
     let frac = format!("{:08}", e8s % 100_000_000);
@@ -334,6 +332,8 @@ fn icp(e8s: u64) -> String {
     }
 }
 
+/// Cycles for a person: T with three decimals from 10 B up, B with one
+/// decimal from 1 B, M below. Integer arithmetic only, so 2 T is "2.000 T".
 fn cycles(n: u64) -> String {
     const T: u64 = 1_000_000_000_000;
     const B: u64 = 1_000_000_000;

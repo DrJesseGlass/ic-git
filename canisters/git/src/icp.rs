@@ -148,11 +148,10 @@ fn note_error(block: u64, error: &str) {
 /// if the deposit is still pending (a concurrent settle may have taken it);
 /// a refund drops it without credit; anything else leaves it pending with
 /// the error, for `finish_icp_deposit`. Returns the depositor's new balance.
-fn settle(block: u64, outcome: Result<u128, String>, refunded: bool) -> Result<u64, String> {
+fn settle(block: u64, outcome: Result<u64, String>, refunded: bool) -> Result<u64, String> {
     match outcome {
         Ok(cycles) => {
             let p = take_pending(block).ok_or_else(|| format!("ICP deposit {block} was already credited"))?;
-            let cycles = u64::try_from(cycles).map_err(|_| "cycles amount out of range".to_string())?;
             Ok(tenancy::credit(&p.who, cycles).balance)
         }
         Err(e) if refunded => {
@@ -179,7 +178,9 @@ async fn notify(block: u64) -> Result<u64, String> {
     .await;
     match reply {
         Ok(Ok(cycles)) => {
-            let cycles = u128::try_from(cycles.0).map_err(|_| "cycles amount out of range".to_string());
+            // Out of range stays pending (with the error) rather than
+            // being taken and dropped uncredited.
+            let cycles = u64::try_from(cycles.0).map_err(|_| "notify_top_up: cycles amount out of range".to_string());
             settle(block, cycles, false)
         }
         Ok(Err(NotifyError::Refunded { reason, .. })) => settle(block, Err(reason), true),

@@ -482,6 +482,8 @@ const Console = (() => {
   const CMC = 'rkp4c-7iaaa-aaaaa-aaaap-cai';
   const ICP_FEE = 10_000n; // e8s
   const ACCOUNT = { record: { owner: 'principal', subaccount: { opt: 'blob' } } };
+  // ICRC-2 icrc2_approve's argument, for both the cycles and the ICP ledger.
+  const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
   const SIGNER = { url: 'https://oisy.com/sign', origin: 'https://oisy.com' };
   const T = 1_000_000_000_000n;
   // Cycles for humans: T above 0.01 T, otherwise B or M.
@@ -654,10 +656,10 @@ const Console = (() => {
       onsubmit('f-icp', async v => {
         const amount = e8s(v.amount);
         if (amount < 1_000_000n) throw new Error('deposit at least 0.01 ICP');
+        if (amount >= 1n << 64n) throw new Error('amount too large');
         // 1. approve ic-git on the ICP ledger for the amount plus the fee its
         // transfer_from takes out of the allowance; 2. ic-git pulls it to the
         // cycles minting canister and credits the cycles. One wallet session.
-        const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
         const balance = await session(async s => {
           await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + ICP_FEE, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], ICP_LEDGER);
           return s('deposit_from_icp', ['nat64'], [amount]);
@@ -692,7 +694,6 @@ const Console = (() => {
         // amount + 2 fees, the deposit call names amount + 1 fee, and the
         // wallet needs amount + 3 fees.
         // 1. approve ic-git on the cycles ledger, 2. ic-git pulls it.
-        const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
         const balance = await session(async s => {
           await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + 2n * fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
           return s('deposit_from_cycles_ledger', ['nat64'], [amount + fee]);
