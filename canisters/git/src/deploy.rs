@@ -501,6 +501,9 @@ async fn install(
         wasm_module: wasm,
         arg: vec![],
     };
+    // Unbounded wait on purpose: the reply (or reject) is definite, so the
+    // deploy log never records an install whose outcome is unknown. The
+    // names announce relies on that (see `run`).
     intercanister::call::<(InstallCodeArgument,), ()>(
         Principal::management_canister(),
         "install_code",
@@ -691,6 +694,10 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         // EVM-only repo: the wasm leg vacuously succeeds.
         None => st.ok = true,
     }
+    // Whether the wasm leg installed, before the EVM leg folds its outcome
+    // into `st.ok`: the announce is about what the canister runs, which the
+    // EVM leg does not change.
+    let wasm_installed = wasm_cfg.is_some() && st.ok;
 
     if let Some(cfg) = evm_cfg {
         let evm_st = run_evm(repo, &cfg, &commit_oid, force).await;
@@ -711,10 +718,15 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         put_status(repo, &st);
     }
 
-    // Optional ic-name-service hook (names.rs): announce the wasm install,
-    // last, so a deploy is announced only when every leg succeeded and the
-    // EVM leg never waits on the name service. Never affects `ok`; the note
-    // lands in the message.
+    // Optional ic-name-service hook (names.rs): announce the wasm install
+    // whenever it succeeded, whatever the EVM leg did -- the record names
+    // the canister and the module it runs, which is true once install_code
+    // returns, and a deploy whose EVM leg failed would otherwise leave the
+    // name on an older commit than the canister runs, with no later deploy
+    // to announce it. It runs last, so the EVM leg never waits on the name
+    // service. Never affects `ok`; the note, like any EVM failure, lands in
+    // the deploy status message, so what failed is recorded there and only
+    // what succeeded reaches the name service.
     //
     // deploy_now runs outside the queue, so a newer deploy of this repo can
     // run while this one awaits. So:
@@ -727,8 +739,15 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     //   execution, and a deploy installing after it announces later, which
     //   the IC delivers after ours (calls between two canisters stay in
     //   order).
+    // - the deploy log's record of each install is definite: install_code
+    //   is an unbounded-wait call, which on the IC always gets a reply or a
+    //   definite reject, never an unknown outcome (only bounded-wait calls
+    //   can time out with SYS_UNKNOWN). So an install logged as failed did
+    //   not happen, and cannot leave the target running code that no
+    //   announce names. Switching install_code to a bounded-wait call would
+    //   break that and must then log an unknown outcome as one.
     // - after the reply: annotate only while the status is still this one.
-    if let (Some(cfg), true, Some(names_cfg)) = (&wasm_cfg, st.ok, crate::names::get_config()) {
+    if let (Some(cfg), true, Some(names_cfg)) = (&wasm_cfg, wasm_installed, crate::names::get_config()) {
         if !is_latest_install(repo, &cfg.target, &st) {
             return st;
         }
