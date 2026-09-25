@@ -28,6 +28,8 @@
 //!   ICP, less a fee, to the tenant). Errors that no retry can fix --
 //!   `TransactionTooOld`, `InvalidTransaction`, a replay past the ledger's
 //!   dedup window -- move it to `failed_icp_deposits` for the operator.
+//! - Each deposit keeps the ledger and CMC it started with, and every
+//!   retry uses those: `set_icp_ledgers` redirects only new deposits.
 //! - `finish_icp_deposit(id)` is for the depositor or an operator, and
 //!   credits the depositor. The CMC answers a repeated notify with the same
 //!   result, and the entry is taken off the list after the reply and before
@@ -46,7 +48,7 @@ use serde::{Deserialize, Serialize};
 /// Mainnet ICP ledger and cycles minting canister (the same ids an NNS
 /// install gives a local replica). Overridable through META.
 pub const ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
-pub const CMC: &str = "rkp4c-7iaaa-aaaaa-aaaap-cai";
+pub const CMC: &str = "rkp4c-7iaaa-aaaaa-aaaca-cai";
 /// The ICP ledger's transfer fee, in e8s.
 pub const ICP_FEE: u64 = 10_000;
 /// Smallest deposit, in e8s (0.01 ICP): far above the fee, which the CMC
@@ -126,6 +128,13 @@ pub struct PendingIcpDeposit {
     pub at_ns: u64,
     /// The last failure, if a step failed.
     pub last_error: Option<String>,
+    /// The ICP ledger and CMC this deposit started with. Every retry uses
+    /// these, not the current `set_icp_ledgers` pair: a replay must repeat
+    /// the original transfer exactly (or the ledger's dedup cannot see it,
+    /// and it could pull the allowance again), and a block is only
+    /// meaningful to the CMC it was paid to.
+    pub ledger: Principal,
+    pub cmc: Principal,
 }
 
 /// A deposit no retry can finish, kept for the operator.
@@ -137,6 +146,9 @@ pub struct FailedIcpDeposit {
     pub e8s: u64,
     pub error: String,
     pub at_ns: u64,
+    /// Where it was: what the operator needs to look it up.
+    pub ledger: Principal,
+    pub cmc: Principal,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -232,6 +244,8 @@ fn fail(id: u64, error: &str) {
             e8s: p.e8s,
             error: error.to_string(),
             at_ns: tenancy::now_ns(),
+            ledger: p.ledger,
+            cmc: p.cmc,
         });
         store::meta_set_json(FAILED_KEY, &all);
     }
@@ -326,10 +340,9 @@ fn settle(id: u64, outcome: Notified) -> Result<u64, String> {
 // --- the calls -------------------------------------------------------------------
 
 async fn transfer(p: &PendingIcpDeposit) -> Transfer {
-    let (ledger, cmc) = ids();
     let me = ic_cdk::api::canister_self();
     let reply: Result<Result<Nat, TransferFromError>, String> = intercanister::call(
-        ledger,
+        p.ledger,
         "icrc2_transfer_from",
         (TransferFromArgs {
             spender_subaccount: None,
@@ -338,7 +351,7 @@ async fn transfer(p: &PendingIcpDeposit) -> Transfer {
                 subaccount: None,
             },
             to: Account {
-                owner: cmc,
+                owner: p.cmc,
                 subaccount: Some(top_up_subaccount(&me)),
             },
             amount: Nat::from(p.e8s),
@@ -352,8 +365,7 @@ async fn transfer(p: &PendingIcpDeposit) -> Transfer {
     classify_transfer(reply)
 }
 
-async fn notify(block: u64) -> Notified {
-    let (_, cmc) = ids();
+async fn notify(cmc: Principal, block: u64) -> Notified {
     let reply: Result<Result<Nat, NotifyError>, String> = intercanister::call(
         cmc,
         "notify_top_up",
@@ -396,7 +408,7 @@ async fn advance(id: u64) -> Result<u64, String> {
             }
         },
     };
-    settle(id, notify(block).await)
+    settle(id, notify(p.cmc, block).await)
 }
 
 /// Pull `e8s` ICP the caller approved on the ICP ledger, convert it to
@@ -409,7 +421,9 @@ pub async fn deposit_from_icp(who: Principal, e8s: u64) -> Result<u64, String> {
         return Err(format!("deposit at least {MIN_DEPOSIT} e8s (0.01 ICP)"));
     }
     let id = next_id();
-    // Recorded before anything moves, so no outcome goes unrecorded.
+    let (ledger, cmc) = ids();
+    // Recorded before anything moves, so no outcome goes unrecorded; the
+    // ledger and CMC with it, so a later set_icp_ledgers cannot redirect it.
     add_pending(PendingIcpDeposit {
         id,
         block_index: None,
@@ -417,6 +431,8 @@ pub async fn deposit_from_icp(who: Principal, e8s: u64) -> Result<u64, String> {
         e8s,
         at_ns: tenancy::now_ns(),
         last_error: None,
+        ledger,
+        cmc,
     });
     advance(id).await
 }
@@ -445,7 +461,8 @@ mod tests {
     }
 
     fn pend(id: u64, block: Option<u64>, who: Principal) {
-        add_pending(PendingIcpDeposit { id, block_index: block, who, e8s: MIN_DEPOSIT, at_ns: 0, last_error: None });
+        let (ledger, cmc) = ids();
+        add_pending(PendingIcpDeposit { id, block_index: block, who, e8s: MIN_DEPOSIT, at_ns: 0, last_error: None, ledger, cmc });
     }
 
     #[test]
@@ -460,6 +477,33 @@ mod tests {
         // "TPUP" as the ledger's u64 memo, 1347768404.
         assert_eq!(TOP_UP_MEMO, 1_347_768_404);
         assert_eq!(&TOP_UP_MEMO.to_le_bytes()[..4], b"TPUP");
+    }
+
+    /// The defaults are the NNS canisters: the ICP ledger is NNS canister 2
+    /// and the CMC canister 4 (subnet-local ids 0x..02 and 0x..04, class
+    /// 0x0101). Pinned by bytes, because a typo in the text form either
+    /// fails to parse (and traps every deposit) or names another canister.
+    #[test]
+    fn the_default_ids_are_the_nns_ledger_and_cmc() {
+        let nns = |n: u8| Principal::from_slice(&[0, 0, 0, 0, 0, 0, 0, n, 1, 1]);
+        assert_eq!(Principal::from_text(ICP_LEDGER).unwrap(), nns(2));
+        assert_eq!(Principal::from_text(CMC).unwrap(), nns(4));
+    }
+
+    /// A deposit keeps the ledger and CMC it started with, and so does its
+    /// failure record, whatever set_icp_ledgers says later.
+    #[test]
+    fn a_deposit_keeps_its_ledger_and_cmc() {
+        let who = p(63);
+        pend(11, None, who);
+        let (old_ledger, old_cmc) = ids();
+        set_ids(p(70), p(71));
+        assert_eq!(ids(), (p(70), p(71)));
+        let d = get_pending(11).unwrap();
+        assert_eq!((d.ledger, d.cmc), (old_ledger, old_cmc));
+        fail(11, "lost");
+        let f = &failed()[0];
+        assert_eq!((f.ledger, f.cmc), (old_ledger, old_cmc));
     }
 
     #[test]

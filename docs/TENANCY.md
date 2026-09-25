@@ -152,7 +152,8 @@ rent tick clear it.
   console's "deposit from ICP" does the approve and the call in one wallet
   session, estimates the cycles from the CMC's rate, and lists any pending
   deposit with a finish button. `set_icp_ledgers(ledger, cmc)` (operators)
-  repoints both for local testing.
+  repoints both for local testing; a deposit keeps the pair it started
+  with, so repointing never redirects one already under way.
 
 Balances are not refundable yet; that needs the reverse of the ledger flow.
 

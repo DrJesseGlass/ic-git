@@ -142,7 +142,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -479,7 +479,7 @@ const Console = (() => {
   const CANISTER = location.hostname.split('.')[0];
   const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
   const ICP_LEDGER = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
-  const CMC = 'rkp4c-7iaaa-aaaaa-aaaap-cai';
+  const CMC = 'rkp4c-7iaaa-aaaaa-aaaca-cai';
   const ICP_FEE = 10_000n; // e8s
   const ACCOUNT = { record: { owner: 'principal', subaccount: { opt: 'blob' } } };
   // ICRC-2 icrc2_approve's argument, for both the cycles and the ICP ledger.

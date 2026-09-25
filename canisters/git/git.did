@@ -76,6 +76,8 @@ type PendingIcpDeposit = record {
   e8s : nat64;
   at_ns : nat64;
   last_error : opt text;
+  ledger : principal;
+  cmc : principal;
 };
 type FailedIcpDeposit = record {
   id : nat64;
@@ -84,6 +86,8 @@ type FailedIcpDeposit = record {
   e8s : nat64;
   error : text;
   at_ns : nat64;
+  ledger : principal;
+  cmc : principal;
 };
 type ResultAccount = variant { Ok : Account; Err : text };
 type ResultMembers = variant { Ok : vec Member; Err : text };
