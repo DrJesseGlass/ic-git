@@ -129,9 +129,31 @@ rent tick clear it.
   after the transfer, the tenant is still credited (the cycles are ours,
   just parked on the ledger) and the event is listed in `stranded_deposits`
   for the operator to sweep.
-- ICP: not yet. The path is an ICRC-2 approve on the ICP ledger, a transfer
-  to the cycles minting canister, and `notify_top_up`; it is the funding
-  route OISY users will actually want and is the next item here.
+- `deposit_from_icp(e8s)`: the route OISY users hold funds on. The tenant
+  approves this canister on the ICP ledger for `e8s` plus one fee (the
+  approve costs a second, from the wallet), then calls this. ic-git moves
+  the ICP with `icrc2_transfer_from` straight to the cycles minting
+  canister's top-up account for ic-git (memo `TPUP`), then calls the CMC's
+  `notify_top_up`, which converts it at the current rate and deposits the
+  cycles into ic-git; the tenant is credited exactly what the CMC reports.
+  At least 0.01 ICP. Each deposit is recorded in `pending_icp_deposits`
+  before anything moves, under an id that is also the transfer's
+  `created_at_time`, so the ICP ledger treats a replay of the transfer as
+  a duplicate and returns its block rather than moving the ICP twice.
+  `finish_icp_deposit(id)` (the depositor or an operator) takes a pending
+  deposit the rest of the way: it replays a transfer whose outcome was
+  unknown, and retries a notify that failed, crediting the depositor once;
+  a finish that arrives after the credit reports the balance. A definite
+  transfer refusal drops the deposit (nothing moved), and a CMC refund
+  returns the ICP to the tenant less a fee, uncredited. Errors no retry
+  can fix (the CMC's TransactionTooOld or InvalidTransaction, or a replay
+  past the ledger's 24-hour dedup window) move it to `failed_icp_deposits`
+  for the operator. The
+  console's "deposit from ICP" does the approve and the call in one wallet
+  session, estimates the cycles from the CMC's rate, and lists any pending
+  deposit with a finish button. `set_icp_ledgers(ledger, cmc)` (operators)
+  repoints both for local testing; a deposit keeps the pair it started
+  with, so repointing never redirects one already under way.
 
 Balances are not refundable yet; that needs the reverse of the ledger flow.
 

@@ -63,6 +63,28 @@ struct PushTokenInfo {
     expires_ns: u64,
     key: Option<String>,
 }
+#[derive(CandidType, Deserialize)]
+struct IcpXdrConversionRate {
+    xdr_permyriad_per_icp: u64,
+    timestamp_seconds: u64,
+}
+#[derive(CandidType, Deserialize)]
+struct IcpXdrConversionRateResponse {
+    certificate: Vec<u8>,
+    data: IcpXdrConversionRate,
+    hash_tree: Vec<u8>,
+}
+#[derive(CandidType, Deserialize)]
+struct PendingIcpDeposit {
+    id: u64,
+    block_index: Option<u64>,
+    who: Principal,
+    e8s: u64,
+    at_ns: u64,
+    last_error: Option<String>,
+    ledger: Principal,
+    cmc: Principal,
+}
 #[derive(CandidType)]
 struct IcrcAccount {
     owner: Principal,
@@ -121,6 +143,15 @@ fn print_vectors() {
         ("reply:push_tokens", encode_one(vec![
             PushTokenInfo { id: "0123456789abcdef".into(), repo: "r".into(), minted_by: Some(q), created_ns: Some(1), expires_ns: 2, key: Some("ssh-ed25519 AAAA".into()) },
             PushTokenInfo { id: "fedcba9876543210".into(), repo: "r".into(), minted_by: None, created_ns: None, expires_ns: 3, key: None },
+        ]).unwrap()),
+        ("reply:cmc_rate", encode_one(IcpXdrConversionRateResponse {
+            certificate: vec![1, 2, 3],
+            data: IcpXdrConversionRate { xdr_permyriad_per_icp: 45_000, timestamp_seconds: 1_790_000_000 },
+            hash_tree: vec![4],
+        }).unwrap()),
+        ("reply:pending_icp", encode_one(vec![
+            PendingIcpDeposit { id: 1_790_000_000_000_000_000, block_index: Some(42), who: q, e8s: 50_000_000, at_ns: 7, last_error: Some("Processing".into()), ledger: p, cmc: q },
+            PendingIcpDeposit { id: 1_790_000_000_000_000_001, block_index: None, who: q, e8s: 1_000_000, at_ns: 8, last_error: None, ledger: p, cmc: q },
         ]).unwrap()),
         ("reply:opt_site_reinstall_mode", encode_one(Some(DeployConfig { target: p.to_text(), source_path: "x.wat".into(), mode: DeployMode::Reinstall })).unwrap()),
     ];

@@ -11,6 +11,7 @@ mod consent;
 mod deploy;
 mod evm;
 mod fleet;
+mod icp;
 mod interp;
 mod kv;
 mod lang;
@@ -532,6 +533,36 @@ async fn deposit_from_cycles_ledger(amount: u64) -> Result<u64, String> {
     ledger::deposit_from_cycles_ledger(caller(), amount).await
 }
 
+/// Fund your balance with ICP: approve this canister on the ICP ledger for
+/// `e8s` plus one fee, then call this. The ICP goes to the cycles minting
+/// canister, which turns it into cycles for this canister; you are credited
+/// exactly those cycles. Returns your new balance. See icp.rs.
+#[ic_cdk::update]
+async fn deposit_from_icp(e8s: u64) -> Result<u64, String> {
+    icp::deposit_from_icp(caller(), e8s).await
+}
+
+/// Finish pending ICP deposit `id` (see pending_icp_deposits): replay its
+/// transfer if the outcome was unknown, then have the cycles minting
+/// canister convert it and credit the cycles. For the depositor or an
+/// operator; credits the depositor and returns their new balance.
+#[ic_cdk::update]
+async fn finish_icp_deposit(id: u64) -> Result<u64, String> {
+    icp::finish_icp_deposit(caller(), operator(), id).await
+}
+
+/// ICP deposits not yet credited or settled.
+#[ic_cdk::query]
+fn pending_icp_deposits() -> Vec<icp::PendingIcpDeposit> {
+    icp::pending()
+}
+
+/// ICP deposits no retry can finish, for the operator to resolve by hand.
+#[ic_cdk::query]
+fn failed_icp_deposits() -> Vec<icp::FailedIcpDeposit> {
+    icp::failed()
+}
+
 #[ic_cdk::query]
 fn get_account(principal: candid::Principal) -> tenancy::Account {
     tenancy::get_account(&principal)
@@ -666,6 +697,14 @@ fn charge_rent_now() -> (u32, u64) {
 #[ic_cdk::update(guard = "is_admin")]
 fn set_cycles_ledger(principal: candid::Principal) -> Result<(), String> {
     ledger::set_ledger_id(principal);
+    Ok(())
+}
+
+/// Point ICP deposits at another ICP ledger and cycles minting canister
+/// (local testing; mainnet ids are the defaults).
+#[ic_cdk::update(guard = "is_admin")]
+fn set_icp_ledgers(ledger: candid::Principal, cmc: candid::Principal) -> Result<(), String> {
+    icp::set_ids(ledger, cmc);
     Ok(())
 }
 

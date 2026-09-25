@@ -142,7 +142,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -479,7 +479,11 @@ const Console = (() => {
   const CANISTER = location.hostname.split('.')[0];
   const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
   const ICP_LEDGER = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+  const CMC = 'rkp4c-7iaaa-aaaaa-aaaca-cai';
+  const ICP_FEE = 10_000n; // e8s
   const ACCOUNT = { record: { owner: 'principal', subaccount: { opt: 'blob' } } };
+  // ICRC-2 icrc2_approve's argument, for both the cycles and the ICP ledger.
+  const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
   const SIGNER = { url: 'https://oisy.com/sign', origin: 'https://oisy.com' };
   const T = 1_000_000_000_000n;
   // Cycles for humans: T above 0.01 T, otherwise B or M.
@@ -637,9 +641,54 @@ const Console = (() => {
       (acct.repos.length ? ' &middot; your repos: ' + acct.repos.map(r => '<a href="#/' + encodeURIComponent(r) + '">' + esc(r) + '</a>').join(', ') : '') + '</p>' +
       '<p class="muted">creating a repo costs ' + fmtT(pricing.create_repo) + '; a push costs ' + fmtT(pricing.push_base) + ' + ' + pricing.push_per_byte + ' cycles/byte; storage rent ' + pricing.rent_per_byte_year + ' cycles per byte-year.</p>' +
       form('f-deposit', [{ name: 'amount', placeholder: 'deposit, in T cycles (e.g. 2)' }], 'deposit from cycles ledger') + '<p id="f-deposit-st" class="status"></p>' +
+      form('f-icp', [{ name: 'amount', placeholder: 'deposit, in ICP (e.g. 0.5; at least 0.01)' }], 'deposit from ICP') +
+      '<p id="icp-rate" class="muted">...</p><p id="f-icp-st" class="status"></p><div id="icp-pending"></div>' +
       form('f-create', [{ name: 'name', placeholder: 'new repo name' }], 'create repo') + '<p id="f-create-st" class="status"></p></div>';
     setTimeout(() => {
       land('held-icp', icp, fmtIcp); land('held-cyc', cyc, fmtCycles);
+      // ICP deposits (icp.rs): the CMC's current rate, for an estimate; the
+      // canister credits whatever the CMC actually converts. 1 XDR is 1 T
+      // cycles, so cycles per ICP = xdr_permyriad_per_icp * 10^8.
+      const rate = IC.query(CMC, 'get_icp_xdr_conversion_rate', [], []).then(r => BigInt(r[0].data.xdr_permyriad_per_icp) * 100_000_000n, e => { console.warn('cmc rate: ' + e.message); return undefined; });
+      land('icp-rate', rate, perIcp => 'at the current rate 1 ICP is about ' + fmtCycles(perIcp) + '; the wallet pays the amount plus two ICP ledger fees (' + fmtIcp(2n * ICP_FEE) + ').');
+      // ICP amounts are parsed as decimals, never through floating point.
+      const e8s = s => { const m = /^\s*(\d*)(?:\.(\d{0,8}))?\s*$/.exec(s); if (!m || (!m[1] && !m[2])) throw new Error('enter an amount in ICP, e.g. 0.5'); return BigInt(m[1] || '0') * 100_000_000n + BigInt((m[2] || '').padEnd(8, '0')); };
+      onsubmit('f-icp', async v => {
+        const amount = e8s(v.amount);
+        if (amount < 1_000_000n) throw new Error('deposit at least 0.01 ICP');
+        if (amount >= 1n << 64n) throw new Error('amount too large');
+        // 1. approve ic-git on the ICP ledger for the amount plus the fee its
+        // transfer_from takes out of the allowance; 2. ic-git pulls it to the
+        // cycles minting canister and credits the cycles. One wallet session.
+        let balance;
+        try {
+          balance = await session(async s => {
+            await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + ICP_FEE, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], ICP_LEDGER);
+            return s('deposit_from_icp', ['nat64'], [amount]);
+          });
+        } catch (e) { drawPending(); throw e; }
+        setTimeout(() => location.reload(), 1200);
+        return 'deposited ' + fmtIcp(amount) + '; balance now ' + fmtT(balance);
+      });
+      // Deposits not yet credited (icp.rs): a finish button replays the
+      // transfer if its outcome was unknown, then converts and credits.
+      // Drawn at load, and again after a deposit fails, so a deposit that
+      // needs finishing gets its button without a reload.
+      const drawPending = () => IC.query(CANISTER, 'pending_icp_deposits', [], []).then(r => {
+        const mine = r[0].filter(p => p.who === me);
+        const el = document.getElementById('icp-pending');
+        if (!el) return;
+        el.innerHTML = !mine.length ? '' : '<p class="bad">ICP deposits not yet credited:</p><table>' + mine.map(p => '<tr><td>' + esc(fmtIcp(p.e8s)) + '</td><td class="muted">' +
+          (p.block_index === null ? 'transfer outcome unknown' : 'at the cycles minting canister, block ' + esc(p.block_index)) +
+          (p.last_error ? ': ' + esc(p.last_error) : '') + '</td><td><button class="icp-finish" type="button" data-id="' + esc(p.id) + '">finish</button></td></tr>').join('') + '</table><p id="icp-pending-st" class="status"></p>';
+        el.querySelectorAll('button.icp-finish').forEach(b => { b.onclick = async () => {
+          b.disabled = true;
+          status('icp-pending-st', 'waiting for wallet...', true);
+          try { const bal = await write('finish_icp_deposit', ['nat64'], [BigInt(b.dataset.id)]); status('icp-pending-st', 'credited; balance now ' + fmtT(bal), true); setTimeout(() => location.reload(), 1200); }
+          catch (e) { b.disabled = false; status('icp-pending-st', e.message, false); }
+        }; });
+      }, e => console.warn('pending_icp_deposits: ' + e.message));
+      drawPending();
       onsubmit('f-deposit', async v => {
         const amount = cycles(v.amount);
         const fee = 100_000_000n;
@@ -652,7 +701,6 @@ const Console = (() => {
         // amount + 2 fees, the deposit call names amount + 1 fee, and the
         // wallet needs amount + 3 fees.
         // 1. approve ic-git on the cycles ledger, 2. ic-git pulls it.
-        const APPROVE = { record: { from_subaccount: { opt: 'blob' }, spender: ACCOUNT, amount: 'nat', expected_allowance: { opt: 'nat' }, expires_at: { opt: 'nat64' }, fee: { opt: 'nat' }, memo: { opt: 'blob' }, created_at_time: { opt: 'nat64' } } };
         const balance = await session(async s => {
           await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: amount + 2n * fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], CYCLES_LEDGER);
           return s('deposit_from_cycles_ledger', ['nat64'], [amount + fee]);
