@@ -717,30 +717,42 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     // lands in the message.
     //
     // deploy_now runs outside the queue, so a newer deploy of this repo can
-    // start while this one awaits. Every deploy writes its status (DEPLOYING)
-    // before it installs, so:
-    // - before sending: if the stored status is no longer this one, a newer
-    //   deploy has started and owns the announce; skip, or the name service
-    //   could end up on an older commit than the target runs. announce() has
-    //   no await before its call, so this check and the send are one message
-    //   execution, and a deploy starting after it announces later, which the
-    //   IC delivers after ours (calls between two canisters stay in order).
+    // run while this one awaits. So:
+    // - before sending: if a newer deploy has since installed, the target no
+    //   longer runs this commit and that deploy owns the announce; skip, or
+    //   the name service could end up on an older commit than the target
+    //   runs. A newer deploy that was refused or failed its install leaves
+    //   the target on this commit, so it does not count. announce() has no
+    //   await before its call, so this check and the send are one message
+    //   execution, and a deploy installing after it announces later, which
+    //   the IC delivers after ours (calls between two canisters stay in
+    //   order).
     // - after the reply: annotate only while the status is still this one.
-    if let (Some(cfg), true) = (&wasm_cfg, st.ok) {
-        if !is_current(repo, &st) {
+    if let (Some(cfg), true, Some(names_cfg)) = (&wasm_cfg, st.ok, crate::names::get_config()) {
+        if !is_latest_install(repo, &st) {
             return st;
         }
         let before = st.clone();
-        if let Some(note) =
-            crate::names::announce(repo, &cfg.target, &st.commit, &st.wasm_sha256).await
-        {
-            st.message.push_str(&note);
-            if is_current(repo, &before) {
-                put_status(repo, &st);
-            }
+        let note =
+            crate::names::announce(&names_cfg, repo, &cfg.target, &st.commit, &st.wasm_sha256)
+                .await;
+        st.message.push_str(&note);
+        if is_current(repo, &before) {
+            put_status(repo, &st);
         }
     }
     st
+}
+
+/// The repo's latest successful install recorded in its deploy log.
+fn latest_install(repo: &str) -> Option<DeployRecord> {
+    get_history(repo).into_iter().rev().find(|r| r.ok)
+}
+
+/// Whether `st`'s install is still the repo's latest successful one, i.e.
+/// no other deploy of the repo has installed since.
+fn is_latest_install(repo: &str, st: &DeployStatus) -> bool {
+    latest_install(repo).is_some_and(|r| r.commit == st.commit && r.wasm_sha256 == st.wasm_sha256)
 }
 
 /// Whether the repo's stored deploy status is still `st`, i.e. no other
@@ -779,7 +791,7 @@ pub async fn run_current(repo: &str) -> Result<DeployStatus, String> {
 /// configured has nothing to run.
 pub fn is_live(repo: &str, commit_hex: &str) -> bool {
     let wasm = get_config(repo).is_none()
-        || get_history(repo).iter().rev().find(|r| r.ok).is_some_and(|r| r.commit == commit_hex);
+        || latest_install(repo).is_some_and(|r| r.commit == commit_hex);
     let evm = get_evm_config(repo).is_none() || evm::latest_deploy(repo, commit_hex).is_some();
     wasm && evm
 }
@@ -826,6 +838,25 @@ mod tests {
         record("live", &cfg, &status("c2", true, "installed"));
         assert!(is_live("live", "c2"));
         assert!(!is_live("live", "c1"));
+    }
+
+    /// The announce guard: a newer deploy that failed or was refused leaves
+    /// the target on the older install, which is still announced; a newer
+    /// successful install takes the announce over.
+    #[test]
+    fn a_newer_install_takes_the_announce_over() {
+        store::create_repo("ann").unwrap();
+        set_config("ann", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        let cfg = get_config("ann").unwrap();
+        let older = status("c1", true, "installed");
+        assert!(!is_latest_install("ann", &older));
+        record("ann", &cfg, &older);
+        assert!(is_latest_install("ann", &older));
+        put_status("ann", &status("c2", false, "awaiting voter approval; see get_votes"));
+        record("ann", &cfg, &status("c2", false, "install_code failed"));
+        assert!(is_latest_install("ann", &older));
+        record("ann", &cfg, &status("c2", true, "installed"));
+        assert!(!is_latest_install("ann", &older));
     }
 
     /// A deploy already queued or running is not queued again.
