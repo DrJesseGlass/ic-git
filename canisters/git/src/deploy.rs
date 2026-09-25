@@ -501,6 +501,9 @@ async fn install(
         wasm_module: wasm,
         arg: vec![],
     };
+    // Unbounded wait on purpose: the reply (or reject) is definite, so the
+    // deploy log never records an install whose outcome is unknown. The
+    // names announce relies on that (see `run`).
     intercanister::call::<(InstallCodeArgument,), ()>(
         Principal::management_canister(),
         "install_code",
@@ -691,6 +694,10 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         // EVM-only repo: the wasm leg vacuously succeeds.
         None => st.ok = true,
     }
+    // Whether the wasm leg installed, before the EVM leg folds its outcome
+    // into `st.ok`: the announce is about what the canister runs, which the
+    // EVM leg does not change.
+    let wasm_installed = wasm_cfg.is_some() && st.ok;
 
     if let Some(cfg) = evm_cfg {
         let evm_st = run_evm(repo, &cfg, &commit_oid, force).await;
@@ -711,36 +718,64 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         put_status(repo, &st);
     }
 
-    // Optional ic-name-service hook (names.rs): announce the wasm install,
-    // last, so a deploy is announced only when every leg succeeded and the
-    // EVM leg never waits on the name service. Never affects `ok`; the note
-    // lands in the message.
+    // Optional ic-name-service hook (names.rs): announce the wasm install
+    // whenever it succeeded, whatever the EVM leg did -- the record names
+    // the canister and the module it runs, which is true once install_code
+    // returns, and a deploy whose EVM leg failed would otherwise leave the
+    // name on an older commit than the canister runs, with no later deploy
+    // to announce it. It runs last, so the EVM leg never waits on the name
+    // service. Never affects `ok`; the note, like any EVM failure, lands in
+    // the deploy status message, so what failed is recorded there and only
+    // what succeeded reaches the name service.
     //
     // deploy_now runs outside the queue, so a newer deploy of this repo can
-    // start while this one awaits. Every deploy writes its status (DEPLOYING)
-    // before it installs, so:
-    // - before sending: if the stored status is no longer this one, a newer
-    //   deploy has started and owns the announce; skip, or the name service
-    //   could end up on an older commit than the target runs. announce() has
-    //   no await before its call, so this check and the send are one message
-    //   execution, and a deploy starting after it announces later, which the
-    //   IC delivers after ours (calls between two canisters stay in order).
+    // run while this one awaits. So:
+    // - before sending: if a newer deploy has since installed, the target no
+    //   longer runs this commit and that deploy owns the announce; skip, or
+    //   the name service could end up on an older commit than the target
+    //   runs. A newer deploy that was refused or failed its install leaves
+    //   the target on this commit, so it does not count. announce() has no
+    //   await before its call, so this check and the send are one message
+    //   execution, and a deploy installing after it announces later, which
+    //   the IC delivers after ours (calls between two canisters stay in
+    //   order).
+    // - the deploy log's record of each install is definite: install_code
+    //   is an unbounded-wait call, which on the IC always gets a reply or a
+    //   definite reject, never an unknown outcome (only bounded-wait calls
+    //   can time out with SYS_UNKNOWN). So an install logged as failed did
+    //   not happen, and cannot leave the target running code that no
+    //   announce names. Switching install_code to a bounded-wait call would
+    //   break that and must then log an unknown outcome as one.
     // - after the reply: annotate only while the status is still this one.
-    if let (Some(cfg), true) = (&wasm_cfg, st.ok) {
-        if !is_current(repo, &st) {
+    if let (Some(cfg), true, Some(names_cfg)) = (&wasm_cfg, wasm_installed, crate::names::get_config()) {
+        if !is_latest_install(repo, &cfg.target, &st) {
             return st;
         }
         let before = st.clone();
-        if let Some(note) =
-            crate::names::announce(repo, &cfg.target, &st.commit, &st.wasm_sha256).await
-        {
-            st.message.push_str(&note);
-            if is_current(repo, &before) {
-                put_status(repo, &st);
-            }
+        let note =
+            crate::names::announce(&names_cfg, repo, &cfg.target, &st.commit, &st.wasm_sha256)
+                .await;
+        st.message.push_str(&note);
+        if is_current(repo, &before) {
+            put_status(repo, &st);
         }
     }
     st
+}
+
+/// The repo's latest successful install recorded in its deploy log.
+fn latest_install(repo: &str) -> Option<DeployRecord> {
+    get_history(repo).into_iter().rev().find(|r| r.ok)
+}
+
+/// Whether `st`'s install into `target` is still the repo's latest
+/// successful one, i.e. no other deploy of the repo has installed since.
+/// The target counts too: after a config change, the same commit installed
+/// into a new target takes the announce over from the old one.
+fn is_latest_install(repo: &str, target: &str, st: &DeployStatus) -> bool {
+    latest_install(repo).is_some_and(|r| {
+        r.target == target && r.commit == st.commit && r.wasm_sha256 == st.wasm_sha256
+    })
 }
 
 /// Whether the repo's stored deploy status is still `st`, i.e. no other
@@ -779,7 +814,7 @@ pub async fn run_current(repo: &str) -> Result<DeployStatus, String> {
 /// configured has nothing to run.
 pub fn is_live(repo: &str, commit_hex: &str) -> bool {
     let wasm = get_config(repo).is_none()
-        || get_history(repo).iter().rev().find(|r| r.ok).is_some_and(|r| r.commit == commit_hex);
+        || latest_install(repo).is_some_and(|r| r.commit == commit_hex);
     let evm = get_evm_config(repo).is_none() || evm::latest_deploy(repo, commit_hex).is_some();
     wasm && evm
 }
@@ -826,6 +861,33 @@ mod tests {
         record("live", &cfg, &status("c2", true, "installed"));
         assert!(is_live("live", "c2"));
         assert!(!is_live("live", "c1"));
+    }
+
+    /// The announce guard: a newer deploy that failed or was refused leaves
+    /// the target on the older install, which is still announced; a newer
+    /// successful install takes the announce over.
+    #[test]
+    fn a_newer_install_takes_the_announce_over() {
+        store::create_repo("ann").unwrap();
+        set_config("ann", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        let cfg = get_config("ann").unwrap();
+        let older = status("c1", true, "installed");
+        assert!(!is_latest_install("ann", &cfg.target, &older));
+        record("ann", &cfg, &older);
+        assert!(is_latest_install("ann", &cfg.target, &older));
+        put_status("ann", &status("c2", false, "awaiting voter approval; see get_votes"));
+        record("ann", &cfg, &status("c2", false, "install_code failed"));
+        assert!(is_latest_install("ann", &cfg.target, &older));
+        record("ann", &cfg, &status("c2", true, "installed"));
+        assert!(!is_latest_install("ann", &cfg.target, &older));
+        // The same commit installed into a new target takes it over too.
+        record("ann", &cfg, &older);
+        assert!(is_latest_install("ann", &cfg.target, &older));
+        set_config("ann", "2vxsx-fae".into(), "app.wasm".into()).unwrap();
+        let moved = get_config("ann").unwrap();
+        record("ann", &moved, &older);
+        assert!(!is_latest_install("ann", &cfg.target, &older));
+        assert!(is_latest_install("ann", &moved.target, &older));
     }
 
     /// A deploy already queued or running is not queued again.

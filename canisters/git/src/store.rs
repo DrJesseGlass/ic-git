@@ -306,10 +306,26 @@ pub fn has_object(oid: &Oid) -> bool {
 /// and DNS's.
 pub const MAX_LABEL: usize = 63;
 
+/// ic-name-service's rule for a handle or a label: 1 to MAX_LABEL bytes of
+/// a-z, 0-9 and '-', not starting or ending with '-'.
+pub fn check_segment(what: &str, s: &str) -> Result<(), String> {
+    if s.is_empty() || s.len() > MAX_LABEL {
+        return Err(format!("{what} must be 1 to {MAX_LABEL} bytes"));
+    }
+    if !s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return Err(format!("{what} may only contain a-z, 0-9 and '-'"));
+    }
+    if s.starts_with('-') || s.ends_with('-') {
+        return Err(format!("{what} may not start or end with '-'"));
+    }
+    Ok(())
+}
+
 /// The lower-kebab label a repo name maps to: lowercased, '.' and '_' made
 /// '-', runs of '-' collapsed, and '-' trimmed from both ends. "My_App"
-/// and "my-app" map to the same "my-app". Refused when that leaves nothing
-/// or more than MAX_LABEL bytes. It is what the repo is announced under in
+/// and "my-app" map to the same "my-app". Refused when the result breaks
+/// `check_segment` (empty, over MAX_LABEL bytes, or a character outside
+/// a-z, 0-9 and '-'). It is what the repo is announced under in
 /// ic-name-service (names.rs), whose names are lower kebab case only.
 pub fn repo_label(name: &str) -> Result<String, String> {
     let mut label = String::with_capacity(name.len());
@@ -323,12 +339,9 @@ pub fn repo_label(name: &str) -> Result<String, String> {
         }
     }
     let label = label.trim_matches('-').to_string();
-    if label.is_empty() || label.len() > MAX_LABEL {
-        return Err(format!(
-            "repo name '{name}' must map to a label of 1 to {MAX_LABEL} of a-z, 0-9 and '-' \
-             (lowercased, '.' and '_' as '-')"
-        ));
-    }
+    check_segment("label", &label).map_err(|e| {
+        format!("repo name '{name}' maps to the label '{label}' (lowercased, '.' and '_' as '-'): {e}")
+    })?;
     Ok(label)
 }
 
@@ -342,6 +355,11 @@ pub fn label_holder(label: &str) -> Option<String> {
     meta_get_json(&label_key(label))
 }
 
+/// Longest repo name, in bytes. Generous for a git repo name, and well
+/// under the 512 bytes ic-name-service accepts for the `repo` text an
+/// announce carries, so every repo that can be created can be announced.
+pub const MAX_REPO_NAME: usize = 100;
+
 /// Check that `name` could be created now, returning its label: a valid
 /// name, not taken, whose label is not held either. `tenancy::create_repo`
 /// runs this before charging the creation fee, so a refused name costs
@@ -354,6 +372,10 @@ pub fn check_new_repo(name: &str) -> Result<String, String> {
         || name.starts_with('.')
     {
         return Err("repo names: [A-Za-z0-9._-]+, not starting with '.'".into());
+    }
+    // ASCII only by now, so bytes are characters.
+    if name.len() > MAX_REPO_NAME {
+        return Err(format!("repo names are at most {MAX_REPO_NAME} characters"));
     }
     if repo_exists(name) {
         return Err(format!("repo '{name}' already exists"));
@@ -593,6 +615,17 @@ mod tests {
         assert!(repo_label("--").is_err());
         assert!(repo_label(&"a".repeat(MAX_LABEL)).is_ok());
         assert!(repo_label(&"a".repeat(MAX_LABEL + 1)).is_err());
+    }
+
+    /// A repo name is at most MAX_REPO_NAME characters, and a refused one
+    /// leaves no trace.
+    #[test]
+    fn repo_names_are_bounded() {
+        // Both label as "a-b"; only the length differs.
+        assert!(check_new_repo(&format!("a{}b", "_".repeat(MAX_REPO_NAME - 2))).is_ok());
+        let long = format!("a{}b", "_".repeat(MAX_REPO_NAME - 1));
+        assert!(create_repo(&long).unwrap_err().contains("at most"));
+        assert!(!repo_exists(&long));
     }
 
     /// A label is taken by the first repo that maps to it; every other

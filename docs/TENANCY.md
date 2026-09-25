@@ -257,12 +257,14 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   re-armed on every upgrade.
 - Existing repos (`evm-demo`, `registry`, `ic-git`) are ownerless and exempt.
   `transfer_repo` can hand any of them to a paying owner.
-- Repo names and labels: a repo name is `[A-Za-z0-9._-]+`, and it also
+- Repo names and labels: a repo name is `[A-Za-z0-9._-]+`, at most 100
+  characters (so the name service always accepts it), and it also
   maps to a lower-kebab label (lowercased, `.` and `_` as `-`, runs of `-`
   collapsed, ends trimmed; 1 to 63 bytes). The label is unique: once
   `my-app` exists, `My_App` and `my.app` are refused. Repos from before
   labels were indexed at the upgrade that introduced them.
-- ic-name-service hook: `names_set_config(canister, handle)` turns on an
+- ic-name-service hook: `names_set_config(canister, handle)` (operators:
+  controllers or the admin allowlist) turns on an
   announce after every successful install, naming the repo
   `<handle>/<label>` with its commit and module hash; the handle follows
   the same lower-kebab rule. `names_clear_config` turns it off. The call
