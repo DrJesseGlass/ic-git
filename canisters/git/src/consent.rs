@@ -136,6 +136,23 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
                 cycles(amount)
             )
         }
+        "deposit_from_icp" => {
+            let (e8s,): (u64,) = args(arg, m)?;
+            format!(
+                "Deposit {} into your ic-git balance, taken from the allowance you approved on \
+                 the ICP ledger (plus its {} fee). The ICP goes to the cycles minting canister, \
+                 and you are credited the cycles it converts it to at the current rate.",
+                icp(e8s),
+                icp(crate::icp::ICP_FEE)
+            )
+        }
+        "finish_icp_deposit" => {
+            let (block,): (u64,) = args(arg, m)?;
+            format!(
+                "Finish the ICP deposit at ICP ledger block {block}: ask the cycles minting \
+                 canister for its cycles and credit them to whoever made that deposit."
+            )
+        }
         "create_repo" => {
             let (repo,): (String,) = args(arg, m)?;
             format!(
@@ -306,6 +323,17 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
 
 /// Cycles for a person: T with three decimals from 10 B up, B with one
 /// decimal from 1 B, M below. Integer arithmetic only, so 2 T is "2.000 T".
+/// e8s as ICP, to 8 places with trailing zeros dropped: "1.5 ICP".
+fn icp(e8s: u64) -> String {
+    let frac = format!("{:08}", e8s % 100_000_000);
+    let frac = frac.trim_end_matches('0');
+    if frac.is_empty() {
+        format!("{} ICP", e8s / 100_000_000)
+    } else {
+        format!("{}.{frac} ICP", e8s / 100_000_000)
+    }
+}
+
 fn cycles(n: u64) -> String {
     const T: u64 = 1_000_000_000_000;
     const B: u64 = 1_000_000_000;
@@ -402,6 +430,9 @@ mod tests {
         let p = Principal::from_text("3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe").unwrap();
         let cases: Vec<(&str, Vec<u8>, &[&str])> = vec![
             ("deposit_from_cycles_ledger", encode_args((2_100_000_000_000u64,)).unwrap(), &["2.100 T cycles", "allowance"]),
+            ("deposit_from_icp", encode_args((150_000_000u64,)).unwrap(), &["Deposit 1.5 ICP", "0.0001 ICP fee", "cycles minting canister"]),
+            ("deposit_from_icp", encode_args((2_000_000u64,)).unwrap(), &["Deposit 0.02 ICP"]),
+            ("finish_icp_deposit", encode_args((42u64,)).unwrap(), &["block 42", "whoever made that deposit"]),
             ("create_repo", encode_args(("ic-vote",)).unwrap(), &["\"ic-vote\"", "owner"]),
             ("create_app_canister", encode_args(("ic-vote", 1_000_000_000_000u64)).unwrap(), &["1.000 T cycles", "both control"]),
             ("top_up_app_canister", encode_args(("ic-vote", 500_000_000_000u64)).unwrap(), &["0.500 T cycles", "app canister"]),

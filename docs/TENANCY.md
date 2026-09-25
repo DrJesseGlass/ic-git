@@ -129,9 +129,22 @@ rent tick clear it.
   after the transfer, the tenant is still credited (the cycles are ours,
   just parked on the ledger) and the event is listed in `stranded_deposits`
   for the operator to sweep.
-- ICP: not yet. The path is an ICRC-2 approve on the ICP ledger, a transfer
-  to the cycles minting canister, and `notify_top_up`; it is the funding
-  route OISY users will actually want and is the next item here.
+- `deposit_from_icp(e8s)`: the route OISY users hold funds on. The tenant
+  approves this canister on the ICP ledger for `e8s` plus one fee (the
+  approve costs a second, from the wallet), then calls this. ic-git moves
+  the ICP with `icrc2_transfer_from` straight to the cycles minting
+  canister's top-up account for ic-git (memo `TPUP`), then calls the CMC's
+  `notify_top_up`, which converts it at the current rate and deposits the
+  cycles into ic-git; the tenant is credited exactly what the CMC reports.
+  At least 0.01 ICP. Once the transfer lands the ICP is the CMC's, so the
+  deposit is recorded in `pending_icp_deposits` before the notify; if the
+  notify fails, `finish_icp_deposit(block)` retries it (anyone may call
+  it; it credits the original depositor, once). If the CMC refunds, the
+  ICP returns to the tenant less a fee and nothing is credited. The
+  console's "deposit from ICP" does the approve and the call in one wallet
+  session, estimates the cycles from the CMC's rate, and lists any pending
+  deposit with a finish button. `set_icp_ledgers(ledger, cmc)` (operators)
+  repoints both for local testing.
 
 Balances are not refundable yet; that needs the reverse of the ledger flow.
 

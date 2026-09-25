@@ -68,6 +68,11 @@ assert.deepEqual(dec('reply:opt_site_reinstall_mode'), { target: CANISTER, sourc
 assert.deepEqual(dec('reply:push_tokens'), [
   { id: '0123456789abcdef', repo: 'r', minted_by: USER, created_ns: 1n, expires_ns: 2n, key: 'ssh-ed25519 AAAA' },
   { id: 'fedcba9876543210', repo: 'r', minted_by: null, created_ns: null, expires_ns: 3n, key: null }]);
+// ICP deposits: the CMC's rate (for the estimate) and the pending list.
+const rate = dec('reply:cmc_rate');
+assert.equal(rate.data.xdr_permyriad_per_icp, 45_000n);
+assert.equal(rate.data.timestamp_seconds, 1_790_000_000n);
+assert.deepEqual(dec('reply:pending_icp'), [{ block_index: 42n, who: USER, e8s: 50_000_000n, at_ns: 7n, last_error: 'Processing' }]);
 // deploy_now's reply, which the deploy-now and reinstall controls report.
 assert.deepEqual(dec('reply:result_deploy_status_ok'), { Ok: { commit: '0123456789abcdef0123456789abcdef01234567', ok: true, message: 'installed', wasm_len: 365_000n, wasm_sha256: 'ab'.repeat(32) } });
 

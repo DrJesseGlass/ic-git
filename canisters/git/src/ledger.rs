@@ -41,19 +41,21 @@ pub struct Account {
     pub subaccount: Option<Vec<u8>>,
 }
 
+/// ICRC-2 `icrc2_transfer_from` arguments; icp.rs uses them on the ICP
+/// ledger too.
 #[derive(CandidType)]
-struct TransferFromArgs {
-    spender_subaccount: Option<Vec<u8>>,
-    from: Account,
-    to: Account,
-    amount: Nat,
-    fee: Option<Nat>,
-    memo: Option<Vec<u8>>,
-    created_at_time: Option<u64>,
+pub(crate) struct TransferFromArgs {
+    pub spender_subaccount: Option<Vec<u8>>,
+    pub from: Account,
+    pub to: Account,
+    pub amount: Nat,
+    pub fee: Option<Nat>,
+    pub memo: Option<Vec<u8>>,
+    pub created_at_time: Option<u64>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
-enum TransferFromError {
+pub(crate) enum TransferFromError {
     BadFee { expected_fee: Nat },
     BadBurn { min_burn_amount: Nat },
     InsufficientFunds { balance: Nat },
