@@ -109,6 +109,10 @@ dfx canister --network https://icp-api.io call $C add_member '("myapp", principa
 dfx canister --network https://icp-api.io call $C set_required_votes '("myapp", 1)'
 dfx canister --network https://icp-api.io call $C create_push_token '("myapp", opt 90)'   # lifetime in days: default 30, max 365
 dfx canister --network https://icp-api.io call $C list_push_tokens '("myapp")'
+# Signed pushes: bind the token to your SSH key, and have git sign with it
+dfx canister --network https://icp-api.io call $C create_push_token "(\"myapp\", null, opt \"$(cat ~/.ssh/id_ed25519.pub)\")"
+git config gpg.format ssh && git config user.signingkey ~/.ssh/id_ed25519.pub && git config push.gpgSign if-asked
+dfx canister --network https://icp-api.io call $C set_require_signed_push '("myapp", true)'   # optional: refuse unbound tokens
 ```
 
 `GET /api/account/<principal>`, `/api/<repo>/info`, `/api/<repo>/votes/<commit>`

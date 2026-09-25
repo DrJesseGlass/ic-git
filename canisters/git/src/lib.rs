@@ -21,6 +21,7 @@ mod pack;
 mod provenance;
 mod receive;
 mod rpc_common;
+mod signed_push;
 mod site;
 mod smart_http;
 mod sol;
@@ -44,6 +45,7 @@ fn init() {
     auth::init_with_caller();
     store::init_schema_version();
     tenancy::arm_rent_timer();
+    arm_push_cert_seed();
 }
 
 #[ic_cdk::pre_upgrade]
@@ -61,6 +63,7 @@ fn post_upgrade() {
     tenancy::arm_rent_timer();
     site::record_gated_repos();
     tokens::migrate();
+    arm_push_cert_seed();
     store::index_repo_labels();
 }
 
@@ -143,9 +146,10 @@ pub(crate) fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) 
     }
 }
 
-/// The repo a Basic-auth push token authorizes, if the header carries one,
-/// the token has not expired, and its minter may still write to the repo.
-fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
+/// What a Basic-auth push token grants, if the header carries one, the
+/// token has not expired, and its minter may still write to the repo: the
+/// repo, and the SSH key a push must be signed with if the token is bound.
+fn push_grant(headers: &[(String, String)]) -> Option<tokens::Grant> {
     let value = http::get_header(headers, "authorization")?;
     let b64 = value.strip_prefix("Basic ")?;
     let decoded = base64::engine::general_purpose::STANDARD
@@ -157,8 +161,8 @@ fn push_token_repo(headers: &[(String, String)]) -> Option<String> {
     tokens::authorize_if(token, |repo, minter| tenancy::can_write(repo, minter, is_operator(minter)).is_ok())
 }
 
-fn push_authorized(repo: &str, headers: &[(String, String)]) -> bool {
-    push_token_repo(headers).as_deref() == Some(repo)
+fn push_authorized(repo: &str, headers: &[(String, String)]) -> Option<tokens::Grant> {
+    push_grant(headers).filter(|g| g.repo == repo)
 }
 
 /// 401 challenge that makes git retry with credentials.
@@ -184,7 +188,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         // head_target doubles as the repo-existence probe: one REPOS read.
         Route::InfoRefs { repo, service } => match store::head_target(&repo) {
             None => git_response(404, "text/plain", b"no such repo\n".to_vec()),
-            Some(_) if service == Service::ReceivePack && !push_authorized(&repo, &req.headers) => {
+            Some(_) if service == Service::ReceivePack && push_authorized(&repo, &req.headers).is_none() => {
                 unauthorized()
             }
             Some(head) => git_response(
@@ -263,15 +267,36 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             if !store::repo_exists(&repo) {
                 return git_response(404, "text/plain", b"no such repo\n".to_vec());
             }
-            if !push_authorized(&repo, &req.headers) {
+            let Some(grant) = push_authorized(&repo, &req.headers) else {
                 return unauthorized();
+            };
+            // Refusals are a 200 report-status naming each ref
+            // (receive::refuse): git drops the body of a non-200 reply and
+            // shows only the status code.
+            const RESULT: &str = "application/x-git-receive-pack-result";
+            // Key-bound tokens and repos that require them (signed_push.rs):
+            // the certificate is checked before the push is charged or its
+            // pack is read.
+            let request = receive::parse_request(&req.body);
+            // An unparseable request is refused as it is, uncharged: judging
+            // it as "unsigned" would tell a bound token's pusher to sign a
+            // push that may already be signed.
+            let parsed = match &request {
+                Ok(r) => r,
+                Err(e) => return git_response(200, RESULT, receive::refuse(&request, e)),
+            };
+            // The clock the advertisement's nonce was issued by.
+            let now_s = tenancy::now_ns() / 1_000_000_000;
+            let required = tenancy::requires_signed_push(&repo);
+            if let Err(e) = signed_push::check(&repo, grant.key.as_deref(), parsed.cert.as_ref(), required, now_s) {
+                return git_response(200, RESULT, receive::refuse(&request, &e));
             }
             // Tenancy: the owner pays for the push before anything is
-            // ingested. 402 is what git shows the pusher verbatim.
+            // ingested.
             if let Err(e) = tenancy::charge_push(&repo, req.body.len()) {
-                return git_response(402, "text/plain", format!("{e}\n").into_bytes());
+                return git_response(200, RESULT, receive::refuse(&request, &e));
             }
-            let outcome = receive::handle(&repo, &req.body);
+            let outcome = receive::handle(&repo, request, &req.body);
             // m4: if the push moved the deploy branch and a deploy is
             // configured, enqueue a job and return immediately. The compile +
             // validate + install_code runs from a timer, off the push path
@@ -283,11 +308,7 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             // approval walk starts from (a force push can drop the served
             // commit off the branch).
             follow_approvals(&repo, false);
-            git_response(
-                200,
-                "application/x-git-receive-pack-result",
-                outcome.report,
-            )
+            git_response(200, RESULT, outcome.report)
         }
         _ => git_response(404, "text/plain", b"not found\n".to_vec()),
     }
@@ -383,11 +404,13 @@ fn list_authorized() -> Vec<candid::Principal> {
 /// https://ic:<token>@<canister>.raw.icp0.io/<repo>.git
 /// `days` is a trailing opt, so a caller passing only the repo still works.
 #[ic_cdk::update]
-async fn create_push_token(repo: String, days: Option<u32>) -> Result<String, String> {
+async fn create_push_token(repo: String, days: Option<u32>, key: Option<String>) -> Result<String, String> {
     tenancy::can_write(&repo, &caller(), operator())?;
-    // Refuse a bad lifetime, or a repo at its token cap, before paying for
-    // randomness; mint checks the cap again after the await.
+    // Refuse a bad lifetime, a key that cannot be bound, or a repo at its
+    // token cap, before paying for randomness; mint checks the cap again
+    // after the await.
     tokens::lifetime(days)?;
+    tokens::bindable_key(key.as_deref())?;
     tokens::check_room(&repo)?;
     let bytes: Vec<u8> = ic_dev_kit_rs::intercanister::call_no_args(
         candid::Principal::management_canister(),
@@ -397,8 +420,42 @@ async fn create_push_token(repo: String, days: Option<u32>) -> Result<String, St
     // Membership may have changed while raw_rand was in flight.
     tenancy::can_write(&repo, &caller(), operator())?;
     let token = hex::encode(&bytes[..16]);
-    tokens::mint(&repo, &token, caller(), days)?;
+    tokens::mint(&repo, &token, caller(), days, key.as_deref())?;
     Ok(token)
+}
+
+/// Require every push to the repo to be signed: a push with a token that
+/// is not bound to an SSH key is refused (signed_push.rs). Owner or
+/// operator.
+#[ic_cdk::update]
+fn set_require_signed_push(repo: String, on: bool) -> Result<(), String> {
+    tenancy::set_require_signed_push(&repo, &caller(), operator(), on)
+}
+
+/// Create the secret seed push-certificate nonces are keyed with, once. From
+/// init and post_upgrade on a timer, since raw_rand is a call; until it
+/// lands the advertisement offers no push-cert, and a bound token's push is
+/// refused as unsigned. A failed raw_rand is retried a minute later rather
+/// than leaving bound tokens unusable until the next upgrade.
+fn arm_push_cert_seed() {
+    arm_push_cert_seed_after(std::time::Duration::ZERO);
+}
+
+fn arm_push_cert_seed_after(delay: std::time::Duration) {
+    if signed_push::has_seed() {
+        return;
+    }
+    ic_cdk_timers::set_timer(delay, async {
+        let bytes: Result<Vec<u8>, String> = ic_dev_kit_rs::intercanister::call_no_args(
+            candid::Principal::management_canister(),
+            "raw_rand",
+        )
+        .await;
+        match bytes {
+            Ok(b) => signed_push::set_seed_once(&b),
+            Err(_) => arm_push_cert_seed_after(std::time::Duration::from_secs(60)),
+        }
+    });
 }
 
 /// The live push tokens of a repo, by id, soonest to expire first. Public:

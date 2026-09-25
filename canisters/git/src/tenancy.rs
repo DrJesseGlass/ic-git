@@ -217,6 +217,11 @@ pub struct RepoMeta {
     pub app_canister: Option<Principal>,
     #[serde(default)]
     pub created_ns: u64,
+    /// Refuse pushes with a token that is not bound to an SSH key, so every
+    /// push carries a certificate its key signed (signed_push.rs). Off by
+    /// default.
+    #[serde(default)]
+    pub require_signed_push: bool,
 }
 
 pub fn meta(repo: &str) -> Option<RepoMeta> {
@@ -244,6 +249,7 @@ fn meta_or_legacy(repo: &str) -> Result<RepoMeta, String> {
         required_votes: 0,
         app_canister: None,
         created_ns: 0,
+        require_signed_push: false,
     })
 }
 
@@ -344,6 +350,7 @@ pub fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), St
             required_votes: 0,
             app_canister: None,
             created_ns: now_ns(),
+            require_signed_push: false,
         },
     );
     Ok(())
@@ -662,6 +669,7 @@ pub struct RepoInfo {
     pub required_votes: u32,
     pub app_canister: Option<Principal>,
     pub exempt: bool,
+    pub require_signed_push: bool,
 }
 
 pub fn repo_info(repo: &str) -> Option<RepoInfo> {
@@ -674,7 +682,21 @@ pub fn repo_info(repo: &str) -> Option<RepoInfo> {
         delinquent: m.delinquent,
         required_votes: m.required_votes,
         app_canister: m.app_canister,
+        require_signed_push: m.require_signed_push,
     })
+}
+
+/// Turn required signed pushes on or off (owner or operator).
+pub fn set_require_signed_push(repo: &str, who: &Principal, operator: bool, on: bool) -> Result<(), String> {
+    let mut m = can_admin(repo, who, operator)?;
+    m.require_signed_push = on;
+    save_meta(repo, &m);
+    Ok(())
+}
+
+/// Does the repo refuse pushes with tokens that are not key-bound?
+pub fn requires_signed_push(repo: &str) -> bool {
+    meta(repo).is_some_and(|m| m.require_signed_push)
 }
 
 pub fn set_app_canister(repo: &str, canister: Principal) -> Result<(), String> {
@@ -805,6 +827,21 @@ mod tests {
         let (charged, _) = charge_rent_all();
         assert!(!store::repo_meta_all::<RepoMeta>().iter().any(|(n, _)| n == "t-legacy"));
         let _ = charged;
+    }
+
+    #[test]
+    fn only_the_owner_requires_signed_pushes() {
+        let (alice, w) = (p(51), p(52));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-signed", &alice, false).unwrap();
+        add_member("t-signed", &alice, false, w, Role::Writer).unwrap();
+        assert!(!requires_signed_push("t-signed"));
+        assert!(set_require_signed_push("t-signed", &w, false, true).is_err());
+        set_require_signed_push("t-signed", &alice, false, true).unwrap();
+        assert!(requires_signed_push("t-signed"));
+        assert!(repo_info("t-signed").unwrap().require_signed_push);
+        set_require_signed_push("t-signed", &alice, false, false).unwrap();
+        assert!(!requires_signed_push("t-signed"));
     }
 
     #[test]

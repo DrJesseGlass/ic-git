@@ -28,6 +28,10 @@ sha1 = "0.10"
 sha2 = "0.10"
 hex = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
+# Key-bound pushes (tokens.rs, signed_push.rs): verify the Ed25519 SSH
+# signature on a git push certificate. Verification only: no default
+# features, so no rand/getrandom and nothing that needs the OS.
+ed25519-dalek = { version = "2", default-features = false }
 
 # Track B, rung R0 (see ROADMAP.md): on-chain WAT -> wasm assembler plus a
 # validation pass. Both pure Rust, no filesystem/threads, target

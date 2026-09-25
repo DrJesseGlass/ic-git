@@ -142,7 +142,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -678,13 +678,15 @@ const Console = (() => {
       '<p>owner: ' + (info.owner ? '<span class="oid" title="' + esc(info.owner) + '">' + esc(short(info.owner)) + '</span>' : '<span class="muted">operator (exempt)</span>') +
       ' &middot; storage ' + info.storage_bytes + ' bytes' + (info.delinquent ? ' &middot; <b class="bad">behind on rent</b>' : '') +
       ' &middot; deploys need ' + info.required_votes + ' approval' + (info.required_votes === 1 ? '' : 's') +
-      (info.app_canister ? ' &middot; app canister <span class="oid">' + esc(info.app_canister) + '</span>' : '') + '</p>' +
+      (info.app_canister ? ' &middot; app canister <span class="oid">' + esc(info.app_canister) + '</span>' : '') +
+      (info.require_signed_push ? ' &middot; <b>pushes must be signed</b>' : '') + '</p>' +
       '<p>on push, deploys <b id="cfg-deploy">...</b> &middot; site <b id="cfg-site">...</b></p>';
     if (info.members.length) html += '<table><tr><th>member</th><th>role</th>' + (isOwner ? '<th></th>' : '') + '</tr>' + info.members.map(m => '<tr><td class="oid">' + esc(m.principal) + '</td><td>' + esc(m.role) + '</td>' + (isOwner ? '<td><button class="rm" data-p="' + esc(m.principal) + '">remove</button></td>' : '') + '</tr>').join('') + '</table>';
-    if (isWriter) html += form('f-token', [{ name: 'days', placeholder: 'lifetime in days (1-365, default 30)' }], 'mint push token') + '<p id="f-token-st" class="status tok"></p>' +
+    if (isWriter) html += form('f-token', [{ name: 'days', placeholder: 'lifetime in days (1-365, default 30)' }, { name: 'key', placeholder: 'bind to an SSH key: contents of ~/.ssh/id_ed25519.pub' + (info.require_signed_push ? ' (required here)' : ' (optional)') }], 'mint push token') + '<p id="f-token-st" class="status tok"></p>' +
       '<div id="tok-list"><p class="muted">push tokens: ...</p></div><p id="tok-list-st" class="status"></p>';
     if (isOwner) html += form('f-member', [{ name: 'principal', placeholder: 'principal' }, { name: 'role', placeholder: 'writer or voter', value: 'writer' }], 'add member') + '<p id="f-member-st" class="status"></p>' +
       form('f-votes', [{ name: 'k', placeholder: 'approvals required before deploy', value: String(info.required_votes) }], 'set required votes') + '<p id="f-votes-st" class="status"></p>' +
+      form('f-signed', [], info.require_signed_push ? 'stop requiring signed pushes' : 'require signed pushes (key-bound tokens only)') + '<p id="f-signed-st" class="status"></p>' +
       (info.app_canister
         ? form('f-topup', [{ name: 'amount', placeholder: 'T cycles to add' }], 'top up app canister') + '<p id="f-topup-st" class="status"></p>'
         : form('f-app', [{ name: 'amount', placeholder: 'T cycles (min 1)' }], 'create app canister') + '<p id="f-app-st" class="status"></p>');
@@ -714,13 +716,21 @@ const Console = (() => {
       const nsDate = ns => new Date(Number(BigInt(ns) / 1_000_000n)).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
       // Resolves to the list (or undefined if it could not be read), so the
       // mint can find its own token in it.
-      const tokens = () => IC.query(CANISTER, 'list_push_tokens', ['text'], [repo]).then(r => {
+      // A bound key as ssh-keygen -l prints it, and as git names the pusher.
+      const fingerprint = async text => {
+        const blob = Uint8Array.from(atob(text.split(' ')[1] || ''), c => c.charCodeAt(0));
+        const d = new Uint8Array(await crypto.subtle.digest('SHA-256', blob));
+        return 'SHA256:' + btoa(String.fromCharCode(...d)).replace(/=+$/, '');
+      };
+      const tokens = () => IC.query(CANISTER, 'list_push_tokens', ['text'], [repo]).then(async r => {
         const ts = r[0];
         const el = document.getElementById('tok-list');
         if (!el) return ts;
+        const fps = await Promise.all(ts.map(t => t.key ? fingerprint(t.key).catch(() => t.key) : null));
         el.innerHTML = !ts.length ? '<p class="muted">no live push tokens.</p>'
-          : '<table><tr><th>push token</th><th>minted by</th><th>expires</th><th></th></tr>' + ts.map(t => '<tr><td class="oid">' + esc(t.id) + '</td><td class="oid">' +
-            (t.minted_by ? esc(short(t.minted_by)) : '<span class="muted">before expiry existed</span>') + '</td><td>' + esc(nsDate(t.expires_ns)) +
+          : '<table><tr><th>push token</th><th>minted by</th><th>bound key</th><th>expires</th><th></th></tr>' + ts.map((t, i) => '<tr><td class="oid">' + esc(t.id) + '</td><td class="oid">' +
+            (t.minted_by ? esc(short(t.minted_by)) : '<span class="muted">before expiry existed</span>') + '</td><td class="oid">' +
+            (fps[i] ? esc(fps[i]) : '<span class="muted">none</span>') + '</td><td>' + esc(nsDate(t.expires_ns)) +
             '</td><td><button class="tok-rm" type="button" data-id="' + esc(t.id) + '">revoke</button></td></tr>').join('') + '</table>';
         el.querySelectorAll('button.tok-rm').forEach(b => { b.onclick = async () => {
           b.disabled = true;
@@ -735,7 +745,9 @@ const Console = (() => {
         const d = v.days.trim();
         const days = d ? Number(d) : null;
         if (days !== null && !(Number.isInteger(days) && days >= 1 && days <= 365)) throw new Error('lifetime is a whole number of days, 1 to 365');
-        const token = await write('create_push_token', ['text', { opt: 'nat32' }], [repo, days]);
+        const key = v.key.trim() || null;
+        if (key && !key.startsWith('ssh-ed25519 ')) throw new Error('only ssh-ed25519 keys can be bound (the contents of ~/.ssh/id_ed25519.pub)');
+        const token = await write('create_push_token', ['text', { opt: 'nat32' }, { opt: 'text' }], [repo, days, key]);
         // The expiry comes from the canister, not from a default copied
         // here: a token's id is the first 16 hex characters of the sha256 of
         // its text, so the new token can be found in the refreshed list.
@@ -745,7 +757,13 @@ const Console = (() => {
           const id = IC.hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))).slice(0, 8));
           mine = ((await tokens()) || []).find(t => t.id === id);
         } catch (e) { console.warn('push token list: ' + e.message); }
-        return 'token (shown once' + (mine ? ', valid until ' + nsDate(mine.expires_ns) : '') + '): ' + token + '  -> git push https://ic:<token>@' + location.host + '/' + repo + '.git main';
+        return 'token (shown once' + (mine ? ', valid until ' + nsDate(mine.expires_ns) : '') + '): ' + token + '  -> git push https://ic:<token>@' + location.host + '/' + repo + '.git main' +
+          (key ? '  -- bound to that key, so sign pushes with it: git config gpg.format ssh; git config user.signingkey <path to that .pub>; git config push.gpgSign if-asked' : '');
+      });
+      onsubmit('f-signed', async () => {
+        await write('set_require_signed_push', ['text', 'bool'], [repo, !info.require_signed_push]);
+        setTimeout(() => location.reload(), 800);
+        return info.require_signed_push ? 'signed pushes no longer required' : 'pushes must now be signed: tokens without a bound key are refused';
       });
       onsubmit('f-member', async v => { await write('add_member', ['text', 'principal', 'text'], [repo, v.principal.trim(), v.role.trim()]); setTimeout(() => location.reload(), 800); return 'added'; });
       onsubmit('f-votes', async v => { await write('set_required_votes', ['text', 'nat32'], [repo, Number(v.k)]); setTimeout(() => location.reload(), 800); return 'saved'; });

@@ -20,7 +20,9 @@ the browser (the console in `browser/index.html`, signing through the IC
 signer standards, which OISY implements) and from `dfx` on the command line.
 Git itself stays on HTTPS with per-repo push tokens; a canister cannot speak
 SSH, and a relay that could would hold exactly the standing credential this
-design refuses to have.
+design refuses to have. What SSH gives -- a push authorized by a key that
+never leaves your machine -- comes instead from signed pushes (below):
+stock git signs a push certificate with your SSH key, over HTTPS.
 
 ### Push tokens
 
@@ -47,6 +49,35 @@ minted by whoever lost write access (a previous owner keeps theirs only
 if they are an operator). Tokens from before expiry existed record no
 minter, so they run out their 30 days instead.
 
+### Signed pushes
+
+A token can be bound to an SSH public key at mint:
+`create_push_token(repo, days, opt "ssh-ed25519 AAAA...")`, or the key
+field in the console's mint form. A push with a bound token must carry a
+git push certificate signed by that key, so the token alone -- in a leaked
+URL, a CI log, a shell history -- pushes nothing. git does the signing:
+
+```
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/id_ed25519.pub
+git config push.gpgSign if-asked
+```
+
+The receive-pack advertisement offers `push-cert=<nonce>`, and git then
+sends a certificate listing each `<old> <new> <ref>` update with the nonce,
+signed with the key (OpenSSH's SSHSIG format, namespace `git`). The canister
+checks, before the push is charged or its pack read, that the nonce is one
+it issued for this repo within the last 10 minutes (an HMAC under a secret
+seed, as git's own `receive.certNonceSeed`), and that the signature is by
+exactly the bound key; the updates it then runs are the ones in the
+certificate. A refusal reaches git as `! [remote rejected] <ref> (<reason>)`,
+the reason saying what to fix. Only `ssh-ed25519` keys are accepted. `list_push_tokens` shows
+each token's bound key, and the console its fingerprint.
+
+`set_require_signed_push(repo, true)` (owner; the console's "require
+signed pushes") makes the repo refuse pushes with any token that is not
+bound to a key. It is off by default.
+
 ## Roles
 
 | Role | Granted by | May |
@@ -68,7 +99,7 @@ margin:
 | Charge | Default | When |
 |---|---|---|
 | create_repo | 1B cycles | on creation; also what "positive balance" means |
-| push | 100M + 5K per byte of the pack | before the pack is ingested (HTTP 402 if refused) |
+| push | 100M + 5K per byte of the pack | before the pack is ingested (refused as `[remote rejected]`, with the reason) |
 | storage rent | 5K per byte-year of ingested pack data | hourly timer, pro rata |
 | EVM action | 50B | each deploy or registry publish (a t-ECDSA signature plus RPC outcalls) |
 | IC deploy | 5B | each install from the deploy queue |
