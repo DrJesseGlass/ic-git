@@ -57,7 +57,12 @@ struct Announcement {
 }
 
 pub fn set_config(canister: String, handle: String) -> Result<(), String> {
-    Principal::from_text(&canister).map_err(|e| format!("bad names canister principal: {e}"))?;
+    let p = Principal::from_text(&canister).map_err(|e| format!("bad names canister principal: {e}"))?;
+    // A typo here would send every later announce nowhere: the anonymous
+    // principal and the management canister are never a name service.
+    if p == Principal::anonymous() || p == Principal::management_canister() {
+        return Err(format!("{canister} is not a canister that can run ic-name-service"));
+    }
     check_segment("handle", &handle)?;
     store::meta_set_json(CONFIG_KEY, &Some(NamesConfig { canister, handle }));
     Ok(())
@@ -132,7 +137,9 @@ mod tests {
 
     #[test]
     fn config_refuses_a_handle_the_name_service_would() {
-        let names = "aaaaa-aa".to_string();
+        let names = "ryjl3-tyaaa-aaaaa-aaaba-cai".to_string();
+        assert!(set_config("aaaaa-aa".into(), "solo".into()).is_err());
+        assert!(set_config("2vxsx-fae".into(), "solo".into()).is_err());
         assert!(set_config(names.clone(), "Solo".into()).is_err());
         assert!(set_config(names.clone(), "a/b".into()).is_err());
         assert!(set_config("not a principal".into(), "solo".into()).is_err());

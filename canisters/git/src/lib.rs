@@ -1013,13 +1013,14 @@ fn evm_get_config() -> Option<evm::EvmConfig> {
 // --- ic-name-service hook (names.rs) -----------------------------------------
 
 /// Turn on the announce hook: after each successful install, tell the
-/// name service canister `canister` about it under `<handle>/<repo>`.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+/// name service canister `canister` about it under `<handle>/<label>`.
+/// Operators: controllers or the admin allowlist, like set_pricing.
+#[ic_cdk::update(guard = "is_admin")]
 fn names_set_config(canister: String, handle: String) -> Result<(), String> {
     names::set_config(canister, handle)
 }
 
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 fn names_clear_config() {
     names::clear_config()
 }

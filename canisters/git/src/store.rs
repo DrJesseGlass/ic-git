@@ -359,7 +359,15 @@ pub fn label_holder(label: &str) -> Option<String> {
 /// name, not taken, whose label is not held either. `tenancy::create_repo`
 /// runs this before charging the creation fee, so a refused name costs
 /// nothing.
+/// Longest repo name, in bytes. Generous for a git repo name, and well
+/// under the 512 bytes ic-name-service accepts for the `repo` text an
+/// announce carries, so every repo that can be created can be announced.
+pub const MAX_REPO_NAME: usize = 100;
+
 pub fn check_new_repo(name: &str) -> Result<String, String> {
+    if name.len() > MAX_REPO_NAME {
+        return Err(format!("repo names are at most {MAX_REPO_NAME} characters"));
+    }
     if name.is_empty()
         || !name
             .chars()
@@ -610,6 +618,15 @@ mod tests {
 
     /// A label is taken by the first repo that maps to it; every other
     /// spelling of it is refused, and a refused name leaves no trace.
+    #[test]
+    fn repo_names_are_bounded() {
+        // Both label as "a-b"; only the length differs.
+        assert!(check_new_repo(&format!("a{}b", "_".repeat(MAX_REPO_NAME - 2))).is_ok());
+        let long = format!("a{}b", "_".repeat(MAX_REPO_NAME - 1));
+        assert!(create_repo(&long).unwrap_err().contains("at most"));
+        assert!(!repo_exists(&long));
+    }
+
     #[test]
     fn a_repo_label_is_unique() {
         create_repo("my-app").unwrap();
