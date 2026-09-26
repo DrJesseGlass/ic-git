@@ -319,6 +319,39 @@ pub fn revoke_key(key: &str) -> bool {
     remove_key(key)
 }
 
+/// Ids of token records that do not decode. They authorize nothing, but no
+/// revoke can remove them (neither knows their repo), so an operator lists
+/// them here and purges them with `purge_unreadable`. They only exist after
+/// a bug; the scan reads the whole map, which the per-repo cap bounds.
+pub fn unreadable_ids() -> Vec<String> {
+    store::token_entries("")
+        .into_iter()
+        .filter(|(_, value)| matches!(parse(value.clone()), Entry::Unreadable))
+        .map(|(key, _)| key[..ID_LEN].to_string())
+        .collect()
+}
+
+/// Remove the unreadable token record with this id (operators only, which
+/// the caller checks). Refused for a readable record -- that one has a repo,
+/// and revoke_push_token_id is the way to remove it -- and unless the id
+/// names exactly one record. An unreadable record has no index entries of
+/// its own; a stale one pointing at it is dropped by the expiry sweep.
+pub fn purge_unreadable(id: &str) -> Result<(), String> {
+    check_id(id)?;
+    let mut hits = store::token_entries(&id.to_ascii_lowercase()).into_iter();
+    let (key, value) = hits.next().ok_or("no push token with that id")?;
+    if hits.next().is_some() {
+        return Err("that id names more than one token record".into());
+    }
+    match parse(value) {
+        Entry::Unreadable => {
+            store::token_remove(&key);
+            Ok(())
+        }
+        _ => Err("that push token's record is readable; revoke it with revoke_push_token_id".into()),
+    }
+}
+
 /// Drop up to `PURGE_BATCH` expired tokens, oldest expiry first, read off
 /// the front of the expiry index. Run on every mint; a backlog drains over
 /// several mints rather than in one message.
@@ -612,6 +645,27 @@ mod tests {
         assert_eq!(authorize("tok-bad"), None);
         migrate();
         assert_eq!(store::token_get(&key).as_deref(), Some("{\"repo\":\"bad\"}"));
+    }
+
+    /// An unreadable record can be listed and purged by id; nothing else
+    /// can be purged that way, and revoke still refuses it.
+    #[test]
+    fn an_unreadable_record_can_be_purged_and_only_that() {
+        set_test_now(T0);
+        let bad = store::token_key("tok-corrupt");
+        store::token_put(&bad, "{\"not\":\"a record\"}".to_string());
+        let good = mint("pur", "tok-good", alice(), None, None).unwrap();
+        let id = bad[..ID_LEN].to_string();
+        assert_eq!(unreadable_ids(), vec![id.clone()]);
+        assert!(find_id(&id).unwrap_err().contains("unreadable"));
+        assert!(purge_unreadable(&good.id).unwrap_err().contains("readable"));
+        assert!(purge_unreadable("zz").is_err());
+        purge_unreadable(&id).unwrap();
+        assert!(store::token_get(&bad).is_none());
+        assert!(unreadable_ids().is_empty());
+        assert!(purge_unreadable(&id).unwrap_err().contains("no push token"));
+        // The readable one is untouched.
+        assert_eq!(authorize("tok-good").as_deref(), Some("pur"));
     }
 
     #[test]
