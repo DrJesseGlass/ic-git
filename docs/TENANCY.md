@@ -49,10 +49,11 @@ minted by whoever lost write access (a previous owner keeps theirs only
 if they are an operator). Tokens from before expiry existed record no
 minter, so they run out their 30 days instead.
 
-A token record that does not decode -- only a bug leaves one -- authorizes
-nothing, and neither revoke can remove it, since neither can tell its repo.
-Operators list them with `unreadable_push_tokens` and remove one by id with
-`purge_unreadable_push_token`, which refuses any readable record.
+A dead token record can never authorize again, and no listing shows it
+or revoke can remove it: one that does not decode (only a bug leaves one),
+or an old-format bare repo name written after the migration (a rolled-back
+wasm). Operators list them with `dead_push_tokens` and remove one by id
+with `purge_dead_push_token`, which refuses any live record.
 
 ### Signed pushes
 

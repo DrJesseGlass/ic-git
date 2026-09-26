@@ -346,32 +346,43 @@ pub fn revoke_key(key: &str) -> bool {
     remove_key(key)
 }
 
-/// Ids of token records that do not decode. They authorize nothing, but no
-/// revoke can remove them (neither knows their repo), so an operator lists
-/// them here and purges them with `purge_unreadable`. They only exist after
-/// a bug; the scan reads the whole map, which the per-repo cap bounds.
-pub fn unreadable_ids() -> Vec<String> {
+/// A record that can never authorize again: one that does not decode, or
+/// a bare repo name (the format before expiry existed) once `migrate` has
+/// run -- `authorize_if` honors those only until then, so one written
+/// afterwards (by a rolled-back wasm) is dead on arrival. Neither kind is
+/// indexed, so no listing shows it, and neither revoke can remove it: one
+/// has no repo to check, the other no id anyone can see. A legacy value
+/// before the migration is live and not dead.
+fn is_dead(e: &Entry) -> bool {
+    match e {
+        Entry::Unreadable => true,
+        Entry::Legacy(_) => migrated(),
+        Entry::Stored(_) => false,
+    }
+}
+
+/// Ids of dead token records (`is_dead`), for an operator to purge. Only a
+/// bug or a rollback leaves one; the scan reads the whole map, which the
+/// per-repo cap bounds.
+pub fn dead_ids() -> Vec<String> {
     store::token_entries("")
         .into_iter()
-        .filter_map(|(key, value)| matches!(parse(value), Entry::Unreadable).then(|| key[..ID_LEN].to_string()))
+        .filter_map(|(key, value)| is_dead(&parse(value)).then(|| key[..ID_LEN].to_string()))
         .collect()
 }
 
-/// Remove the unreadable token record with this id (operators only, which
-/// the caller checks). Refused for a readable record -- that one has a repo,
-/// and revoke_push_token_id is the way to remove it -- and unless the id
-/// names exactly one record. Index entries the record names are removed
-/// with it (`remove_key`); any other stale one is dropped by the expiry
-/// sweep or skipped by listings.
-pub fn purge_unreadable(id: &str) -> Result<(), String> {
+/// Remove the dead token record with this id (operators only, which the
+/// caller checks). Refused for a live record -- revoke_push_token_id
+/// removes those -- and unless the id names exactly one record. Index
+/// entries the record names are removed with it (`remove_key`); any other
+/// stale one is dropped by the expiry sweep or skipped by listings.
+pub fn purge_dead(id: &str) -> Result<(), String> {
     let (key, value) = one_record(id, "that id names more than one token record")?;
-    match parse(value) {
-        Entry::Unreadable => {
-            remove_key(&key);
-            Ok(())
-        }
-        _ => Err("that push token's record is readable; revoke it with revoke_push_token_id".into()),
+    if !is_dead(&parse(value)) {
+        return Err("that push token's record is live; revoke it with revoke_push_token_id".into());
     }
+    remove_key(&key);
+    Ok(())
 }
 
 /// Drop up to `PURGE_BATCH` expired tokens, oldest expiry first, read off
@@ -669,8 +680,8 @@ mod tests {
         assert_eq!(store::token_get(&key).as_deref(), Some("{\"repo\":\"bad\"}"));
     }
 
-    /// An unreadable record can be listed and purged by id; nothing else
-    /// can be purged that way, and revoke still refuses it.
+    /// An unreadable record is dead: listed and purged by id; a live one
+    /// cannot be purged that way, and revoke still refuses the dead one.
     #[test]
     fn an_unreadable_record_can_be_purged_and_only_that() {
         set_test_now(T0);
@@ -678,17 +689,41 @@ mod tests {
         store::token_put(&bad, "{\"not\":\"a record\"}".to_string());
         let good = mint("pur", "tok-good", alice(), None, None).unwrap();
         let id = bad[..ID_LEN].to_string();
-        assert!(unreadable_ids().contains(&id));
-        assert!(!unreadable_ids().contains(&good.id));
+        assert!(dead_ids().contains(&id));
+        assert!(!dead_ids().contains(&good.id));
         assert!(find_id(&id).unwrap_err().contains("unreadable"));
-        assert!(purge_unreadable(&good.id).unwrap_err().contains("readable"));
-        assert!(purge_unreadable("zz").is_err());
-        purge_unreadable(&id).unwrap();
+        assert!(purge_dead(&good.id).unwrap_err().contains("live"));
+        assert!(purge_dead("zz").is_err());
+        purge_dead(&id).unwrap();
         assert!(store::token_get(&bad).is_none());
-        assert!(!unreadable_ids().contains(&id));
-        assert!(purge_unreadable(&id).unwrap_err().contains("no push token"));
+        assert!(!dead_ids().contains(&id));
+        assert!(purge_dead(&id).unwrap_err().contains("no push token"));
         // The readable one is untouched.
         assert_eq!(authorize("tok-good").as_deref(), Some("pur"));
+    }
+
+    /// A bare repo name is live until the migration and dead after it:
+    /// listed and purgeable then, and not before.
+    #[test]
+    fn a_legacy_record_written_after_the_migration_is_dead() {
+        set_test_now(T0);
+        let early = store::token_key("tok-early");
+        store::token_put(&early, "old".to_string());
+        let id_early = early[..ID_LEN].to_string();
+        assert!(!dead_ids().contains(&id_early), "before migrate it is live");
+        assert!(purge_dead(&id_early).unwrap_err().contains("live"));
+        migrate();
+        // Migrated: now a stored record, live, and not dead either.
+        assert!(!dead_ids().contains(&id_early));
+        // One written after the migration (a rolled-back wasm) is dead.
+        let late = store::token_key("tok-late-legacy");
+        store::token_put(&late, "old".to_string());
+        assert_eq!(authorize("tok-late-legacy"), None);
+        let id_late = late[..ID_LEN].to_string();
+        assert!(dead_ids().contains(&id_late));
+        purge_dead(&id_late).unwrap();
+        assert!(store::token_get(&late).is_none());
+        assert_eq!(authorize("tok-early").as_deref(), Some("old"));
     }
 
     /// An unreadable record that another wasm indexed loses its index
@@ -703,7 +738,7 @@ mod tests {
         let x = format!("e\0{e:020}\0{key}");
         store::token_index_put(r.clone());
         store::token_index_put(x.clone());
-        purge_unreadable(&key[..ID_LEN]).unwrap();
+        purge_dead(&key[..ID_LEN]).unwrap();
         assert!(store::token_index_range(&r, "r\0pix\x01", usize::MAX).is_empty());
         assert!(!store::token_index_range("e\0", "e\x01", usize::MAX).contains(&x));
     }

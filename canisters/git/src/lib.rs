@@ -490,18 +490,20 @@ fn revoke_push_token(token: String) -> bool {
     }
 }
 
-/// Ids of push-token records that do not decode (operators). They
-/// authorize nothing, and only a bug leaves one; see tokens.rs.
+/// Ids of dead push-token records (operators): ones that can never
+/// authorize again and that no listing shows or revoke can remove -- a
+/// record that does not decode, or an old-format one written after the
+/// migration. Only a bug or a rollback leaves one; see tokens.rs.
 #[ic_cdk::query(guard = "is_admin")]
-fn unreadable_push_tokens() -> Vec<String> {
-    tokens::unreadable_ids()
+fn dead_push_tokens() -> Vec<String> {
+    tokens::dead_ids()
 }
 
-/// Remove an unreadable push-token record by id (operators). A readable
-/// one is refused: revoke_push_token_id removes those.
+/// Remove a dead push-token record by id (operators). A live one is
+/// refused: revoke_push_token_id removes those.
 #[ic_cdk::update(guard = "is_admin")]
-fn purge_unreadable_push_token(id: String) -> Result<(), String> {
-    tokens::purge_unreadable(&id)
+fn purge_dead_push_token(id: String) -> Result<(), String> {
+    tokens::purge_dead(&id)
 }
 
 /// Revoke a token by the id `list_push_tokens` shows, without holding the
