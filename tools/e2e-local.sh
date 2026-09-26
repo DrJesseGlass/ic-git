@@ -12,6 +12,8 @@
 #   KEEP=1 tools/e2e-local.sh          # leave the network running after
 #   E2E_PORT=4960 tools/e2e-local.sh   # another port (default 4950)
 #   NAMES_REPO=../ic-name-service ...  # where ic-name-service is (optional)
+#   BASE_REF=v0.2.2 tools/e2e-local.sh # the release to upgrade from (default:
+#                                      # the newest tag); BASE_REF=none skips
 #
 # Identities: e2e-local (controller and operator) and e2e-tenant (a paying,
 # non-operator user), plaintext and local-only, created if missing. Never
@@ -23,8 +25,11 @@
 # revoke by id; the approval-gated site (hidden until approved, rollback on
 # a withdrawn approval); an approval-gated deploy of a .wat app into the
 # repo's app canister, its certified module hash, and the ic-name-service
-# announce; an upgrade with state; the console's query-backed reads through
-# the page's own code, and the /api reads.
+# announce; an upgrade in place; an upgrade from the previous release
+# (BASE_REF) over state that release wrote -- a gated repo and its site, an
+# old-format token, a name that only maps to a label -- checking each
+# migration lands; the console's query-backed reads through the page's own
+# code, and the /api reads.
 #
 # Not covered: wallet writes (OISY signs mainnet only), the EVM leg (no EVM
 # RPC locally), ICP recovery paths (lost reply, refund), expiry by time.
@@ -34,6 +39,10 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${E2E_PORT:-4950}
 KEEP=${KEEP:-0}
+# The release a mainnet upgrade starts from: by default the newest tag. Set
+# it to what mainnet actually runs (tools/check-module-hash.sh says whether
+# that is a recorded release).
+BASE_REF=${BASE_REF-$(git -C "$(dirname "$0")/.." describe --tags --abbrev=0 2>/dev/null || true)}
 NAMES_REPO=${NAMES_REPO:-$ROOT/../ic-name-service}
 OP=e2e-local
 TEN=e2e-tenant
@@ -56,8 +65,11 @@ cleanup() {
     printf '\nnetwork left running on 127.0.0.1:%s (project %s); stop it with: (cd %s && dfx stop)\n' "$PORT" "$WORK" "$WORK"
   else
     (cd "$WORK" && dfx stop >/dev/null 2>&1) || true
-    rm -rf "$WORK"
   fi
+  if [ -d "$WORK/base-src" ]; then
+    git -C "$ROOT" worktree remove --force "$WORK/base-src" >/dev/null 2>&1 || true
+  fi
+  [ "$KEEP" = 1 ] || rm -rf "$WORK"
 }
 trap cleanup EXIT
 
@@ -88,6 +100,16 @@ if [ -d "$NAMES_REPO/canisters/names" ]; then
   NAMES_WASM=$NAMES_REPO/target/wasm32-unknown-unknown/release/name_canister.wasm
 fi
 echo "ic-git wasm: $GIT_WASM${NAMES_WASM:+; ic-name-service wasm: $NAMES_WASM}"
+BASE_WASM=
+if [ -n "$BASE_REF" ] && [ "$BASE_REF" != none ]; then
+  # Built from a worktree of the release, into its own target dir so later
+  # runs reuse it.
+  BASE_SRC=$WORK/base-src
+  git -C "$ROOT" worktree add -q --detach "$BASE_SRC" "$BASE_REF"
+  (cd "$BASE_SRC" && CARGO_TARGET_DIR="$ROOT/target/e2e-base" cargo build -q --target wasm32-unknown-unknown --release -p git_canister)
+  BASE_WASM=$ROOT/target/e2e-base/wasm32-unknown-unknown/release/git_canister.wasm
+  echo "base release $BASE_REF: $BASE_WASM"
+fi
 
 section "network"
 NAMES_ENTRY=
@@ -99,7 +121,8 @@ cat > "$WORK/dfx.json" <<EOF
 {
   "version": 1,
   "canisters": {
-    "git": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] }$NAMES_ENTRY
+    "git": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] },
+    "base": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] }$NAMES_ENTRY
   },
   "networks": { "local": { "bind": "127.0.0.1:$PORT", "type": "ephemeral" } }
 }
@@ -188,10 +211,12 @@ fi
 
 section "approval-gated site"
 SITE="http://$HOST/site/e2e-app/"
-served() {
-  curl -s -D "$WORK/h" -o "$WORK/b" "$SITE" -w '%{http_code} ' || true
+# "<status> <commit>" of a site's root: the X-Ic-Git-Commit header names it.
+served_at() {
+  curl -s -D "$WORK/h" -o "$WORK/b" "$1" -w '%{http_code} ' || true
   tr -d '\r' <"$WORK/h" | grep -i '^x-ic-git-commit:' | cut -d' ' -f2 || true
 }
+served() { served_at "$SITE"; }
 call "$TEN" git set_site '("e2e-app", "site")' >/dev/null
 TIP=$(git -C "$W" rev-parse HEAD)
 expect "served at the tip without votes" "$(served)" "^200 $TIP"
@@ -241,7 +266,7 @@ if [ -n "$NAMES_WASM" ]; then
   expect "  ...and the module hash" "$REC" "\"$WASM_SHA\""
 fi
 
-section "upgrade with state"
+section "upgrade in place (same build)"
 BEFORE=$(served)
 (cd "$WORK" && dfx canister install git --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
 expect "site unchanged" "$(served)" "^${BEFORE%% *} ${BEFORE#* }"
@@ -250,6 +275,59 @@ expect "balance kept" "$(call "$TEN" git get_account "(principal \"$T\")")" 'dep
 expect "push-cert still offered (the seed survived)" "$(curl -s "http://ic:$BOUND@$HOST/e2e-app.git/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert='
 commit site/e.txt e after-upgrade
 expect "signed push after upgrade" "$(signed "$URL")" 'main -> main'
+
+if [ -n "$BASE_WASM" ]; then
+  section "upgrade from $BASE_REF"
+  # State written by the release mainnet starts from, through its own API
+  # (its candid), then an upgrade to this build and a check per migration.
+  OLD_DID=$BASE_SRC/canisters/git/git.did
+  NEW_DID=$ROOT/canisters/git/git.did
+  (cd "$WORK" && dfx canister create base --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister install base --identity "$OP" --wasm "$BASE_WASM" >/dev/null 2>&1)
+  BID=$(cd "$WORK" && dfx canister id base)
+  BHOST="$BID.raw.localhost:$PORT"
+  old() { local who=$1; shift; call "$who" base "$@" --candid "$OLD_DID"; }
+  new() { local who=$1; shift; call "$who" base "$@" --candid "$NEW_DID"; }
+  old "$OP" create_repo '("legacy-app")' >/dev/null
+  old "$OP" create_repo '("legacy.name")' >/dev/null
+  old "$OP" add_member "(\"legacy-app\", principal \"$T\", \"writer\")" >/dev/null
+  # A token in the old format (a bare repo name): no expiry, no minter.
+  LT=$(old "$TEN" create_push_token '("legacy-app")' | ok_text)
+  LURL="http://ic:$LT@$BHOST/legacy-app.git"
+  LW=$WORK/legacy
+  git init -q -b main "$LW"
+  git -C "$LW" config user.name E2E
+  git -C "$LW" config user.email e2e@local
+  echo '<!doctype html><title>l1</title>' >"$LW/index.html"; git -C "$LW" add -A; git -C "$LW" commit -qm l1
+  expect "$BASE_REF: push with its token" "$(git -C "$LW" push "$LURL" main 2>&1 || true)" 'new branch'
+  L1=$(git -C "$LW" rev-parse HEAD)
+  old "$OP" set_site '("legacy-app", "")' >/dev/null
+  old "$OP" set_required_votes '("legacy-app", 1 : nat32)' >/dev/null
+  old "$OP" vote "(\"legacy-app\", \"$L1\", true)" >/dev/null
+  echo '<!doctype html><title>l2</title>' >"$LW/index.html"; git -C "$LW" commit -qam l2
+  git -C "$LW" push "$LURL" main >/dev/null 2>&1 || true
+  L2=$(git -C "$LW" rev-parse HEAD)
+  LSITE="http://$BHOST/site/legacy-app/"
+  expect "$BASE_REF: serves the tip, approved or not" "$(served_at "$LSITE")" "^200 $L2"
+
+  (cd "$WORK" && dfx canister install base --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
+  expect "upgraded: the gated site serves its approved commit, not the tip" "$(served_at "$LSITE")" "^200 $L1"
+  TOK=$(new "$TEN" list_push_tokens '("legacy-app")')
+  expect "the old-format token is listed" "$(echo "$TOK" | grep -c 'id =')" '^1$'
+  expect "  ...with no minter recorded" "$TOK" 'minted_by = null'
+  EXP=$(echo "$TOK" | sed -n 's/.*expires_ns = \([0-9_]*\).*/\1/p' | tr -d _)
+  NOW_S=$(date +%s)
+  DAYS=$(( (EXP / 1000000000 - NOW_S + 43200) / 86400 ))
+  expect "  ...expiring in the 30-day grace" "$DAYS" '^30$'
+  echo x >"$LW/x.txt"; git -C "$LW" add -A; git -C "$LW" commit -qm l3
+  expect "the old-format token still pushes" "$(git -C "$LW" push "$LURL" main 2>&1 || true)" 'main -> main'
+  expect "the pushed commit is not served until approved" "$(served_at "$LSITE")" "^200 $L1"
+  expect "push-cert offered (the nonce seed was created on upgrade)" "$(curl -s "$LURL/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert='
+  expect "a label taken by an old repo is refused" "$(new "$OP" create_repo '("legacy-name")')" "maps to the label .{0,2}legacy-name.{0,2}, which repo .{0,2}legacy[.]name"
+  INFO=$(new "$OP" get_repo_info '("legacy-app")')
+  expect "membership kept" "$INFO" "$T"
+  expect "required votes kept" "$INFO" 'required_votes = 1'
+fi
 
 section "console reads"
 for p in pricing e2e-app/info "account/$T" e2e-app/deploys; do

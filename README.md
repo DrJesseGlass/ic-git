@@ -137,8 +137,9 @@ tools/e2e-local.sh   # before an upgrade: the whole user path on a local replica
 CMC) on port 4950 from a temporary project, so a replica you already run is
 untouched, and drives the current checkout the way users do: ICP deposits,
 signed pushes over HTTP, tokens, the approval-gated site and deploy, the
-ic-name-service announce (if `../ic-name-service` exists), an upgrade with
-state, and the console's reads. It prints PASS or FAIL per check and exits
+ic-name-service announce (if `../ic-name-service` exists), an upgrade from
+the previous release (`BASE_REF`, by default the newest tag) over state
+that release wrote, and the console's reads. It prints PASS or FAIL per check and exits
 non-zero on any failure; `KEEP=1` leaves the network up afterwards.
 
 Admin API calls (`create_repo`, `put_object`, `set_ref`) are restricted to
