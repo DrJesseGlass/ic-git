@@ -14,6 +14,25 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-09-01 | `2dd941d` | `v0.1.2` | `268c18bbfeb0cda616a55fcd500e62fcfc267c77aa8f297ad046d69108718d8f` | MATCH, 2026-09-01 | deployer (pinned container) |
 | 2026-09-02 | `9cdc58c` | `v0.2.0` | `278ebec09bc4d353da718a2751ce01dd74bb44804d1f99abf72b0e08d4b3541a` (gz) | MATCH, 2026-09-02 | deployer (pinned container); GitHub Actions amd64 runner, [run 33653643555](https://github.com/DrJesseGlass/ic-git/actions/runs/33653643555), MATCH |
 | 2026-09-22 | `bcd6f9b` | `v0.2.1` | `29e5ba3aa7e2dc0c62519c5a9e7e609bf72493971947e565e68daf3d43d29c1a` (gz) | MATCH, 2026-09-22 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 35805482289](https://github.com/DrJesseGlass/ic-git/actions/runs/35805482289), identical hash |
+| 2026-09-24 to 26 | `5b2b55f` | `v0.2.2` | `f13ff2226676f02cffe3906f641a63e6df0806ef25c093ae159444aeb278cca1` (gz) | MATCH, 2026-09-26 (recorded late) | GitHub Actions amd64 runner, [run 36039724742](https://github.com/DrJesseGlass/ic-git/actions/runs/36039724742), identical hash; deployer (pinned container, macOS arm64 host under emulation), MATCH |
+
+## v0.2.2 -- deployed 2026-09-24 to 26, recorded 2026-09-26
+
+Recorded late. v0.2.2 was tagged on 2026-09-24 and deployed without a
+record here, so on 2026-09-26 `tools/check-module-hash.sh` reported the
+live module as one nobody had recorded -- the drift watch doing its job.
+A rebuild of the tag in the pinned container, from a worktree at `v0.2.2`,
+matched the IC's certified module hash byte for byte, so the running code
+is this source; the exact deploy date was not logged and is bounded by
+the tag and the check.
+
+Three merges changed the canister crate since v0.2.1: the console's deploy
+configuration (#20), ICRC-21 consent messages and the ICRC-10 standards
+list so wallets will sign console calls (#22), and clippy cleanups (#23).
+Same recipe and base image digest as v0.2.1. The raw wasm inside the gzip
+hashes to `cb6eba84...90be`. Two hosts agreed: a native x86_64 GitHub
+runner triggered by the tag push on 2026-09-24, and the deployer's arm64
+machine running the amd64 image under emulation on 2026-09-26.
 
 ## v0.2.1 -- 2026-09-22
 
