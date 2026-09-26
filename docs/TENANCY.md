@@ -49,6 +49,12 @@ minted by whoever lost write access (a previous owner keeps theirs only
 if they are an operator). Tokens from before expiry existed record no
 minter, so they run out their 30 days instead.
 
+A dead token record can never authorize again, and no listing shows it
+or revoke can remove it: one that does not decode (only a bug leaves one),
+or an old-format bare repo name written after the migration (a rolled-back
+wasm). Operators list them with `dead_push_tokens` and remove one by id
+with `purge_dead_push_token`, which refuses any live record.
+
 ### Signed pushes
 
 A token can be bound to an SSH public key at mint:
@@ -85,7 +91,7 @@ bound to a key. It is off by default.
 | Owner | creating the repo, or `transfer_repo` | everything below, plus manage members, config, deploys, and votes threshold; pays |
 | Writer | owner, `add_member(repo, p, "writer")` | push, mint and revoke tokens |
 | Voter | owner, `add_member(repo, p, "voter")` | cast ballots on commits |
-| Operator | controller or the legacy admin allowlist | act on any repo; charged nothing |
+| Operator | controller or the legacy admin allowlist (never ic-git itself) | act on any repo; charged nothing |
 
 Repos created before tenancy existed have no owner and are treated as
 operator repos: exempt from every charge, writable only by operators.

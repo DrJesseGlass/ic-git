@@ -273,6 +273,8 @@ service : {
   list_push_tokens : (text) -> (vec PushTokenInfo) query;
   revoke_push_token : (text) -> (bool);
   revoke_push_token_id : (text) -> (Result);
+  dead_push_tokens : () -> (vec text) query;
+  purge_dead_push_token : (text) -> (Result);
 
   // tenancy: accounts, ownership, membership, votes (docs/TENANCY.md)
   deposit : () -> (ResultAccount);

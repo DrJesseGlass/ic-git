@@ -352,22 +352,36 @@ fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String>
 // canister, so they are trusted at least as much as an allowlisted principal;
 // letting them manage the list makes the cutover a settings change.
 
-/// Guard: the caller is a controller or an allowlisted principal.
+/// The one operator rule: controllers and the admin allowlist, and never
+/// this canister itself. `operator()` and the `is_admin` guard apply it to
+/// the caller; the push-token checks apply it to a token's minter. The
+/// self exclusion is deliberate: code this canister runs on its own behalf
+/// (timers, its own calls) is not an operator, even if its principal were
+/// put on the allowlist -- which is what the allowlist check used to refuse
+/// for the caller alone, so the two paths could disagree.
+fn is_operator(p: &candid::Principal) -> bool {
+    *p != ic_cdk::api::canister_self()
+        && (ic_cdk::api::is_controller(p) || auth::is_principal_authorized(*p).unwrap_or(false))
+}
+
+/// Guard: the caller is an operator (`is_operator`).
 fn is_admin() -> Result<(), String> {
-    if ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
-        return Ok(());
+    let c = caller();
+    if is_operator(&c) {
+        Ok(())
+    } else {
+        Err(format!("{c} is not an operator (a controller or on the admin allowlist)"))
     }
-    auth::is_authorized()
 }
 
 fn caller() -> candid::Principal {
     ic_cdk::api::msg_caller()
 }
 
-/// Operators (controllers and the allowlist) may act on any repo and pay
-/// nothing; everyone else is a tenant.
+/// Operators (`is_operator`) may act on any repo and pay nothing; everyone
+/// else is a tenant.
 fn operator() -> bool {
-    is_admin().is_ok()
+    is_operator(&caller())
 }
 
 #[ic_cdk::update(guard = "is_admin")]
@@ -474,6 +488,22 @@ fn revoke_push_token(token: String) -> bool {
         Some(repo) if tenancy::can_write(&repo, &caller(), operator()).is_ok() => tokens::revoke(&token),
         _ => false,
     }
+}
+
+/// Ids of dead push-token records (operators): ones that can never
+/// authorize again and that no listing shows or revoke can remove -- a
+/// record that does not decode, or an old-format one written after the
+/// migration. Only a bug or a rollback leaves one; see tokens.rs.
+#[ic_cdk::query(guard = "is_admin")]
+fn dead_push_tokens() -> Vec<String> {
+    tokens::dead_ids()
+}
+
+/// Remove a dead push-token record by id (operators). A live one is
+/// refused: revoke_push_token_id removes those.
+#[ic_cdk::update(guard = "is_admin")]
+fn purge_dead_push_token(id: String) -> Result<(), String> {
+    tokens::purge_dead(&id)
 }
 
 /// Revoke a token by the id `list_push_tokens` shows, without holding the
@@ -609,12 +639,6 @@ fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), Strin
     // write (an operator).
     revoke_tokens_of_non_writers(&repo);
     Ok(())
-}
-
-/// Controllers and the admin allowlist: who `operator()` admits, for any
-/// principal rather than the caller.
-fn is_operator(p: &candid::Principal) -> bool {
-    ic_cdk::api::is_controller(p) || auth::is_principal_authorized(*p).unwrap_or(false)
 }
 
 /// After a membership change: a push token lasts only as long as its
