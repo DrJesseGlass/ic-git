@@ -47,6 +47,8 @@ browser/index.html      the repo browser -- one self-contained page, served by
 tools/seed-repo.sh      upload a local repo via the admin API (pre-m3 push)
 tools/reproducible-build.sh, tools/check-module-hash.sh
                         prove the deployed wasm is this source (REPRODUCIBLE_BUILD.md)
+tools/e2e-local.sh      end-to-end pass on a throwaway local replica, run
+                        before every mainnet upgrade
 site/                   placeholder content for the asset canister ("www")
 ARCHITECTURE.md         the design
 ```
@@ -128,7 +130,17 @@ commit it actually came from rather than the branch tip (demo/README.md).
 ```sh
 cargo check
 cargo test
+tools/e2e-local.sh   # before an upgrade: the whole user path on a local replica
 ```
+
+`tools/e2e-local.sh` starts its own network (with the ICP ledger and the
+CMC) on port 4950 from a temporary project, so a replica you already run is
+untouched, and drives the current checkout the way users do: ICP deposits,
+signed pushes over HTTP, tokens, the approval-gated site and deploy, the
+ic-name-service announce (if `../ic-name-service` exists), an upgrade from
+the previous release (`BASE_REF`, by default the newest tag) over state
+that release wrote, and the console's reads. It prints PASS or FAIL per check and exits
+non-zero on any failure; `KEEP=1` leaves the network up afterwards.
 
 Admin API calls (`create_repo`, `put_object`, `set_ref`) are restricted to
 authorized principals - the deploying identity is authorized at init

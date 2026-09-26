@@ -231,7 +231,14 @@ const IC = (() => {
   // An anonymous query straight to the IC HTTP API, for reads that need no
   // signature (ledger balances). The reply is taken as the boundary node
   // returns it, without checking node signatures, like the /api reads.
-  const API = 'https://icp-api.io', QUERY_TIMEOUT_MS = 15_000;
+  // Served by a local replica (<id>.localhost or <id>.raw.localhost), the
+  // queries go to that replica's gateway, which answers /api/v2 on the same
+  // origin; otherwise to mainnet. Without this a local deployment's console
+  // asked mainnet about local canister ids and every query-backed panel
+  // failed. The ICP ledger, cycles ledger and CMC keep their mainnet ids on
+  // a replica started with --system-canisters.
+  const LOCAL = typeof location !== 'undefined' && /(^|\.)localhost$/.test(location.hostname);
+  const API = LOCAL ? location.origin : 'https://icp-api.io', QUERY_TIMEOUT_MS = 15_000;
   async function query(canisterId, method, types, values) {
     const content = { request_type: 'query', sender: Uint8Array.of(4), canister_id: principalFromText(canisterId), method_name: method, arg: encode(types, values), ingress_expiry: BigInt(Date.now() + 240_000) * 1_000_000n };
     const r = await fetch(API + '/api/v2/canister/' + canisterId + '/query', { method: 'POST', headers: { 'Content-Type': 'application/cbor' }, body: cborEnc({ content }), signal: AbortSignal.timeout(QUERY_TIMEOUT_MS) });
