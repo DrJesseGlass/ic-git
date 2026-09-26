@@ -123,12 +123,32 @@ fn store_record(key: &str, s: &Stored) {
 
 /// Remove a record and its index entries.
 fn remove_key(key: &str) -> bool {
-    if let Some(Entry::Stored(s)) = store::token_get(key).map(parse) {
-        for k in index_keys(key, &s) {
-            store::token_index_remove(&k);
-        }
+    let Some(value) = store::token_get(key) else {
+        return false;
+    };
+    for k in indexed_as(key, &value) {
+        store::token_index_remove(&k);
     }
     store::token_remove(key)
+}
+
+/// The index keys a record may have: exactly `index_keys` for a readable
+/// one, and for an unreadable one whatever its `repo` and `expires_ns`
+/// fields name where they are present -- the wasm that wrote it may have
+/// indexed it, and an `r` entry left behind would never be swept. A legacy
+/// value is not JSON and has none.
+fn indexed_as(key: &str, value: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(value) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(repo) = v.get("repo").and_then(|r| r.as_str()) {
+        out.push(format!("{}{key}", repo_prefix(repo).0));
+    }
+    if let Some(e) = v.get("expires_ns").and_then(|e| e.as_u64()) {
+        out.push(format!("e\0{e:020}\0{key}"));
+    }
+    out
 }
 
 fn stored(key: &str) -> Option<Stored> {
@@ -305,14 +325,21 @@ pub fn check_id(id: &str) -> Result<(), String> {
 /// The key and repo of the token with this id. Refused unless it names
 /// exactly one token.
 pub fn find_id(id: &str) -> Result<(String, String), String> {
-    check_id(id)?;
-    let mut hits = store::token_entries(&id.to_ascii_lowercase()).into_iter();
-    let (key, value) = hits.next().ok_or("no push token with that id")?;
-    if hits.next().is_some() {
-        return Err("that id names more than one token; revoke it with the token itself".into());
-    }
+    let (key, value) = one_record(id, "that id names more than one token; revoke it with the token itself")?;
     let repo = parse(value).repo().ok_or("that push token's record is unreadable")?;
     Ok((key, repo))
+}
+
+/// The (key, value) of the one record whose id is `id`; `ambiguous` is the
+/// refusal when the id names more than one.
+fn one_record(id: &str, ambiguous: &str) -> Result<(String, String), String> {
+    check_id(id)?;
+    let mut hits = store::token_entries(&id.to_ascii_lowercase()).into_iter();
+    let hit = hits.next().ok_or("no push token with that id")?;
+    if hits.next().is_some() {
+        return Err(ambiguous.to_string());
+    }
+    Ok(hit)
 }
 
 pub fn revoke_key(key: &str) -> bool {
@@ -326,26 +353,21 @@ pub fn revoke_key(key: &str) -> bool {
 pub fn unreadable_ids() -> Vec<String> {
     store::token_entries("")
         .into_iter()
-        .filter(|(_, value)| matches!(parse(value.clone()), Entry::Unreadable))
-        .map(|(key, _)| key[..ID_LEN].to_string())
+        .filter_map(|(key, value)| matches!(parse(value), Entry::Unreadable).then(|| key[..ID_LEN].to_string()))
         .collect()
 }
 
 /// Remove the unreadable token record with this id (operators only, which
 /// the caller checks). Refused for a readable record -- that one has a repo,
 /// and revoke_push_token_id is the way to remove it -- and unless the id
-/// names exactly one record. An unreadable record has no index entries of
-/// its own; a stale one pointing at it is dropped by the expiry sweep.
+/// names exactly one record. Index entries the record names are removed
+/// with it (`remove_key`); any other stale one is dropped by the expiry
+/// sweep or skipped by listings.
 pub fn purge_unreadable(id: &str) -> Result<(), String> {
-    check_id(id)?;
-    let mut hits = store::token_entries(&id.to_ascii_lowercase()).into_iter();
-    let (key, value) = hits.next().ok_or("no push token with that id")?;
-    if hits.next().is_some() {
-        return Err("that id names more than one token record".into());
-    }
+    let (key, value) = one_record(id, "that id names more than one token record")?;
     match parse(value) {
         Entry::Unreadable => {
-            store::token_remove(&key);
+            remove_key(&key);
             Ok(())
         }
         _ => Err("that push token's record is readable; revoke it with revoke_push_token_id".into()),
@@ -656,16 +678,34 @@ mod tests {
         store::token_put(&bad, "{\"not\":\"a record\"}".to_string());
         let good = mint("pur", "tok-good", alice(), None, None).unwrap();
         let id = bad[..ID_LEN].to_string();
-        assert_eq!(unreadable_ids(), vec![id.clone()]);
+        assert!(unreadable_ids().contains(&id));
+        assert!(!unreadable_ids().contains(&good.id));
         assert!(find_id(&id).unwrap_err().contains("unreadable"));
         assert!(purge_unreadable(&good.id).unwrap_err().contains("readable"));
         assert!(purge_unreadable("zz").is_err());
         purge_unreadable(&id).unwrap();
         assert!(store::token_get(&bad).is_none());
-        assert!(unreadable_ids().is_empty());
+        assert!(!unreadable_ids().contains(&id));
         assert!(purge_unreadable(&id).unwrap_err().contains("no push token"));
         // The readable one is untouched.
         assert_eq!(authorize("tok-good").as_deref(), Some("pur"));
+    }
+
+    /// An unreadable record that another wasm indexed loses its index
+    /// entries when purged, so no `r` entry is stranded.
+    #[test]
+    fn purging_an_indexed_unreadable_record_drops_its_index_entries() {
+        set_test_now(T0);
+        let key = store::token_key("tok-idx-bad");
+        let e = T0 + DAY_NS;
+        store::token_put(&key, format!("{{\"repo\":\"pix\",\"expires_ns\":{e},\"minted_by\":7}}"));
+        let r = format!("r\0pix\0{key}");
+        let x = format!("e\0{e:020}\0{key}");
+        store::token_index_put(r.clone());
+        store::token_index_put(x.clone());
+        purge_unreadable(&key[..ID_LEN]).unwrap();
+        assert!(store::token_index_range(&r, "r\0pix\x01", usize::MAX).is_empty());
+        assert!(!store::token_index_range("e\0", "e\x01", usize::MAX).contains(&x));
     }
 
     #[test]

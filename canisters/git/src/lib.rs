@@ -352,7 +352,6 @@ fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String>
 // canister, so they are trusted at least as much as an allowlisted principal;
 // letting them manage the list makes the cutover a settings change.
 
-/// Guard: the caller is a controller or an allowlisted principal.
 /// The one operator rule: controllers and the admin allowlist, and never
 /// this canister itself. `operator()` and the `is_admin` guard apply it to
 /// the caller; the push-token checks apply it to a token's minter. The
@@ -365,6 +364,7 @@ fn is_operator(p: &candid::Principal) -> bool {
         && (ic_cdk::api::is_controller(p) || auth::is_principal_authorized(*p).unwrap_or(false))
 }
 
+/// Guard: the caller is an operator (`is_operator`).
 fn is_admin() -> Result<(), String> {
     let c = caller();
     if is_operator(&c) {
