@@ -1116,7 +1116,7 @@ async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutco
     // Hex in, bytes out: the signing side takes decoded bytecode, so this
     // endpoint decodes on the way in. The candid signature is unchanged.
     let bytecode = deploy::decode_bytecode_hex(&bytecode_hex)?;
-    evm::deploy_bytecode(String::new(), bytecode, gas_limit, String::new()).await
+    Ok(evm::deploy_bytecode(String::new(), bytecode, gas_limit, String::new()).await?)
 }
 
 /// Poll a transaction receipt. None while still pending. A found receipt is
@@ -1135,6 +1135,21 @@ async fn evm_receipt(tx_hash: String) -> Result<Option<evm::ReceiptSummary>, Str
 #[ic_cdk::query]
 fn evm_deploy_history() -> Vec<evm::EvmDeployRecord> {
     evm::get_history()
+}
+
+/// The stored next EVM nonce: the nonce after the last broadcast a provider
+/// accepted. Sends use the higher of this and the confirmed count.
+#[ic_cdk::query]
+fn evm_next_nonce() -> Option<u64> {
+    evm::next_nonce()
+}
+
+/// Forget the stored next nonce. Only for a transaction that was accepted
+/// and then dropped from every mempool, which leaves a gap every later send
+/// waits behind; on a merely slow one, the next send would replace it.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn evm_reset_nonce() {
+    evm::reset_next_nonce()
 }
 
 /// Point the canister at its deployed ProvenanceRegistry contract.
@@ -1157,8 +1172,7 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
     // Resolve the record before charging: a publish that cannot happen costs
     // nothing.
     let record = provenance::tip_record(&repo)?;
-    tenancy::charge_action(&repo, tenancy::pricing().evm_action, "registry publish")?;
-    record.publish().await
+    publish_charged(&repo, &record).await
 }
 
 /// Write a *site* repo's provenance to the registry under the key
@@ -1173,8 +1187,24 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
 async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
     let record = provenance::served_site_record(&repo)?;
-    tenancy::charge_action(&repo, tenancy::pricing().evm_action, "registry publish")?;
-    record.publish().await
+    publish_charged(&repo, &record).await
+}
+
+/// Charge the repo for a registry publish, and give back what a failed one
+/// did not use: all of it when it failed before any outcall, the price less
+/// the outcalls it made when no provider can hold the transaction (a read,
+/// the signature, or a definite refusal failed). When a provider may hold it,
+/// the gas may be spent and the full charge stays.
+async fn publish_charged(
+    repo: &str,
+    record: &provenance::Record,
+) -> Result<evm::TxOutcome, String> {
+    let cost = tenancy::pricing().evm_action;
+    let payer = tenancy::charge_action(repo, cost, "registry publish")?;
+    record.publish().await.map_err(|e| {
+        tenancy::refund_action(payer, e.refundable(cost));
+        e.message
+    })
 }
 
 // --- Track S: Solana signing spine (phase S0; see VISION.md section 4) -------

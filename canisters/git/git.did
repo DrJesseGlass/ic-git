@@ -361,6 +361,8 @@ service : {
   evm_deploy : (text, nat64) -> (ResultTxOutcome);
   evm_receipt : (text) -> (ResultReceipt);
   evm_deploy_history : () -> (vec EvmDeployRecord) query;
+  evm_next_nonce : () -> (opt nat64) query;
+  evm_reset_nonce : () -> ();
 
   // ProvenanceRegistry: canister-attested repo -> (commit, bundleHash) on-chain
   evm_set_registry : (text) -> (Result);
