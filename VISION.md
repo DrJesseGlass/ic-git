@@ -132,7 +132,9 @@ registry comparison, not F0.5 certification, which the gateway performs on
 the client's behalf and a hostile gateway therefore simply skips. The F2
 client so far is a zero-dependency CLI
 (`tools/verify.mjs`: registry entry vs served bytes vs deployed code vs an
-independent `git clone`), not yet the in-wallet verifier of section 3.
+independent `git clone`) and a browser loader kept by the user
+(`loader/index.html`: the same comparison, then it runs only the bytes it
+checked), not yet an extension that checks every page load.
 The registry makes the frontend *checkable*; F2 makes it *checked*.
 
 ## 3. Track C: the transaction reviewer (side project write-up)
