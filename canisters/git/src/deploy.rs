@@ -548,11 +548,12 @@ async fn attempt_evm(
     repo: &str,
     cfg: &EvmDeployConfig,
     commit_oid: &Oid,
-) -> Result<(crate::evm::TxOutcome, [u8; 32]), String> {
+) -> Result<(crate::evm::TxOutcome, [u8; 32]), evm::SendError> {
     // Chain-side preconditions first: an unconfigured canister or an unpayable
     // gas limit should say so without first walking the tree and decoding.
-    evm::require_deploy_target(cfg.gas_limit)?;
-    let bytecode = evm_artifact_bytecode(commit_oid, &cfg.source_path)?;
+    evm::require_deploy_target(cfg.gas_limit).map_err(evm::SendError::before)?;
+    let bytecode =
+        evm_artifact_bytecode(commit_oid, &cfg.source_path).map_err(evm::SendError::before)?;
     let bundle: [u8; 32] = sha2::Sha256::digest(&bytecode).into();
     let out = evm::deploy_bytecode(
         repo.to_string(),
@@ -569,12 +570,17 @@ async fn attempt_evm(
 /// not reverted) is skipped -- the guard against double-push and
 /// push-then-impatient-deploy_now duplicates. After a fresh broadcast, the
 /// repo's provenance is auto-published to the registry when one is set.
+///
+/// Also returns how much of `price` (the evm_action charged for this leg) to
+/// give back: all of it for a skipped commit, and for a failed deploy what
+/// `SendError::refundable` says it did not use.
 async fn run_evm(
     repo: &str,
     cfg: &EvmDeployConfig,
     commit_oid: &Oid,
     force: bool,
-) -> EvmDeployStatus {
+    price: u64,
+) -> (EvmDeployStatus, u64) {
     let commit = store::oid_hex(commit_oid);
     let mut st = EvmDeployStatus {
         commit: commit.clone(),
@@ -593,9 +599,10 @@ async fn run_evm(
                 st.contract_address, st.tx_hash
             );
             store::meta_set_json(&evm_status_key(repo), &st);
-            return st;
+            return (st, price);
         }
     }
+    let mut unused = 0;
     store::meta_set_json(&evm_status_key(repo), &st);
     match attempt_evm(repo, cfg, commit_oid).await {
         Ok((out, bundle)) => {
@@ -619,10 +626,13 @@ async fn run_evm(
                 }
             }
         }
-        Err(e) => st.message = e,
+        Err(e) => {
+            unused = e.refundable(price);
+            st.message = e.message;
+        }
     }
     store::meta_set_json(&evm_status_key(repo), &st);
-    st
+    (st, unused)
 }
 
 /// Whether a push to the deploy branch should enqueue a deploy: true when
@@ -665,11 +675,14 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     let pricing = crate::tenancy::pricing();
     let cost = wasm_cfg.as_ref().map_or(0, |_| pricing.ic_deploy)
         + evm_cfg.as_ref().map_or(0, |_| pricing.evm_action);
-    if let Err(e) = crate::tenancy::charge_action(repo, cost, "deploy") {
-        st.message = e;
-        put_status(repo, &st);
-        return st;
-    }
+    let payer = match crate::tenancy::charge_action(repo, cost, "deploy") {
+        Ok(payer) => payer,
+        Err(e) => {
+            st.message = e;
+            put_status(repo, &st);
+            return st;
+        }
+    };
 
     put_status(
         repo,
@@ -700,7 +713,8 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     let wasm_installed = wasm_cfg.is_some() && st.ok;
 
     if let Some(cfg) = evm_cfg {
-        let evm_st = run_evm(repo, &cfg, &commit_oid, force).await;
+        let (evm_st, unused) = run_evm(repo, &cfg, &commit_oid, force, pricing.evm_action).await;
+        crate::tenancy::refund_action(payer, unused);
         let leg = if evm_st.ok {
             format!("evm: {} ({})", evm_st.contract_address, evm_st.tx_hash)
         } else {

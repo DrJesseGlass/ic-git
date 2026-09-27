@@ -614,6 +614,14 @@ pub fn charge_action(repo: &str, cycles: u64, what: &str) -> Result<Option<Princ
     Ok(Some(owner))
 }
 
+/// Give back part of a `charge_action` charge. `payer` is what it returned;
+/// an exempt repo (`None`) paid nothing and gets nothing.
+pub fn refund_action(payer: Option<Principal>, cycles: u64) {
+    if let (Some(p), true) = (payer, cycles > 0) {
+        refund(&p, cycles);
+    }
+}
+
 /// Rent due for `bytes` held from `from_ns` to `to_ns`.
 fn rent_due(p: &Pricing, bytes: u64, from_ns: u64, to_ns: u64) -> u64 {
     if to_ns <= from_ns {
@@ -830,6 +838,13 @@ mod tests {
         assert_eq!(balance(&bob), before - 60);
         refund(&bob, 60);
         assert_eq!(balance(&bob), before);
+        // refund_action: a partial refund to the payer; nothing for an
+        // exempt repo's None payer.
+        charge_action("t-refund", 60, "evm").unwrap();
+        refund_action(Some(bob), 25);
+        assert_eq!(balance(&bob), before - 35);
+        refund_action(None, 25);
+        assert_eq!(balance(&bob), before - 35);
     }
 
     #[test]

@@ -1116,7 +1116,7 @@ async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutco
     // Hex in, bytes out: the signing side takes decoded bytecode, so this
     // endpoint decodes on the way in. The candid signature is unchanged.
     let bytecode = deploy::decode_bytecode_hex(&bytecode_hex)?;
-    evm::deploy_bytecode(String::new(), bytecode, gas_limit, String::new()).await
+    Ok(evm::deploy_bytecode(String::new(), bytecode, gas_limit, String::new()).await?)
 }
 
 /// Poll a transaction receipt. None while still pending. A found receipt is
@@ -1190,10 +1190,11 @@ async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, Strin
     publish_charged(&repo, &record).await
 }
 
-/// Charge the repo for a registry publish, and refund it if the publish fails
-/// before the broadcast call (config, key, nonce, fee, or signing errors):
-/// nothing left the canister, so nothing was consumed. A failure at or after
-/// the broadcast keeps the charge, since a provider may hold the transaction.
+/// Charge the repo for a registry publish, and give back what a failed one
+/// did not use: all of it when it failed before any outcall, the price less
+/// the outcalls it made when no provider can hold the transaction (a read,
+/// the signature, or a definite refusal failed). When a provider may hold it,
+/// the gas may be spent and the full charge stays.
 async fn publish_charged(
     repo: &str,
     record: &provenance::Record,
@@ -1201,9 +1202,7 @@ async fn publish_charged(
     let cost = tenancy::pricing().evm_action;
     let payer = tenancy::charge_action(repo, cost, "registry publish")?;
     record.publish().await.map_err(|e| {
-        if let (false, Some(p)) = (e.broadcast, payer) {
-            tenancy::refund(&p, cost);
-        }
+        tenancy::refund_action(payer, e.refundable(cost));
         e.message
     })
 }

@@ -77,7 +77,7 @@ pub async fn create_app_canister(
             Ok(r.canister_id)
         }
         Err(e) => {
-            refund(payer, cycles);
+            tenancy::refund_action(payer, cycles);
             Err(format!("create_canister: {e}"))
         }
     }
@@ -106,7 +106,7 @@ pub async fn top_up_app_canister(
     )
     .await;
     if let Err(e) = sent {
-        refund(payer, cycles);
+        tenancy::refund_action(payer, cycles);
         return Err(format!("deposit_cycles: {e}"));
     }
     Ok(())
@@ -120,10 +120,4 @@ fn pay(repo: &str, owner: &Principal, cycles: u64, what: &str) -> Result<Option<
     }
     tenancy::debit(owner, cycles, what)?;
     Ok(Some(*owner))
-}
-
-fn refund(payer: Option<Principal>, cycles: u64) {
-    if let Some(p) = payer {
-        tenancy::refund(&p, cycles);
-    }
 }

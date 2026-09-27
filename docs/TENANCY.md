@@ -110,6 +110,21 @@ margin:
 | EVM action | 50B | each deploy or registry publish (a t-ECDSA signature plus RPC outcalls) |
 | IC deploy | 5B | each install from the deploy queue |
 
+An EVM action is charged up front, and a failed one gives back what it did
+not use:
+
+- **Failed before any outcall** (no config, no registry, send lock held,
+  artifact would not decode) or a deploy skipped as already deployed: the
+  whole 50B comes back.
+- **No provider can hold the transaction** (a nonce or fee read failed, the
+  signature failed, or a provider refused it: nonce too low or too high,
+  insufficient funds, a JSON-RPC error, a 429): the owner pays the cycles
+  attached to the outcalls made (3B per RPC call, 30B for the signature),
+  and gets the rest back. The worst case is 45B, under the price.
+- **A provider may hold it** (lost consensus on the broadcast reply, a 5xx,
+  providers disagreeing, the call to the RPC canister failing): the full
+  charge stays, since the gas may be spent.
+
 Rent is charged on the bytes a repo's pushes ingested. Objects are
 content-addressed and shared, so two repos pushing the same blob are both
 charged for it: attribution, not a measure of unique storage. An owner who

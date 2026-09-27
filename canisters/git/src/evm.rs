@@ -245,7 +245,8 @@ async fn public_key(cfg: &EvmConfig) -> Result<Vec<u8>, String> {
 }
 
 /// Sign a 32-byte hash. Returns the fixed 64-byte r||s signature.
-async fn sign_hash(cfg: &EvmConfig, hash: [u8; 32]) -> Result<[u8; 64], String> {
+async fn sign_hash(cfg: &EvmConfig, hash: [u8; 32], meter: &Meter) -> Result<[u8; 64], String> {
+    meter.add(SIGN_CYCLES);
     let reply: SignWithEcdsaReply = intercanister::call_with_payment(
         Principal::management_canister(),
         "sign_with_ecdsa",
@@ -399,6 +400,21 @@ impl RpcError {
     fn render(&self) -> String {
         format!("{self:?}")
     }
+
+    /// For a failed eth_sendRawTransaction: whether a provider may still have
+    /// taken the transaction. A JSON-RPC error is the provider refusing it,
+    /// and provider or validation errors stop the request before it is sent;
+    /// a 429 is a refusal too. Any other outcall failure (lost consensus on
+    /// the replies, a 5xx, an unparseable body) leaves it unknown.
+    fn may_have_sent(&self) -> bool {
+        match self {
+            Self::HttpOutcallError(HttpOutcallError::InvalidHttpJsonRpcResponse {
+                status, ..
+            }) => *status != 429,
+            Self::HttpOutcallError(_) => true,
+            Self::JsonRpcError(_) | Self::ProviderError(_) | Self::ValidationError(_) => false,
+        }
+    }
 }
 
 #[derive(CandidType, Deserialize, Debug, Clone)]
@@ -509,12 +525,18 @@ enum MultiResult<T> {
 
 impl<T> MultiResult<T> {
     /// Worth one retry: an outcall that failed consensus or hit a transient
-    /// IC error, or providers that disagreed (a read racing a new block).
+    /// IC error, a provider that rate-limited (429) or failed (5xx), or
+    /// providers that disagreed (a read racing a new block).
     fn is_transient(&self) -> bool {
         match self {
-            Self::Consistent(RpcResult::Err(RpcError::HttpOutcallError(
-                HttpOutcallError::IcError { code, .. },
-            ))) => matches!(code, RejectionCode::SysTransient),
+            Self::Consistent(RpcResult::Err(RpcError::HttpOutcallError(e))) => match e {
+                HttpOutcallError::IcError { code, .. } => {
+                    matches!(code, RejectionCode::SysTransient)
+                }
+                HttpOutcallError::InvalidHttpJsonRpcResponse { status, .. } => {
+                    *status == 429 || (500..600).contains(status)
+                }
+            },
             Self::Consistent(_) => false,
             Self::Inconsistent(_) => true,
         }
@@ -622,41 +644,79 @@ fn rpc_principal(cfg: &EvmConfig) -> Result<Principal, String> {
     Principal::from_text(&cfg.evm_rpc).map_err(|e| format!("bad evm_rpc principal: {e}"))
 }
 
-async fn rpc_call<A, T>(cfg: &EvmConfig, method: &str, arg: A, what: &str) -> Result<T, String>
+/// Cycles attached to the outcalls one send has made. An upper bound on what
+/// the send cost this canister (each callee refunds its surplus), and what a
+/// failed send is charged in place of the full action price.
+#[derive(Default)]
+struct Meter(std::cell::Cell<u64>);
+
+impl Meter {
+    fn add(&self, cycles: u128) {
+        let c = u64::try_from(cycles).unwrap_or(u64::MAX);
+        self.0.set(self.0.get().saturating_add(c));
+    }
+
+    fn get(&self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// One EVM RPC canister call, returning the raw multi-provider result.
+async fn rpc_multi<A, T>(
+    cfg: &EvmConfig,
+    method: &str,
+    arg: A,
+    meter: &Meter,
+) -> Result<MultiResult<T>, String>
 where
     A: CandidType,
     T: serde::de::DeserializeOwned + CandidType,
 {
-    let multi: MultiResult<T> = intercanister::call_with_payment(
-        rpc_principal(cfg)?,
+    let rpc = rpc_principal(cfg)?;
+    meter.add(RPC_CYCLES);
+    intercanister::call_with_payment(
+        rpc,
         method,
         (services(cfg), all_but_one(&cfg.rpc_urls), arg),
         RPC_CYCLES,
     )
-    .await?;
-    multi.into_result(what)
+    .await
+}
+
+async fn rpc_call<A, T>(
+    cfg: &EvmConfig,
+    method: &str,
+    arg: A,
+    what: &str,
+    meter: &Meter,
+) -> Result<T, String>
+where
+    A: CandidType,
+    T: serde::de::DeserializeOwned + CandidType,
+{
+    rpc_multi(cfg, method, arg, meter).await?.into_result(what)
 }
 
 /// `rpc_call` for reads, retried once on a transient failure. A read has no
 /// side effects, so the retry is safe; a second call usually lands after the
 /// block or the mempool the replicas split on has settled. Never used for
 /// eth_sendRawTransaction, whose outcome is ambiguous on a transport error.
-async fn rpc_read<A, T>(cfg: &EvmConfig, method: &str, arg: A, what: &str) -> Result<T, String>
+async fn rpc_read<A, T>(
+    cfg: &EvmConfig,
+    method: &str,
+    arg: A,
+    what: &str,
+    meter: &Meter,
+) -> Result<T, String>
 where
     A: CandidType + Clone,
     T: serde::de::DeserializeOwned + CandidType,
 {
-    let first: MultiResult<T> = intercanister::call_with_payment(
-        rpc_principal(cfg)?,
-        method,
-        (services(cfg), all_but_one(&cfg.rpc_urls), arg.clone()),
-        RPC_CYCLES,
-    )
-    .await?;
+    let first: MultiResult<T> = rpc_multi(cfg, method, arg.clone(), meter).await?;
     if !first.is_transient() {
         return first.into_result(what);
     }
-    rpc_call(cfg, method, arg, what).await
+    rpc_call(cfg, method, arg, what, meter).await
 }
 
 // --- chain reads -------------------------------------------------------------
@@ -666,7 +726,7 @@ where
 /// and the outcall fails consensus. The confirmed count agrees everywhere;
 /// transactions sent but not yet mined are covered by the stored next nonce
 /// (see `next_nonce`), which is why that store must be durable.
-async fn nonce_of(cfg: &EvmConfig, address: &str) -> Result<u64, String> {
+async fn nonce_of(cfg: &EvmConfig, address: &str, meter: &Meter) -> Result<u64, String> {
     let count: u128 = rpc_read(
         cfg,
         "eth_getTransactionCount",
@@ -675,6 +735,7 @@ async fn nonce_of(cfg: &EvmConfig, address: &str) -> Result<u64, String> {
             block: BlockTag::Latest,
         },
         "eth_getTransactionCount",
+        meter,
     )
     .await?;
     u64::try_from(count).map_err(|_| "nonce overflows u64".into())
@@ -683,7 +744,7 @@ async fn nonce_of(cfg: &EvmConfig, address: &str) -> Result<u64, String> {
 /// (max_fee_per_gas, max_priority_fee_per_gas) from recent fee history:
 /// tip = median of the 50th-percentile rewards (floor 1 gwei), max fee =
 /// 2 * next base fee + tip, which survives six consecutive full blocks.
-async fn fees(cfg: &EvmConfig) -> Result<(u128, u128), String> {
+async fn fees(cfg: &EvmConfig, meter: &Meter) -> Result<(u128, u128), String> {
     let hist: FeeHistory = rpc_read(
         cfg,
         "eth_feeHistory",
@@ -693,6 +754,7 @@ async fn fees(cfg: &EvmConfig) -> Result<(u128, u128), String> {
             reward_percentiles: Some(vec![50]),
         },
         "eth_feeHistory",
+        meter,
     )
     .await?;
     let base = *hist
@@ -750,8 +812,13 @@ struct NextNonce {
     next: u64,
 }
 
-fn stored_next_nonce() -> Option<NextNonce> {
-    kv::get_json::<Option<NextNonce>>(NEXT_NONCE_KEY).flatten()
+/// Strict read: an undecodable entry is an error, not "no store", since
+/// treating it as absent would fall back to the confirmed count and sign
+/// over a pending transaction.
+fn stored_next_nonce() -> Result<Option<NextNonce>, String> {
+    kv::try_get_json::<Option<NextNonce>>(NEXT_NONCE_KEY)
+        .map(Option::flatten)
+        .map_err(|e| format!("stored next nonce unreadable ({e}); see evm_reset_nonce"))
 }
 
 fn store_next_nonce(chain_id: u64, from: &str, next: u64) {
@@ -776,7 +843,7 @@ fn choose_nonce(stored: Option<&NextNonce>, chain_id: u64, from: &str, confirmed
 
 /// The stored next nonce, for an operator diagnosing a stuck send.
 pub fn next_nonce() -> Option<u64> {
-    stored_next_nonce().map(|n| n.next)
+    stored_next_nonce().ok().flatten().map(|n| n.next)
 }
 
 /// Operator escape hatch: forget the stored next nonce, so the next send uses
@@ -788,20 +855,33 @@ pub fn reset_next_nonce() {
     kv::set_json::<Option<NextNonce>>(NEXT_NONCE_KEY, &None);
 }
 
-/// Why a send failed, and whether it got as far as the broadcast call. Up to
-/// that call nothing has left the canister; once it is made a provider may
-/// hold the transaction and its gas may be spent, whatever the reply says.
+/// Why a send failed, what it cost, and whether a provider may hold the
+/// transaction. `spent` is the cycles attached to the outcalls made (see
+/// `Meter`); a caller that charged an action price keeps that much and gives
+/// the rest back, unless `maybe_sent`, when the gas may be spent too.
 #[derive(Debug)]
 pub struct SendError {
     pub message: String,
-    pub broadcast: bool,
+    pub maybe_sent: bool,
+    pub spent: u64,
 }
 
 impl SendError {
-    fn before(message: String) -> Self {
+    /// A failure before any outcall: nothing spent, nothing sent.
+    pub fn before(message: String) -> Self {
         SendError {
             message,
-            broadcast: false,
+            maybe_sent: false,
+            spent: 0,
+        }
+    }
+
+    /// How much of an action charged at `price` to give back.
+    pub fn refundable(&self, price: u64) -> u64 {
+        if self.maybe_sent {
+            0
+        } else {
+            price.saturating_sub(self.spent)
         }
     }
 }
@@ -839,22 +919,55 @@ async fn send_tx(
     gas_limit: u64,
 ) -> Result<TxOutcome, SendError> {
     let _lock = SendLock::acquire().map_err(SendError::before)?;
-    let (tx_hash, raw, nonce, from) = sign_tx(cfg, to, value, data, gas_limit)
+    let meter = Meter::default();
+    let fail = |message: String, maybe_sent: bool| SendError {
+        message,
+        maybe_sent,
+        spent: meter.get(),
+    };
+    let (tx_hash, raw, nonce, from) = sign_tx(cfg, to, value, data, gas_limit, &meter)
         .await
-        .map_err(SendError::before)?;
+        .map_err(|m| fail(m, false))?;
     let from_hex = checksum_address(&from);
 
-    let status: SendRawTransactionStatus = rpc_call(
-        cfg,
-        "eth_sendRawTransaction",
-        format!("0x{}", hex::encode(&raw)),
-        "eth_sendRawTransaction",
-    )
-    .await
-    .map_err(|message| SendError {
-        message,
-        broadcast: true,
-    })?;
+    let what = "eth_sendRawTransaction";
+    let reply: Result<MultiResult<SendRawTransactionStatus>, String> =
+        rpc_multi(cfg, what, format!("0x{}", hex::encode(&raw)), &meter).await;
+    let status = match reply {
+        Ok(MultiResult::Consistent(RpcResult::Ok(status))) => status,
+        Ok(MultiResult::Consistent(RpcResult::Err(e))) => {
+            return Err(fail(format!("{what}: {}", e.render()), e.may_have_sent()));
+        }
+        Ok(MultiResult::Inconsistent(results)) => {
+            // One provider accepting is enough for the transaction to spread,
+            // so its nonce is taken: advance past it, or the next send would
+            // sign over it (the confirmed count cannot see it).
+            let accepted = results
+                .iter()
+                .any(|(_, r)| matches!(r, RpcResult::Ok(SendRawTransactionStatus::Ok(_))));
+            if accepted {
+                store_next_nonce(cfg.chain_id, &from_hex, nonce + 1);
+                return Err(fail(
+                    format!(
+                        "{what}: providers disagree, but at least one accepted tx {tx_hash} \
+                         (nonce {nonce}); confirm with evm_receipt before retrying"
+                    ),
+                    true,
+                ));
+            }
+            let maybe_sent = results
+                .iter()
+                .any(|(_, r)| matches!(r, RpcResult::Err(e) if e.may_have_sent()));
+            let message = MultiResult::Inconsistent(results)
+                .into_result(what)
+                .err()
+                .unwrap_or_default();
+            return Err(fail(message, maybe_sent));
+        }
+        // The call to the RPC canister itself failed: whether it reached a
+        // provider is unknown.
+        Err(e) => return Err(fail(format!("{what}: {e}"), true)),
+    };
     match status {
         // Some providers return the tx hash, some don't; ours is exact either way.
         SendRawTransactionStatus::Ok(_) => {
@@ -868,6 +981,8 @@ async fn send_tx(
                 from: from_hex,
             })
         }
+        // Definite refusals: no provider holds the transaction, so no gas is
+        // spent and only the outcalls are charged.
         other => {
             // NonceTooLow: a transaction already holds this nonce, which the
             // confirmed count cannot see (the store was empty or reset while
@@ -878,31 +993,29 @@ async fn send_tx(
             if matches!(other, SendRawTransactionStatus::NonceTooLow) {
                 store_next_nonce(cfg.chain_id, &from_hex, nonce + 1);
             }
-            Err(SendError {
-                message: format!("eth_sendRawTransaction: {other:?}"),
-                broadcast: true,
-            })
+            Err(fail(format!("{what}: {other:?}"), false))
         }
     }
 }
 
 /// Everything before the broadcast: nonce, fees, signature. Returns (tx hash,
 /// raw signed tx, nonce, EOA). No side effects, so any error here means
-/// nothing was sent.
+/// nothing was sent; `meter` counts what the outcalls cost.
 async fn sign_tx(
     cfg: &EvmConfig,
     to: Option<[u8; 20]>,
     value: u128,
     data: Vec<u8>,
     gas_limit: u64,
+    meter: &Meter,
 ) -> Result<(String, Vec<u8>, u64, [u8; 20]), String> {
     let pk = public_key(cfg).await?;
     let from = eoa_of_pubkey(&pk)?;
     let from_hex = checksum_address(&from);
     // Independent chain reads; joined to pay one outcall round trip, not two.
     let (confirmed, fee_pair) =
-        futures::future::join(nonce_of(cfg, &from_hex), fees(cfg)).await;
-    let stored = stored_next_nonce();
+        futures::future::join(nonce_of(cfg, &from_hex, meter), fees(cfg, meter)).await;
+    let stored = stored_next_nonce()?;
     let nonce = choose_nonce(stored.as_ref(), cfg.chain_id, &from_hex, confirmed?);
     let (max_fee, tip) = fee_pair?;
     let tx = Tx {
@@ -916,7 +1029,7 @@ async fn sign_tx(
         data,
     };
     let sighash = tx.signature_hash();
-    let sig = sign_hash(cfg, sighash).await?;
+    let sig = sign_hash(cfg, sighash, meter).await?;
     let (parity, r, s) = recover_parity(&pk, &sighash, &sig)?;
     let raw = tx.raw_signed(parity, &r, &s);
     let tx_hash = format!("0x{}", hex::encode(keccak256(&raw)));
@@ -1125,10 +1238,10 @@ pub async fn deploy_bytecode(
     bytecode: Vec<u8>,
     gas_limit: u64,
     commit: String,
-) -> Result<TxOutcome, String> {
-    let cfg = deploy_target(gas_limit)?;
+) -> Result<TxOutcome, SendError> {
+    let cfg = deploy_target(gas_limit).map_err(SendError::before)?;
     if bytecode.is_empty() {
-        return Err("empty bytecode".into());
+        return Err(SendError::before("empty bytecode".into()));
     }
     // Hashed here rather than taken from the caller: the log has to record what
     // this canister actually broadcast, a property that must survive the caller
@@ -1136,10 +1249,8 @@ pub async fn deploy_bytecode(
     let sha256 = hex::encode(sha2::Sha256::digest(&bytecode));
     let len = bytecode.len() as u64;
     // Before spending gas: if the outcome cannot be recorded, do not broadcast.
-    preflight_log()?;
-    let out = send_tx(&cfg, None, 0, bytecode, gas_limit)
-        .await
-        .map_err(String::from);
+    preflight_log().map_err(SendError::before)?;
+    let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
     let recorded = record(EvmDeployRecord {
         repo,
         commit,
@@ -1156,7 +1267,7 @@ pub async fn deploy_bytecode(
         ok: out.is_ok(),
         message: match &out {
             Ok(_) => "broadcast accepted; confirm via evm_receipt".into(),
-            Err(e) => e.clone(),
+            Err(e) => e.message.clone(),
         },
         receipt_status: String::new(),
         at_ns: ic_cdk::api::time(),
@@ -1167,12 +1278,16 @@ pub async fn deploy_bytecode(
     // Surface the tx hash and say so explicitly -- this needs a human, not a
     // retry. (preflight_log makes this near-unreachable; it is the backstop.)
     if let (Ok(o), Err(e)) = (&out, &recorded) {
-        return Err(format!(
-            "DEPLOY BROADCAST BUT NOT RECORDED: tx {} is live on chain {} and paid for, \
-             but the deploy log could not be updated ({e}). Do NOT retry -- \
-             resolve the log first, or the contract will be deployed twice.",
-            o.tx_hash, cfg.chain_id
-        ));
+        return Err(SendError {
+            message: format!(
+                "DEPLOY BROADCAST BUT NOT RECORDED: tx {} is live on chain {} and paid for, \
+                 but the deploy log could not be updated ({e}). Do NOT retry -- \
+                 resolve the log first, or the contract will be deployed twice.",
+                o.tx_hash, cfg.chain_id
+            ),
+            maybe_sent: true,
+            spent: 0,
+        });
     }
     if let Ok(o) = &out {
         schedule_receipt_poll(o.tx_hash.clone(), 0);
@@ -1281,6 +1396,7 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
         "eth_getTransactionReceipt",
         tx_hash.clone(),
         "eth_getTransactionReceipt",
+        &Meter::default(),
     )
     .await?;
     let summary = receipt.map(|r| ReceiptSummary {
@@ -1332,11 +1448,11 @@ mod tests {
         store_next_nonce(11155111, "0xA", 7);
         assert_eq!(
             stored_next_nonce(),
-            Some(NextNonce {
+            Ok(Some(NextNonce {
                 chain_id: 11155111,
                 from: "0xA".into(),
                 next: 7
-            })
+            }))
         );
         assert_eq!(next_nonce(), Some(7));
         reset_next_nonce();
@@ -1365,6 +1481,81 @@ mod tests {
         )));
         assert!(!json.is_transient());
         assert!(MultiResult::<u128>::Inconsistent(vec![]).is_transient());
+        let http = |status| {
+            MultiResult::<u128>::Consistent(RpcResult::Err(RpcError::HttpOutcallError(
+                HttpOutcallError::InvalidHttpJsonRpcResponse {
+                    status,
+                    body: String::new(),
+                    parsing_error: None,
+                },
+            )))
+        };
+        assert!(http(429).is_transient());
+        assert!(http(500).is_transient());
+        assert!(http(503).is_transient());
+        assert!(!http(400).is_transient());
+        assert!(!http(404).is_transient());
+    }
+
+    /// Which broadcast failures leave the transaction possibly held by a
+    /// provider (keep the whole charge) and which are definite refusals.
+    #[test]
+    fn broadcast_failures_classified_by_whether_a_provider_may_hold_the_tx() {
+        let http = |status| {
+            RpcError::HttpOutcallError(HttpOutcallError::InvalidHttpJsonRpcResponse {
+                status,
+                body: String::new(),
+                parsing_error: None,
+            })
+        };
+        assert!(!http(429).may_have_sent());
+        assert!(http(502).may_have_sent());
+        assert!(RpcError::HttpOutcallError(HttpOutcallError::IcError {
+            code: RejectionCode::SysTransient,
+            message: "No consensus could be reached".into(),
+        })
+        .may_have_sent());
+        assert!(!RpcError::JsonRpcError(JsonRpcError {
+            code: -32000,
+            message: "replacement transaction underpriced".into(),
+        })
+        .may_have_sent());
+        assert!(!RpcError::ProviderError(ProviderError::NoPermission).may_have_sent());
+        assert!(!RpcError::ValidationError(ValidationError::Custom("x".into())).may_have_sent());
+    }
+
+    #[test]
+    fn refund_is_price_less_outcalls_unless_the_tx_may_be_out() {
+        let price = 50_000_000_000;
+        assert_eq!(SendError::before("no config".into()).refundable(price), price);
+        let signed = SendError {
+            message: "eth_sendRawTransaction: InsufficientFunds".into(),
+            maybe_sent: false,
+            spent: 36_000_000_000,
+        };
+        assert_eq!(signed.refundable(price), 14_000_000_000);
+        let over = SendError {
+            spent: price + 1,
+            ..signed
+        };
+        assert_eq!(over.refundable(price), 0);
+        let ambiguous = SendError {
+            message: "eth_sendRawTransaction: lost consensus".into(),
+            maybe_sent: true,
+            spent: 1,
+        };
+        assert_eq!(ambiguous.refundable(price), 0);
+    }
+
+    #[test]
+    fn meter_sums_attached_cycles() {
+        let m = Meter::default();
+        m.add(RPC_CYCLES);
+        m.add(RPC_CYCLES);
+        m.add(SIGN_CYCLES);
+        assert_eq!(m.get() as u128, 2 * RPC_CYCLES + SIGN_CYCLES);
+        m.add(u128::MAX);
+        assert_eq!(m.get(), u64::MAX);
     }
 
     fn rlp_bytes(b: &[u8]) -> Vec<u8> {
