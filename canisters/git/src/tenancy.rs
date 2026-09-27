@@ -599,15 +599,19 @@ pub fn charge_push(repo: &str, bytes: usize) -> Result<(), String> {
 }
 
 /// Charge a deploy-queue action (an IC install, an EVM deploy or publish).
-pub fn charge_action(repo: &str, cycles: u64, what: &str) -> Result<(), String> {
+/// Returns who paid, `None` for an exempt repo, so a caller whose action
+/// then fails before consuming anything can `refund` that principal.
+pub fn charge_action(repo: &str, cycles: u64, what: &str) -> Result<Option<Principal>, String> {
     let m = meta_or_legacy(repo)?;
     if exempt(&m) {
-        return Ok(());
+        return Ok(None);
     }
     if m.delinquent {
         return Err(format!("repo {repo} is behind on storage rent; deposit cycles to resume"));
     }
-    debit(&m.owner.expect("non-exempt repo has an owner"), cycles, what)
+    let owner = m.owner.expect("non-exempt repo has an owner");
+    debit(&owner, cycles, what)?;
+    Ok(Some(owner))
 }
 
 /// Rent due for `bytes` held from `from_ns` to `to_ns`.
@@ -812,12 +816,28 @@ mod tests {
         set_test_now(start);
     }
 
+    /// An action charge names its payer, and refunding that payer restores
+    /// the balance exactly: what a registry publish that fails before its
+    /// broadcast relies on.
+    #[test]
+    fn charged_action_names_payer_for_refund() {
+        let bob = p(22);
+        let pr = pricing();
+        credit(&bob, pr.create_repo + 100);
+        create_repo("t-refund", &bob, false).unwrap();
+        let before = balance(&bob);
+        assert_eq!(charge_action("t-refund", 60, "evm"), Ok(Some(bob)));
+        assert_eq!(balance(&bob), before - 60);
+        refund(&bob, 60);
+        assert_eq!(balance(&bob), before);
+    }
+
     #[test]
     fn legacy_and_operator_repos_are_exempt() {
         store::create_repo("t-legacy").unwrap();
         assert!(meta("t-legacy").is_none());
         charge_push("t-legacy", 10_000_000).unwrap();
-        assert!(charge_action("t-legacy", u64::MAX, "evm").is_ok());
+        assert_eq!(charge_action("t-legacy", u64::MAX, "evm"), Ok(None));
         assert!(repo_info("t-legacy").unwrap().exempt);
         // Anyone may push to a legacy repo only as an operator; tokens still
         // gate the HTTP path.

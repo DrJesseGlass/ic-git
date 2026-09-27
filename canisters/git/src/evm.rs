@@ -21,7 +21,9 @@
 //! its tx_hash (evm_receipt).
 
 use crate::kv;
-use crate::rpc_common::{all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, SIGN_CYCLES};
+use crate::rpc_common::{
+    all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, RejectionCode, SIGN_CYCLES,
+};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -399,7 +401,7 @@ impl RpcError {
     }
 }
 
-#[derive(CandidType, Deserialize, Debug)]
+#[derive(CandidType, Deserialize, Debug, Clone)]
 enum BlockTag {
     Earliest,
     Safe,
@@ -409,13 +411,13 @@ enum BlockTag {
     Pending,
 }
 
-#[derive(CandidType, Deserialize, Debug)]
+#[derive(CandidType, Deserialize, Debug, Clone)]
 struct GetTransactionCountArgs {
     address: String,
     block: BlockTag,
 }
 
-#[derive(CandidType, Deserialize, Debug)]
+#[derive(CandidType, Deserialize, Debug, Clone)]
 struct FeeHistoryArgs {
     #[serde(rename = "blockCount")]
     block_count: u128,
@@ -506,6 +508,18 @@ enum MultiResult<T> {
 }
 
 impl<T> MultiResult<T> {
+    /// Worth one retry: an outcall that failed consensus or hit a transient
+    /// IC error, or providers that disagreed (a read racing a new block).
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Consistent(RpcResult::Err(RpcError::HttpOutcallError(
+                HttpOutcallError::IcError { code, .. },
+            ))) => matches!(code, RejectionCode::SysTransient),
+            Self::Consistent(_) => false,
+            Self::Inconsistent(_) => true,
+        }
+    }
+
     /// Collapse to a plain Result. `Inconsistent` is treated as failure: we
     /// asked for consensus across providers and did not get it.
     fn into_result(self, what: &str) -> Result<T, String> {
@@ -623,17 +637,42 @@ where
     multi.into_result(what)
 }
 
+/// `rpc_call` for reads, retried once on a transient failure. A read has no
+/// side effects, so the retry is safe; a second call usually lands after the
+/// block or the mempool the replicas split on has settled. Never used for
+/// eth_sendRawTransaction, whose outcome is ambiguous on a transport error.
+async fn rpc_read<A, T>(cfg: &EvmConfig, method: &str, arg: A, what: &str) -> Result<T, String>
+where
+    A: CandidType + Clone,
+    T: serde::de::DeserializeOwned + CandidType,
+{
+    let first: MultiResult<T> = intercanister::call_with_payment(
+        rpc_principal(cfg)?,
+        method,
+        (services(cfg), all_but_one(&cfg.rpc_urls), arg.clone()),
+        RPC_CYCLES,
+    )
+    .await?;
+    if !first.is_transient() {
+        return first.into_result(what);
+    }
+    rpc_call(cfg, method, arg, what).await
+}
+
 // --- chain reads -------------------------------------------------------------
 
-/// Pending, not Latest: Latest counts only mined transactions, so a second
-/// deploy inside one block window would reuse the nonce of a still-pending tx.
+/// Latest, not Pending: the pending count depends on which node a replica's
+/// outcall reaches and what sits in that node's mempool, so replicas disagree
+/// and the outcall fails consensus. The confirmed count agrees everywhere;
+/// transactions sent but not yet mined are covered by the stored next nonce
+/// (see `next_nonce`), which is why that store must be durable.
 async fn nonce_of(cfg: &EvmConfig, address: &str) -> Result<u64, String> {
-    let count: u128 = rpc_call(
+    let count: u128 = rpc_read(
         cfg,
         "eth_getTransactionCount",
         GetTransactionCountArgs {
             address: address.to_string(),
-            block: BlockTag::Pending,
+            block: BlockTag::Latest,
         },
         "eth_getTransactionCount",
     )
@@ -645,7 +684,7 @@ async fn nonce_of(cfg: &EvmConfig, address: &str) -> Result<u64, String> {
 /// tip = median of the 50th-percentile rewards (floor 1 gwei), max fee =
 /// 2 * next base fee + tip, which survives six consecutive full blocks.
 async fn fees(cfg: &EvmConfig) -> Result<(u128, u128), String> {
-    let hist: FeeHistory = rpc_call(
+    let hist: FeeHistory = rpc_read(
         cfg,
         "eth_feeHistory",
         FeeHistoryArgs {
@@ -692,13 +731,85 @@ thread_local! {
     /// NonceTooLow. Heap state: an upgrade clears it, along with the
     /// in-flight call it was guarding.
     static SEND_IN_FLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// (chain_id, EOA, next nonce) advanced on each accepted broadcast.
-    /// A provider's pending count can lag a just-accepted tx, so the chain
-    /// read alone is not enough; the max of both is used. Cleared on a
-    /// rejected broadcast (a dropped or replaced tx makes it overshoot) and
-    /// by upgrades (the Pending-tag chain read resumes coverage).
-    static NEXT_NONCE: std::cell::RefCell<Option<(u64, String, u64)>> =
-        const { std::cell::RefCell::new(None) };
+}
+
+// --- stored next nonce --------------------------------------------------------
+
+const NEXT_NONCE_KEY: &str = "evm:next_nonce";
+
+/// The nonce after the last broadcast a provider accepted, for one chain and
+/// EOA. The chain read counts confirmed transactions only, so this is what
+/// keeps a second send inside one block window from reusing the nonce of a
+/// still-pending one. Stable, not heap: an upgrade between two sends would
+/// otherwise lose it (ROADMAP E4, "do not trust eth_getTransactionCount
+/// mid-flight"). Only moves up; `reset_next_nonce` is the one way down.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct NextNonce {
+    chain_id: u64,
+    from: String,
+    next: u64,
+}
+
+fn stored_next_nonce() -> Option<NextNonce> {
+    kv::get_json::<Option<NextNonce>>(NEXT_NONCE_KEY).flatten()
+}
+
+fn store_next_nonce(chain_id: u64, from: &str, next: u64) {
+    kv::set_json(
+        NEXT_NONCE_KEY,
+        &Some(NextNonce {
+            chain_id,
+            from: from.to_string(),
+            next,
+        }),
+    );
+}
+
+/// The nonce to sign with: the confirmed count, or the stored next nonce if
+/// that is higher and belongs to this chain and EOA.
+fn choose_nonce(stored: Option<&NextNonce>, chain_id: u64, from: &str, confirmed: u64) -> u64 {
+    match stored {
+        Some(n) if n.chain_id == chain_id && n.from == from => confirmed.max(n.next),
+        _ => confirmed,
+    }
+}
+
+/// The stored next nonce, for an operator diagnosing a stuck send.
+pub fn next_nonce() -> Option<u64> {
+    stored_next_nonce().map(|n| n.next)
+}
+
+/// Operator escape hatch: forget the stored next nonce, so the next send uses
+/// the confirmed count. For a transaction that was accepted but then dropped
+/// from every mempool, whose nonce every later send is queued behind. Not
+/// automatic: a transaction that is merely slow would be replaced by the next
+/// send at the same nonce, and its accepted broadcast would never land.
+pub fn reset_next_nonce() {
+    kv::set_json::<Option<NextNonce>>(NEXT_NONCE_KEY, &None);
+}
+
+/// Why a send failed, and whether it got as far as the broadcast call. Up to
+/// that call nothing has left the canister; once it is made a provider may
+/// hold the transaction and its gas may be spent, whatever the reply says.
+#[derive(Debug)]
+pub struct SendError {
+    pub message: String,
+    pub broadcast: bool,
+}
+
+impl SendError {
+    fn before(message: String) -> Self {
+        SendError {
+            message,
+            broadcast: false,
+        }
+    }
+}
+
+impl From<SendError> for String {
+    fn from(e: SendError) -> String {
+        e.message
+    }
 }
 
 /// Releases the send lock on every exit path from send_tx.
@@ -726,22 +837,74 @@ async fn send_tx(
     value: u128,
     data: Vec<u8>,
     gas_limit: u64,
-) -> Result<TxOutcome, String> {
-    let _lock = SendLock::acquire()?;
+) -> Result<TxOutcome, SendError> {
+    let _lock = SendLock::acquire().map_err(SendError::before)?;
+    let (tx_hash, raw, nonce, from) = sign_tx(cfg, to, value, data, gas_limit)
+        .await
+        .map_err(SendError::before)?;
+    let from_hex = checksum_address(&from);
+
+    let status: SendRawTransactionStatus = rpc_call(
+        cfg,
+        "eth_sendRawTransaction",
+        format!("0x{}", hex::encode(&raw)),
+        "eth_sendRawTransaction",
+    )
+    .await
+    .map_err(|message| SendError {
+        message,
+        broadcast: true,
+    })?;
+    match status {
+        // Some providers return the tx hash, some don't; ours is exact either way.
+        SendRawTransactionStatus::Ok(_) => {
+            store_next_nonce(cfg.chain_id, &from_hex, nonce + 1);
+            Ok(TxOutcome {
+                tx_hash,
+                nonce,
+                contract_address: to
+                    .is_none()
+                    .then(|| checksum_address(&create_address(&from, nonce))),
+                from: from_hex,
+            })
+        }
+        other => {
+            // NonceTooLow: a transaction already holds this nonce, which the
+            // confirmed count cannot see (the store was empty or reset while
+            // one was pending). Step past it so the caller's retry succeeds;
+            // moving up never replaces anything. Every other rejection keeps
+            // the store: dropping it would fall back to the confirmed count
+            // and sign over a pending transaction.
+            if matches!(other, SendRawTransactionStatus::NonceTooLow) {
+                store_next_nonce(cfg.chain_id, &from_hex, nonce + 1);
+            }
+            Err(SendError {
+                message: format!("eth_sendRawTransaction: {other:?}"),
+                broadcast: true,
+            })
+        }
+    }
+}
+
+/// Everything before the broadcast: nonce, fees, signature. Returns (tx hash,
+/// raw signed tx, nonce, EOA). No side effects, so any error here means
+/// nothing was sent.
+async fn sign_tx(
+    cfg: &EvmConfig,
+    to: Option<[u8; 20]>,
+    value: u128,
+    data: Vec<u8>,
+    gas_limit: u64,
+) -> Result<(String, Vec<u8>, u64, [u8; 20]), String> {
     let pk = public_key(cfg).await?;
     let from = eoa_of_pubkey(&pk)?;
     let from_hex = checksum_address(&from);
     // Independent chain reads; joined to pay one outcall round trip, not two.
-    let (chain_nonce, fee_pair) =
+    let (confirmed, fee_pair) =
         futures::future::join(nonce_of(cfg, &from_hex), fees(cfg)).await;
-    let chain_nonce = chain_nonce?;
+    let stored = stored_next_nonce();
+    let nonce = choose_nonce(stored.as_ref(), cfg.chain_id, &from_hex, confirmed?);
     let (max_fee, tip) = fee_pair?;
-    let nonce = NEXT_NONCE.with(|c| match c.borrow().as_ref() {
-        Some((chain, addr, next)) if *chain == cfg.chain_id && *addr == from_hex => {
-            chain_nonce.max(*next)
-        }
-        _ => chain_nonce,
-    });
     let tx = Tx {
         chain_id: cfg.chain_id,
         nonce,
@@ -757,34 +920,7 @@ async fn send_tx(
     let (parity, r, s) = recover_parity(&pk, &sighash, &sig)?;
     let raw = tx.raw_signed(parity, &r, &s);
     let tx_hash = format!("0x{}", hex::encode(keccak256(&raw)));
-
-    let status: SendRawTransactionStatus = rpc_call(
-        cfg,
-        "eth_sendRawTransaction",
-        format!("0x{}", hex::encode(&raw)),
-        "eth_sendRawTransaction",
-    )
-    .await?;
-    match status {
-        // Some providers return the tx hash, some don't; ours is exact either way.
-        SendRawTransactionStatus::Ok(_) => {
-            NEXT_NONCE.with(|c| {
-                *c.borrow_mut() = Some((cfg.chain_id, from_hex.clone(), nonce + 1));
-            });
-            Ok(TxOutcome {
-                tx_hash,
-                nonce,
-                contract_address: to
-                    .is_none()
-                    .then(|| checksum_address(&create_address(&from, nonce))),
-                from: from_hex,
-            })
-        }
-        other => {
-            NEXT_NONCE.with(|c| *c.borrow_mut() = None);
-            Err(format!("eth_sendRawTransaction: {other:?}"))
-        }
-    }
+    Ok((tx_hash, raw, nonce, from))
 }
 
 /// E0: plain value transfer, the signing-spine proof. `value_wei` is decimal.
@@ -794,7 +930,7 @@ pub async fn send_value(to: String, value_wei: String) -> Result<TxOutcome, Stri
     let value: u128 = value_wei
         .parse()
         .map_err(|e| format!("bad value_wei: {e}"))?;
-    send_tx(&cfg, Some(to), value, vec![], 21_000).await
+    Ok(send_tx(&cfg, Some(to), value, vec![], 21_000).await?)
 }
 
 // --- E1: contract deployment with provenance ---------------------------------
@@ -1001,7 +1137,9 @@ pub async fn deploy_bytecode(
     let len = bytecode.len() as u64;
     // Before spending gas: if the outcome cannot be recorded, do not broadcast.
     preflight_log()?;
-    let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
+    let out = send_tx(&cfg, None, 0, bytecode, gas_limit)
+        .await
+        .map_err(String::from);
     let recorded = record(EvmDeployRecord {
         repo,
         commit,
@@ -1091,8 +1229,8 @@ pub async fn registry_publish_record(
     record_key: &str,
     commit: &[u8; 20],
     bundle: &[u8; 32],
-) -> Result<TxOutcome, String> {
-    let (cfg, to) = publish_target()?;
+) -> Result<TxOutcome, SendError> {
+    let (cfg, to) = publish_target().map_err(SendError::before)?;
     let data = abi_encode_set(record_key, commit, bundle);
     send_tx(&cfg, Some(to), 0, data, 150_000).await
 }
@@ -1167,6 +1305,67 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonce_is_max_of_confirmed_and_stored_for_same_chain_and_eoa() {
+        let stored = NextNonce {
+            chain_id: 1,
+            from: "0xA".into(),
+            next: 10,
+        };
+        // Sent but unmined: the stored value wins over the confirmed count.
+        assert_eq!(choose_nonce(Some(&stored), 1, "0xA", 8), 10);
+        // Mined past the store (sends from elsewhere): the chain wins.
+        assert_eq!(choose_nonce(Some(&stored), 1, "0xA", 12), 12);
+        // Another chain or EOA ignores the store.
+        assert_eq!(choose_nonce(Some(&stored), 5, "0xA", 3), 3);
+        assert_eq!(choose_nonce(Some(&stored), 1, "0xB", 3), 3);
+        assert_eq!(choose_nonce(None, 1, "0xA", 3), 3);
+    }
+
+    /// The store lives in stable memory (the META map), so it round-trips
+    /// through kv, and only the operator reset clears it.
+    #[test]
+    fn next_nonce_is_stored_and_reset_by_operator() {
+        reset_next_nonce();
+        assert_eq!(next_nonce(), None);
+        store_next_nonce(11155111, "0xA", 7);
+        assert_eq!(
+            stored_next_nonce(),
+            Some(NextNonce {
+                chain_id: 11155111,
+                from: "0xA".into(),
+                next: 7
+            })
+        );
+        assert_eq!(next_nonce(), Some(7));
+        reset_next_nonce();
+        assert_eq!(next_nonce(), None);
+    }
+
+    #[test]
+    fn only_transient_read_failures_are_retried() {
+        let ic = |code| {
+            MultiResult::<u128>::Consistent(RpcResult::Err(RpcError::HttpOutcallError(
+                HttpOutcallError::IcError {
+                    code,
+                    message: "No consensus could be reached".into(),
+                },
+            )))
+        };
+        assert!(ic(RejectionCode::SysTransient).is_transient());
+        assert!(!ic(RejectionCode::SysFatal).is_transient());
+        assert!(!ic(RejectionCode::CanisterReject).is_transient());
+        assert!(!MultiResult::<u128>::Consistent(RpcResult::Ok(1)).is_transient());
+        let json = MultiResult::<u128>::Consistent(RpcResult::Err(RpcError::JsonRpcError(
+            JsonRpcError {
+                code: -32000,
+                message: "bad".into(),
+            },
+        )));
+        assert!(!json.is_transient());
+        assert!(MultiResult::<u128>::Inconsistent(vec![]).is_transient());
+    }
 
     fn rlp_bytes(b: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();

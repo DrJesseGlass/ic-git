@@ -31,8 +31,9 @@ pub struct Record {
 }
 
 impl Record {
-    /// The module's single exit point to the signing side.
-    pub async fn publish(&self) -> Result<TxOutcome, String> {
+    /// The module's single exit point to the signing side. The error says
+    /// whether the broadcast was attempted, which decides a refund.
+    pub async fn publish(&self) -> Result<TxOutcome, evm::SendError> {
         evm::registry_publish_record(&self.key, &self.commit, &self.bundle).await
     }
 }
@@ -127,7 +128,7 @@ pub async fn publish_commit(
     bundle: [u8; 32],
 ) -> Result<TxOutcome, String> {
     evm::require_publish_target()?;
-    deploy_record(repo, commit_oid, bundle)?.publish().await
+    Ok(deploy_record(repo, commit_oid, bundle)?.publish().await?)
 }
 
 /// The repo's release commit (`deploy::release_commit`: the tip, or with

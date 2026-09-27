@@ -1137,6 +1137,21 @@ fn evm_deploy_history() -> Vec<evm::EvmDeployRecord> {
     evm::get_history()
 }
 
+/// The stored next EVM nonce: the nonce after the last broadcast a provider
+/// accepted. Sends use the higher of this and the confirmed count.
+#[ic_cdk::query]
+fn evm_next_nonce() -> Option<u64> {
+    evm::next_nonce()
+}
+
+/// Forget the stored next nonce. Only for a transaction that was accepted
+/// and then dropped from every mempool, which leaves a gap every later send
+/// waits behind; on a merely slow one, the next send would replace it.
+#[ic_cdk::update(guard = "auth::is_authorized")]
+fn evm_reset_nonce() {
+    evm::reset_next_nonce()
+}
+
 /// Point the canister at its deployed ProvenanceRegistry contract.
 #[ic_cdk::update(guard = "auth::is_authorized")]
 fn evm_set_registry(address: String) -> Result<(), String> {
@@ -1157,8 +1172,7 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
     // Resolve the record before charging: a publish that cannot happen costs
     // nothing.
     let record = provenance::tip_record(&repo)?;
-    tenancy::charge_action(&repo, tenancy::pricing().evm_action, "registry publish")?;
-    record.publish().await
+    publish_charged(&repo, &record).await
 }
 
 /// Write a *site* repo's provenance to the registry under the key
@@ -1173,8 +1187,25 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
 async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
     let record = provenance::served_site_record(&repo)?;
-    tenancy::charge_action(&repo, tenancy::pricing().evm_action, "registry publish")?;
-    record.publish().await
+    publish_charged(&repo, &record).await
+}
+
+/// Charge the repo for a registry publish, and refund it if the publish fails
+/// before the broadcast call (config, key, nonce, fee, or signing errors):
+/// nothing left the canister, so nothing was consumed. A failure at or after
+/// the broadcast keeps the charge, since a provider may hold the transaction.
+async fn publish_charged(
+    repo: &str,
+    record: &provenance::Record,
+) -> Result<evm::TxOutcome, String> {
+    let cost = tenancy::pricing().evm_action;
+    let payer = tenancy::charge_action(repo, cost, "registry publish")?;
+    record.publish().await.map_err(|e| {
+        if let (false, Some(p)) = (e.broadcast, payer) {
+            tenancy::refund(&p, cost);
+        }
+        e.message
+    })
 }
 
 // --- Track S: Solana signing spine (phase S0; see VISION.md section 4) -------
