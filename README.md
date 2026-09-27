@@ -142,7 +142,9 @@ the previous release (`BASE_REF`, by default the newest tag) over state
 that release wrote, and the console's reads. It prints PASS or FAIL per check and exits
 non-zero on any failure; `KEEP=1` leaves the network up afterwards.
 
-Admin API calls (`create_repo`, `put_object`, `set_ref`) are restricted to
-authorized principals - the deploying identity is authorized at init
-(`auth::init_with_caller`), and the allowlist survives upgrades via a stable
-snapshot.
+Admin API calls (`put_object`, `set_ref`, and the EVM, Solana, pricing and
+other operator calls) are restricted to operators: the canister's controllers
+and the admin allowlist. The deploying identity is put on the allowlist at
+init (`auth::init_with_caller`), and the allowlist survives upgrades via a
+stable snapshot. `create_repo` is open to any signed-in, funded caller (see
+docs/TENANCY.md).

@@ -215,6 +215,13 @@ expect "tenant: evm_set_config refused" "$(call "$TEN" git evm_set_config '("x",
 expect "tenant: sol_send refused" "$(call "$TEN" git sol_send '("x", 1 : nat64)')" 'is not an operator'
 expect "tenant: put_object refused" "$(call "$TEN" git put_object '("blob", blob "x")')" 'is not an operator'
 refuse "operator: evm_reset_nonce passes the guard" "$(call "$OP" git evm_reset_nonce)" 'rror|not an operator'
+# The change itself: a controller that is not on the allowlist is an operator
+# here too (these calls used to check the allowlist alone). $OP is both, so
+# make the tenant a controller for one call.
+(cd "$WORK" && dfx canister update-settings git --add-controller "$T" --identity "$OP" >/dev/null)
+refuse "controller not on the allowlist: evm_reset_nonce passes the guard" "$(call "$TEN" git evm_reset_nonce)" 'rror|not an operator'
+(cd "$WORK" && dfx canister update-settings git --remove-controller "$T" --identity "$OP" >/dev/null)
+expect "  ...and refused again once it is not a controller" "$(call "$TEN" git evm_reset_nonce)" 'is not an operator'
 
 section "approval-gated site"
 SITE="http://$HOST/site/e2e-app/"

@@ -315,7 +315,7 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
     }
 }
 
-// --- candid admin API (milestone 1; auth = dev-kit principal allowlist) -----
+// --- candid admin API (milestone 1; guard = is_admin, see is_operator) ------
 
 /// Anyone signed in with a funded account may create a repo and becomes its
 /// owner; operators pay nothing. See tenancy.rs.
