@@ -31,7 +31,11 @@
   from another origin -- the boundary node does not expose it -- and D
   subsumes it: the served bytes ARE the attested commit's entrypoint.
 
-  Query string: ?repo=R [&canister=C] [&run=1 to run as soon as verified].
+  Query string: ?repo=R [&run=1 to run as soon as verified]. Nothing else
+  is taken from a link: the registry, the rpc and the canister are what
+  the check trusts, and the record is keyed by repo name alone, so a
+  canister chosen by a link could replay the public commit, pass every
+  check, and then receive everything the running page asks of its base.
 -->
 <style>
   :root { --fg:#1c1c1c; --muted:#6b6b6b; --bg:#fafaf8; --line:#e2e0da; --ok:#1a7f37; --bad:#b3261e; --field:#fff; }
@@ -486,10 +490,11 @@ function unverifiableSubresource(servedPath, body) {
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const q = new URLSearchParams(location.search);
-  // Only repo and canister come from the query string. The registry and the
-  // rpc are what the check trusts; a link that could set them (with &run=1)
-  // would run any page it liked under a VERIFIED verdict.
-  for (const k of ['repo', 'canister']) $(k).value = q.get(k) || Verifier.DEFAULTS[k] || '';
+  // Only the repo comes from the query string (see the header): the
+  // registry, the rpc and the canister start at the defaults and change
+  // only by hand.
+  for (const k of ['canister', 'registry', 'rpc']) $(k).value = Verifier.DEFAULTS[k];
+  $('repo').value = q.get('repo') || '';
   for (const k of ['registry', 'rpc']) $(k).value = Verifier.DEFAULTS[k];
 
   // Run the checked bytes, not a second fetch: the page replaces this one.
@@ -501,9 +506,31 @@ function unverifiableSubresource(servedPath, body) {
   // this page's origin, so its storage and any origin-bound sign-in differ
   // from the live site's, and a page that picks hosts from location (rather
   // than document.baseURI) sees this origin, not the canister's.
+  //
+  // The crossorigin edit is textual, so it is proven before it runs: the
+  // edited page must parse to the checked page's DOM with crossorigin set on
+  // exactly the integrity-pinned elements and nothing else. A match inside
+  // script text, a comment or an attribute value changes the parse, and
+  // then nothing runs.
+  function withCrossorigin(src) {
+    const parse = s => new DOMParser().parseFromString(s, 'text/html');
+    const want = parse(src);
+    for (const el of want.querySelectorAll('link[integrity], script[integrity]')) {
+      if (!el.hasAttribute('crossorigin')) el.setAttribute('crossorigin', 'anonymous');
+    }
+    // Appended last among the attributes, where setAttribute puts it.
+    const out = src.replace(/<(script|link)\b[^>]*>/gi, tag =>
+      /\sintegrity\s*=/i.test(tag) && !/\scrossorigin\b/i.test(tag) ? tag.replace(/\/?>$/, ' crossorigin="anonymous"$&') : tag);
+    // The whole document, not just <html>: a comment before it is a child
+    // of the document.
+    const ser = d => new XMLSerializer().serializeToString(d);
+    if (ser(parse(out)) !== ser(want)) {
+      throw new Error('could not mark this page\'s pinned files crossorigin without changing anything else, so it was not run; open the live site instead');
+    }
+    return out;
+  }
   function run(r) {
-    let html = new TextDecoder().decode(r.bytes).replace(/<(script|link)\b[^>]*>/gi, tag =>
-      /\sintegrity\s*=/i.test(tag) && !/\scrossorigin\b/i.test(tag) ? tag.replace(/^<(script|link)/i, '$& crossorigin="anonymous"') : tag);
+    let html = withCrossorigin(new TextDecoder().decode(r.bytes));
     // After any leading comments and doctype (anything before the doctype
     // would put the page in quirks mode), before everything else: the parser
     // opens html and head for it and merges the page's own <html> attributes.
@@ -523,7 +550,16 @@ function unverifiableSubresource(servedPath, body) {
       '<div class="actions">' + (r.verified ? '<button class="go" id="run">run it</button>' : '') +
       '<a class="button" href="' + esc(r.url) + '">open the live site</a>' +
       '<span class="muted">' + (r.verified ? 'the live site is fetched again, so this check does not cover it' : '') + '</span></div>';
-    if (r.verified) $('run').onclick = () => run(r);
+    if (r.verified) $('run').onclick = () => start(r);
+  }
+
+  // Run, or keep the report and say why not.
+  function start(r) {
+    try { run(r); } catch (e) {
+      show(r);
+      $('out').insertAdjacentHTML('beforeend', '<p class="fail">' + esc(e.message || e) + '</p>');
+      $('run').remove();
+    }
   }
 
   // Only the newest request may show or run its result; an earlier, slower
@@ -540,7 +576,7 @@ function unverifiableSubresource(servedPath, body) {
     try {
       const r = await Verifier.verify(opts);
       if (me !== latest) return;
-      if (autorun && r.verified) return run(r);
+      if (autorun && r.verified) return start(r);
       show(r);
     } catch (e) {
       if (me === latest) $('out').innerHTML = '<p class="fail">' + esc(e.message || e) + '</p>';
