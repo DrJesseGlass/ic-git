@@ -864,6 +864,9 @@ pub struct SendError {
     pub message: String,
     pub maybe_sent: bool,
     pub spent: u64,
+    /// With `maybe_sent`: the signed transaction a provider may hold, so a
+    /// caller can log its hash and poll for its receipt.
+    pub tx: Option<TxOutcome>,
 }
 
 impl SendError {
@@ -873,6 +876,7 @@ impl SendError {
             message,
             maybe_sent: false,
             spent: 0,
+            tx: None,
         }
     }
 
@@ -920,15 +924,45 @@ async fn send_tx(
 ) -> Result<TxOutcome, SendError> {
     let _lock = SendLock::acquire().map_err(SendError::before)?;
     let meter = Meter::default();
-    let fail = |message: String, maybe_sent: bool| SendError {
+    // A definite failure: no provider holds the transaction.
+    let fail = |message: String| SendError {
         message,
-        maybe_sent,
+        maybe_sent: false,
         spent: meter.get(),
+        tx: None,
     };
     let (tx_hash, raw, nonce, from) = sign_tx(cfg, to, value, data, gas_limit, &meter)
         .await
-        .map_err(|m| fail(m, false))?;
+        .map_err(fail)?;
     let from_hex = checksum_address(&from);
+    let outcome = TxOutcome {
+        tx_hash,
+        nonce,
+        contract_address: to
+            .is_none()
+            .then(|| checksum_address(&create_address(&from, nonce))),
+        from: from_hex.clone(),
+    };
+    // Its nonce is taken once any provider has the transaction. Move the store
+    // past it, or the next send, reading the confirmed count, would sign over
+    // it.
+    let reserve = || store_next_nonce(cfg.chain_id, &from_hex, nonce + 1);
+    // An unknown outcome: a provider may hold the transaction. Reserve its
+    // nonce; if it never lands, that leaves a gap only an operator can clear.
+    let unknown = |message: String| {
+        reserve();
+        SendError {
+            message: format!(
+                "{message}; outcome unknown: tx {} may be live, and its nonce {nonce} \
+                 stays reserved. Check evm_receipt; if the tx never appears, \
+                 evm_reset_nonce frees the nonce",
+                outcome.tx_hash
+            ),
+            maybe_sent: true,
+            spent: meter.get(),
+            tx: Some(outcome.clone()),
+        }
+    };
 
     let what = "eth_sendRawTransaction";
     let reply: Result<MultiResult<SendRawTransactionStatus>, String> =
@@ -936,24 +970,23 @@ async fn send_tx(
     let status = match reply {
         Ok(MultiResult::Consistent(RpcResult::Ok(status))) => status,
         Ok(MultiResult::Consistent(RpcResult::Err(e))) => {
-            return Err(fail(format!("{what}: {}", e.render()), e.may_have_sent()));
+            let message = format!("{what}: {}", e.render());
+            return Err(if e.may_have_sent() {
+                unknown(message)
+            } else {
+                fail(message)
+            });
         }
         Ok(MultiResult::Inconsistent(results)) => {
-            // One provider accepting is enough for the transaction to spread,
-            // so its nonce is taken: advance past it, or the next send would
-            // sign over it (the confirmed count cannot see it).
+            // One provider accepting is enough for the transaction to spread:
+            // it is live, and is reported (and logged, and receipt-polled)
+            // as an accepted broadcast.
             let accepted = results
                 .iter()
                 .any(|(_, r)| matches!(r, RpcResult::Ok(SendRawTransactionStatus::Ok(_))));
             if accepted {
-                store_next_nonce(cfg.chain_id, &from_hex, nonce + 1);
-                return Err(fail(
-                    format!(
-                        "{what}: providers disagree, but at least one accepted tx {tx_hash} \
-                         (nonce {nonce}); confirm with evm_receipt before retrying"
-                    ),
-                    true,
-                ));
+                reserve();
+                return Ok(outcome);
             }
             let maybe_sent = results
                 .iter()
@@ -962,24 +995,21 @@ async fn send_tx(
                 .into_result(what)
                 .err()
                 .unwrap_or_default();
-            return Err(fail(message, maybe_sent));
+            return Err(if maybe_sent {
+                unknown(message)
+            } else {
+                fail(message)
+            });
         }
         // The call to the RPC canister itself failed: whether it reached a
         // provider is unknown.
-        Err(e) => return Err(fail(format!("{what}: {e}"), true)),
+        Err(e) => return Err(unknown(format!("{what}: {e}"))),
     };
     match status {
         // Some providers return the tx hash, some don't; ours is exact either way.
         SendRawTransactionStatus::Ok(_) => {
-            store_next_nonce(cfg.chain_id, &from_hex, nonce + 1);
-            Ok(TxOutcome {
-                tx_hash,
-                nonce,
-                contract_address: to
-                    .is_none()
-                    .then(|| checksum_address(&create_address(&from, nonce))),
-                from: from_hex,
-            })
+            reserve();
+            Ok(outcome)
         }
         // Definite refusals: no provider holds the transaction, so no gas is
         // spent and only the outcalls are charged.
@@ -987,13 +1017,13 @@ async fn send_tx(
             // NonceTooLow: a transaction already holds this nonce, which the
             // confirmed count cannot see (the store was empty or reset while
             // one was pending). Step past it so the caller's retry succeeds;
-            // moving up never replaces anything. Every other rejection keeps
+            // moving up never replaces anything. Every other refusal keeps
             // the store: dropping it would fall back to the confirmed count
             // and sign over a pending transaction.
             if matches!(other, SendRawTransactionStatus::NonceTooLow) {
-                store_next_nonce(cfg.chain_id, &from_hex, nonce + 1);
+                reserve();
             }
-            Err(fail(format!("{what}: {other:?}"), false))
+            Err(fail(format!("{what}: {other:?}")))
         }
     }
 }
@@ -1103,9 +1133,16 @@ pub const RECEIPT_UNKNOWN: &str = "unknown";
 
 /// The most recent accepted, not-known-reverted deploy of (repo, commit).
 /// The push path skips a commit that already has one; deploy_now does not.
+///
+/// A failed record with a tx hash counts too: its broadcast outcome was
+/// unknown, so the contract may be live (the receipt poll settles it, and a
+/// found receipt shows as receipt_status). Definite failures log no hash.
 pub fn latest_deploy(repo: &str, commit: &str) -> Option<EvmDeployRecord> {
     get_history().into_iter().rev().find(|r| {
-        r.repo == repo && r.commit == commit && r.ok && r.receipt_status != RECEIPT_REVERTED
+        r.repo == repo
+            && r.commit == commit
+            && (r.ok || !r.tx_hash.is_empty())
+            && r.receipt_status != RECEIPT_REVERTED
     })
 }
 
@@ -1251,17 +1288,23 @@ pub async fn deploy_bytecode(
     // Before spending gas: if the outcome cannot be recorded, do not broadcast.
     preflight_log().map_err(SendError::before)?;
     let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
+    // The transaction that is, or may be, live: an accepted one, or one whose
+    // broadcast outcome is unknown. Either is logged with its hash and polled
+    // for a receipt, so the same-commit dedupe (latest_deploy) sees it.
+    let live: Option<TxOutcome> = match &out {
+        Ok(o) => Some(o.clone()),
+        Err(e) => e.tx.clone(),
+    };
     let recorded = record(EvmDeployRecord {
         repo,
         commit,
         chain_id: cfg.chain_id,
-        contract_address: out
+        contract_address: live
             .as_ref()
-            .ok()
             .and_then(|o| o.contract_address.clone())
             .unwrap_or_default(),
-        tx_hash: out.as_ref().map(|o| o.tx_hash.clone()).unwrap_or_default(),
-        nonce: out.as_ref().map(|o| o.nonce).unwrap_or_default(),
+        tx_hash: live.as_ref().map(|o| o.tx_hash.clone()).unwrap_or_default(),
+        nonce: live.as_ref().map(|o| o.nonce).unwrap_or_default(),
         bytecode_sha256: sha256,
         bytecode_len: len,
         ok: out.is_ok(),
@@ -1277,19 +1320,20 @@ pub async fn deploy_bytecode(
     // will dedupe it, so a caller that retries on error would deploy it again.
     // Surface the tx hash and say so explicitly -- this needs a human, not a
     // retry. (preflight_log makes this near-unreachable; it is the backstop.)
-    if let (Ok(o), Err(e)) = (&out, &recorded) {
+    if let (Some(o), Err(e)) = (&live, &recorded) {
         return Err(SendError {
             message: format!(
-                "DEPLOY BROADCAST BUT NOT RECORDED: tx {} is live on chain {} and paid for, \
-                 but the deploy log could not be updated ({e}). Do NOT retry -- \
-                 resolve the log first, or the contract will be deployed twice.",
+                "DEPLOY BROADCAST BUT NOT RECORDED: tx {} is (or may be) live on chain {} \
+                 and paid for, but the deploy log could not be updated ({e}). Do NOT \
+                 retry -- resolve the log first, or the contract will be deployed twice.",
                 o.tx_hash, cfg.chain_id
             ),
             maybe_sent: true,
             spent: 0,
+            tx: Some(o.clone()),
         });
     }
-    if let Ok(o) = &out {
+    if let Some(o) = &live {
         schedule_receipt_poll(o.tx_hash.clone(), 0);
     }
     out
@@ -1532,6 +1576,7 @@ mod tests {
             message: "eth_sendRawTransaction: InsufficientFunds".into(),
             maybe_sent: false,
             spent: 36_000_000_000,
+            tx: None,
         };
         assert_eq!(signed.refundable(price), 14_000_000_000);
         let over = SendError {
@@ -1543,6 +1588,7 @@ mod tests {
             message: "eth_sendRawTransaction: lost consensus".into(),
             maybe_sent: true,
             spent: 1,
+            tx: None,
         };
         assert_eq!(ambiguous.refundable(price), 0);
     }
@@ -1782,6 +1828,35 @@ mod tests {
         assert!(latest_deploy("r", "c").is_some());
         mark_receipt("0xABcd", "reverted");
         assert!(latest_deploy("r", "c").is_none());
+    }
+
+    /// A failed deploy with a tx hash had an unknown broadcast outcome and may
+    /// be live, so it blocks a same-commit redeploy until a receipt shows it
+    /// reverted. A definite failure logs no hash and blocks nothing.
+    #[test]
+    fn unknown_outcome_deploy_blocks_redeploy_until_reverted() {
+        let rec = |commit: &str, tx_hash: &str| EvmDeployRecord {
+            repo: "r-unknown".into(),
+            commit: commit.into(),
+            chain_id: 1,
+            contract_address: String::new(),
+            tx_hash: tx_hash.into(),
+            nonce: 0,
+            bytecode_sha256: String::new(),
+            bytecode_len: 0,
+            ok: false,
+            message: String::new(),
+            receipt_status: String::new(),
+            at_ns: 0,
+        };
+        record(rec("definite", "")).unwrap();
+        assert!(latest_deploy("r-unknown", "definite").is_none());
+        record(rec("unknown", "0xFEED")).unwrap();
+        assert!(latest_deploy("r-unknown", "unknown").is_some());
+        mark_receipt("0xfeed", RECEIPT_SUCCESS);
+        assert!(latest_deploy("r-unknown", "unknown").is_some());
+        mark_receipt("0xfeed", RECEIPT_REVERTED);
+        assert!(latest_deploy("r-unknown", "unknown").is_none());
     }
 
     #[test]

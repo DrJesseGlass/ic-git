@@ -591,13 +591,23 @@ async fn run_evm(
     };
     if !force {
         if let Some(prev) = evm::latest_deploy(repo, &commit) {
-            st.ok = true;
+            // An accepted broadcast, or an unknown one whose receipt has since
+            // shown it mined, is a deploy; an unknown one not yet seen may be.
+            st.ok = prev.ok || prev.receipt_status == evm::RECEIPT_SUCCESS;
             st.contract_address = prev.contract_address;
             st.tx_hash = prev.tx_hash;
-            st.message = format!(
-                "already deployed at {} (tx {}); skipped (deploy_now redeploys)",
-                st.contract_address, st.tx_hash
-            );
+            st.message = if st.ok {
+                format!(
+                    "already deployed at {} (tx {}); skipped (deploy_now redeploys)",
+                    st.contract_address, st.tx_hash
+                )
+            } else {
+                format!(
+                    "an earlier deploy of this commit may be live at {} (tx {}, broadcast \
+                     outcome unknown); skipped. Check evm_receipt; deploy_now redeploys",
+                    st.contract_address, st.tx_hash
+                )
+            };
             store::meta_set_json(&evm_status_key(repo), &st);
             return (st, price);
         }
