@@ -99,7 +99,10 @@ operator repos: exempt from every charge, writable only by operators.
 A repo is exempt while its owner is an operator, read live on every
 charge: an owner removed as controller or from the allowlist pays from the
 next charge on. Rent is not back-billed: the rent clock of an exempt repo
-keeps moving, so rent starts when the exemption ends.
+keeps moving, so rent starts when the exemption ends. Pushes to an exempt
+repo are free but still count toward its stored bytes, so that rent covers
+everything the repo holds. Bytes pushed before v0.3.1 to an operator-owned
+repo were not counted.
 
 ## Money
 

@@ -628,6 +628,13 @@ fn reached(repo: &str, pol: &Policy, oid: &store::Oid) -> bool {
 pub fn charge_push(repo: &str, bytes: usize) -> Result<(), String> {
     let mut m = meta_or_legacy(repo)?;
     if exempt(&m) {
+        // No fee, but an owned repo still counts its bytes: if the owner
+        // stops being an operator, rent covers what was pushed meanwhile.
+        // Ownerless (legacy) repos have no record to keep them in.
+        if m.owner.is_some() {
+            m.storage_bytes = m.storage_bytes.saturating_add(bytes as u64);
+            save_meta(repo, &m);
+        }
         return Ok(());
     }
     if m.delinquent {
@@ -927,11 +934,11 @@ mod tests {
         create_repo("t-ctl", &c, true).unwrap();
         assert!(repo_info("t-ctl").unwrap().exempt);
         assert_eq!(charge_action("t-ctl", 5, "evm"), Ok(None));
+        // A push is free but its bytes still count, for rent if the
+        // exemption ends.
         charge_push("t-ctl", 1000).unwrap();
         assert_eq!(balance(&c), 0);
-        let mut m = meta("t-ctl").unwrap();
-        m.storage_bytes = 1000;
-        save_meta("t-ctl", &m);
+        assert_eq!(meta("t-ctl").unwrap().storage_bytes, 1000);
         // A year exempt: no rent, and the clock moves with it.
         let start = now_ns();
         set_test_now(start + YEAR_NS as u64);
