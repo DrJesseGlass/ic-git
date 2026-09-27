@@ -380,11 +380,16 @@ only ADD warnings (a check can downgrade, never falsely upgrade):
        As a CLI, this exists: `tools/verify.mjs` performs the hash comparison
        AND the reference check (its check E is a port of
        `site::unverifiable_subresource`; the two must track each other),
-       which is the F2 rung of VISION.md. Nothing does it in a browser yet,
-       and it cannot be a MetaMask Snap, since Snaps are isolated from the
-       page and never see the served bytes. It needs a content script -- so
-       this step implies an extension of our own, whether or not it ships in
-       the same bundle as the transaction reviewer.
+       which is the F2 rung of VISION.md. In a browser, `loader/index.html`
+       does it for a page the user asks about: a file the user keeps, which
+       checks the entrypoint (reading the registry through the wallet's
+       provider when there is one) and then runs only the bytes it checked.
+       Checking every page load, on the site's own origin, cannot be a
+       MetaMask Snap, since Snaps are isolated from the page and never see
+       the served bytes. It needs a content script -- so this step implies
+       an extension of our own, whether or not it ships in the same bundle
+       as the transaction reviewer. The loader's core block is written to
+       run in it unchanged.
 
     2. Read X's CERTIFIED module hash -> H_live (BLS-verified, fresh).
 

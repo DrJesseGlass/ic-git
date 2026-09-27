@@ -93,6 +93,9 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 // canister: every ambiguity refuses, because a false refusal costs one edit
 // and a false accept reports "verified" over swappable code.
 
+// === shared: unverifiableSubresource ===
+// loader/index.html carries a byte-identical copy of this block
+// (tools/loader-test.mjs checks it); edit both or neither.
 const isWs = (c) => " \t\n\r\f".includes(c); // Rust is_ascii_whitespace
 
 // True when an integrity value holds at least one token the SRI spec
@@ -250,6 +253,8 @@ function unverifiableSubresource(servedPath, body) {
     }
   }
 }
+
+// === end shared ===
 
 // ABI-encode get(string repo): selector, offset word, length word, padded data.
 function encodeGet(repo) {

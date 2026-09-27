@@ -49,6 +49,9 @@ tools/reproducible-build.sh, tools/check-module-hash.sh
                         prove the deployed wasm is this source (REPRODUCIBLE_BUILD.md)
 tools/e2e-local.sh      end-to-end pass on a throwaway local replica, run
                         before every mainnet upgrade
+tools/verify.mjs        check a served site against its registry record (CLI)
+loader/index.html       the same check in a browser, then run the checked bytes
+                        (see "Verifying a site in the browser")
 site/                   placeholder content for the asset canister ("www")
 ARCHITECTURE.md         the design
 ```
@@ -88,6 +91,34 @@ node tools/verify.mjs ic-git index.html
 
 The page is then at `https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-git/`
 and browses, among other things, its own source.
+
+## Verifying a site in the browser
+
+`loader/index.html` is a verifier you keep. Open it from disk (or any origin
+you trust -- never from the canister it checks, which could serve a page
+that claims success), enter a repo, and it:
+
+1. reads `get("<repo>#site")` from the Sepolia registry, through your
+   wallet's provider when one is injected and on Sepolia, else a public RPC;
+2. fetches the served entrypoint and checks its sha256 against the record;
+3. walks the recorded commit to that entrypoint through the canister's
+   `get_object` query, checking every object against its SHA-1, and
+   compares the blob with the served bytes;
+4. scans the page for references the browser would not enforce (the same
+   code as `tools/verify.mjs` check E);
+
+and only when all pass offers **run it**, which runs the bytes it checked
+rather than fetching them again. `?repo=ic-vote&run=1` does it in one step.
+
+What it cannot do: the page runs on the loader's origin, so its storage and
+any origin-bound sign-in are not the live site's, and a page that chooses
+hosts from `location` instead of `document.baseURI` sees the loader's host.
+An always-on check of the live site needs a browser extension; the loader's
+`// === core ===` block is written to run in one unchanged.
+
+`node tools/loader-test.mjs` runs that core against mainnet: both live sites
+verify, a tampered page and a lying `get_object` both fail, and the scanner
+is byte-identical to the CLI's.
 
 ## Accounts, ownership, and paying for what you use
 
