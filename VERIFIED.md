@@ -15,6 +15,32 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-09-02 | `9cdc58c` | `v0.2.0` | `278ebec09bc4d353da718a2751ce01dd74bb44804d1f99abf72b0e08d4b3541a` (gz) | MATCH, 2026-09-02 | deployer (pinned container); GitHub Actions amd64 runner, [run 33653643555](https://github.com/DrJesseGlass/ic-git/actions/runs/33653643555), MATCH |
 | 2026-09-22 | `bcd6f9b` | `v0.2.1` | `29e5ba3aa7e2dc0c62519c5a9e7e609bf72493971947e565e68daf3d43d29c1a` (gz) | MATCH, 2026-09-22 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 35805482289](https://github.com/DrJesseGlass/ic-git/actions/runs/35805482289), identical hash |
 | 2026-09-24 to 26 | `5b2b55f` | `v0.2.2` | `f13ff2226676f02cffe3906f641a63e6df0806ef25c093ae159444aeb278cca1` (gz) | MATCH, 2026-09-26 (recorded late) | GitHub Actions amd64 runner, [run 36039724742](https://github.com/DrJesseGlass/ic-git/actions/runs/36039724742), identical hash; deployer (pinned container, macOS arm64 host under emulation), MATCH |
+| 2026-09-26 | `07fd244` | `v0.3.0` | `3afcac754d55c6747abda09568412517602710eb91e68a2ac3c7937e4f76db03` (gz) | MATCH, 2026-09-26 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 36220841774](https://github.com/DrJesseGlass/ic-git/actions/runs/36220841774), identical hash |
+
+## v0.3.0 -- 2026-09-26
+
+The release that makes approvals, pushes and funding what the tenancy
+design promised. Canister changes since v0.2.2, #26 to #35: a site and
+the app both follow the repo's newest approved commit (#26); push tokens
+expire, can be listed and revoked by id, and stop working when their
+minter loses write access (#27, #29); the optional ic-name-service
+announce, and lower-kebab repo labels unique per repo (#28, #32); tokens
+bound to an SSH key, with pushes signed by it over HTTPS (#30); deposits
+from ICP through the cycles minting canister (#33); ic-dev-kit-rs 0.4
+(#34); and one operator rule plus the operator purge of dead token
+records (#35).
+
+Gated before the deploy by `tools/e2e-local.sh`: 57 checks on this commit
+on a local replica with the NNS ledger and CMC, including an upgrade from
+v0.2.2 -- what mainnet ran -- over state that release wrote. After the
+upgrade the migrations were visible on mainnet: the existing push tokens
+listed without a minter and expiring 30 days out, and every repo's info
+reporting `require_signed_push`.
+
+Same recipe and base image digest as v0.2.2. The raw wasm inside the gzip
+hashes to `75d3de45...faaf`. Two hosts agreed byte for byte: the
+deployer's arm64 machine running the amd64 image under emulation, and a
+native x86_64 GitHub runner triggered by the tag push.
 
 ## v0.2.2 -- deployed 2026-09-24 to 26, recorded 2026-09-26
 

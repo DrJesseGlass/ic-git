@@ -201,6 +201,43 @@
         "note": "recorded late: tools/check-module-hash.sh reported the live module as unrecorded on 2026-09-26, and a rebuild of v0.2.2 matched it. Upgrade from v0.2.1; the canister crate changed in three merges: the console's deploy configuration (#20), ICRC-21 consent messages and the ICRC-10 standards list (#22), and clippy cleanups (#23)"
       },
       "wasm_sha256": "cb6eba843cfcc7a29ec85ee496e40e205510cb515f26a3844fd8b1ddf98490be"
+    },
+    {
+      "commit": "07fd244b96f3efd1508d4fceed640bdfac371f0b",
+      "tag": "v0.3.0",
+      "module_hash": "3afcac754d55c6747abda09568412517602710eb91e68a2ac3c7937e4f76db03",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, linux/amd64 image under emulation",
+          "date": "2026-09-26"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/36220841774",
+          "date": "2026-09-26",
+          "check": "identical hash (3afcac75...db03 gz, 75d3de45...faaf raw); the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-09-26",
+        "on_chain_match": "match",
+        "checked_by": "tools/reproducible-build.sh (built module sha256) against the on-chain module hash",
+        "note": "upgrade from v0.2.2, after tools/e2e-local.sh passed 57/57 on this commit including an upgrade from v0.2.2. The canister crate changed in #26-#35: sites and deploys follow the newest approved commit (#26); push tokens expire, are listed and revoked by id, and are checked against their minter's access (#27, #29); the ic-name-service announce hook and repo labels (#28, #32); key-bound, signed pushes (#30); ICP deposits through the CMC (#33); ic-dev-kit-rs 0.4 (#34); one operator rule and the dead-token purge (#35)"
+      },
+      "wasm_sha256": "75d3de45cdff70442b35f1e43f3c415093e57393e42895e18a4b03cd5fd5faaf"
     }
   ]
 }
