@@ -56,8 +56,8 @@ flowchart LR
   packfile reader/writer, object store, refs, push auth, deploy trigger.
   Multi-repo: path prefix `/<repo>.git/...` keys everything.
   From the dev kit: `http` (request/response types, `upgrade_response()`,
-  routing helpers), `auth` (principal allowlist guarding the candid admin
-  API, persisted across upgrades), and later `large_objects` (chunked
+  routing helpers), `auth` (principal allowlist that, with the controllers,
+  guards the candid admin API; persisted across upgrades), and later `large_objects` (chunked
   uploads, see the "Push size" section) and `telemetry`. Streamed clone
   responses use the dev kit's `StreamingStrategy`/`StreamingCallbackToken`
   types (in the dev kit since v0.3.0).

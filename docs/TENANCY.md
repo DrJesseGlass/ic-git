@@ -296,6 +296,12 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
 - The canister now custodies tenant balances. That raises the stakes on the
   controller and the attestation work, and is the strongest argument yet for
   docs/CANISTER_SPLIT.md: the ledger belongs in the small, stable canister.
+- Every operator-only endpoint uses the one guard, `is_admin`: the admin
+  API, pricing and ledgers, the names hook, the compiler workers, the legacy
+  `put_object`/`set_ref` seeding calls, and the EVM and Solana operator calls
+  (`evm_set_config`, `evm_send`, `evm_deploy`, `sol_set_config`, ...). Before
+  v0.3.1 the last three groups checked the allowlist alone, so a controller
+  not on the allowlist was refused there and nowhere else.
 - `charge_rent_now` runs a rent tick on demand; the timer runs hourly and is
   re-armed on every upgrade.
 - Existing repos (`evm-demo`, `registry`, `ic-git`) are ownerless and exempt.
