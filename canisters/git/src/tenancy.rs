@@ -253,18 +253,64 @@ fn meta_or_legacy(repo: &str) -> Result<RepoMeta, String> {
     })
 }
 
-/// Operators are the controllers plus the legacy admin allowlist. Callers
-/// pass `operator` in from lib.rs (controller checks need the IC); here we
-/// only consult the allowlist, which is host-testable.
-fn allowlisted(p: &Principal) -> bool {
-    auth::is_principal_authorized(*p).unwrap_or(false)
+/// The one operator rule: controllers and the admin allowlist, and never
+/// this canister itself. The `is_admin` guard applies it to the caller, the
+/// push-token checks to a token's minter, and `exempt` to a repo's owner.
+/// The self exclusion is deliberate: code this canister runs on its own
+/// behalf (timers, its own calls) is not an operator, even if its principal
+/// were put on the allowlist.
+///
+/// Both halves are read live, so a repo's exemption follows its owner:
+/// removing a controller or an allowlist entry makes its repos pay from the
+/// next charge on.
+pub fn is_operator(p: &Principal) -> bool {
+    !is_self(p) && (is_controller(p) || auth::is_principal_authorized(*p).unwrap_or(false))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONTROLLERS: std::cell::RefCell<Vec<Principal>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub fn set_test_controller(p: Principal, on: bool) {
+    TEST_CONTROLLERS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.retain(|x| x != &p);
+        if on {
+            c.push(p);
+        }
+    });
+}
+
+fn is_controller(p: &Principal) -> bool {
+    #[cfg(test)]
+    {
+        TEST_CONTROLLERS.with(|c| c.borrow().contains(p))
+    }
+    #[cfg(not(test))]
+    {
+        ic_cdk::api::is_controller(p)
+    }
+}
+
+fn is_self(p: &Principal) -> bool {
+    #[cfg(test)]
+    {
+        let _ = p;
+        false
+    }
+    #[cfg(not(test))]
+    {
+        *p == ic_cdk::api::canister_self()
+    }
 }
 
 /// A repo whose owner pays nothing: ownerless (legacy) or operator-owned.
 fn exempt(m: &RepoMeta) -> bool {
     match &m.owner {
         None => true,
-        Some(o) => allowlisted(o),
+        Some(o) => is_operator(o),
     }
 }
 
@@ -642,6 +688,12 @@ pub fn charge_rent_all() -> (u32, u64) {
     let mut collected = 0u64;
     for (name, mut m) in store::repo_meta_all::<RepoMeta>() {
         if exempt(&m) {
+            // Keep the rent clock running, so an owner who stops being an
+            // operator pays from then on, not back to the repo's creation.
+            if m.rent_paid_to_ns < now {
+                m.rent_paid_to_ns = now;
+                save_meta(&name, &m);
+            }
             continue;
         }
         let owner = m.owner.expect("non-exempt repo has an owner");
@@ -862,6 +914,41 @@ mod tests {
         let (charged, _) = charge_rent_all();
         assert!(!store::repo_meta_all::<RepoMeta>().iter().any(|(n, _)| n == "t-legacy"));
         let _ = charged;
+    }
+
+    /// A controller off the allowlist is an operator for billing too, and
+    /// the exemption follows it: once removed, its repo pays, with rent from
+    /// then on rather than back to creation.
+    #[test]
+    fn controller_owned_repos_are_exempt_while_controller() {
+        let c = p(61);
+        set_test_controller(c, true);
+        assert!(is_operator(&c));
+        create_repo("t-ctl", &c, true).unwrap();
+        assert!(repo_info("t-ctl").unwrap().exempt);
+        assert_eq!(charge_action("t-ctl", 5, "evm"), Ok(None));
+        charge_push("t-ctl", 1000).unwrap();
+        assert_eq!(balance(&c), 0);
+        let mut m = meta("t-ctl").unwrap();
+        m.storage_bytes = 1000;
+        save_meta("t-ctl", &m);
+        // A year exempt: no rent, and the clock moves with it.
+        let start = now_ns();
+        set_test_now(start + YEAR_NS as u64);
+        charge_rent_all();
+        assert!(!meta("t-ctl").unwrap().delinquent);
+        assert_eq!(meta("t-ctl").unwrap().rent_paid_to_ns, start + YEAR_NS as u64);
+        // Removed as controller: the repo is billed like any tenant's.
+        set_test_controller(c, false);
+        assert!(!is_operator(&c));
+        assert!(!repo_info("t-ctl").unwrap().exempt);
+        assert!(charge_action("t-ctl", 5, "evm").unwrap_err().contains("insufficient"));
+        let pr = pricing();
+        credit(&c, 1_000_000_000);
+        set_test_now(start + 2 * YEAR_NS as u64);
+        let (_, collected) = charge_rent_all();
+        assert_eq!(collected, 1000 * pr.rent_per_byte_year);
+        set_test_now(start);
     }
 
     #[test]

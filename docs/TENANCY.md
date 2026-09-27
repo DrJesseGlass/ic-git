@@ -96,6 +96,11 @@ bound to a key. It is off by default.
 Repos created before tenancy existed have no owner and are treated as
 operator repos: exempt from every charge, writable only by operators.
 
+A repo is exempt while its owner is an operator, read live on every
+charge: an owner removed as controller or from the allowlist pays from the
+next charge on. Rent is not back-billed: the rent clock of an exempt repo
+keeps moving, so rent starts when the exemption ends.
+
 ## Money
 
 `get_pricing` returns the table; operators retune it with `set_pricing`.
@@ -301,7 +306,10 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   `put_object`/`set_ref` seeding calls, and the EVM and Solana operator calls
   (`evm_set_config`, `evm_send`, `evm_deploy`, `sol_set_config`, ...). Before
   v0.3.1 the last three groups checked the allowlist alone, so a controller
-  not on the allowlist was refused there and nowhere else.
+  not on the allowlist was refused there and nowhere else. The billing
+  exemption had the same gap: a controller off the allowlist created repos
+  free but was then billed for them (rent, pushes, deploy actions). It now
+  uses the same rule, `tenancy::is_operator`.
 - `charge_rent_now` runs a rent tick on demand; the timer runs hourly and is
   re-armed on every upgrade.
 - Existing repos (`evm-demo`, `registry`, `ic-git`) are ownerless and exempt.
