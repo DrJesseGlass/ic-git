@@ -220,8 +220,12 @@ refuse "operator: evm_reset_nonce passes the guard" "$(call "$OP" git evm_reset_
 # make the tenant a controller for one call.
 (cd "$WORK" && dfx canister update-settings git --add-controller "$T" --identity "$OP" >/dev/null)
 refuse "controller not on the allowlist: evm_reset_nonce passes the guard" "$(call "$TEN" git evm_reset_nonce)" 'rror|not an operator'
+# Billing follows the same rule: the tenant's repo is exempt while it is a
+# controller, and pays again once it is not.
+expect "  ...and its repo is exempt from charges" "$(call "$OP" git get_repo_info '("e2e-app")')" 'exempt = true'
 (cd "$WORK" && dfx canister update-settings git --remove-controller "$T" --identity "$OP" >/dev/null)
 expect "  ...and refused again once it is not a controller" "$(call "$TEN" git evm_reset_nonce)" 'is not an operator'
+expect "  ...and its repo pays again" "$(call "$OP" git get_repo_info '("e2e-app")')" 'exempt = false'
 
 section "approval-gated site"
 SITE="http://$HOST/site/e2e-app/"

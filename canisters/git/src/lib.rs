@@ -352,16 +352,12 @@ fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String>
 // canister, so they are trusted at least as much as an allowlisted principal;
 // letting them manage the list makes the cutover a settings change.
 
-/// The one operator rule: controllers and the admin allowlist, and never
-/// this canister itself. `operator()` and the `is_admin` guard apply it to
-/// the caller; the push-token checks apply it to a token's minter. The
-/// self exclusion is deliberate: code this canister runs on its own behalf
-/// (timers, its own calls) is not an operator, even if its principal were
-/// put on the allowlist -- which is what the allowlist check used to refuse
-/// for the caller alone, so the two paths could disagree.
+/// The one operator rule, `tenancy::is_operator`: controllers and the admin
+/// allowlist, never this canister. `operator()` and the `is_admin` guard
+/// apply it to the caller; the push-token checks apply it to a token's
+/// minter; tenancy applies it to a repo's owner to decide who pays.
 fn is_operator(p: &candid::Principal) -> bool {
-    *p != ic_cdk::api::canister_self()
-        && (ic_cdk::api::is_controller(p) || auth::is_principal_authorized(*p).unwrap_or(false))
+    tenancy::is_operator(p)
 }
 
 /// Guard: the caller is an operator (`is_operator`).
