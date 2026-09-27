@@ -317,7 +317,7 @@ function unverifiableSubresource(servedPath, body) {
       if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; }
     }
     const b = Uint8Array.from(out.slice(4));
-    if (((out[0] << 24) | (out[1] << 16) | (out[2] << 8) | out[3]) >>> 0 !== crc32(b)) throw new Error('bad canister id checksum: ' + text);
+    if (out.length <= 4 || ((out[0] << 24) | (out[1] << 16) | (out[2] << 8) | out[3]) >>> 0 !== crc32(b)) throw new Error('bad canister id checksum: ' + text);
     return b;
   }
   const uleb = n => { const o = []; do { let b = n & 0x7f; n = Math.floor(n / 128); if (n) b |= 0x80; o.push(b); } while (n); return o; };
@@ -399,7 +399,8 @@ function unverifiableSubresource(servedPath, body) {
   }
   function entry(tree, name) {
     for (let i = 0; i < tree.length;) {
-      const sp = tree.indexOf(0x20, i), nul = tree.indexOf(0, sp);
+      const sp = tree.indexOf(0x20, i), nul = sp < 0 ? -1 : tree.indexOf(0, sp);
+      if (nul < 0) return null; // malformed: stop rather than loop
       if (td.decode(tree.subarray(sp + 1, nul)) === name) return hex(tree.subarray(nul + 1, nul + 21));
       i = nul + 21;
     }
@@ -459,13 +460,16 @@ function unverifiableSubresource(servedPath, body) {
       if (!site[0]) throw new Error('the canister reports no site for ' + o.repo);
       const e = await entrypoint(o, out.record.commit, site[0][0]);
       path = e.path;
-      check('D', equal(e.bytes, served), 'the served page is ' + path + ' at the recorded commit', equal(e.bytes, served) ? 'every object on the way checked against its SHA-1' : 'the attested file differs from what was served');
+      const same = equal(e.bytes, served);
+      check('D', same, 'the served page is ' + path + ' at the recorded commit', same ? 'every object on the way checked against its SHA-1' : 'the attested file differs from what was served');
     } catch (e) {
       check('D', false, 'the served page is the recorded commit\'s entrypoint', e.message);
     }
     out.path = path;
 
-    const why = unverifiableSubresource(path, served);
+    // Scanned as markup whatever the entrypoint is named: run() hands the
+    // bytes to the HTML parser, which never looks at the extension.
+    const why = unverifiableSubresource('index.html', served);
     check('E', why === null, 'everything the page loads is inline or SRI-pinned', why || '');
 
     out.verified = checks.every(c => c.ok);
@@ -482,7 +486,11 @@ function unverifiableSubresource(servedPath, body) {
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const q = new URLSearchParams(location.search);
-  for (const k of ['repo', 'canister', 'registry', 'rpc']) $(k).value = q.get(k) || Verifier.DEFAULTS[k] || '';
+  // Only repo and canister come from the query string. The registry and the
+  // rpc are what the check trusts; a link that could set them (with &run=1)
+  // would run any page it liked under a VERIFIED verdict.
+  for (const k of ['repo', 'canister']) $(k).value = q.get(k) || Verifier.DEFAULTS[k] || '';
+  for (const k of ['registry', 'rpc']) $(k).value = Verifier.DEFAULTS[k];
 
   // Run the checked bytes, not a second fetch: the page replaces this one.
   // Two changes, neither loosening a check: a <base> so its relative URLs
@@ -496,15 +504,18 @@ function unverifiableSubresource(servedPath, body) {
   function run(r) {
     let html = new TextDecoder().decode(r.bytes).replace(/<(script|link)\b[^>]*>/gi, tag =>
       /\sintegrity\s*=/i.test(tag) && !/\scrossorigin\b/i.test(tag) ? tag.replace(/^<(script|link)/i, '$& crossorigin="anonymous"') : tag);
-    const base = '<base href="' + esc(r.url) + '">';
-    const head = /<head[^>]*>/i.exec(html);
-    html = head ? html.slice(0, head.index + head[0].length) + base + html.slice(head.index + head[0].length) : base + html;
+    // After any leading comments and doctype (anything before the doctype
+    // would put the page in quirks mode), before everything else: the parser
+    // opens html and head for it and merges the page's own <html> attributes.
+    const lead = /^(?:\s|<!--[\s\S]*?-->)*(?:<!doctype[^>]*>)?/i.exec(html)[0].length;
+    html = html.slice(0, lead) + '<base href="' + esc(r.url) + '">' + html.slice(lead);
     document.open(); document.write(html); document.close();
   }
 
   function show(r) {
+    const at = r.record && new Date(r.record.updatedAt * 1000);
     const rec = r.record && r.record.present
-      ? '<p class="muted"><span class="mono">' + esc(r.key) + '</span> at commit <span class="mono">' + esc(r.record.commit.slice(0, 12)) + '</span>, recorded ' + esc(new Date(r.record.updatedAt * 1000).toISOString().slice(0, 16).replace('T', ' ')) + ' UTC, read via ' + esc(r.via) + (r.note ? ' (' + esc(r.note) + ')' : '') + '</p>'
+      ? '<p class="muted"><span class="mono">' + esc(r.key) + '</span> at commit <span class="mono">' + esc(r.record.commit.slice(0, 12)) + '</span>, recorded ' + esc(isNaN(at) ? 'at ' + r.record.updatedAt : at.toISOString().slice(0, 16).replace('T', ' ') + ' UTC') + ', read via ' + esc(r.via) + (r.note ? ' (' + esc(r.note) + ')' : '') + '</p>'
       : '';
     const rows = r.checks.map(c => '<li><span class="' + (c.ok ? 'pass">PASS' : 'fail">FAIL') + '</span><span>' + esc(c.label) + '</span>' + (c.detail ? '<span class="d">' + esc(c.detail) + '</span>' : '') + '</li>').join('');
     $('out').innerHTML = rec + '<ul>' + rows + '</ul>' +
@@ -515,17 +526,24 @@ function unverifiableSubresource(servedPath, body) {
     if (r.verified) $('run').onclick = () => run(r);
   }
 
+  // Only the newest request may show or run its result; an earlier, slower
+  // one must not replace it (and its "run it" with another repo's bytes).
+  let latest = 0;
   async function go(autorun) {
     const repo = $('repo').value.trim();
     if (!repo) return;
+    const me = ++latest;
     $('out').innerHTML = '<p class="muted">checking ' + esc(repo) + '&hellip;</p>';
-    const opts = { repo, canister: $('canister').value.trim(), registry: $('registry').value.trim(), rpc: $('rpc').value.trim(), provider: window.ethereum || null };
+    // A cleared setting falls back to its default rather than overriding it.
+    const opts = { repo, provider: window.ethereum || null };
+    for (const k of ['canister', 'registry', 'rpc']) { const v = $(k).value.trim(); if (v) opts[k] = v; }
     try {
       const r = await Verifier.verify(opts);
+      if (me !== latest) return;
       if (autorun && r.verified) return run(r);
       show(r);
     } catch (e) {
-      $('out').innerHTML = '<p class="fail">' + esc(e.message || e) + '</p>';
+      if (me === latest) $('out').innerHTML = '<p class="fail">' + esc(e.message || e) + '</p>';
     }
   }
 
