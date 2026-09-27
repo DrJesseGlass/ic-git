@@ -22,8 +22,9 @@
 # Covered: ICP deposit through the CMC; the push-certificate nonce; signed
 # pushes (bound token unsigned, wrong key, unbound before and after
 # require_signed_push, GPG-signed with an unbound token); token listing and
-# revoke by id; the approval-gated site (hidden until approved, rollback on
-# a withdrawn approval); an approval-gated deploy of a .wat app into the
+# revoke by id; the operator guard on the EVM, Solana and seeding calls;
+# the approval-gated site (hidden until approved, rollback on a withdrawn
+# approval); an approval-gated deploy of a .wat app into the
 # repo's app canister, its certified module hash, and the ic-name-service
 # announce; an upgrade in place; an upgrade from the previous release
 # (BASE_REF) over state that release wrote -- a gated repo and its site, an
@@ -208,6 +209,12 @@ if command -v gpg >/dev/null; then
   rm -rf "$GNUPGHOME"
   unset GNUPGHOME
 fi
+
+section "operator guard"
+expect "tenant: evm_set_config refused" "$(call "$TEN" git evm_set_config '("x", "dfx_test_key", 11155111 : nat64, vec {})')" 'is not an operator'
+expect "tenant: sol_send refused" "$(call "$TEN" git sol_send '("x", 1 : nat64)')" 'is not an operator'
+expect "tenant: put_object refused" "$(call "$TEN" git put_object '("blob", blob "x")')" 'is not an operator'
+refuse "operator: evm_reset_nonce passes the guard" "$(call "$OP" git evm_reset_nonce)" 'rror|not an operator'
 
 section "approval-gated site"
 SITE="http://$HOST/site/e2e-app/"

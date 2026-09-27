@@ -325,7 +325,7 @@ fn create_repo(name: String) -> Result<(), String> {
 }
 
 /// Store an object from (type, content); returns the hex oid.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 fn put_object(object_type: String, content: Vec<u8>) -> Result<String, String> {
     let object_type = ObjectType::parse(&object_type)?;
     Ok(store::oid_hex(&store::put_object(object_type, &content)))
@@ -337,7 +337,7 @@ fn get_object(oid_hex: String) -> Option<Vec<u8>> {
     store::get_object(&store::parse_oid(&oid_hex).ok()?)
 }
 
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String> {
     store::set_ref(&repo, &refname, store::parse_oid(&oid_hex)?)
 }
@@ -915,7 +915,7 @@ struct DistributeReport {
 }
 
 /// Register the compiler worker pool (canisters exposing `compile_module`).
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 fn set_compiler_workers(workers: Vec<candid::Principal>) -> Result<(), String> {
     fleet::set_workers(&workers);
     Ok(())
@@ -1058,7 +1058,7 @@ fn get_site(repo: String) -> Option<site::SiteConfig> {
 /// threshold ECDSA key name (dfx_test_key locally, test_key_1/key_1 on ICP),
 /// the target chain id, and optional custom JSON-RPC URLs (required for chains
 /// without an EVM RPC preset, e.g. a local anvil or Base Sepolia).
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 fn evm_set_config(
     evm_rpc: String,
     key_name: String,
@@ -1096,14 +1096,14 @@ fn names_get_config() -> Option<names::NamesConfig> {
 /// The canister's own EOA (EIP-55). Derived from the threshold ECDSA public
 /// key on first call, cached after. Fund this address with native gas on the
 /// target chain; the canister pays for its own deploys.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 async fn evm_address() -> Result<String, String> {
     evm::address().await
 }
 
 /// E0 signing spine: send a plain value transfer from the canister EOA.
 /// `value_wei` is a decimal string. Returns the tx hash.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 async fn evm_send(to: String, value_wei: String) -> Result<evm::TxOutcome, String> {
     evm::send_value(to, value_wei).await
 }
@@ -1111,7 +1111,7 @@ async fn evm_send(to: String, value_wei: String) -> Result<evm::TxOutcome, Strin
 /// E1: deploy init bytecode as a CREATE transaction from the canister EOA.
 /// Returns the deterministic contract address immediately (no receipt wait);
 /// confirm with evm_receipt. Appends to the EVM provenance log.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutcome, String> {
     // Hex in, bytes out: the signing side takes decoded bytecode, so this
     // endpoint decodes on the way in. The candid signature is unchanged.
@@ -1122,7 +1122,7 @@ async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutco
 /// Poll a transaction receipt. None while still pending. A found receipt is
 /// folded into any matching deploy record's receipt_status, same as the
 /// automatic post-broadcast poll.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 async fn evm_receipt(tx_hash: String) -> Result<Option<evm::ReceiptSummary>, String> {
     evm::receipt(tx_hash).await
 }
@@ -1147,13 +1147,13 @@ fn evm_next_nonce() -> Option<u64> {
 /// Forget the stored next nonce. Only for a transaction that was accepted
 /// and then dropped from every mempool, which leaves a gap every later send
 /// waits behind; on a merely slow one, the next send would replace it.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 fn evm_reset_nonce() {
     evm::reset_next_nonce()
 }
 
 /// Point the canister at its deployed ProvenanceRegistry contract.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 fn evm_set_registry(address: String) -> Result<(), String> {
     evm::set_registry(address)
 }
@@ -1213,7 +1213,7 @@ async fn publish_charged(
 /// (mainnet: tghme-zyaaa-aaaar-qarca-cai), the threshold Schnorr key name
 /// (dfx_test_key locally, test_key_1/key_1 on ICP), the target cluster
 /// ("mainnet" / "devnet" / "testnet"), and optional custom JSON-RPC URLs.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 fn sol_set_config(
     sol_rpc: String,
     key_name: String,
@@ -1231,20 +1231,20 @@ fn sol_get_config() -> Option<sol::SolConfig> {
 /// The canister's own Solana address (base58 of its threshold Ed25519 public
 /// key). Derived on first call, cached after. Fund it (devnet: airdrop) and
 /// the canister pays its own fees.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 async fn sol_address() -> Result<String, String> {
     sol::address().await
 }
 
 /// Lamport balance of the canister's own address (finalized commitment).
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 async fn sol_balance() -> Result<u64, String> {
     sol::balance().await
 }
 
 /// S0 signing spine: send a system transfer from the canister's address.
 /// Returns the transaction signature; confirm with sol_signature_status.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 async fn sol_send(to: String, lamports: u64) -> Result<sol::SolTxOutcome, String> {
     sol::send_lamports(to, lamports).await
 }
@@ -1252,7 +1252,7 @@ async fn sol_send(to: String, lamports: u64) -> Result<sol::SolTxOutcome, String
 /// Confirmation status of a transaction signature: null while the cluster
 /// does not know it, otherwise the confirmation level, slot, and whether the
 /// transaction succeeded on-chain. The sol analog of evm_receipt.
-#[ic_cdk::update(guard = "auth::is_authorized")]
+#[ic_cdk::update(guard = "is_admin")]
 async fn sol_signature_status(signature: String) -> Result<Option<sol::SolSigStatus>, String> {
     sol::signature_status(signature).await
 }
