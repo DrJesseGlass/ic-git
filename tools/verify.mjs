@@ -98,6 +98,32 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 // (tools/loader-test.mjs checks it); edit both or neither.
 const isWs = (c) => " \t\n\r\f".includes(c); // Rust is_ascii_whitespace
 
+// Where a comment opened at `lt` ends (the offset just past it), as the
+// browser's tokenizer ends it: `<!-->` and `<!--->` at once, else the first
+// `-->` or `--!>`. -1: it runs to the end, and nothing after is markup.
+function commentEnd(hay, lt) {
+  if (hay.startsWith("<!-->", lt)) return lt + 5;
+  if (hay.startsWith("<!--->", lt)) return lt + 6;
+  const ends = [["-->", 3], ["--!>", 4]]
+    .map(([m, n]) => { const p = hay.indexOf(m, lt + 4); return p === -1 ? -1 : p + n; })
+    .filter((e) => e !== -1);
+  return ends.length ? Math.min(...ends) : -1;
+}
+
+// Offset of the end tag closing raw-text element `tag`: the first `</tag`
+// followed by whitespace, `/` or `>`. -1 when there is none.
+function rawTextEnd(hay, from, tag) {
+  const close = "</" + tag;
+  for (let at = from; ; ) {
+    const p = hay.indexOf(close, at);
+    if (p === -1) return -1;
+    const c = hay[p + close.length];
+    if (c === undefined) return -1;
+    if (isWs(c) || c === "/" || c === ">") return p;
+    at = p + close.length;
+  }
+}
+
 // True when an integrity value holds at least one token the SRI spec
 // recognizes (sha256/384/512 + base64, options after `?`). The spec makes the
 // browser IGNORE metadata that parses to an empty set -- the resource then
@@ -120,6 +146,10 @@ function unverifiableSubresource(servedPath, body) {
   const markup =
     dot === -1 || ["html", "htm", "xhtml", "svg"].includes(name.slice(dot + 1).toLowerCase());
   if (!markup) return null;
+  // Only a page served as HTML has raw-text elements; see the canister's
+  // unverifiable_subresource for why bodies are skipped and where not.
+  const html = dot !== -1 && ["html", "htm"].includes(name.slice(dot + 1).toLowerCase());
+  let foreign = false;
   let text;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(body);
@@ -176,7 +206,11 @@ function unverifiableSubresource(servedPath, body) {
     if (!/[a-z]/.test(c)) {
       // Closing tag, comment, doctype, or bogus comment: nothing inside one
       // executes before its first `>`, so skip there; a stray `<` is text.
-      if (c === "/" || c === "!" || c === "?") {
+      if (hay.startsWith("<!--", lt)) {
+        const end = commentEnd(hay, lt);
+        if (end === -1) return null;
+        i = end;
+      } else if (c === "/" || c === "!" || c === "?") {
         const gt = hay.indexOf(">", lt + 1);
         if (gt === -1) return null;
         i = gt + 1;
@@ -250,6 +284,13 @@ function unverifiableSubresource(servedPath, body) {
       ) {
         return `<link rel="${rel}"> has no enforceable integrity=`;
       }
+    }
+    if (tag === "svg" || tag === "math") foreign = true;
+    // Raw text: the browser reads everything to the end tag as text.
+    if (html && !foreign && ["script", "style", "textarea", "title"].includes(tag)) {
+      const end = rawTextEnd(hay, i, tag);
+      if (end === -1) return `<${tag}> is never closed`;
+      i = end;
     }
   }
 }
