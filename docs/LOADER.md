@@ -50,6 +50,7 @@ A one-day token is enough; it expires on its own.
 ```sh
 TOKEN=$(dfx canister --network ic call $C create_push_token '("ic-git-loader", opt (1 : nat32), null)' \
   | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
+: "${TOKEN:?create_push_token returned no token}"
 git push "https://ic:$TOKEN@umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/ic-git-loader.git" main
 ```
 
@@ -74,7 +75,11 @@ dfx canister --network ic call $C evm_registry_publish_site '("ic-git-loader")'
 
 It returns the transaction hash and nonce as soon as the transaction is
 broadcast. The canister refuses to publish an entrypoint that loads
-anything unpinned; the loader is self-contained, so it passes.
+anything unpinned. The loader is self-contained, but it passes only on a
+canister whose scanner skips `<script>` and `<style>` bodies as a browser
+does: the loader's own JavaScript holds strings such as `"<base href=..."`
+that an older scanner reads as tags, and refuses. Run these steps only
+after the canister release that carries that scanner (v0.3.1 or later).
 
 ### 5. Confirm on chain
 
@@ -91,9 +96,13 @@ Add a row to "Releases" below and commit it, so the hash is also in
 the repo's history and in GitHub, a third place a user can compare
 against. Optionally attach `loader/index.html` to a GitHub release.
 
-Republish (steps 2 to 6) whenever `loader/index.html` changes. A push that
-leaves the loader unchanged needs no new record: the served bytes, and so
-the hash, are the same.
+Republish (steps 2 to 6) whenever `loader/index.html` changes. Push to
+`ic-git-loader` only as part of a release: a push that leaves the loader
+unchanged keeps the hash, so the user's check still passes, but it moves
+the served commit away from the recorded one, and `tools/verify.mjs`
+check A (served commit == registry commit) then fails until the record is
+republished. Between steps 2 and 4 of a release, the served file and the
+record disagree; a user who downloads in that window sees a mismatch.
 
 ## Verifying the registry contract on Etherscan (once)
 
@@ -124,16 +133,20 @@ show the source and call `get` for the user.
 
 ## What a user does (once, about two minutes)
 
-1. **Download** `loader.html` from anywhere:
-   `https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-git-loader/`,
-   a GitHub release, or `git show <commit>:loader/index.html` from a clone.
+1. **Download** it, as `loader.html`, from anywhere:
+   `curl -so loader.html https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-git-loader/`,
+   a GitHub release, or `git show <commit>:loader/index.html > loader.html`
+   from a clone. Use `curl`, not a browser visit: the browser runs the page
+   on the canister's origin (README: never open the loader from the
+   canister it checks) and saves it under another name.
 2. **Hash it** with the operating system's own tool:
    - macOS, Linux: `shasum -a 256 loader.html`
    - Windows: `certutil -hashfile loader.html SHA256`
 3. **Read the published hash** on a block explorer: registry
    `0xa1362DAda583c56a395D305a8C7A458E0B62A209` on Sepolia, "Read Contract",
    `get` with `ic-git-loader#site`. The second value, `bundleHash`, must
-   equal step 2. For extra assurance, `owner` must be
+   equal step 2. For extra assurance, the contract's separate `owner`
+   getter (not a value `get` returns) must read
    `0x6ad88e005f96b18e8b1c76a9da85fa8efa2c848a`, the canister's own
    address -- the only one the contract lets write a record.
 
