@@ -49,6 +49,8 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
     "<script>'</scripts><base href=x>'</script>",
     '<!-- a > <base href=x> -->',
     '<!-- <script src=x> --><p>after</p>',
+    "<noscript>enable JavaScript</noscript><script>'<base href=x>'</script>",
+    '<xmp><base href=x></xmp>',
   ];
   const refused = [
     ['index.html', '<!-- x --!><base href=y>'],
@@ -64,6 +66,21 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
     ['page.svg', "<svg><script>'<base href=y>'</script></svg>"],
     ['page.xhtml', "<script>'<base href=y>'</script>"],
     ['page', "<script>'<base href=y>'</script>"],
+    ['index.html', '<p></p title="> <!--"><base href=y><!-- -->'],
+    ['index.html', '<xmp><!--</xmp><base href=y>-->'],
+    ['index.html', '<noembed><!--</noembed><base href=y>-->'],
+    ['index.html', '<noframes><!--</noframes><base href=y>-->'],
+    ['index.html', '<noscript><!--</noscript><base href=y>-->'],
+    ['index.html', '<xmp><a title="</xmp><base href=y>">'],
+    ['index.html', '<noscript><base href=y></noscript>'],
+    ['index.html', '<noscript><!-- </noscript><a title=" --><base href=y>">'],
+    ['index.html', '<script-x><base href=y></script>'],
+    ['index.html', '<title:x><base href=y></title>'],
+    ['index.html', '<select><style><base href=y></style></select>'],
+    ['index.html', '<svg><![CDATA[ a > <!-- ]]><base href=y> -->'],
+    ['page.svg', '<?pi > <!-- ?><script href="y"/><!-- -->'],
+    ['index.html', `<a"b='><base href=y>'>`],
+    ['index.html', "<a ='><base href=y>'>"],
   ];
   const bad = [
     ...accepted.filter(t => scan('index.html', bytes(t)) !== null).map(t => 'refused: ' + t),

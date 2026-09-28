@@ -88,6 +88,11 @@ fn parse_tag(hay: &str, from: usize) -> Option<(Vec<(&str, &str)>, usize)> {
             return Some((attrs, i));
         }
         let name_start = i;
+        // A leading `=` is part of the name to the tokenizer, not a value
+        // separator: `<a ='>...` is attribute `='` and the tag ends at `>`.
+        if b[i] == b'=' {
+            i += 1;
+        }
         while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b'/' | b'=' | b'>') {
             i += 1;
         }
@@ -125,6 +130,17 @@ fn parse_tag(hay: &str, from: usize) -> Option<(Vec<(&str, &str)>, usize)> {
             attrs.push((name, ""));
         }
     }
+}
+
+/// Where a tag name starting at `from` ends as the tokenizer reads it: at
+/// whitespace, `/` or `>`, so `<a"b='>` is one tag named `a"b='` and
+/// `<script-x>` is not a script.
+fn tag_name_end(b: &[u8], from: usize) -> usize {
+    let mut e = from;
+    while e < b.len() && !b[e].is_ascii_whitespace() && !matches!(b[e], b'/' | b'>') {
+        e += 1;
+    }
+    e
 }
 
 /// Where a comment opened at `lt` ends (the offset just past it), as the
@@ -252,19 +268,27 @@ fn char_ref_free<'a>(tag: &str, name: &str, value: &'a str) -> Result<&'a str, S
 /// accept costs a user their funds. That asymmetry is the whole design.
 /// Text the browser never parses as markup is not scanned, so an honest
 /// page is not refused over strings in its own code: a comment is skipped to
-/// where the tokenizer ends it, and in a page served as HTML (`.html`,
-/// `.htm`) the body of `<script>`, `<style>`, `<textarea>` and `<title>` is
-/// skipped to its end tag. Every skip ends no later than the browser's --
-/// a script can end later than its first `</script>` (a `<!--<script>`
-/// inside it defers the end), never earlier -- so the scan covers at least
-/// what the browser parses as markup, and a divergence can only over-refuse.
-/// Bodies are not skipped where that would stop holding: in an SVG or XHTML
-/// file (XML, where a script's `<` does open a tag), and from the first
-/// `<svg` or `<math` on, since in foreign content `<script>` is ordinary
-/// markup and `<script/>` closes itself. Other `<!` and `<?` constructs are
-/// skipped only to their first `>` (never past anything the browser would
-/// execute), so what follows may be rescanned and over-refuse -- the safe
-/// direction to be wrong in.
+/// where the tokenizer ends it, and the body of `<script>`, `<style>`,
+/// `<textarea>`, `<title>`, `<xmp>`, `<noembed>`, `<noframes>` and
+/// `<noscript>` is skipped to its end tag (a `<noscript>` body is also
+/// scanned as a page of its own, which is how a browser with scripting off
+/// reads it). Every skip ends no later than the browser's -- a script can end
+/// later than its first `</script>` (a `<!--<script>` inside it defers the
+/// end), never earlier -- so the scan covers at least what the browser
+/// parses as markup, and a divergence can only over-refuse. That holds only
+/// while the scan is in step with the tokenizer, so these skips are made
+/// only in plain HTML content: in a page served as HTML (`.html`, `.htm`;
+/// never SVG or XHTML, which are XML, where a script's `<` does open a tag
+/// and CDATA, processing instructions and doctype subsets can hide a
+/// `<!--`), before the first `<svg` or `<math` (foreign content: `<script>`
+/// is ordinary markup there, `<script/>` closes itself, CDATA is text) and
+/// before the first `<select` (whose legacy parser ignores `<style>` and
+/// `<title>`, leaving their bodies markup); only on an exact tag name
+/// (`<script-x>` is not a script); and with end tags tokenized attributes
+/// and all, as the browser does. Elsewhere, and for other `<!` and `<?`
+/// constructs, a skip runs only to the first `>` (never past anything the
+/// browser would execute), so what follows may be rescanned and
+/// over-refuse -- the safe direction to be wrong in.
 ///
 /// NOT covered, stated rather than implied:
 /// - Images, fonts, and media. SRI has no mechanism for them, so refusing them
@@ -283,18 +307,15 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
     // extensions stay exempt: a JSON or hex artifact holding "<script" as
     // data is verifiable as-is (see tests).
     let name = served_path.rsplit('/').next().unwrap_or(served_path);
-    let markup = match name.rsplit_once('.') {
-        Some((_, ext)) => ["html", "htm", "xhtml", "svg"]
-            .iter()
-            .any(|e| ext.eq_ignore_ascii_case(e)),
-        None => true,
-    };
-    if !markup {
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext);
+    let ext_in = |set: &[&str]| ext.is_some_and(|x| set.iter().any(|e| x.eq_ignore_ascii_case(e)));
+    if ext.is_some() && !ext_in(&["html", "htm", "xhtml", "svg"]) {
         return None;
     }
-    // Only a page served as HTML has raw-text elements (see content_type).
-    let html = matches!(name.rsplit_once('.'), Some((_, ext)) if ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"));
-    let mut foreign = false;
+    // Plain HTML content, where the long skips are sound (see above): only a
+    // page served as HTML (see content_type), until foreign content or a
+    // select begins.
+    let mut plain = ext_in(&["html", "htm"]);
     let Ok(text) = core::str::from_utf8(body) else {
         return Some("entrypoint is not valid UTF-8, so its references cannot be read".to_string());
     };
@@ -305,12 +326,19 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
     while let Some(lt) = find_from(&hay, "<", i) {
         let Some(&c) = b.get(lt + 1) else { break };
         if !c.is_ascii_alphabetic() {
-            // `</`, `<!`, `<?`: closing tag, comment, doctype, or bogus
-            // comment. Nothing inside one executes before its first `>` (a
-            // real comment runs at least to the `>` of `-->`), so skipping
-            // there never hides executable markup; what follows may be
-            // rescanned and over-refuse. Any other byte is a stray `<`.
-            i = if hay[lt..].starts_with("<!--") {
+            // `</`, `<!`, `<?`: end tag, comment, doctype, or bogus comment.
+            // An end tag's attributes are tokenized like a start tag's, so
+            // `</p title="> <!--">` ends after its closing quote, not at the
+            // first `>`. A comment in plain HTML ends where the tokenizer
+            // ends it. Anything else executes nothing before its first `>`,
+            // so skipping there never hides executable markup; what follows
+            // may be rescanned and over-refuse. Any other byte is a stray `<`.
+            i = if c == b'/' && b.get(lt + 2).is_some_and(u8::is_ascii_alphabetic) {
+                match parse_tag(&hay, tag_name_end(b, lt + 2)) {
+                    Some((_, gt)) => gt + 1,
+                    None => break,
+                }
+            } else if plain && hay[lt..].starts_with("<!--") {
                 match comment_end(&hay, lt) {
                     Some(end) => end,
                     None => break,
@@ -330,12 +358,16 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
         while name_end < b.len() && b[name_end].is_ascii_alphanumeric() {
             name_end += 1;
         }
+        // `tag` is the alphanumeric prefix, so a check keyed on it also
+        // catches `<script-x ...>` (over-refusing); a skip keys on `exact`.
         let tag = &hay[name_start..name_end];
+        let full_end = tag_name_end(b, name_start);
+        let exact = full_end == name_end;
         // Every element is tokenized to its real end, quoted values and all,
         // so an unchecked tag's attribute text is never rescanned as markup:
         // `<div title="<script src=x>">` is inert to the browser and must not
         // block attestation.
-        let Some((attrs, end)) = parse_tag(&hay, name_end) else {
+        let Some((attrs, end)) = parse_tag(&hay, full_end) else {
             return Some(format!("<{tag}> tag is never closed"));
         };
         i = end + 1;
@@ -420,15 +452,37 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
                     return Some(format!("<link rel=\"{rel}\"> has no enforceable integrity="));
                 }
             }
-            "svg" | "math" => foreign = true,
+            "svg" | "math" | "select" => plain = false,
             _ => {}
         }
         // Raw text: the browser reads everything to the end tag as text.
-        if html && !foreign && matches!(tag, "script" | "style" | "textarea" | "title") {
-            match raw_text_end(&hay, i, tag) {
-                Some(end) => i = end,
-                None => return Some(format!("<{tag}> is never closed")),
+        if plain
+            && exact
+            && matches!(
+                tag,
+                "script" | "style" | "textarea" | "title" | "xmp" | "noembed" | "noframes"
+                    | "noscript"
+            )
+        {
+            let Some(end) = raw_text_end(&hay, i, tag) else {
+                return Some(format!("<{tag}> is never closed"));
+            };
+            if tag == "noscript" {
+                // With scripting off the body is markup: scan it as a page of
+                // its own. A comment there that is still open at the end tag
+                // would run on past it, where this scan does not follow.
+                let inner = &hay[i..end];
+                if let Some(why) = unverifiable_subresource("noscript.html", inner.as_bytes()) {
+                    return Some(why);
+                }
+                if inner.rfind("<!--").is_some_and(|p| comment_end(inner, p).is_none()) {
+                    return Some("<noscript> holds a comment that runs past its end".to_string());
+                }
+                if ["<svg", "<math", "<select"].iter().any(|t| inner.contains(t)) {
+                    plain = false;
+                }
             }
+            i = end;
         }
     }
     None
@@ -913,6 +967,8 @@ mod tests {
         ok("<script>'</scripts><base href=x>'</script>");
         ok("<!-- a > <base href=x> -->");
         ok("<!-- <script src=x> --><p>after</p>");
+        ok("<noscript>enable JavaScript</noscript><script>'<base href=x>'</script>");
+        ok("<xmp><base href=x></xmp>");
     }
 
     /// Every skip ends no later than the browser's, and bodies are not
@@ -947,6 +1003,31 @@ mod tests {
         refused("page.svg", "<svg><script>'<base href=y>'</script></svg>");
         refused("page.xhtml", "<script>'<base href=y>'</script>");
         refused("page", "<script>'<base href=y>'</script>");
+        // An end tag's quoted attribute holds its `>`: a `<!--` in it is not
+        // a comment.
+        refused("index.html", "<p></p title=\"> <!--\"><base href=y><!-- -->");
+        // Every HTML raw-text element: a `<!--` in its body is text.
+        refused("index.html", "<xmp><!--</xmp><base href=y>-->");
+        refused("index.html", "<noembed><!--</noembed><base href=y>-->");
+        refused("index.html", "<noframes><!--</noframes><base href=y>-->");
+        refused("index.html", "<noscript><!--</noscript><base href=y>-->");
+        refused("index.html", "<xmp><a title=\"</xmp><base href=y>\">");
+        // With scripting off a noscript body is markup.
+        refused("index.html", "<noscript><base href=y></noscript>");
+        refused("index.html", "<noscript><!-- </noscript><a title=\" --><base href=y>\">");
+        // Only the exact tag name is a raw-text element.
+        refused("index.html", "<script-x><base href=y></script>");
+        refused("index.html", "<title:x><base href=y></title>");
+        // A legacy select parser ignores <style>, leaving its body markup.
+        refused("index.html", "<select><style><base href=y></style></select>");
+        // CDATA (foreign content) and processing instructions (XML) are not
+        // comments, and may hold a `<!--` and a `>`.
+        refused("index.html", "<svg><![CDATA[ a > <!-- ]]><base href=y> -->");
+        refused("page.svg", "<?pi > <!-- ?><script href=\"y\"/><!-- -->");
+        // The tokenizer's tag name runs to whitespace, `/` or `>`, and a
+        // leading `=` starts an attribute name: neither opens a quote.
+        refused("index.html", "<a\"b='><base href=y>'>");
+        refused("index.html", "<a ='><base href=y>'>");
     }
 
     /// The two entrypoint shapes whose attested hash actually proves something:
