@@ -116,6 +116,10 @@ hosts from `location` instead of `document.baseURI` sees the loader's host.
 An always-on check of the live site needs a browser extension; the loader's
 `// === core ===` block is written to run in one unchanged.
 
+How a user gets a copy they can trust -- the loader's own hash, published
+in the registry like any site -- and the operator steps to publish it are
+in docs/LOADER.md.
+
 `node tools/loader-test.mjs` runs that core against mainnet: both live sites
 verify, a tampered page and a lying `get_object` both fail, and the scanner
 is byte-identical to the CLI's.
