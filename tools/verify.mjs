@@ -98,6 +98,40 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 // (tools/loader-test.mjs checks it); edit both or neither.
 const isWs = (c) => " \t\n\r\f".includes(c); // Rust is_ascii_whitespace
 
+// Where a tag name starting at `from` ends as the tokenizer reads it: at
+// whitespace, `/` or `>` (`<a"b='>` is one tag; `<script-x>` is no script).
+function tagNameEnd(hay, from) {
+  let e = from;
+  while (e < hay.length && !isWs(hay[e]) && hay[e] !== "/" && hay[e] !== ">") e++;
+  return e;
+}
+
+// Where a comment opened at `lt` ends (the offset just past it), as the
+// browser's tokenizer ends it: `<!-->` and `<!--->` at once, else the first
+// `-->` or `--!>`. -1: it runs to the end, and nothing after is markup.
+function commentEnd(hay, lt) {
+  if (hay.startsWith("<!-->", lt)) return lt + 5;
+  if (hay.startsWith("<!--->", lt)) return lt + 6;
+  const ends = [["-->", 3], ["--!>", 4]]
+    .map(([m, n]) => { const p = hay.indexOf(m, lt + 4); return p === -1 ? -1 : p + n; })
+    .filter((e) => e !== -1);
+  return ends.length ? Math.min(...ends) : -1;
+}
+
+// Offset of the end tag closing raw-text element `tag`: the first `</tag`
+// followed by whitespace, `/` or `>`. -1 when there is none.
+function rawTextEnd(hay, from, tag) {
+  const close = "</" + tag;
+  for (let at = from; ; ) {
+    const p = hay.indexOf(close, at);
+    if (p === -1) return -1;
+    const c = hay[p + close.length];
+    if (c === undefined) return -1;
+    if (isWs(c) || c === "/" || c === ">") return p;
+    at = p + close.length;
+  }
+}
+
 // True when an integrity value holds at least one token the SRI spec
 // recognizes (sha256/384/512 + base64, options after `?`). The spec makes the
 // browser IGNORE metadata that parses to an empty set -- the resource then
@@ -117,9 +151,12 @@ function unverifiableSubresource(servedPath, body) {
   // blob could be a page, so it is scanned rather than skipped.
   const name = servedPath.split("/").pop();
   const dot = name.lastIndexOf(".");
-  const markup =
-    dot === -1 || ["html", "htm", "xhtml", "svg"].includes(name.slice(dot + 1).toLowerCase());
-  if (!markup) return null;
+  const ext = dot === -1 ? null : name.slice(dot + 1).toLowerCase();
+  if (ext !== null && !["html", "htm", "xhtml", "svg"].includes(ext)) return null;
+  // Plain HTML content, where the long skips are sound: only a page served
+  // as HTML, until foreign content or a select begins. See the canister's
+  // unverifiable_subresource for why bodies are skipped and where not.
+  let plain = ext === "html" || ext === "htm";
   let text;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(body);
@@ -141,6 +178,7 @@ function unverifiableSubresource(servedPath, body) {
       if (i >= hay.length) return null;
       if (hay[i] === ">") return { attrs, end: i };
       const nameStart = i;
+      if (hay[i] === "=") i++; // a leading `=` is part of the name
       while (i < hay.length && !isWs(hay[i]) && !"/=>".includes(hay[i])) i++;
       const attrName = hay.slice(nameStart, i);
       let j = i;
@@ -174,9 +212,19 @@ function unverifiableSubresource(servedPath, body) {
     if (lt === -1 || lt + 1 >= hay.length) return null;
     const c = hay[lt + 1];
     if (!/[a-z]/.test(c)) {
-      // Closing tag, comment, doctype, or bogus comment: nothing inside one
-      // executes before its first `>`, so skip there; a stray `<` is text.
-      if (c === "/" || c === "!" || c === "?") {
+      // End tag (attributes tokenized, quoted values and all), comment (to
+      // the tokenizer's end, in plain HTML), doctype, or bogus comment:
+      // nothing inside the rest executes before its first `>`, so skip
+      // there; a stray `<` is text.
+      if (c === "/" && /[a-z]/.test(hay[lt + 2] ?? "")) {
+        const parsed = parseTag(tagNameEnd(hay, lt + 2));
+        if (parsed === null) return null;
+        i = parsed.end + 1;
+      } else if (plain && hay.startsWith("<!--", lt)) {
+        const end = commentEnd(hay, lt);
+        if (end === -1) return null;
+        i = end;
+      } else if (c === "/" || c === "!" || c === "?") {
         const gt = hay.indexOf(">", lt + 1);
         if (gt === -1) return null;
         i = gt + 1;
@@ -187,8 +235,12 @@ function unverifiableSubresource(servedPath, body) {
     }
     let nameEnd = lt + 1;
     while (nameEnd < hay.length && /[a-z0-9]/.test(hay[nameEnd])) nameEnd++;
+    // `tag` is the alphanumeric prefix (checks on it over-refuse
+    // `<script-x>`); a skip keys on `exact`.
     const tag = hay.slice(lt + 1, nameEnd);
-    const parsed = parseTag(nameEnd);
+    const fullEnd = tagNameEnd(hay, lt + 1);
+    const exact = fullEnd === nameEnd;
+    const parsed = parseTag(fullEnd);
     if (parsed === null) return `<${tag}> tag is never closed`;
     i = parsed.end + 1;
     // First occurrence wins, as in the browser.
@@ -250,6 +302,24 @@ function unverifiableSubresource(servedPath, body) {
       ) {
         return `<link rel="${rel}"> has no enforceable integrity=`;
       }
+    }
+    if (tag === "svg" || tag === "math" || tag === "select") plain = false;
+    // Raw text: the browser reads everything to the end tag as text.
+    const raw = ["script", "style", "textarea", "title", "xmp", "noembed", "noframes", "noscript"];
+    if (plain && exact && raw.includes(tag)) {
+      const end = rawTextEnd(hay, i, tag);
+      if (end === -1) return `<${tag}> is never closed`;
+      if (tag === "noscript") {
+        // With scripting off the body is markup: scan it as a page of its
+        // own; a comment still open at the end tag would run on past it.
+        const inner = hay.slice(i, end);
+        const why = unverifiableSubresource("noscript.html", new TextEncoder().encode(inner));
+        if (why !== null) return why;
+        const p = inner.lastIndexOf("<!--");
+        if (p !== -1 && commentEnd(inner, p) === -1) return "<noscript> holds a comment that runs past its end";
+        if (["<svg", "<math", "<select"].some((t) => inner.includes(t))) plain = false;
+      }
+      i = end;
     }
   }
 }

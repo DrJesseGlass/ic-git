@@ -32,6 +32,67 @@ const SHARED = ['// === shared: unverifiableSubresource ===', '// === end shared
 assert.equal(between(html, ...SHARED), between(read('./verify.mjs'), ...SHARED), 'the loader\'s scanner differs from tools/verify.mjs\'s');
 console.log('PASS  shared scanner block is identical to tools/verify.mjs');
 
+// The shared scanner on its own, against the cases the canister's tests pin
+// (site.rs: text_the_browser_never_parses_as_markup_is_not_scanned and
+// skips_never_hide_what_the_browser_parses), and against the loader itself,
+// which is published as a site record and must pass its own check.
+{
+  const scan = new Function(between(html, ...SHARED) + '\nreturn unverifiableSubresource;')();
+  const bytes = t => new TextEncoder().encode(t);
+  const accepted = [
+    "<script>const s = '<base href=x>' + '<script src=y>';</script>",
+    "<script src=a.js integrity=sha384-AAAA></script><script>'<iframe>'</script>",
+    '<style>/* <link rel=stylesheet href=x> */</style>',
+    '<title><base href=x></title>',
+    '<textarea><meta http-equiv=refresh content=0></textarea>',
+    "<SCRIPT>'<base href=x>'</Script >",
+    "<script>'</scripts><base href=x>'</script>",
+    '<!-- a > <base href=x> -->',
+    '<!-- <script src=x> --><p>after</p>',
+    "<noscript>enable JavaScript</noscript><script>'<base href=x>'</script>",
+    '<xmp><base href=x></xmp>',
+  ];
+  const refused = [
+    ['index.html', '<!-- x --!><base href=y>'],
+    ['index.html', '<!--><base href=y>'],
+    ['index.html', '<!---><base href=y>'],
+    ['index.html', '<!-- a --> <base href=y> -->'],
+    ['index.html', '<script>a</script><base href=y>'],
+    ['index.html', '<script><!--<script>x</script><base href=y></script>-->'],
+    ['index.html', "<script>'<base href=y>'"],
+    ['index.html', '<svg><script/><base href=y></svg>'],
+    ['index.html', "<svg></svg><script>'<base href=y>'</script>"],
+    ['index.html', '<math><style><base href=y></style></math>'],
+    ['page.svg', "<svg><script>'<base href=y>'</script></svg>"],
+    ['page.xhtml', "<script>'<base href=y>'</script>"],
+    ['page', "<script>'<base href=y>'</script>"],
+    ['index.html', '<p></p title="> <!--"><base href=y><!-- -->'],
+    ['index.html', '<xmp><!--</xmp><base href=y>-->'],
+    ['index.html', '<noembed><!--</noembed><base href=y>-->'],
+    ['index.html', '<noframes><!--</noframes><base href=y>-->'],
+    ['index.html', '<noscript><!--</noscript><base href=y>-->'],
+    ['index.html', '<xmp><a title="</xmp><base href=y>">'],
+    ['index.html', '<noscript><base href=y></noscript>'],
+    ['index.html', '<noscript><!-- </noscript><a title=" --><base href=y>">'],
+    ['index.html', '<script-x><base href=y></script>'],
+    ['index.html', '<title:x><base href=y></title>'],
+    ['index.html', '<select><style><base href=y></style></select>'],
+    ['index.html', '<svg><![CDATA[ a > <!-- ]]><base href=y> -->'],
+    ['page.svg', '<?pi > <!-- ?><script href="y"/><!-- -->'],
+    ['index.html', `<a"b='><base href=y>'>`],
+    ['index.html', "<a ='><base href=y>'>"],
+  ];
+  const bad = [
+    ...accepted.filter(t => scan('index.html', bytes(t)) !== null).map(t => 'refused: ' + t),
+    ...refused.filter(([p, t]) => scan(p, bytes(t)) === null).map(([p, t]) => 'accepted: ' + p + ' ' + t),
+  ];
+  for (const b of bad) console.log('        ' + b);
+  const self = scan('index.html', readFileSync(new URL('../loader/index.html', import.meta.url)));
+  const ok = bad.length === 0 && self === null;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  scanner: ${accepted.length} accepted, ${refused.length} refused, and the loader passes its own check${self ? ' (it did not: ' + self + ')' : ''}`);
+  if (!ok) process.exitCode = 1;
+}
+
 const browser = process.argv[process.argv.indexOf('--browser') + 1];
 if (process.argv.includes('--browser')) await domCases(browser);
 if (process.argv.includes('--offline')) process.exit(process.exitCode ?? 0);
