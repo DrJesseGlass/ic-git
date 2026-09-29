@@ -238,6 +238,43 @@
         "note": "upgrade from v0.2.2, after tools/e2e-local.sh passed 57/57 on this commit including an upgrade from v0.2.2. The canister crate changed in #26-#35: sites and deploys follow the newest approved commit (#26); push tokens expire, are listed and revoked by id, and are checked against their minter's access (#27, #29); the ic-name-service announce hook and repo labels (#28, #32); key-bound, signed pushes (#30); ICP deposits through the CMC (#33); ic-dev-kit-rs 0.4 (#34); one operator rule and the dead-token purge (#35)"
       },
       "wasm_sha256": "75d3de45cdff70442b35f1e43f3c415093e57393e42895e18a4b03cd5fd5faaf"
+    },
+    {
+      "commit": "0d1d466f8c947428b54f82c23937d7e0604cca7c",
+      "tag": "v0.3.1",
+      "module_hash": "5f283447bc72c028dd7e2feb51f9edd91e4b1861e1979cb161e8e4f6a1d7ad32",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, linux/amd64 image under emulation",
+          "date": "2026-09-28"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/36506401506",
+          "date": "2026-09-29",
+          "check": "identical hash (5f283447...ad32 gz, 5ab7c2f6...41e6 raw); the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-09-28",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh (live module hash) against the reproducible build's module sha256",
+        "note": "upgrade from v0.3.0, after tools/e2e-local.sh passed 69/69 on this commit including an upgrade from v0.3.0 over state it wrote. The canister crate changed in #37-#42: EVM sends sign with a stored next nonce and refund pre-broadcast failures (#37); every operator-only endpoint uses the one operator guard (#38) and billing exemption the same rule (#39); the subresource scanner skips what the browser never parses as markup (#42)"
+      },
+      "wasm_sha256": "5ab7c2f6d743331fe755e1f299421694ae3ed82020f5e68bc46aa49842b841e6"
     }
   ]
 }
