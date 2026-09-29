@@ -64,11 +64,16 @@ enforces the verified page's scripts instead of its bytes:
    timer, and whenever the record changes.
 2. From the verified bytes, derive a policy that allows exactly the scripts
    that page runs: `script-src` listing the sha256 of each inline script and
-   the `integrity` hash of each external one, `style-src` likewise,
+   the `integrity` hash of each external one; `style-src` listing the
+   sha256 of each inline `<style>` and the exact URL of each external
+   stylesheet (Chrome takes no hash source for an external stylesheet; its
+   `integrity`, which check E requires, still pins its contents);
    `object-src 'none'`, `base-uri 'none'`.
 3. Install it as a session `declarativeNetRequest` rule that appends that
    `Content-Security-Policy` to the site's main-frame responses. Two CSPs
-   both apply, so the page cannot loosen it.
+   both apply, so the page cannot loosen it. The rule applies only where
+   the extension has host permission, so the manifest names the canisters
+   in scope.
 
 Now whatever the network delivers, only scripts identical to the verified
 page's can run; an injected `<script src>` is refused by the browser, not
@@ -78,16 +83,39 @@ after load, compares, and replaces the page with the stop page on a
 mismatch. A site whose record changes between the rule and the load simply
 fails closed until the background check catches up.
 
-Spikes before building on this (none is a design risk if it fails; each
-narrows what Chrome gets):
+### The Chrome spikes, run 2026-09-29
 
-- `declarativeNetRequest` `modifyHeaders` appending
-  `Content-Security-Policy` to a `main_frame` response on `raw.icp0.io`.
-- A `script-src` hash source admitting an external script whose
-  `integrity` names the same hash (CSP Level 3); otherwise external
-  scripts are pinned by URL plus SRI, which the page already enforces.
-- ic-vote and the console running unchanged under the derived policy
-  (neither uses inline event handlers or `eval`, which the policy forbids).
+Chrome for Testing (Chromium 1243, headless) with a minimal Manifest V3
+extension whose static `declarativeNetRequest` rule adds the policy, against
+the live pages on mainnet. Chrome for Testing is used because a TLS proxy on
+the development machine intercepts the branded browser (docs/LOADER.md).
+
+1. **An extension-added CSP is enforced: yes.** With `script-src 'none'`,
+   by `append` and by `set` alike, Chrome refused ic-vote's `app.js` and the
+   page stayed on its static text. DevTools does not display the added
+   header; enforcement is the evidence.
+2. **A hash source admits an external script by its `integrity`: yes.**
+   With `app.js`'s `sha384` in `script-src`, it ran and ic-vote reached
+   YELLOW; with one character of the hash changed, it was refused. A
+   script injected with a copied hash passes CSP and then fails SRI on its
+   contents.
+3. **Both sites run under the full derived policy: yes, with one change.**
+   The console (three inline scripts, one inline style, all by hash) ran
+   with no refusals: repositories listed, its provenance line shown,
+   "connect wallet" offered. ic-vote ran, but Chrome refused its
+   stylesheet by hash; by exact URL it loads, and ic-vote reached YELLOW
+   styled with no refusals. Step 2 above says so. Wallet sign-in and
+   writes were not exercised (headless, no wallet); they are the first
+   thing to try in a real browser.
+4. **The attack is refused.** A copy of ic-vote with an injected inline
+   script and an injected `<script src>` (as the proxy does), under
+   ic-vote's derived policy: both refused, and neither ran. Without the
+   policy both ran. This needed host permission for the page's origin --
+   a rule without it silently does nothing.
+
+So Chrome gets script-level enforcement before anything runs; what it
+does not get is Firefox's byte-level hold, which is why the post-load
+recheck above stays.
 
 `chrome.debugger` would give Chrome Firefox's guarantee, at the cost of the
 debugging bar on every tab while it is attached. It is not the default; it
@@ -164,12 +192,14 @@ is submitted to a store, and the Releases table carries the version.
 
 ## Order of work
 
-1. Chrome spikes (above): CSP append on `main_frame`, external-script hash
-   sources, both sites under the derived policy.
+1. Done: the Chrome spikes (above) -- Chrome is buildable.
 2. The shared core as a module both the loader and the extension import
    byte-identical, the way the scanner block is shared today.
-3. Firefox extension: `filterResponseData`, stop page, toolbar state.
-4. Chrome extension: background verification, the CSP rule, post-load
-   recheck, stop page.
+3. Chrome extension first, for its reach: background verification, the
+   CSP rule, post-load recheck, stop page, toolbar state -- and wallet
+   sign-in and a write tried on the console under the policy.
+4. Firefox extension: `filterResponseData` and the same stop page; the
+   recommended browser where the byte-level guarantee matters (operators,
+   observers).
 5. `extension/SHA256SUMS`, `tools/extension-sums.sh`, the `ic-git-extension`
    record, and a Releases table -- before the first store submission.
