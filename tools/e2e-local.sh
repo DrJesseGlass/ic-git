@@ -312,6 +312,12 @@ if [ -n "$BASE_WASM" ]; then
   old "$OP" create_repo '("legacy-app")' >/dev/null
   old "$OP" create_repo '("legacy.name")' >/dev/null
   old "$OP" add_member "(\"legacy-app\", principal \"$T\", \"writer\")" >/dev/null
+  LW=$WORK/legacy
+  git init -q -b main "$LW"
+  git -C "$LW" config user.name E2E
+  git -C "$LW" config user.email e2e@local
+  LSITE="http://$BHOST/site/legacy-app/"
+  exp_of() { sed -n 's/.*expires_ns = \([0-9_]*\).*/\1/p' | tr -d _; }
   # The base's candid says which API wrote the state: v0.3.x takes
   # create_push_token's lifetime and key, v0.2.x only a repo name.
   if grep -q 'create_push_token : (text, opt nat32' "$OLD_DID"; then
@@ -321,10 +327,6 @@ if [ -n "$BASE_WASM" ]; then
     LT=$(old "$TEN" create_push_token "(\"legacy-app\", opt (7 : nat32), opt \"$(cat "$KEY.pub")\")" | ok_text)
     LURL="http://ic:$LT@$BHOST/legacy-app.git"
     lsigned() { git -C "$LW" -c gpg.format=ssh -c user.signingkey="$KEY.pub" push --signed "$LURL" main 2>&1 || true; }
-    LW=$WORK/legacy
-    git init -q -b main "$LW"
-    git -C "$LW" config user.name E2E
-    git -C "$LW" config user.email e2e@local
     old "$OP" set_require_signed_push '("legacy-app", true)' >/dev/null
     echo '<!doctype html><title>l1</title>' >"$LW/index.html"; git -C "$LW" add -A; git -C "$LW" commit -qm l1
     expect "$BASE_REF: signed push with a key-bound token" "$(lsigned)" 'new branch'
@@ -333,11 +335,8 @@ if [ -n "$BASE_WASM" ]; then
     old "$OP" set_required_votes '("legacy-app", 1 : nat32)' >/dev/null
     old "$OP" vote "(\"legacy-app\", \"$L1\", true)" >/dev/null
     echo '<!doctype html><title>l2</title>' >"$LW/index.html"; git -C "$LW" commit -qam l2
-    lsigned >/dev/null
-    L2=$(git -C "$LW" rev-parse HEAD)
-    LSITE="http://$BHOST/site/legacy-app/"
+    expect "$BASE_REF: a second signed push" "$(lsigned)" 'main -> main'
     expect "$BASE_REF: serves the approved commit, not the tip" "$(served_at "$LSITE")" "^200 $L1"
-    exp_of() { sed -n 's/.*expires_ns = \([0-9_]*\).*/\1/p' | tr -d _; }
     EXP_BEFORE=$(old "$TEN" list_push_tokens '("legacy-app")' | exp_of)
 
     (cd "$WORK" && dfx canister install base --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
@@ -348,21 +347,19 @@ if [ -n "$BASE_WASM" ]; then
     expect "  ...and its expiry unchanged" "$(echo "$TOK" | exp_of)" "^${EXP_BEFORE:-missing}\$"
     echo x >"$LW/x.txt"; git -C "$LW" add -A; git -C "$LW" commit -qm l3
     L3=$(git -C "$LW" rev-parse HEAD)
-    expect "signing still required: an unsigned push is refused" "$(git -C "$LW" push "$LURL" main 2>&1 || true)" 'remote rejected'
+    # A bound token refuses unsigned pushes on its own; only an unbound one
+    # shows the repo's require_signed_push survived.
+    LPLAIN=$(new "$TEN" create_push_token '("legacy-app", null, null)' | ok_text)
+    expect "signing still required: an unbound token's unsigned push is refused" "$(git -C "$LW" push "http://ic:$LPLAIN@$BHOST/legacy-app.git" main 2>&1 || true)" 'remote rejected.*requires signed pushes'
     expect "the key-bound token still pushes, signed" "$(lsigned)" 'main -> main'
     expect "the pushed commit is not served until approved" "$(served_at "$LSITE")" "^200 $L1"
     new "$OP" vote "(\"legacy-app\", \"$L3\", true)" >/dev/null
     expect "a vote after the upgrade moves the site" "$(served_at "$LSITE")" "^200 $L3"
     expect "push-cert still offered" "$(curl -s "$LURL/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert='
-    expect "the EVM nonce store starts empty (no pending tx carried over)" "$(new "$OP" evm_next_nonce)" '^\(null\)$'
   else
     # A token in the old format (a bare repo name): no expiry, no minter.
     LT=$(old "$TEN" create_push_token '("legacy-app")' | ok_text)
     LURL="http://ic:$LT@$BHOST/legacy-app.git"
-    LW=$WORK/legacy
-    git init -q -b main "$LW"
-    git -C "$LW" config user.name E2E
-    git -C "$LW" config user.email e2e@local
     echo '<!doctype html><title>l1</title>' >"$LW/index.html"; git -C "$LW" add -A; git -C "$LW" commit -qm l1
     expect "$BASE_REF: push with its token" "$(git -C "$LW" push "$LURL" main 2>&1 || true)" 'new branch'
     L1=$(git -C "$LW" rev-parse HEAD)
@@ -372,7 +369,6 @@ if [ -n "$BASE_WASM" ]; then
     echo '<!doctype html><title>l2</title>' >"$LW/index.html"; git -C "$LW" commit -qam l2
     git -C "$LW" push "$LURL" main >/dev/null 2>&1 || true
     L2=$(git -C "$LW" rev-parse HEAD)
-    LSITE="http://$BHOST/site/legacy-app/"
     expect "$BASE_REF: serves the tip, approved or not" "$(served_at "$LSITE")" "^200 $L2"
 
     (cd "$WORK" && dfx canister install base --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
@@ -380,7 +376,7 @@ if [ -n "$BASE_WASM" ]; then
     TOK=$(new "$TEN" list_push_tokens '("legacy-app")')
     expect "the old-format token is listed" "$(echo "$TOK" | grep -c 'id =')" '^1$'
     expect "  ...with no minter recorded" "$TOK" 'minted_by = null'
-    EXP=$(echo "$TOK" | sed -n 's/.*expires_ns = \([0-9_]*\).*/\1/p' | tr -d _)
+    EXP=$(echo "$TOK" | exp_of)
     NOW_S=$(date +%s)
     DAYS=$(( (EXP / 1000000000 - NOW_S + 43200) / 86400 ))
     expect "  ...expiring in the 30-day grace" "$DAYS" '^30$'
@@ -389,6 +385,7 @@ if [ -n "$BASE_WASM" ]; then
     expect "the pushed commit is not served until approved" "$(served_at "$LSITE")" "^200 $L1"
     expect "push-cert offered (the nonce seed was created on upgrade)" "$(curl -s "$LURL/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert='
   fi
+  expect "the EVM nonce store starts empty (no pending tx carried over)" "$(new "$OP" evm_next_nonce)" '^\(null\)$'
   expect "a label taken by an old repo is refused" "$(new "$OP" create_repo '("legacy-name")')" "maps to the label .{0,2}legacy-name.{0,2}, which repo .{0,2}legacy[.]name"
   INFO=$(new "$OP" get_repo_info '("legacy-app")')
   expect "membership kept" "$INFO" "$T"
