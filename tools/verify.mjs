@@ -107,11 +107,18 @@ function tagNameEnd(hay, from) {
 }
 
 // Where a comment opened at `lt` ends (the offset just past it), as the
-// browser's tokenizer ends it: `<!-->` and `<!--->` at once, else the first
-// `-->` or `--!>`. -1: it runs to the end, and nothing after is markup.
+// browser's tokenizer ends it: an empty comment (the opener followed by `>`
+// or `->`) at once, else the first `-->` or `--!>`. -1: it runs to the end,
+// and nothing after is markup.
+//
+// The comment opener is written "\x3c!--" throughout this block, never
+// literally: the block also runs inside the loader's <script>, where a
+// literal one puts the HTML parser in the script-escaped state, and a later
+// "<script" in this code then keeps the element's real end tag from ending
+// it -- the page fails to parse (tools/loader-test.mjs checks this).
 function commentEnd(hay, lt) {
-  if (hay.startsWith("<!-->", lt)) return lt + 5;
-  if (hay.startsWith("<!--->", lt)) return lt + 6;
+  if (hay.startsWith("\x3c!-->", lt)) return lt + 5;
+  if (hay.startsWith("\x3c!--->", lt)) return lt + 6;
   const ends = [["-->", 3], ["--!>", 4]]
     .map(([m, n]) => { const p = hay.indexOf(m, lt + 4); return p === -1 ? -1 : p + n; })
     .filter((e) => e !== -1);
@@ -220,7 +227,7 @@ function unverifiableSubresource(servedPath, body) {
         const parsed = parseTag(tagNameEnd(hay, lt + 2));
         if (parsed === null) return null;
         i = parsed.end + 1;
-      } else if (plain && hay.startsWith("<!--", lt)) {
+      } else if (plain && hay.startsWith("\x3c!--", lt)) {
         const end = commentEnd(hay, lt);
         if (end === -1) return null;
         i = end;
@@ -315,7 +322,7 @@ function unverifiableSubresource(servedPath, body) {
         const inner = hay.slice(i, end);
         const why = unverifiableSubresource("noscript.html", new TextEncoder().encode(inner));
         if (why !== null) return why;
-        const p = inner.lastIndexOf("<!--");
+        const p = inner.lastIndexOf("\x3c!--");
         if (p !== -1 && commentEnd(inner, p) === -1) return "<noscript> holds a comment that runs past its end";
         if (["<svg", "<math", "<select"].some((t) => inner.includes(t))) plain = false;
       }

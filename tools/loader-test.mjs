@@ -32,6 +32,26 @@ const SHARED = ['// === shared: unverifiableSubresource ===', '// === end shared
 assert.equal(between(html, ...SHARED), between(read('./verify.mjs'), ...SHARED), 'the loader\'s scanner differs from tools/verify.mjs\'s');
 console.log('PASS  shared scanner block is identical to tools/verify.mjs');
 
+// Each <script> element must end where its source ends. The HTML parser ends
+// one at the first end tag it meets, and after a "<!--" in its text a later
+// "<script" defers even that (the script-escaped state) -- either way the
+// code and the element part company and the page fails to parse. Every
+// script here opens with "<script>" and closes with "</script>" on its own
+// line, so the text between is exactly the code.
+{
+  const bad = [];
+  for (const m of html.matchAll(/<script>\n([\s\S]*?)\n<\/script>/g)) {
+    const at = html.slice(0, m.index).split('\n').length;
+    for (const pat of ['<!--', '</script']) {
+      if (m[1].toLowerCase().includes(pat)) bad.push(`script at line ${at} contains ${pat}`);
+    }
+  }
+  const scripts = (html.match(/^<script>$/gm) || []).length;
+  const ok = bad.length === 0 && scripts === [...html.matchAll(/<script>\n[\s\S]*?\n<\/script>/g)].length;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  loader scripts hold no comment opener or end tag in their text${ok ? '' : ': ' + (bad.join('; ') || 'a <script> without its own-line end tag')}`);
+  if (!ok) process.exitCode = 1;
+}
+
 // The shared scanner on its own, against the cases the canister's tests pin
 // (site.rs: text_the_browser_never_parses_as_markup_is_not_scanned and
 // skips_never_hide_what_the_browser_parses), and against the loader itself,
@@ -187,10 +207,15 @@ async function domCases(bin) {
     assert.ok(target, 'headless browser did not start');
     const ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise(r => { ws.onopen = r; });
-    const reply = new Promise(r => { ws.onmessage = m => { const d = JSON.parse(m.data); if (d.id === 1) r(d.result); }; });
-    ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: expr, returnByValue: true } }));
-    const res = await reply;
-    ws.close();
+    let seq = 0;
+    const pending = {}, thrown = [];
+    ws.onmessage = m => {
+      const d = JSON.parse(m.data);
+      if (pending[d.id]) { pending[d.id](d.result); delete pending[d.id]; }
+      if (d.method === 'Runtime.exceptionThrown') thrown.push(d.params.exceptionDetails.exception?.description || d.params.exceptionDetails.text);
+    };
+    const send = (method, params = {}) => new Promise(r => { pending[++seq] = r; ws.send(JSON.stringify({ id: seq, method, params })); });
+    const res = await send('Runtime.evaluate', { expression: expr, returnByValue: true });
     assert.ok(!res.exceptionDetails, JSON.stringify(res.exceptionDetails));
     res.result.value.forEach((got, i) => {
       const [name, , want] = cases[i];
@@ -198,6 +223,19 @@ async function domCases(bin) {
       console.log(`${ok ? 'PASS' : 'FAIL'}  crossorigin edit: ${name} -> ${want}${ok ? '' : ` (got ${got})`}`);
       if (!ok) process.exitCode = 1;
     });
+
+    // The page itself, opened from disk as a user opens it: every script
+    // parses and runs, and ?repo= fills the form and starts a check.
+    await send('Runtime.enable');
+    await send('Page.navigate', { url: new URL('../loader/index.html?repo=no-such-repo', import.meta.url).href });
+    await new Promise(r => setTimeout(r, 1500));
+    const page = (await send('Runtime.evaluate', { returnByValue: true, expression:
+      "JSON.stringify({ core: typeof Verifier, repo: document.getElementById('repo').value, out: document.getElementById('out').textContent.length > 0 })" })).result.value;
+    ws.close();
+    const want = JSON.stringify({ core: 'object', repo: 'no-such-repo', out: true });
+    const loads = page === want && thrown.length === 0;
+    console.log(`${loads ? 'PASS' : 'FAIL'}  loader/index.html opened from disk: scripts run, ?repo= fills the form and starts a check${loads ? '' : ` (got ${page}; ${thrown.join(' | ') || 'no exceptions'})`}`);
+    if (!loads) process.exitCode = 1;
   } finally {
     const exited = new Promise(r => chrome.once('exit', r));
     chrome.kill();
