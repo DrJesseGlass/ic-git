@@ -200,4 +200,4 @@ reproduces the hash from a clone of the repository.
 
 | Date | Commit | sha256 of loader/index.html | Registry tx |
 |---|---|---|---|
-| (not yet published) | | | |
+| 2026-09-29 | `050da748d33f92fd67094a694b420386973ef9b5` | `693af23578b49305b3cf6e253989a5b2b138065d60119504c4aec6dd502bd60e` | [`0x9292958231358ed4ce809cea8983c945ffdada759b9f1abb2cc2c85134d83647`](https://sepolia.etherscan.io/tx/0x9292958231358ed4ce809cea8983c945ffdada759b9f1abb2cc2c85134d83647) (Sepolia, block 11808833) |
