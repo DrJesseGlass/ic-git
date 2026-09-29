@@ -16,6 +16,33 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-09-22 | `bcd6f9b` | `v0.2.1` | `29e5ba3aa7e2dc0c62519c5a9e7e609bf72493971947e565e68daf3d43d29c1a` (gz) | MATCH, 2026-09-22 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 35805482289](https://github.com/DrJesseGlass/ic-git/actions/runs/35805482289), identical hash |
 | 2026-09-24 to 26 | `5b2b55f` | `v0.2.2` | `f13ff2226676f02cffe3906f641a63e6df0806ef25c093ae159444aeb278cca1` (gz) | MATCH, 2026-09-26 (recorded late) | GitHub Actions amd64 runner, [run 36039724742](https://github.com/DrJesseGlass/ic-git/actions/runs/36039724742), identical hash; deployer (pinned container, macOS arm64 host under emulation), MATCH |
 | 2026-09-26 | `07fd244` | `v0.3.0` | `3afcac754d55c6747abda09568412517602710eb91e68a2ac3c7937e4f76db03` (gz) | MATCH, 2026-09-26 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 36220841774](https://github.com/DrJesseGlass/ic-git/actions/runs/36220841774), identical hash |
+| 2026-09-28 | `0d1d466` | `v0.3.1` | `5f283447bc72c028dd7e2feb51f9edd91e4b1861e1979cb161e8e4f6a1d7ad32` (gz) | MATCH, 2026-09-28 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 36506401506](https://github.com/DrJesseGlass/ic-git/actions/runs/36506401506), identical hash |
+
+## v0.3.1 -- 2026-09-28
+
+Fixes and hardening on v0.3.0; no state migrations. Canister changes, #37
+to #42: EVM sends sign with the next nonce kept in stable memory rather
+than the providers' pending count, which replicas disagreed on, and a
+publish that fails before its broadcast refunds its charge (#37); every
+operator-only endpoint, including the EVM and Solana ones that checked
+the allowlist alone, uses the one operator guard (#38), and billing
+exemption follows the same rule (#39); and the subresource scanner skips
+what the browser never parses as markup -- comments to their tokenizer
+end, script and other raw-text bodies to their end tag, only in plain
+HTML -- so an honest page is no longer refused over strings in its own
+code, with the bypasses a review found closed (#42). The last is what
+lets the loader (docs/LOADER.md) be published as a site record.
+
+Gated before the deploy by `tools/e2e-local.sh`: 69 checks on this
+commit, including an upgrade from v0.3.0 -- what mainnet ran -- over
+state that release wrote through its own API: a signing-required repo, a
+key-bound token, a vote-gated site behind its tip. After the upgrade both
+published site records still verified with `tools/verify.mjs`.
+
+Same recipe and base image digest as v0.3.0. The raw wasm inside the
+gzip hashes to `5ab7c2f6...41e6`. Two hosts agreed byte for byte: the
+deployer's arm64 machine running the amd64 image under emulation, and a
+native x86_64 GitHub runner triggered by the tag push.
 
 ## v0.3.0 -- 2026-09-26
 
