@@ -83,12 +83,26 @@ after the canister release that carries that scanner (v0.3.1 or later).
 
 ### 5. Confirm on chain
 
+Step 4 returned before the transaction was mined, and `evm_receipt`
+answers `Ok = null` until it is. Poll until the receipt arrives, and stop
+if it reverted: the verifier run before then reports the new record as
+absent or stale.
+
 ```sh
-dfx canister --network ic call $C evm_receipt '("<tx hash from step 4>")'
-node tools/verify.mjs ic-git-loader index.html --record site    # VERIFIED
+TX=0x...    # the tx hash step 4 returned
+until R=$(dfx canister --network ic call $C evm_receipt "(\"$TX\")") &&
+      ! echo "$R" | grep -q 'Ok = null'; do
+  sleep 15
+done
+echo "$R"
+echo "$R" | grep -q 'status = "success"' &&
+  node tools/verify.mjs ic-git-loader index.html --record site    # VERIFIED
 ```
 
-Or look the transaction up on https://sepolia.etherscan.io.
+The verifier runs only on a successful receipt. A reverted receipt (or an
+`Err`) means the record did not change: find the cause and publish again
+(step 4). The transaction can also be looked up on
+https://sepolia.etherscan.io.
 
 ### 6. Record the release
 
