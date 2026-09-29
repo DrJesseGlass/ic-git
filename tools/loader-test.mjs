@@ -37,19 +37,27 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
 // "<script" defers even that (the script-escaped state) -- either way the
 // code and the element part company and the page fails to parse. Every
 // script here opens with "<script>" and closes with "</script>" on its own
-// line, so the text between is exactly the code.
+// line. As the parser does, each ends at the first "</script" after it; that
+// one must be the own-line end tag, and the page holds no other, so no end
+// tag hides in a script's text.
 {
   const bad = [];
-  const found = [...html.matchAll(/^<script\b[^>]*>\n([\s\S]*?)\n<\/script>$/gm)];
-  for (const m of found) {
+  const lower = html.toLowerCase();
+  const opens = [...html.matchAll(/^<script\b[^>]*>$/gim)];
+  const ends = lower.split('</script').length - 1;
+  for (const m of opens) {
     const at = html.slice(0, m.index).split('\n').length;
-    for (const pat of ['<!--', '</script']) {
-      if (m[1].toLowerCase().includes(pat)) bad.push(`script at line ${at} contains ${pat}`);
+    const start = m.index + m[0].length;
+    const end = lower.indexOf('</script', start);
+    if (end < 0 || html[end - 1] !== '\n' || !/^<\/script>(\n|$)/.test(html.slice(end, end + 10))) {
+      bad.push(`script at line ${at} does not end at its own-line end tag`);
+    } else if (html.slice(start, end).includes('<!--')) {
+      bad.push(`script at line ${at} contains <!--`);
     }
   }
-  const scripts = (html.match(/^<script\b[^>]*>$/gm) || []).length;
-  const ok = bad.length === 0 && scripts === found.length;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  loader scripts hold no comment opener or end tag in their text${ok ? '' : ': ' + (bad.join('; ') || 'a <script> without its own-line end tag')}`);
+  if (ends !== opens.length) bad.push(`${ends} "</script" in the page for ${opens.length} scripts`);
+  const ok = bad.length === 0;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  loader scripts hold no comment opener or end tag in their text${ok ? '' : ': ' + bad.join('; ')}`);
   if (!ok) process.exitCode = 1;
 }
 
