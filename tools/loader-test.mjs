@@ -40,14 +40,15 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
 // line, so the text between is exactly the code.
 {
   const bad = [];
-  for (const m of html.matchAll(/<script>\n([\s\S]*?)\n<\/script>/g)) {
+  const found = [...html.matchAll(/^<script\b[^>]*>\n([\s\S]*?)\n<\/script>$/gm)];
+  for (const m of found) {
     const at = html.slice(0, m.index).split('\n').length;
     for (const pat of ['<!--', '</script']) {
       if (m[1].toLowerCase().includes(pat)) bad.push(`script at line ${at} contains ${pat}`);
     }
   }
-  const scripts = (html.match(/^<script>$/gm) || []).length;
-  const ok = bad.length === 0 && scripts === [...html.matchAll(/<script>\n[\s\S]*?\n<\/script>/g)].length;
+  const scripts = (html.match(/^<script\b[^>]*>$/gm) || []).length;
+  const ok = bad.length === 0 && scripts === found.length;
   console.log(`${ok ? 'PASS' : 'FAIL'}  loader scripts hold no comment opener or end tag in their text${ok ? '' : ': ' + (bad.join('; ') || 'a <script> without its own-line end tag')}`);
   if (!ok) process.exitCode = 1;
 }
@@ -209,10 +210,12 @@ async function domCases(bin) {
     await new Promise(r => { ws.onopen = r; });
     let seq = 0;
     const pending = {}, thrown = [];
+    let loaded = null;
     ws.onmessage = m => {
       const d = JSON.parse(m.data);
-      if (pending[d.id]) { pending[d.id](d.result); delete pending[d.id]; }
+      if (pending[d.id]) { pending[d.id](d.error ? Promise.reject(new Error(`${d.error.message} (${d.error.code})`)) : d.result); delete pending[d.id]; }
       if (d.method === 'Runtime.exceptionThrown') thrown.push(d.params.exceptionDetails.exception?.description || d.params.exceptionDetails.text);
+      if (d.method === 'Page.loadEventFired' && loaded) loaded();
     };
     const send = (method, params = {}) => new Promise(r => { pending[++seq] = r; ws.send(JSON.stringify({ id: seq, method, params })); });
     const res = await send('Runtime.evaluate', { expression: expr, returnByValue: true });
@@ -227,8 +230,11 @@ async function domCases(bin) {
     // The page itself, opened from disk as a user opens it: every script
     // parses and runs, and ?repo= fills the form and starts a check.
     await send('Runtime.enable');
-    await send('Page.navigate', { url: new URL('../loader/index.html?repo=no-such-repo', import.meta.url).href });
-    await new Promise(r => setTimeout(r, 1500));
+    await send('Page.enable');
+    const load = new Promise(r => { loaded = () => r(true); setTimeout(() => r(false), 15_000).unref(); });
+    const nav = await send('Page.navigate', { url: new URL('../loader/index.html?repo=no-such-repo', import.meta.url).href });
+    assert.ok(!nav.errorText, nav.errorText);
+    assert.ok(await load, 'loader/index.html did not fire load');
     const page = (await send('Runtime.evaluate', { returnByValue: true, expression:
       "JSON.stringify({ core: typeof Verifier, repo: document.getElementById('repo').value, out: document.getElementById('out').textContent.length > 0 })" })).result.value;
     ws.close();
