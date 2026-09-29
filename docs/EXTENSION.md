@@ -104,14 +104,22 @@ the development machine intercepts the branded browser (docs/LOADER.md).
    with no refusals: repositories listed, its provenance line shown,
    "connect wallet" offered. ic-vote ran, but Chrome refused its
    stylesheet by hash; by exact URL it loads, and ic-vote reached YELLOW
-   styled with no refusals. Step 2 above says so. Wallet sign-in and
-   writes were not exercised (headless, no wallet); they are the first
-   thing to try in a real browser.
+   styled with no refusals. Step 2 above says so.
 4. **The attack is refused.** A copy of ic-vote with an injected inline
    script and an injected `<script src>` (as the proxy does), under
    ic-vote's derived policy: both refused, and neither ran. Without the
    policy both ran. This needed host permission for the page's origin --
    a rule without it silently does nothing.
+
+5. **In a real browser, with a wallet: works.** Branded Chrome on macOS,
+   the same policies loaded as an unpacked extension, with the machine's
+   TLS-inspecting proxy (NordVPN Threat Protection) on. The console
+   loaded normally and its only CSP report was the proxy's injected
+   script, refused. OISY sign-in worked, and a push token was minted and
+   revoked through OISY-signed calls. One sign-in attempt stalled on
+   OISY's "Waiting for Dapp interaction" and was not reproducible: it
+   worked with the proxy paused and again with it on, extension on both
+   times.
 
 So Chrome gets script-level enforcement before anything runs; what it
 does not get is Firefox's byte-level hold, which is why the post-load
