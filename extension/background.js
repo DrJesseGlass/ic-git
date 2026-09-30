@@ -189,7 +189,6 @@ async function visit(tabId, href, navStart) {
   }
   const sites = await load();
   const known = sites[repo];
-  const fresh = known && Date.now() - known.checkedAt < REFRESH_MINUTES * 60_000;
 
   const failSoft = e => {
     const site = { repo, status: 'failed', checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message || String(e) }] };
@@ -202,6 +201,7 @@ async function visit(tabId, href, navStart) {
   // verifies, reloads the tab, which then gets the new answer.
   if (known && known.status === 'verified' && known.pinnedAt <= navStart && known.text) {
     badge(tabId, 'verified', known);
+    const fresh = Date.now() - known.checkedAt < REFRESH_MINUTES * 60_000;
     (fresh ? recheck(known) : verifySite(repo)).then(site => {
       if (site.status !== 'verified' || site.policy !== known.policy || site.bundleHash !== known.bundleHash) {
         tell(tabId, { type: 'result', status: site.status, reload: true, site: summary(site) });

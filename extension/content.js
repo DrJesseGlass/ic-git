@@ -71,7 +71,7 @@
     const { div } = veil();
     div.replaceChildren(el('div', { className: 'box' },
       el('h1', { textContent: 'Checking ' + repo }),
-      el('p', { className: 'muted', textContent: 'Comparing this page with its record on chain before any of its code runs. This takes a few seconds, once.' })));
+      el('p', { className: 'muted', textContent: 'Comparing this page with its record on chain before any of its code runs. This takes a few seconds.' })));
   }
 
   function stop(status, site) {
