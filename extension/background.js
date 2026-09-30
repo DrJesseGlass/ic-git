@@ -209,13 +209,12 @@ async function visit(tabId, href, navStart) {
     }, failSoft);
     return { status: 'verified', text: known.text, site: summary(known) };
   }
-  if (known && fresh && known.status !== 'verified') {
-    badge(tabId, known.status, known);
-    return { status: known.status, site: summary(known) };
-  }
-  // First visit, or a stale or unpinned state: check, then reload under
-  // the pinned policy (this load's policy is the static one, which would
-  // refuse the verified scripts too), or stop.
+  // First visit, a stale state, or one that did not verify: check again
+  // now. Only a verified result is reused -- a failure may have been a
+  // proxy that is since gone, or a record since republished, and the
+  // check costs seconds. Then reload under the pinned policy (this load's
+  // policy is the static one, which would refuse the verified scripts
+  // too), or stop.
   badge(tabId, 'checking', { repo });
   verifySite(repo).then(site => {
     const reload = site.status === 'verified';
