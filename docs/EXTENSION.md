@@ -33,7 +33,7 @@ does not prevent it. What an extension can do about that differs by browser.
 | | Sees the exact bytes the page got | Can stop scripts before they run |
 |---|---|---|
 | Firefox | yes: `webRequest.filterResponseData` | yes: hold the response until the check passes |
-| Chrome | no, not without `chrome.debugger` | yes, by pinning scripts with CSP (below) |
+| Chrome | no, not without `chrome.debugger`; it runs its own checked copy instead (below) | yes, by pinning scripts with CSP (below) |
 | Chrome, `chrome.debugger` | yes: the DevTools `Fetch` domain | yes, but a permanent "is debugging this browser" bar |
 
 ### Firefox: hold the document until it verifies
@@ -50,10 +50,15 @@ blocking `webRequest` under Manifest V3, so this does not depend on MV2.
 Chrome's Manifest V3 gives an extension no access to response bodies and no
 blocking `webRequest` (except for extensions force-installed by enterprise
 policy). A content script at `document_start` runs before the page's
-scripts but cannot hold the parser, so checking "the bytes" means a second,
-independent fetch -- which a MITM that rewrites every response consistently
-(the NordVPN case in docs/LOADER.md) fails, but a targeted one could answer
-differently.
+scripts but cannot hold the parser, and a second, independent fetch of
+the entrypoint is no evidence about the navigation: a MITM that rewrites
+every response consistently (the NordVPN case in docs/LOADER.md) answers
+both the same, but a targeted one can tell the extension's fetch from the
+document request (`Sec-Fetch-Dest`, for one) and answer each differently.
+So Chrome gets two mechanisms, neither of which needs the navigation's
+bytes: a policy that pins the page's scripts and styles whatever was
+delivered, and a document replaced by the checked bytes, the loader's
+move.
 
 What Chrome does let an extension do before the response is parsed is
 change its headers, with `declarativeNetRequest` rules. So the extension
@@ -65,14 +70,18 @@ enforces the verified page's scripts instead of its bytes:
 2. From the verified bytes, derive a policy that allows exactly the scripts
    that page runs: `script-src` listing the sha256 of each inline script and
    the `integrity` hash of each external one; `style-src` listing the
-   sha256 of each inline `<style>` and the exact URL of each external
-   stylesheet (Chrome takes no hash source for an external stylesheet; its
-   `integrity`, which check E requires, still pins its contents);
-   `object-src 'none'`, `frame-src 'none'`, `base-uri 'none'`. Check E
-   already refuses `<iframe>`, `<object>`, `<embed>` and `<base>`; an
-   injected frame from another origin would run that origin's scripts
-   under its own policy and could cover the page, so the policy refuses
-   it too.
+   sha256 of each inline `<style>`, and no URL (below); `object-src
+   'none'`, `frame-src 'none'`, `base-uri 'none'`. Check E already
+   refuses `<iframe>`, `<object>`, `<embed>` and `<base>`; an injected
+   frame from another origin would run that origin's scripts under its
+   own policy and could cover the page, so the policy refuses it too.
+   An external stylesheet gets no source at all: Chrome takes no hash
+   source for one, and a URL source pins nothing, since SRI runs only
+   when the markup carries `integrity`, and a proxy that rewrites the
+   page can drop the attribute and serve other CSS at that same URL.
+   So a stylesheet is inlined at publish, as staging already does for
+   ic-vote's modules, and pinned by hash like an inline `<style>` (check
+   E tightening, order of work).
 3. Install it as a session `declarativeNetRequest` rule that appends that
    `Content-Security-Policy` to the site's main-frame responses. Two CSPs
    both apply, so the page cannot loosen it. The rule applies only where
@@ -92,16 +101,43 @@ enforces the verified page's scripts instead of its bytes:
 Now whatever the network delivers, only scripts identical to the verified
 page's can run; an injected `<script src>` is refused by the browser, not
 by us. What CSP does not stop is changed markup -- altered text or a fake
-form without script -- so a content script also re-fetches the entrypoint
-after load, compares, and replaces the page with the stop page on a
-mismatch. A site whose record changes between the rule and the load simply
-fails closed until the background check catches up.
+form without script. No fetch after the fact can catch that: the
+navigation's bytes are never visible, and a targeted MITM answers the
+extension's fetch with the honest page and the navigation with the fake.
+So the page never runs the navigation's bytes at all:
+
+5. A content script at `document_start` calls `window.stop()` before any
+   child of `<html>` exists and asks the background for the entrypoint;
+   the background fetches it, runs the core against the record, and
+   hands back the bytes or the failing check. On a pass the content
+   script does what the loader does -- `document.open()`, `write`,
+   `close()` -- and on a fail it writes the stop page. The document keeps
+   its origin, so storage and wallet sign-in are the live site's, the
+   page's relative URLs need no `<base>`, and same-origin SRI needs no
+   `crossorigin` edit; it also keeps the policy of step 3, since
+   `document.open()` retains the document's policy container. Until the
+   bytes arrive the tab shows the neutral "checking" screen.
+
+That the fetch is distinguishable from the navigation no longer matters:
+its result is not evidence about the page, it is the page. A MITM that
+answers it with the recorded bytes has served the honest page; one that
+answers with anything else fails the hash. What is not yet shown is that
+`window.stop()` at `document_start` leaves none of the delivered markup
+parsed. Chrome runs the script once the `<html>` element exists and
+before any other DOM is constructed, so it should; the spike (order of
+work) loads a page whose body opens with a script that records having
+run. Until it passes, Chrome's guarantee is the policy's alone --
+scripts and styles pinned, markup not -- and the stop page and this
+document say so; if it fails, that limitation stays, and Firefox is the
+byte-level browser. A site whose record changes between the rule and the
+load simply fails closed until the background check catches up.
 
 The derived policy is stricter than check E, and a site must meet both.
 A hash-only `script-src` refuses inline event handlers (`onclick=`),
 `javascript:` URLs, workers (`worker-src` falls back to it, and a hash
 matches no worker URL), and the import chain of a pinned external module;
-a hash-only `style-src` refuses `style=` attributes. Check E lets every
+a hash-only `style-src` refuses `style=` attributes and
+`<link rel=stylesheet>`. Check E lets every
 one of those through by design (import specifiers take no integrity;
 ic-vote runs only because staging links its modules into one file, and
 the console has none of them). A page that passes at publish and fails
@@ -130,8 +166,9 @@ the development machine intercepts the branded browser (docs/LOADER.md).
    The console (three inline scripts, one inline style, all by hash) ran
    with no refusals: repositories listed, its provenance line shown,
    "connect wallet" offered. ic-vote ran, but Chrome refused its
-   stylesheet by hash; by exact URL it loads, and ic-vote reached YELLOW
-   styled with no refusals. Step 2 above says so.
+   stylesheet by hash; by exact URL it loaded, and ic-vote reached YELLOW
+   styled with no refusals. A URL source pins nothing, though (step 2
+   above), so the stylesheet is to be inlined at staging instead.
 4. **The attack is refused.** A copy of ic-vote with an injected inline
    script and an injected `<script src>` (as the proxy does), under
    ic-vote's derived policy: both refused, and neither ran. Without the
@@ -149,8 +186,8 @@ the development machine intercepts the branded browser (docs/LOADER.md).
    times.
 
 So Chrome gets script-level enforcement before anything runs; what it
-does not get is Firefox's byte-level hold, which is why the post-load
-recheck above stays.
+does not get is Firefox's byte-level hold. The replaced document of step
+5 stands in for it, once its spike passes.
 
 `chrome.debugger` would give Chrome Firefox's guarantee, at the cost of the
 debugging bar on every tab while it is attached. It is not the default; it
@@ -159,10 +196,11 @@ could be an opt-in "strict" mode for operators.
 ## How the extension sees the served bytes
 
 - Firefox: the response itself, through `filterResponseData`.
-- Chrome: its own fetch of the entrypoint from the background service
-  worker, which goes through the same network stack as the page -- so a
-  proxy that rewrites the page rewrites this copy too -- plus the policy
-  above, which binds the page to that copy's scripts whatever it received.
+- Chrome: it does not see them. It fetches its own copy of the entrypoint
+  from the background service worker, checks that copy against the
+  record, and runs it in place of whatever the navigation received (step
+  5 above); the policy binds what was received to that copy's scripts
+  and styles as well.
 - Both: `X-Ic-Git-Commit` from `webRequest.onHeadersReceived` on the actual
   document response (headers are readable without blocking), compared with
   the record's commit.
@@ -243,15 +281,18 @@ is submitted to a store, and the Releases table carries the version.
 1. Done: the Chrome spikes (above) -- Chrome is buildable.
 2. The shared core as a module both the loader and the extension import
    byte-identical, the way the scanner block is shared today.
-3. Chrome extension first, for its reach: background verification, the
-   CSP rule, post-load recheck, stop page, toolbar state -- and wallet
-   sign-in and a write tried on the console under the policy.
+3. Chrome extension first, for its reach: the spike that `window.stop()`
+   at `document_start` parses none of the delivered markup, then
+   background verification, the CSP rule, the replaced document, stop
+   page, toolbar state -- and wallet sign-in and a write tried on the
+   console under the policy and through the replaced document.
 4. Firefox extension: `filterResponseData` and the same stop page; the
    recommended browser where the byte-level guarantee matters (operators,
    observers).
 5. Tighten check E to the derived policy's contract (inline handlers,
-   `javascript:` URLs, workers, `style=` attributes, and the import chain
-   of a pinned module), so a page that publishes is a page that runs under
-   the extension; the canister and the shared scanner block together.
+   `javascript:` URLs, workers, `style=` attributes, external stylesheets,
+   and the import chain of a pinned module), so a page that publishes is a
+   page that runs under the extension; the canister and the shared
+   scanner block together.
 6. `extension/SHA256SUMS`, `tools/extension-sums.sh`, the `ic-git-extension`
    record, and a Releases table -- before the first store submission.
