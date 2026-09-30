@@ -68,12 +68,26 @@ enforces the verified page's scripts instead of its bytes:
    sha256 of each inline `<style>` and the exact URL of each external
    stylesheet (Chrome takes no hash source for an external stylesheet; its
    `integrity`, which check E requires, still pins its contents);
-   `object-src 'none'`, `base-uri 'none'`.
+   `object-src 'none'`, `frame-src 'none'`, `base-uri 'none'`. Check E
+   already refuses `<iframe>`, `<object>`, `<embed>` and `<base>`; an
+   injected frame from another origin would run that origin's scripts
+   under its own policy and could cover the page, so the policy refuses
+   it too.
 3. Install it as a session `declarativeNetRequest` rule that appends that
    `Content-Security-Policy` to the site's main-frame responses. Two CSPs
    both apply, so the page cannot loosen it. The rule applies only where
    the extension has host permission, so the manifest names the canisters
    in scope.
+4. Fail closed before that rule exists. A static rule in the manifest
+   blocks main-frame requests to the canisters in scope (redirecting to
+   the extension's own "not yet checked" page), and the session rule of
+   step 3 is paired with a higher-priority `allow` for that site that
+   lifts the block; the policy rule outranks the `allow`, since Chrome
+   skips a `modifyHeaders` rule below a matching `allow`. Session rules
+   do not survive a browser restart, so the background re-derives and
+   re-installs them on `runtime.onStartup`; until it has, the block
+   holds. Without this the first visit after install or restart would
+   run the page under no policy at all.
 
 Now whatever the network delivers, only scripts identical to the verified
 page's can run; an injected `<script src>` is refused by the browser, not
@@ -82,6 +96,19 @@ form without script -- so a content script also re-fetches the entrypoint
 after load, compares, and replaces the page with the stop page on a
 mismatch. A site whose record changes between the rule and the load simply
 fails closed until the background check catches up.
+
+The derived policy is stricter than check E, and a site must meet both.
+A hash-only `script-src` refuses inline event handlers (`onclick=`),
+`javascript:` URLs, workers (`worker-src` falls back to it, and a hash
+matches no worker URL), and the import chain of a pinned external module;
+a hash-only `style-src` refuses `style=` attributes. Check E lets every
+one of those through by design (import specifiers take no integrity;
+ic-vote runs only because staging links its modules into one file, and
+the console has none of them). A page that passes at publish and fails
+at the stop page is the wrong place to learn this, so the scanner should
+refuse them where the record is made, when `served_site_record` runs
+(order of work, below); until it does, the stop page names the refused
+directive.
 
 ### The Chrome spikes, run 2026-09-29
 
@@ -170,14 +197,27 @@ several files, and with no canister change.
 - The canister repo `ic-git-extension` has its site root set to that file
   (`set_site("ic-git-extension", "extension/SHA256SUMS")`; a site root may
   name a blob), and `evm_registry_publish_site("ic-git-extension")` records
-  `ic-git-extension#site = (commit, sha256(SHA256SUMS))`. SHA256SUMS is not
-  markup, so check E does not apply to it.
+  `ic-git-extension#site = (commit, sha256(SHA256SUMS))`. Check E runs on
+  it -- a root whose name has no extension is scanned, not exempted
+  (`site::unverifiable_subresource`) -- and passes because the listing
+  holds no `<`; no path in the listing may contain one.
 - A user, once per release: find the installed files (Chrome:
   `.../Extensions/<id>/<version>/`, ignoring the store's `_metadata/`;
   Firefox: unzip the `.xpi`, ignoring `META-INF/`), run
-  `tools/extension-sums.sh <dir>` -- or `shasum -a 256` over the files in
-  path order, which is all it does -- and compare the digest of that
-  listing with the record, exactly as for the loader.
+  `tools/extension-sums.sh <dir>` -- `shasum -a 256` over the files in
+  byte order of path (`LC_ALL=C`, so the listing does not depend on the
+  user's locale), which is nearly all it does -- and compare the digest
+  of that listing with the record, exactly as for the loader.
+- The one thing more it does is for Chrome, whose installer does not
+  leave the files as packaged: it re-serializes `manifest.json` (and adds
+  `update_url`) and re-encodes the images the manifest names, so a byte
+  comparison of the install directory fails on every honest install. The
+  tool compares `manifest.json` as parsed JSON with `update_url` removed,
+  and manifest-named images by decoded pixels; everything else by bytes.
+  Firefox's `.xpi` keeps the packaged bytes when the manifest names its
+  id (`browser_specific_settings.gecko.id`), so it does, and the `.xpi` is
+  the byte-exact route. The extension keeps its icons few and ships no
+  locale catalog (`_locales/`, which Chrome also rewrites).
 - Auditors can skip the stores: clone at the recorded commit and load
   `extension/` unpacked.
 - The extension can hash its own files (`runtime.getURL`) and show whether
@@ -209,5 +249,9 @@ is submitted to a store, and the Releases table carries the version.
 4. Firefox extension: `filterResponseData` and the same stop page; the
    recommended browser where the byte-level guarantee matters (operators,
    observers).
-5. `extension/SHA256SUMS`, `tools/extension-sums.sh`, the `ic-git-extension`
+5. Tighten check E to the derived policy's contract (inline handlers,
+   `javascript:` URLs, workers, `style=` attributes, and the import chain
+   of a pinned module), so a page that publishes is a page that runs under
+   the extension; the canister and the shared scanner block together.
+6. `extension/SHA256SUMS`, `tools/extension-sums.sh`, the `ic-git-extension`
    record, and a Releases table -- before the first store submission.
