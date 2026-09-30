@@ -12,6 +12,7 @@
   'use strict';
   const navStart = performance.timeOrigin;
   let root = null;
+  let repo = null; // the site this page is, once the background has said
 
   const CSS = `
     :host { all: initial; }
@@ -87,6 +88,9 @@
     const anyway = el('button', { className: 'risk', textContent: 'Open anyway' });
     let armed = false;
     again.onclick = () => {
+      // No repo (an uncovered page, or no answer from the verifier): the
+      // only check there is to run again is the visit itself.
+      if (!site.repo) { location.reload(); return; }
       checking(site.repo);
       chrome.runtime.sendMessage({ type: 'retry', repo: site.repo }, res => {
         if (res && res.status === 'verified') location.reload(); else stop(res ? res.status : 'failed', res ? res.site : site);
@@ -110,6 +114,8 @@
   // Later news for this tab, after the page is written.
   chrome.runtime.onMessage.addListener(msg => {
     if (!msg || msg.type !== 'result') return;
+    // The tab may have moved on to another site since the check began.
+    if (!msg.site || msg.site.repo !== repo) return;
     if (msg.reload) location.reload();
     else if (msg.status !== 'verified') stop(msg.status, msg.site || {});
   });
@@ -119,6 +125,7 @@
       stop('failed', { checks: [{ ok: false, label: 'reach the verifier', detail: chrome.runtime.lastError ? chrome.runtime.lastError.message : 'no answer' }] });
       return;
     }
+    repo = res.site && res.site.repo || null;
     if ((res.status === 'verified' || res.status === 'allowed') && typeof res.text === 'string') { write(res.text); return; }
     write(BARE);
     if (res.status === 'checking') checking(res.site.repo);

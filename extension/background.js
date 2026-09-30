@@ -48,18 +48,24 @@ const save = async sites => chrome.storage.session.set({ sites });
 // index.html, with any query. Other paths under /site/ are covered by no
 // record and keep the static policy.
 const escape = s => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-const entryRegex = repo => '^' + escape(ORIGIN + '/site/' + encodeURIComponent(repo) + '/') + '(index\\.html)?(\\?[^#]*)?$';
+const siteUrl = repo => ORIGIN + '/site/' + encodeURIComponent(repo) + '/';
+const entryRegex = repo => '^' + escape(siteUrl(repo)) + '(index\\.html)?(\\?[^#]*)?$';
+// A rule for one repo's entrypoint. Case matters (DNR's default is that it
+// does not): /site/Foo/ and /site/foo/ are different sites to siteOf.
+const entryCondition = repo => ({ regexFilter: entryRegex(repo), isUrlFilterCaseSensitive: true, resourceTypes: ['main_frame'] });
 
 // Which site a URL is the entrypoint of, or null.
 function siteOf(href) {
-  const u = new URL(href);
-  if (u.origin !== ORIGIN) return null;
-  const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
-  return m ? decodeURIComponent(m[1]) : null;
+  try {
+    const u = new URL(href);
+    if (u.origin !== ORIGIN) return null;
+    const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch (_) { return null; } // not a URL, or a malformed escape
 }
 
 // Session rule ids: one per repo, from 100 up, remembered in state.
-async function ruleIdFor(sites, repo) {
+function ruleIdFor(sites, repo) {
   if (sites[repo] && sites[repo].ruleId) return sites[repo].ruleId;
   const used = Object.values(sites).map(s => s.ruleId || 0);
   return Math.max(99, ...used) + 1;
@@ -72,7 +78,7 @@ async function pin(ruleId, repo, policy) {
       id: ruleId,
       priority: PINNED_PRIORITY,
       action: { type: 'modifyHeaders', responseHeaders: [{ header: 'Content-Security-Policy', operation: 'set', value: policy }] },
-      condition: { regexFilter: entryRegex(repo), resourceTypes: ['main_frame'] },
+      condition: entryCondition(repo),
     }],
   });
 }
@@ -83,6 +89,14 @@ async function unpin(ruleId) {
 
 // --- verification ---
 const inFlight = new Map();
+// Updates to the stored sites run one at a time: two repos finishing together
+// would otherwise take the same rule id and overwrite each other's entry.
+let stateQueue = Promise.resolve();
+const exclusive = fn => {
+  const p = stateQueue.then(fn);
+  stateQueue = p.catch(() => {});
+  return p;
+};
 
 // Full check: registry record, served bytes, object walk, reference scan,
 // and the policy to pin. Concurrent callers for one repo share one run.
@@ -90,33 +104,38 @@ function verifySite(repo) {
   if (inFlight.has(repo)) return inFlight.get(repo);
   const run = (async () => {
     const r = await Verifier.verify({ repo, provider: twoRpcs, providerOnly: true, providerName: 'two RPCs' });
-    const sites = await load();
-    const ruleId = await ruleIdFor(sites, repo);
-    const site = {
-      repo, ruleId, checkedAt: Date.now(),
-      commit: r.record && r.record.commit, bundleHash: r.record && r.record.bundleHash,
-      checks: r.checks, via: r.via, policyError: r.policyError || null,
-    };
-    if (r.verified && r.policy) {
-      const was = sites[repo];
-      await pin(ruleId, repo, r.policy);
-      site.status = 'verified';
-      // A page loaded before this moment ran under an older rule (or none).
-      site.pinnedAt = was && was.status === 'verified' && was.policy === r.policy ? was.pinnedAt : Date.now();
-      site.policy = r.policy;
-      // What the tab is given to show: the bytes just checked, as text.
-      site.text = new TextDecoder().decode(r.bytes);
-    } else {
-      await unpin(ruleId);
-      site.status = r.verified ? 'unpinnable' : 'failed';
-    }
-    sites[repo] = site;
-    await save(sites);
-    return site;
+    return exclusive(() => record(repo, r));
   })();
   inFlight.set(repo, run);
-  run.finally(() => inFlight.delete(repo));
+  run.finally(() => inFlight.delete(repo)).catch(() => {});
   return run;
+}
+
+// Pin (or unpin) what a full check found and store it.
+async function record(repo, r) {
+  const sites = await load();
+  const ruleId = ruleIdFor(sites, repo);
+  const site = {
+    repo, ruleId, checkedAt: Date.now(),
+    commit: r.record && r.record.commit, bundleHash: r.record && r.record.bundleHash,
+    checks: r.checks, via: r.via, policyError: r.policyError || null,
+  };
+  if (r.verified && r.policy) {
+    const was = sites[repo];
+    await pin(ruleId, repo, r.policy);
+    site.status = 'verified';
+    // A page loaded before this moment ran under an older rule (or none).
+    site.pinnedAt = was && was.status === 'verified' && was.policy === r.policy ? was.pinnedAt : Date.now();
+    site.policy = r.policy;
+    // What the tab is given to show: the bytes just checked, as text.
+    site.text = new TextDecoder().decode(r.bytes);
+  } else {
+    await unpin(ruleId);
+    site.status = r.verified ? 'unpinnable' : 'failed';
+  }
+  sites[repo] = site;
+  await save(sites);
+  return site;
 }
 
 // Quick check on every visit: is the entrypoint still the recorded bytes?
@@ -124,7 +143,7 @@ function verifySite(repo) {
 // its way here -- run the full check again.
 async function recheck(site) {
   try {
-    const res = await fetch(ORIGIN + '/site/' + encodeURIComponent(site.repo) + '/', { cache: 'no-store', signal: AbortSignal.timeout(15_000) });
+    const res = await fetch(siteUrl(site.repo), { cache: 'no-store', signal: AbortSignal.timeout(15_000) });
     const bytes = new Uint8Array(await res.arrayBuffer());
     const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), x => x.toString(16).padStart(2, '0')).join('');
     if (res.ok && hash === site.bundleHash) return site;
@@ -165,7 +184,7 @@ async function visit(tabId, href, navStart) {
   if (await allowed(tabId, repo)) {
     // "Open anyway": the bytes as served now, unchecked, as the user chose.
     badge(tabId, 'allowed', { repo });
-    const res = await fetch(ORIGIN + '/site/' + encodeURIComponent(repo) + '/', { cache: 'no-store' });
+    const res = await fetch(siteUrl(repo), { cache: 'no-store' });
     return { status: 'allowed', text: await res.text() };
   }
   const sites = await load();
@@ -225,7 +244,7 @@ async function allow(tabId, repo) {
     addRules: [{
       id, priority: ALLOW_PRIORITY,
       action: { type: 'modifyHeaders', responseHeaders: [{ header: 'Content-Security-Policy', operation: 'remove' }] },
-      condition: { regexFilter: entryRegex(repo), resourceTypes: ['main_frame'], tabIds: [tabId] },
+      condition: { ...entryCondition(repo), tabIds: [tabId] },
     }],
   });
 }
@@ -246,13 +265,17 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     : msg.type === 'allow' ? allow(tabId, msg.repo).then(() => ({ ok: true }))
     : msg.type === 'retry' ? verifySite(msg.repo).then(site => ({ status: site.status, site: summary(site) }))
     : Promise.resolve({ error: 'unknown message' });
-  work.then(reply, e => reply({ status: 'failed', site: { repo: msg.repo, checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message }] } }));
+  // A visit names its site by URL, the other messages by repo.
+  const repo = msg.repo || (msg.url && siteOf(msg.url)) || undefined;
+  work.then(reply, e => reply({ status: 'failed', site: { repo, checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message }] } }));
   return true;
 });
 
 // Keep what is pinned current: a republished record or a redeploy changes
 // the policy, and the next visit should not be the one to find out.
-chrome.alarms.create('refresh', { periodInMinutes: REFRESH_MINUTES });
+// Created once: this runs on every worker start, and creating it again
+// would restart its period, so a worker woken by visits would never refresh.
+chrome.alarms.get('refresh').then(a => { if (!a) chrome.alarms.create('refresh', { periodInMinutes: REFRESH_MINUTES }); });
 chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name !== 'refresh') return;
   for (const repo of Object.keys(await load())) await verifySite(repo).catch(() => {});
