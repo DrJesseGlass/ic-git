@@ -51,19 +51,29 @@ const entryUrl = repo => ORIGIN + '/site/' + encodeURIComponent(repo) + '/';
 
 // Which site a URL is the entrypoint of, or null.
 function siteOf(href) {
-  const u = new URL(href);
-  if (u.origin !== ORIGIN) return null;
-  const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
-  return m ? decodeURIComponent(m[1]) : null;
+  try {
+    const u = new URL(href);
+    if (u.origin !== ORIGIN) return null;
+    const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch (_) { return null; } // not a URL, or a malformed escape
 }
 
 // --- state (storage.session: it outlives this event page, not the browser) ---
+// Each read-modify-write of stored state runs alone: two that overlapped
+// would write back each other's stale copy and lose an update.
+let stateQueue = Promise.resolve();
+const exclusive = fn => {
+  const p = stateQueue.then(fn);
+  stateQueue = p.catch(() => {});
+  return p;
+};
 const load = async () => (await browser.storage.session.get('sites')).sites || {};
-async function remember(site) {
+const remember = site => exclusive(async () => {
   const sites = await load();
   sites[site.repo] = site;
   await browser.storage.session.set({ sites });
-}
+});
 
 // --- verification ---
 // With `delivered`, the core checks those bytes -- the ones that actually
@@ -88,7 +98,7 @@ function verifySite(repo) {
   if (inFlight.has(repo)) return inFlight.get(repo);
   const run = check(repo).then(async site => { await remember(site); return site; });
   inFlight.set(repo, run);
-  run.finally(() => inFlight.delete(repo));
+  run.finally(() => inFlight.delete(repo)).catch(() => {});
   return run;
 }
 
@@ -156,6 +166,8 @@ browser.webRequest.onBeforeRequest.addListener(d => {
   const filter = browser.webRequest.filterResponseData(d.requestId);
   const chunks = [];
   filter.ondata = e => chunks.push(new Uint8Array(e.data));
+  // A redirected or cancelled request ends here, never in onstop.
+  filter.onerror = () => applied.delete(d.requestId);
   filter.onstop = async () => {
     const bytes = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
     let at = 0;
@@ -207,9 +219,11 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     return site && site.status === 'verified' ? { status: 'verified', site: summary(site) } : { status: 'checking', site: { repo } };
   }
   if (msg.type === 'allow') {
-    const { allowed = {} } = await browser.storage.session.get('allowed');
-    allowed[allowedKey(tabId, msg.repo)] = true;
-    await browser.storage.session.set({ allowed });
+    await exclusive(async () => {
+      const { allowed = {} } = await browser.storage.session.get('allowed');
+      allowed[allowedKey(tabId, msg.repo)] = true;
+      await browser.storage.session.set({ allowed });
+    });
     return { ok: true };
   }
   if (msg.type === 'retry') {
@@ -219,17 +233,22 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
   return { error: 'unknown message' };
 });
 
-browser.tabs.onRemoved.addListener(async tabId => {
+browser.tabs.onRemoved.addListener(tabId => {
   results.delete(tabId);
-  const { allowed = {} } = await browser.storage.session.get('allowed');
-  const gone = Object.keys(allowed).filter(k => k.startsWith(tabId + ':'));
-  if (!gone.length) return;
-  for (const k of gone) delete allowed[k];
-  await browser.storage.session.set({ allowed });
+  return exclusive(async () => {
+    const { allowed = {} } = await browser.storage.session.get('allowed');
+    const gone = Object.keys(allowed).filter(k => k.startsWith(tabId + ':'));
+    if (!gone.length) return;
+    for (const k of gone) delete allowed[k];
+    await browser.storage.session.set({ allowed });
+  });
 });
 
 // Keep verified state current, so the next visit does not wait.
-browser.alarms.create('refresh', { periodInMinutes: REFRESH_MINUTES });
+// Created once: this runs on every start of the event page, and creating it
+// again would restart its period, so a page woken by visits would never
+// refresh.
+browser.alarms.get('refresh').then(a => { if (!a) browser.alarms.create('refresh', { periodInMinutes: REFRESH_MINUTES }); });
 browser.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name !== 'refresh') return;
   for (const repo of Object.keys(await load())) await verifySite(repo).catch(() => {});
