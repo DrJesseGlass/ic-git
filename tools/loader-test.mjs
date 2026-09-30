@@ -5,8 +5,13 @@
 //     live sites, reads the registry through an EIP-1193 provider when one is
 //     on the right chain and falls back to the RPC when not, and refuses a
 //     tampered page and a repo with no record;
+//   - its core is core/verifier.js, byte-identical (tools/sync-core.mjs);
+//   - derivePolicy pins exactly the scripts and styles a page loads: fixed
+//     cases offline, and both live sites produce a policy;
 //   - with --browser, in headless Chrome: the crossorigin edit "run it" makes
-//     is refused whenever it would change anything but the pinned tags.
+//     is refused whenever it would change anything but the pinned tags, the
+//     page runs when opened from disk, and derivePolicy agrees with a second
+//     derivation from the browser's own parser on both live pages.
 //
 //   node tools/loader-test.mjs            # all of it (needs the network)
 //   node tools/loader-test.mjs --offline  # the block comparison only
@@ -122,11 +127,62 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
   if (!ok) process.exitCode = 1;
 }
 
+// The loader's core is core/verifier.js, not an edited copy of it.
+{
+  const src = read('../core/verifier.js').replace(/\n$/, '');
+  const inline = between(html, '// === core ===', '// === end core ===') + '// === end core ===';
+  const ok = inline === src;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  loader core is core/verifier.js${ok ? '' : ' (run node tools/sync-core.mjs)'}`);
+  if (!ok) process.exitCode = 1;
+}
+
+const Verifier = new Function(between(html, '// === core ===', '// === end core ===') + '\nreturn Verifier;')();
+
+// derivePolicy on fixed pages: what it pins, what it ignores, where it
+// refuses. Hashes are sha256 over the text as the parser leaves it.
+{
+  const { createHash } = await import('node:crypto');
+  const h = t => "'sha256-" + createHash('sha256').update(t).digest('base64') + "'";
+  const I = 'sha384-XIhEYmHnXytH69pjI0KFgnptcvdZ2ZdkD3c+uSIC3Xoxuc+tCO3UX4l1/JieQMTS';
+  const J = 'sha512-' + 'A'.repeat(86) + '==';
+  const page = 'https://example.raw.icp0.io/site/r/';
+  const tail = "; object-src 'none'; base-uri 'none'";
+  const policy = t => Verifier.derivePolicy(new TextEncoder().encode(t), page);
+  const cases = [
+    ['nothing to run', '<p>hi</p>', "script-src 'none'; style-src 'none'" + tail],
+    ['inline script and style, in order', '<style>a{}</style><script>x()</script><script>y()</script>',
+      `script-src ${h('x()')} ${h('y()')}; style-src ${h('a{}')}` + tail],
+    ['CRLF and CR become LF before hashing', '<script>a()\r\nb()\rc()</script>', `script-src ${h('a()\nb()\nc()')}; style-src 'none'` + tail],
+    ['uppercase tags, original text hashed', '<SCRIPT>Go()</SCRIPT>', `script-src ${h('Go()')}; style-src 'none'` + tail],
+    ['external script by every integrity token', `<script src=a.js integrity="${I} ${J}?x"></script>`, `script-src '${I}' '${J}'; style-src 'none'` + tail],
+    ['stylesheet by its resolved URL', `<link rel="Stylesheet" href="./s.css" integrity="${I}">`, `script-src 'none'; style-src ${page}s.css` + tail],
+    ['modulepreload by integrity', `<link rel=modulepreload href=m.js integrity="${I}">`, `script-src '${I}'; style-src 'none'` + tail],
+    ['same script twice, pinned once', '<script>x()</script><script>x()</script>', `script-src ${h('x()')}; style-src 'none'` + tail],
+    ['a script in a comment is not pinned', '\x3c!-- <script>no()</script> --><script>yes()</script>', `script-src ${h('yes()')}; style-src 'none'` + tail],
+    ['a script in an attribute value is not pinned', '<p title="<script>no()</script>"><script>yes()</script>', `script-src ${h('yes()')}; style-src 'none'` + tail],
+    ['a script in a title is not pinned', '<title><script>no()</script></title><script>yes()</script>', `script-src ${h('yes()')}; style-src 'none'` + tail],
+    ['a <script-x> element is not a script', '<script-x>no()</script-x>', "script-src 'none'; style-src 'none'" + tail],
+    ['external script without integrity', '<script src=a.js></script>', /no integrity to pin/],
+    ['a script inside svg', '<svg><script>x()</script></svg>', /inside <svg> or <math>/],
+    ['a style inside math', '<math><style>a{}</style></math>', /inside <svg> or <math>/],
+    ['a script never closed', '<script>x()', /never closed/],
+  ];
+  const bad = [];
+  for (const [name, input, want] of cases) {
+    let got;
+    try { got = await policy(input); } catch (e) { got = e; }
+    const ok = want instanceof RegExp ? got instanceof Error && want.test(got.message) : got === want;
+    if (!ok) bad.push(`${name}: got ${got instanceof Error ? 'Error ' + got.message : got}`);
+  }
+  for (const b of bad) console.log('        ' + b);
+  console.log(`${bad.length ? 'FAIL' : 'PASS'}  derivePolicy: ${cases.length - bad.length}/${cases.length} fixed pages`);
+  if (bad.length) process.exitCode = 1;
+}
+
 const browser = process.argv[process.argv.indexOf('--browser') + 1];
 if (process.argv.includes('--browser')) await domCases(browser);
 if (process.argv.includes('--offline')) process.exit(process.exitCode ?? 0);
 
-const Verifier = new Function(between(html, '// === core ===', '// === end core ===') + '\nreturn Verifier;')();
 const { rpc } = Verifier.DEFAULTS;
 const pass = (label, cond, r) => {
   if (!cond) {
@@ -147,6 +203,7 @@ const provider = chainId => ({
 for (const repo of ['ic-vote', 'ic-git']) {
   const r = await Verifier.verify({ repo });
   pass(`${repo}: verified through the RPC`, r.verified && r.checks.map(c => c.id).join() === 'R,B,D,E', r);
+  pass(`${repo}: and pinned (${r.policy ? r.policy.split(';').slice(0, 2).map(d => d.trim().split(' ').length - 1).join(' script, ') + ' style source(s)' : r.policyError})`, typeof r.policy === 'string' && !r.policyError, r);
 }
 
 let r = await Verifier.verify({ repo: 'ic-vote', provider: provider(11155111) });
@@ -245,11 +302,39 @@ async function domCases(bin) {
     assert.ok(await load, 'loader/index.html did not fire load');
     const page = (await send('Runtime.evaluate', { returnByValue: true, expression:
       "JSON.stringify({ core: typeof Verifier, repo: document.getElementById('repo').value, out: document.getElementById('out').textContent.length > 0 })" })).result.value;
-    ws.close();
     const want = JSON.stringify({ core: 'object', repo: 'no-such-repo', out: true });
     const loads = page === want && thrown.length === 0;
     console.log(`${loads ? 'PASS' : 'FAIL'}  loader/index.html opened from disk: scripts run, ?repo= fills the form and starts a check${loads ? '' : ` (got ${page}; ${thrown.join(' | ') || 'no exceptions'})`}`);
     if (!loads) process.exitCode = 1;
+
+    // derivePolicy against a second derivation written from the browser's
+    // own parser, on both live pages: the scripts and styles the DOM holds,
+    // in document order, hashed from their parsed text.
+    const fromDom = `async url => {
+      const doc = new DOMParser().parseFromString(await (await fetch(url, { cache: 'no-store' })).text(), 'text/html');
+      const b64 = a => btoa(String.fromCharCode(...a));
+      const h = async t => "'sha256-" + b64(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))) + "'";
+      const ints = v => (v || '').split(/[ \\t\\n\\r\\f]+/).map(t => t.split('?')[0]).filter(t => /^sha(256|384|512)-[A-Za-z0-9+\\/]+={0,2}$/.test(t)).map(t => "'" + t + "'");
+      const scripts = [], styles = [];
+      for (const el of doc.querySelectorAll('script, link[rel~="modulepreload" i]')) {
+        if (el.localName === 'link' || el.hasAttribute('src')) scripts.push(...ints(el.getAttribute('integrity')));
+        else scripts.push(await h(el.textContent));
+      }
+      for (const el of doc.querySelectorAll('style, link[rel~="stylesheet" i]')) {
+        styles.push(el.localName === 'link' ? new URL(el.getAttribute('href'), url).href : await h(el.textContent));
+      }
+      const s = l => [...new Set(l)].join(' ') || "'none'";
+      return 'script-src ' + s(scripts) + '; style-src ' + s(styles) + "; object-src 'none'; base-uri 'none'";
+    }`;
+    for (const repo of ['ic-git', 'ic-vote']) {
+      const url = `https://${Verifier.DEFAULTS.canister}.raw.icp0.io/site/${repo}/`;
+      const dom = (await send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(${fromDom})(${JSON.stringify(url)})` }));
+      const mine = await Verifier.derivePolicy(new Uint8Array(await (await fetch(url, { cache: 'no-store' })).arrayBuffer()), url);
+      const agree = dom.result?.value === mine;
+      console.log(`${agree ? 'PASS' : 'FAIL'}  derivePolicy agrees with the browser's parser on live ${repo}${agree ? '' : `\n        core: ${mine}\n        dom:  ${dom.result?.value ?? JSON.stringify(dom.exceptionDetails)}`}`);
+      if (!agree) process.exitCode = 1;
+    }
+    ws.close();
   } finally {
     const exited = new Promise(r => chrome.once('exit', r));
     chrome.kill();
