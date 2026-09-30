@@ -88,49 +88,49 @@ enforces the verified page's scripts instead of its bytes:
    the extension has host permission, so the manifest names the canisters
    in scope.
 4. Fail closed before that rule exists. A static rule in the manifest
-   blocks main-frame requests to the canisters in scope (redirecting to
-   the extension's own "not yet checked" page), and the session rule of
-   step 3 is paired with a higher-priority `allow` for that site that
-   lifts the block; the policy rule outranks the `allow`, since Chrome
-   skips a `modifyHeaders` rule below a matching `allow`. Session rules
-   do not survive a browser restart, so the background re-derives and
-   re-installs them on `runtime.onStartup`; until it has, the block
-   holds. Without this the first visit after install or restart would
-   run the page under no policy at all.
+   (`extension/rules.json`) sets `script-src 'none'` on every main-frame
+   response under `/site/` on the canisters in scope, and the session rule
+   of step 3 outranks it for a verified entrypoint (both `set` the header;
+   the higher priority wins, measured below). A page nobody has checked,
+   or whose check failed, therefore runs no script at all -- and with step
+   5 its delivered markup is never parsed either, so the stop page drawn
+   over a bare document is all the tab shows. Session rules and the
+   worker's state do not survive a browser restart; the static rule does,
+   so the first visit after a restart is checked again, not trusted.
+   (An earlier draft blocked the request instead, redirecting to an
+   extension page and lifting the block with a paired `allow`; the static
+   policy is simpler and, with step 5, shows no delivered byte either.)
+5. A page-world script at `document_start` (`extension/main.js`) calls
+   `document.open()` before any child of `<html>` exists. That aborts the
+   delivered response: its parser is discarded, so none of the page the
+   network sent is parsed or run. The isolated content script then asks
+   the background for what to show, and writes it through `main.js`,
+   once: on a verified site the checked bytes (cached by the background
+   since the check, so no network is involved at all), otherwise a bare
+   document under the "checking" screen or the stop page. The document
+   keeps its origin, so storage and wallet sign-in are the live site's,
+   relative URLs need no `<base>`, and same-origin SRI needs no
+   `crossorigin` edit; it also keeps the response's policy of step 3,
+   since `document.open()` retains the policy container.
 
-Now whatever the network delivers, only scripts identical to the verified
-page's can run; an injected `<script src>` is refused by the browser, not
-by us. What CSP does not stop is changed markup -- altered text or a fake
-form without script. No fetch after the fact can catch that: the
-navigation's bytes are never visible, and a targeted MITM answers the
-extension's fetch with the honest page and the navigation with the fake.
-So the page never runs the navigation's bytes at all:
-
-5. A content script at `document_start` calls `window.stop()` before any
-   child of `<html>` exists and asks the background for the entrypoint;
-   the background fetches it, runs the core against the record, and
-   hands back the bytes or the failing check. On a pass the content
-   script does what the loader does -- `document.open()`, `write`,
-   `close()` -- and on a fail it writes the stop page. The document keeps
-   its origin, so storage and wallet sign-in are the live site's, the
-   page's relative URLs need no `<base>`, and same-origin SRI needs no
-   `crossorigin` edit; it also keeps the policy of step 3, since
-   `document.open()` retains the document's policy container. Until the
-   bytes arrive the tab shows the neutral "checking" screen.
+   Not `window.stop()`, as an earlier draft said: `stop()` marks the
+   parser aborted, and on such a document `document.open()` is a no-op,
+   so nothing can be written (measured below). The write must also come
+   from the page's world: from the isolated world, `document.write` did
+   nothing.
 
 That the fetch is distinguishable from the navigation no longer matters:
 its result is not evidence about the page, it is the page. A MITM that
 answers it with the recorded bytes has served the honest page; one that
-answers with anything else fails the hash. What is not yet shown is that
-`window.stop()` at `document_start` leaves none of the delivered markup
-parsed. Chrome runs the script once the `<html>` element exists and
-before any other DOM is constructed, so it should; the spike (order of
-work) loads a page whose body opens with a script that records having
-run. Until it passes, Chrome's guarantee is the policy's alone --
-scripts and styles pinned, markup not -- and the stop page and this
-document say so; if it fails, that limitation stays, and Firefox is the
-byte-level browser. A site whose record changes between the rule and the
-load simply fails closed until the background check catches up.
+answers with anything else fails the hash. What the navigation's bytes
+can still do is make requests: Chrome's preload scanner reads ahead in
+the raw response and starts fetching the images, stylesheets and script
+URLs it names before any extension code runs (measured below). Nothing
+it fetches is parsed, applied or run, but the requests go out -- a
+tampered page can make the browser send GETs, cookies attached, to URLs
+of its choosing. That is the residue on Chrome; Firefox's hold (above)
+has none. A site whose record changes between the rule and the load
+simply fails closed until the background check catches up.
 
 The derived policy is stricter than check E, and a site must meet both.
 A hash-only `script-src` refuses inline event handlers (`onclick=`),
@@ -185,9 +185,34 @@ the development machine intercepts the branded browser (docs/LOADER.md).
    worked with the proxy paused and again with it on, extension on both
    times.
 
-So Chrome gets script-level enforcement before anything runs; what it
-does not get is Firefox's byte-level hold. The replaced document of step
-5 stands in for it, once its spike passes.
+Run 2026-09-30, for the implementation:
+
+6. **Rule priority: the higher `set` wins.** A static priority-1 rule
+   setting `script-src 'none'` on all of `/site/`, and a priority-2 rule
+   setting ic-vote's pinned policy: ic-vote ran under the pinned policy
+   alone (no refusals), and the console, covered only by the static
+   rule, had all three of its scripts refused.
+7. **Replacing the document: `document.open()`, not `window.stop()`.** A
+   local page whose `<head>` and `<body>` scripts each report home if
+   they run, served with a hash-only CSP. `window.stop()` at
+   `document_start` left the document empty and ran neither script, but
+   `document.open()` then did nothing, from the isolated world or the
+   page's -- the spec makes it a no-op once `stop()` has aborted the
+   parser. `document.open()` alone, synchronously at `document_start` in
+   the page's world, aborted the delivered page (neither script ran, its
+   markup never reached the DOM, with 1 MB of padding too), and the
+   checked bytes written after it became the page: its inline script
+   whose hash the response's CSP listed ran, and one it did not list was
+   refused -- the policy survives the write.
+8. **The preload scanner still fetches.** In every variant above, the
+   delivered page's `<link rel=stylesheet>` and `<img>` were requested
+   before any extension code ran, though neither was used. Recorded in
+   step 5 as Chrome's residue.
+
+So Chrome gets both layers: the tab only ever shows the checked bytes,
+and they run under a policy that admits only their own scripts. What it
+does not get is Firefox's hold on the response itself, so the delivered
+page can still make requests it names.
 
 `chrome.debugger` would give Chrome Firefox's guarantee, at the cost of the
 debugging bar on every tab while it is attached. It is not the default; it
@@ -286,11 +311,15 @@ is submitted to a store, and the Releases table carries the version.
    policy above, written without a DOM (a service worker has none) and
    checked against a second derivation from the browser's own parser on
    both live pages; on both it produces exactly the policies tested here.
-3. Chrome extension first, for its reach: the spike that `window.stop()`
-   at `document_start` parses none of the delivered markup, then
-   background verification, the CSP rule, the replaced document, stop
-   page, toolbar state -- and wallet sign-in and a write tried on the
-   console under the policy and through the replaced document.
+3. Done, but for the wallet: the Chrome extension (`extension/`, tests in
+   `tools/extension-test.mjs`) -- background verification through two
+   RPCs, the static and pinned rules, the replaced document, the stop
+   page with "check again" and a two-click "open anyway", the toolbar
+   badge. Still to do: wallet sign-in and a write on the console in a
+   real browser, through the replaced document.
+3a. ic-vote: inline its stylesheet at staging, so it can be pinned (today
+   the extension stops it as verified but unpinnable), then redeploy and
+   republish its record.
 4. Firefox extension: `filterResponseData` and the same stop page; the
    recommended browser where the byte-level guarantee matters (operators,
    observers).

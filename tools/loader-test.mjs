@@ -131,8 +131,9 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
 {
   const src = read('../core/verifier.js').replace(/\n$/, '');
   const inline = between(html, '// === core ===', '// === end core ===') + '// === end core ===';
-  const ok = inline === src;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  loader core is core/verifier.js${ok ? '' : ' (run node tools/sync-core.mjs)'}`);
+  const ext = read('../extension/verifier.js').replace(/\n$/, '');
+  const ok = inline === src && ext === src;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  loader and extension cores are core/verifier.js${ok ? '' : ' (run node tools/sync-core.mjs)'}`);
   if (!ok) process.exitCode = 1;
 }
 
@@ -189,6 +190,21 @@ const pinnedPages = [];
     ['a script in an iframe is not pinned', '<iframe><script>no()</script></iframe>', none],
     ['a script after plaintext is not pinned', '<plaintext><script>no()</script>', none],
     ['a double-escaped script', '<script>\x3c!-- <script> </script> --></script>', /where it ends is ambiguous/],
+    ['a data block is not pinned', '<script type="application/json">no()</script><script>x()</script>', one],
+    ['a data block with a src needs no integrity', '<script type=text/plain src=a.txt></script>', none],
+    ['a nomodule script is not pinned', '<script nomodule>no()</script><script>x()</script>', one],
+    ['a JavaScript type with parameters is a data block', '<script type="text/javascript; charset=utf-8">no()</script>', none],
+    ['a type of only spaces is a data block', '<script type=" ">no()</script>', none],
+    ['an empty type, a padded type and a language run', '<script type="">a()</script><script type=" Text/JavaScript ">b()</script><script language=JavaScript1.2>c()</script>',
+      `script-src ${h('a()')} ${h('b()')} ${h('c()')}; style-src 'none'` + tail],
+    ['a language that is not JavaScript is not pinned', '<script language=vbscript>no()</script>', none],
+    ['type wins over language', '<script type=module language=vbscript>x()</script>', one],
+    ['a module with nomodule runs', '<script type=module nomodule>x()</script>', one],
+    ['an import map is pinned', '<script type=importmap>{}</script>', `script-src ${h('{}')}; style-src 'none'` + tail],
+    ['a handler for something else is not pinned', '<script for=document event=onclick>no()</script><script for=" Window " event="onload()">x()</script>', one],
+    ['a type holding a character reference', '<script type="text/&#106;avascript">x()</script>', /character reference/],
+    ['a script inside a template', '<template><script>x()</script></template>', /inside <template>/],
+    ['a data block inside a template, a script after it', '<template><script type=application/json>no()</script><p></template><script>x()</script>', one],
   ];
   const bad = [];
   for (const [name, input, want] of cases) {
@@ -342,7 +358,23 @@ async function domCases(bin) {
       const h = async t => "'sha256-" + b64(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))) + "'";
       const ints = v => (v || '').split(/[ \\t\\n\\r\\f]+/).map(t => t.split('?')[0]).filter(t => /^sha(256|384|512)-[A-Za-z0-9+\\/]+={0,2}$/.test(t)).map(t => "'" + t + "'");
       const scripts = [], styles = [];
+      // Whether a script runs, from the attributes as the parser decoded
+      // them: a data block, a nomodule script and a handler for another
+      // event do not.
+      const js = /^(application\\/(x-)?(ecma|java)script|text\\/((x-)?(ecma|java)script|javascript1\\.[0-5]|jscript|livescript))$/i;
+      const strip = v => v.replace(/^[ \\t\\n\\f\\r]+|[ \\t\\n\\f\\r]+$/g, '');
+      const runs = el => {
+        const type = el.getAttribute('type'), lang = el.getAttribute('language');
+        const t = type !== null ? (type === '' ? 'text/javascript' : strip(type)) : lang ? 'text/' + lang : 'text/javascript';
+        if (/^(module|importmap)$/i.test(t)) return true;
+        if (!js.test(t) || el.hasAttribute('nomodule')) return false;
+        if (el.hasAttribute('for') && el.hasAttribute('event')) {
+          return /^window$/i.test(strip(el.getAttribute('for'))) && /^onload(\\(\\))?$/i.test(strip(el.getAttribute('event')));
+        }
+        return true;
+      };
       for (const el of doc.querySelectorAll('script, link[rel~="modulepreload" i]')) {
+        if (el.localName === 'script' && !runs(el)) continue;
         if (el.localName === 'link' || el.hasAttribute('src')) scripts.push(...ints(el.getAttribute('integrity')));
         else scripts.push(await h(el.textContent));
       }
