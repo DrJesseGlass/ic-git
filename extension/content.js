@@ -10,7 +10,11 @@
 // them.
 (() => {
   'use strict';
-  const navStart = performance.timeOrigin;
+  // When this navigation began, on the clock the background pins by. Not
+  // performance.timeOrigin: after the system has slept it can lag
+  // Date.now() by minutes, and a load that began after the pin would then
+  // look older than it, and be reloaded again and again.
+  const navStart = Date.now() - performance.now();
   let root = null;
   let repo = null; // the site this page is, once the background has said
 
