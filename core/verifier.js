@@ -495,7 +495,11 @@ function unverifiableSubresource(servedPath, body) {
         if (!attrs.has(name)) attrs.set(name, value);
       }
     };
-    let foreign = false;
+    // `plain` as in the scanner: false once <svg>, <math> or <select> has
+    // begun, where the raw-text elements below may be ordinary markup, so
+    // their bodies are walked rather than skipped (a script in one is then
+    // refused or pinned, never missed).
+    let foreign = false, plain = true;
     for (let i = 0; ;) {
       const lt = hay.indexOf('<', i);
       if (lt === -1) break;
@@ -526,6 +530,7 @@ function unverifiableSubresource(servedPath, body) {
       if (!t) throw new Error('<' + name + '> tag is never closed');
       i = t.end + 1;
       if (name === 'svg' || name === 'math') foreign = true;
+      if (foreign || name === 'select') plain = false;
       if ((name === 'script' || name === 'style') && foreign) {
         throw new Error('cannot pin a <' + name + '> inside <svg> or <math>: its text is markup there');
       }
@@ -533,17 +538,25 @@ function unverifiableSubresource(servedPath, body) {
         const rel = (t.attrs.get('rel') || '').toLowerCase().split(/[ \t\n\r\f]+/);
         const href = t.attrs.get('href');
         if (href !== undefined && rel.includes('stylesheet')) {
+          // The browser decodes character references in the value; this does not.
+          if (/&(?:#|[a-z0-9]+(?![a-z0-9=]))/i.test(href)) throw new Error('stylesheet href holds a character reference this cannot decode: ' + href);
           const u = new URL(href, pageUrl).href;
           if (!/^[^\s;,']+$/.test(u)) throw new Error('stylesheet URL cannot be written as a CSP source: ' + u);
           styles.push(u);
         }
         if (href !== undefined && rel.includes('modulepreload')) scripts.push(...integritySources(t.attrs.get('integrity')));
       }
-      if (['script', 'style', 'textarea', 'title', 'xmp', 'noembed', 'noframes', 'noscript'].includes(name)) {
+      if (name === 'script' || name === 'style' || (plain && ['textarea', 'title', 'xmp', 'noembed', 'noframes', 'noscript'].includes(name))) {
         const end = rawTextEnd(hay, i, name);
         if (end === -1) throw new Error('<' + name + '> is never closed');
         const body = text.slice(i, end);
         if (name === 'script') {
+          // After a comment opener, a nested script start tag makes the parser
+          // read past the first end tag (the double-escaped state).
+          const esc = hay.indexOf('\x3c!--', i);
+          if (esc !== -1 && esc < end && /<script[ \t\n\f\/>]/.test(hay.slice(esc, end))) {
+            throw new Error('cannot pin a <script> that holds a comment opener and then a script start tag: where it ends is ambiguous');
+          }
           if (t.attrs.has('src')) {
             const pins = integritySources(t.attrs.get('integrity'));
             if (!pins.length) throw new Error('<script src=' + t.attrs.get('src') + '> has no integrity to pin');

@@ -166,6 +166,11 @@ const Verifier = new Function(between(html, '// === core ===', '// === end core 
     ['a script inside svg', '<svg><script>x()</script></svg>', /inside <svg> or <math>/],
     ['a style inside math', '<math><style>a{}</style></math>', /inside <svg> or <math>/],
     ['a script never closed', '<script>x()', /never closed/],
+    ['a script under an svg title is not missed', '<svg><title><script>x()</script></title></svg>', /inside <svg> or <math>/],
+    ['a script under a raw-text tag in a select is not missed', '<select><xmp><script>x()</script></xmp></select>', `script-src ${h('x()')}; style-src 'none'` + tail],
+    ['a stylesheet href with a character reference', `<link rel=stylesheet href="s.css?a=1&amp;b=2" integrity="${I}">`, /character reference/],
+    ['a stylesheet href with a plain ampersand', `<link rel=stylesheet href="s.css?a=1&b=2" integrity="${I}">`, `script-src 'none'; style-src ${page}s.css?a=1&b=2` + tail],
+    ['a double-escaped script', '<script>\x3c!-- <script> </script> --></script>', /where it ends is ambiguous/],
   ];
   const bad = [];
   for (const [name, input, want] of cases) {
@@ -326,7 +331,7 @@ async function domCases(bin) {
       const s = l => [...new Set(l)].join(' ') || "'none'";
       return 'script-src ' + s(scripts) + '; style-src ' + s(styles) + "; object-src 'none'; base-uri 'none'";
     }`;
-    for (const repo of ['ic-git', 'ic-vote']) {
+    for (const repo of process.argv.includes('--offline') ? [] : ['ic-git', 'ic-vote']) {
       const url = `https://${Verifier.DEFAULTS.canister}.raw.icp0.io/site/${repo}/`;
       const dom = (await send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(${fromDom})(${JSON.stringify(url)})` }));
       const mine = await Verifier.derivePolicy(new Uint8Array(await (await fetch(url, { cache: 'no-store' })).arrayBuffer()), url);
