@@ -129,15 +129,20 @@ function badge(tabId, state, site) {
   browser.action.setTitle({ tabId, title: 'ic-git verifier: ' + (site ? site.repo + ' ' : '') + look[2] }).catch(() => {});
 }
 
-// What each tab's last navigation came to, for the content script.
-const results = new Map();
+// What each tab's latest navigation came to, for the content script. A
+// decision is bound to its request: deciding can take a network check,
+// and a tab that navigated on meanwhile must not hear about the page it
+// left as if it were the page it is on.
+const latest = new Map();  // tabId -> requestId of its latest navigation
+const results = new Map(); // tabId -> { url, status, site } of that navigation
 const summary = site => ({
   repo: site.repo, commit: site.commit || null, checks: site.checks || [],
   via: site.via || null, policyError: site.policyError || null,
 });
-function settle(tabId, status, site) {
-  results.set(tabId, { status, site: site ? summary(site) : undefined });
-  badge(tabId, status, site);
+function settle(d, status, site) {
+  if (latest.get(d.tabId) !== d.requestId) return;
+  results.set(d.tabId, { url: d.url, status, site: site ? summary(site) : undefined });
+  badge(d.tabId, status, site);
 }
 
 // --- the headers: which policy this response goes out with ---
@@ -163,6 +168,7 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
 
 // --- the body: held until it is known to be the recorded page ---
 browser.webRequest.onBeforeRequest.addListener(d => {
+  latest.set(d.tabId, d.requestId);
   const filter = browser.webRequest.filterResponseData(d.requestId);
   const chunks = [];
   filter.ondata = e => chunks.push(new Uint8Array(e.data));
@@ -173,7 +179,7 @@ browser.webRequest.onBeforeRequest.addListener(d => {
     let at = 0;
     for (const c of chunks) { bytes.set(c, at); at += c.length; }
     let out;
-    try { out = await decide(d, bytes); } catch (e) { settle(d.tabId, 'failed', failedSite(siteOf(d.url) || '', e)); out = BARE; }
+    try { out = await decide(d, bytes); } catch (e) { settle(d, 'failed', failedSite(siteOf(d.url) || '', e)); out = BARE; }
     applied.delete(d.requestId);
     filter.write(typeof out === 'string' ? new TextEncoder().encode(out) : out);
     filter.close();
@@ -183,14 +189,14 @@ browser.webRequest.onBeforeRequest.addListener(d => {
 // What the tab gets for a held response: its own bytes, or a document of ours.
 async function decide(d, bytes) {
   const repo = siteOf(d.url);
-  if (repo === null) { settle(d.tabId, 'uncovered'); return BARE; }
-  if (await allowed(d.tabId, repo)) { settle(d.tabId, 'allowed', { repo }); return bytes; }
+  if (repo === null) { settle(d, 'uncovered'); return BARE; }
+  if (await allowed(d.tabId, repo)) { settle(d, 'allowed', { repo }); return bytes; }
   const site = (await load())[repo];
   const policy = applied.get(d.requestId);
   if (site && site.status === 'verified' && await sha256(bytes) === site.bundleHash) {
-    if (policy === site.policy) { settle(d.tabId, 'verified', site); return bytes; }
+    if (policy === site.policy) { settle(d, 'verified', site); return bytes; }
     // Verified since these headers went out: load it again under the policy.
-    settle(d.tabId, 'checking', site);
+    settle(d, 'checking', site);
     return REFRESH;
   }
   // Not what the site's state says it should be. Check what arrived itself:
@@ -199,8 +205,8 @@ async function decide(d, bytes) {
   // a targeted man in the middle can tamper with one response while the
   // record and every other fetch are honest -- so it is not remembered.
   const mine = await check(repo, bytes).catch(e => failedSite(repo, e));
-  if (mine.status === 'verified') { await remember(mine); settle(d.tabId, 'checking', mine); return REFRESH; }
-  settle(d.tabId, mine.status, mine);
+  if (mine.status === 'verified') { await remember(mine); settle(d, 'checking', mine); return REFRESH; }
+  settle(d, mine.status, mine);
   return BARE;
 }
 
@@ -210,8 +216,8 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
   if (tabId === undefined) return { error: 'no tab' };
   if (msg.type === 'visit') {
     const r = results.get(tabId);
-    if (r) return r;
-    // No held response for this tab (a page restored from history, say):
+    if (r && r.url === msg.url) return { status: r.status, site: r.site };
+    // No held response for this page (one restored from history, say):
     // say what the site's state is, and let a reload settle the rest.
     const repo = siteOf(msg.url);
     if (repo === null) return { status: 'uncovered' };
@@ -234,6 +240,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
 });
 
 browser.tabs.onRemoved.addListener(tabId => {
+  latest.delete(tabId);
   results.delete(tabId);
   return exclusive(async () => {
     const { allowed = {} } = await browser.storage.session.get('allowed');
