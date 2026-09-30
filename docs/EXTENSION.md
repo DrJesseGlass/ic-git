@@ -279,8 +279,13 @@ is submitted to a store, and the Releases table carries the version.
 ## Order of work
 
 1. Done: the Chrome spikes (above) -- Chrome is buildable.
-2. The shared core as a module both the loader and the extension import
-   byte-identical, the way the scanner block is shared today.
+2. Done: the shared core. `core/verifier.js` is the source; the loader
+   inlines it byte-identical (`tools/sync-core.mjs`, checked by
+   tools/loader-test.mjs), and the extension's background worker will
+   `importScripts` it. It gained `derivePolicy(bytes, url)`, the pinned
+   policy above, written without a DOM (a service worker has none) and
+   checked against a second derivation from the browser's own parser on
+   both live pages; on both it produces exactly the policies tested here.
 3. Chrome extension first, for its reach: the spike that `window.stop()`
    at `document_start` parses none of the delivered markup, then
    background verification, the CSP rule, the replaced document, stop
