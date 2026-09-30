@@ -50,8 +50,11 @@ tools/reproducible-build.sh, tools/check-module-hash.sh
 tools/e2e-local.sh      end-to-end pass on a throwaway local replica, run
                         before every mainnet upgrade
 tools/verify.mjs        check a served site against its registry record (CLI)
-core/verifier.js        the verification core: the loader inlines it (synced by
-                        tools/sync-core.mjs), the extension will load it as is
+core/verifier.js        the verification core: the loader inlines it and the
+                        extension copies it (both synced by tools/sync-core.mjs)
+extension/              the Chrome extension: checks ic-git sites as they load
+                        and shows only the checked page (docs/EXTENSION.md;
+                        tools/extension-test.mjs drives it)
 loader/index.html       the same check in a browser, then run the checked bytes
                         (see "Verifying a site in the browser")
 site/                   placeholder content for the asset canister ("www")

@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        { "header": "Content-Security-Policy", "operation": "set", "value": "script-src 'none'; object-src 'none'; base-uri 'none'" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "|https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/",
+      "resourceTypes": ["main_frame"]
+    }
+  }
+]

@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "ic-git verifier",
+  "version": "0.1.0",
+  "description": "Checks ic-git sites against their on-chain record and shows only the checked page, running only its verified scripts.",
+  "permissions": [
+    "declarativeNetRequest",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/*",
+    "https://icp-api.io/*",
+    "https://ethereum-sepolia-rpc.publicnode.com/*",
+    "https://sepolia.gateway.tenderly.co/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/*"
+      ],
+      "js": [
+        "main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "default",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "action": {
+    "default_title": "ic-git verifier"
+  }
+}

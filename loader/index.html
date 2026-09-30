@@ -106,6 +106,8 @@ const Verifier = (() => {
     rpc: 'https://ethereum-sepolia-rpc.publicnode.com',
     icApi: 'https://icp-api.io',
     provider: null, // an EIP-1193 provider (window.ethereum), preferred for the registry read
+    providerName: 'wallet', // how a read through it is reported
+    providerOnly: false, // true: a provider that fails or is on another chain fails the read
   };
   const GET_SELECTOR = '693ec85e'; // keccak256("get(string)")[..4], as in tools/verify.mjs
   const SITE_SUFFIX = '#site'; // provenance.rs::SITE_KEY_SUFFIX
@@ -385,11 +387,14 @@ function unverifiableSubresource(servedPath, body) {
     if (o.provider) {
       try {
         const chain = parseInt(await o.provider.request({ method: 'eth_chainId' }), 16);
-        if (chain === o.chainId) return { ret: await o.provider.request({ method: 'eth_call', params }), via: 'wallet' };
-        note = 'wallet is on chain ' + chain + ', not ' + o.chainId;
+        if (chain === o.chainId) return { ret: await o.provider.request({ method: 'eth_call', params }), via: o.providerName };
+        note = o.providerName + ' is on chain ' + chain + ', not ' + o.chainId;
       } catch (e) {
-        note = 'wallet read failed: ' + (e.message || e);
+        note = o.providerName + ' read failed: ' + (e.message || e);
       }
+      // The extension reads through two endpoints that must agree; falling
+      // back to one would quietly drop that requirement.
+      if (o.providerOnly) throw new Error(note);
     }
     return { ret: await rpc(o, 'eth_call', params), via: new URL(o.rpc).host, note };
   }

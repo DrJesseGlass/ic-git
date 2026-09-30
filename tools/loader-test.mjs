@@ -131,8 +131,9 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
 {
   const src = read('../core/verifier.js').replace(/\n$/, '');
   const inline = between(html, '// === core ===', '// === end core ===') + '// === end core ===';
-  const ok = inline === src;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  loader core is core/verifier.js${ok ? '' : ' (run node tools/sync-core.mjs)'}`);
+  const ext = read('../extension/verifier.js').replace(/\n$/, '');
+  const ok = inline === src && ext === src;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  loader and extension cores are core/verifier.js${ok ? '' : ' (run node tools/sync-core.mjs)'}`);
   if (!ok) process.exitCode = 1;
 }
 
