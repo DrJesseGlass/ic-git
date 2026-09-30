@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "ic-git verifier",
+  "version": "0.1.0",
+  "description": "Checks ic-git sites against their on-chain record and lets a page load only if what arrived is the recorded page, running only its verified scripts.",
+  "browser_specific_settings": {
+    "gecko": { "id": "verifier@ic-git.dev", "strict_min_version": "128.0" }
+  },
+  "permissions": ["webRequest", "webRequestBlocking", "webRequestFilterResponse", "storage", "alarms"],
+  "host_permissions": [
+    "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/*",
+    "https://icp-api.io/*",
+    "https://ethereum-sepolia-rpc.publicnode.com/*",
+    "https://sepolia.gateway.tenderly.co/*"
+  ],
+  "background": { "scripts": ["verifier.js", "background.js"] },
+  "content_scripts": [
+    {
+      "matches": ["https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": { "default_title": "ic-git verifier" }
+}

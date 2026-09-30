@@ -55,6 +55,9 @@ core/verifier.js        the verification core: the loader inlines it and the
 extension/              the Chrome extension: checks ic-git sites as they load
                         and shows only the checked page (docs/EXTENSION.md;
                         tools/extension-test.mjs drives it)
+extension-firefox/      the Firefox extension: holds each page until what
+                        arrived is the recorded page (docs/EXTENSION.md;
+                        tools/extension-firefox-test.mjs drives it)
 loader/index.html       the same check in a browser, then run the checked bytes
                         (see "Verifying a site in the browser")
 site/                   placeholder content for the asset canister ("www")

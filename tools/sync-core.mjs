@@ -4,12 +4,15 @@
 //   - loader/index.html, inline between its "// === core ===" and
 //     "// === end core ===" lines: the loader is one self-contained file,
 //     and its registry record is that file's hash;
-//   - extension/verifier.js, whole: a background worker can importScripts
-//     only files inside its own package.
-// Edits go to core/verifier.js and are synced from here.
+//   - extension/verifier.js and extension-firefox/verifier.js, whole: an
+//     extension can load only files inside its own package.
+// It also copies extension/content.js, the content script both extensions
+// share, to extension-firefox/content.js.
+// Edits go to core/verifier.js and extension/content.js, and are synced
+// from here.
 //
-//   node tools/sync-core.mjs          # rewrite both copies
-//   node tools/sync-core.mjs --check  # exit 1 if either copy differs
+//   node tools/sync-core.mjs          # rewrite every copy
+//   node tools/sync-core.mjs --check  # exit 1 if any copy differs
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const START = '// === core ===', END = '// === end core ===';
@@ -28,14 +31,19 @@ if (a === -1 || b < a) {
 const copies = [
   { name: 'loader/index.html', url: loaderUrl, now: loader, want: loader.slice(0, a) + core + loader.slice(b + END.length) },
 ];
-const extUrl = new URL('../extension/verifier.js', import.meta.url);
-copies.push({ name: 'extension/verifier.js', url: extUrl, now: existsSync(extUrl) ? readFileSync(extUrl, 'utf8') : '', want: core + '\n' });
+const whole = (name, want) => {
+  const url = new URL('../' + name, import.meta.url);
+  copies.push({ name, url, now: existsSync(url) ? readFileSync(url, 'utf8') : '', want });
+};
+whole('extension/verifier.js', core + '\n');
+whole('extension-firefox/verifier.js', core + '\n');
+whole('extension-firefox/content.js', readFileSync(new URL('../extension/content.js', import.meta.url), 'utf8'));
 const stale = copies.filter(c => c.now !== c.want);
 if (process.argv.includes('--check')) {
-  for (const c of stale) console.error(`${c.name} is out of step with core/verifier.js: run node tools/sync-core.mjs`);
+  for (const c of stale) console.error(`${c.name} is out of step with its source: run node tools/sync-core.mjs`);
   if (stale.length) process.exit(1);
-  console.log('loader/index.html and extension/verifier.js carry core/verifier.js');
+  console.log('every copy is in step: ' + copies.map(c => c.name).join(', '));
 } else {
-  for (const c of stale) { writeFileSync(c.url, c.want); console.log(`synced core/verifier.js into ${c.name}`); }
-  if (!stale.length) console.log('both copies already carry core/verifier.js');
+  for (const c of stale) { writeFileSync(c.url, c.want); console.log(`synced ${c.name}`); }
+  if (!stale.length) console.log('every copy already in step');
 }
