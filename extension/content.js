@@ -1,4 +1,6 @@
 // ic-git verifier -- content script, at document_start on /site/ pages.
+// Shared by the Chrome and Firefox extensions (tools/sync-core.mjs copies
+// it into extension-firefox/); what differs is who replaces the page.
 //
 // main.js (the page's world) has already dropped the delivered response.
 // This asks the background what the tab should show and writes it: on a
@@ -131,6 +133,9 @@
     }
     repo = res.site && res.site.repo || null;
     if ((res.status === 'verified' || res.status === 'allowed') && typeof res.text === 'string') { write(res.text); return; }
+    // Firefox holds the response itself: the page already is the checked
+    // (or allowed) bytes, so there is nothing to write.
+    if (res.status === 'verified' || res.status === 'allowed') return;
     write(BARE);
     if (res.status === 'checking') checking(res.site.repo);
     else stop(res.status, res.site || {});
