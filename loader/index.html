@@ -529,7 +529,8 @@ function unverifiableSubresource(servedPath, body) {
   // The Content-Security-Policy that admits exactly the scripts and styles a
   // verified page loads and nothing else: each inline <script> and <style>
   // by the sha256 of its text, each external script (and modulepreload) by
-  // its integrity hashes; no frames, objects or <base>. An external
+  // its integrity hashes; no frames, objects or <base>. A <script> the
+  // browser does not run (a data block, a nomodule script) gets no pin. An external
   // stylesheet cannot be pinned and is refused: Chrome takes no hash source
   // for one, and a URL source admits whatever is served there to markup
   // that drops the integrity attribute. For a page that passed check E
@@ -558,6 +559,31 @@ function unverifiableSubresource(servedPath, body) {
     .map(t => t.split('?')[0])
     .filter(t => /^sha(?:256|384|512)-[A-Za-z0-9+/]+={0,2}$/.test(t))
     .map(t => "'" + t + "'");
+
+  // Whether the browser runs a <script> with these attributes, as "prepare
+  // the script element" decides it: a JavaScript type (or none) that is not
+  // nomodule and not an event handler for something else, a module, or an
+  // import map. Anything else is a data block. A pin for a script that does
+  // not run would admit its text as one in markup that drops the attribute.
+  const JS_TYPES = ('application/ecmascript application/javascript application/x-ecmascript application/x-javascript '
+    + 'text/ecmascript text/javascript text/javascript1.0 text/javascript1.1 text/javascript1.2 text/javascript1.3 '
+    + 'text/javascript1.4 text/javascript1.5 text/jscript text/livescript text/x-ecmascript text/x-javascript').split(' ');
+  const trimmed = s => s.replace(/^[ \t\n\f\r]+|[ \t\n\f\r]+$/g, '').toLowerCase();
+  const scriptRuns = attrs => {
+    for (const a of ['type', 'language', 'for', 'event']) {
+      // The browser decodes it; this does not.
+      if ((attrs.get(a) || '').includes('&')) throw new Error('cannot pin a <script> whose ' + a + ' holds a character reference: whether it runs is ambiguous');
+    }
+    const type = attrs.has('type') ? (attrs.get('type') === '' ? 'text/javascript' : trimmed(attrs.get('type')))
+      : attrs.get('language') ? 'text/' + attrs.get('language').toLowerCase()
+      : 'text/javascript';
+    if (type === 'module' || type === 'importmap') return true;
+    if (!JS_TYPES.includes(type) || attrs.has('nomodule')) return false;
+    if (attrs.has('for') && attrs.has('event')) {
+      return trimmed(attrs.get('for')) === 'window' && ['onload', 'onload()'].includes(trimmed(attrs.get('event')));
+    }
+    return true;
+  };
 
   async function derivePolicy(bytes, pageUrl) {
     const text = td.decode(bytes).replace(/\r\n?/g, '\n');
@@ -600,8 +626,9 @@ function unverifiableSubresource(servedPath, body) {
       }
     };
     // `foreign`: the open elements inside <svg> or <math>, outermost first,
-    // or null outside one. `select`: inside a <select>.
-    let foreign = null, select = false;
+    // or null outside one. `select`: inside a <select>. `templates`: how
+    // many <template>s are open.
+    let foreign = null, select = false, templates = 0;
     // The parse from `at` on is not one this can follow. True when nothing
     // after it needs a pin, so the walk can stop there.
     const lost = (at, where) => {
@@ -643,6 +670,8 @@ function unverifiableSubresource(servedPath, body) {
           } else if (select) {
             if (name === 'select') select = false;
             else if (name !== 'option' && name !== 'optgroup' && lost(lt, '</' + name + '> inside <select>')) break;
+          } else if (name === 'template' && templates) {
+            templates--;
           }
         } else if (c === '/' || c === '!' || c === '?') {
           const gt = hay.indexOf('>', lt + 1);
@@ -684,6 +713,7 @@ function unverifiableSubresource(servedPath, body) {
       if (name === 'svg' || name === 'math') { if (!t.selfClosing) foreign = [name]; continue; }
       if (name === 'select') { select = true; continue; }
       if (name === 'plaintext') break;
+      if (name === 'template') { templates++; continue; }
       if (name === 'link') {
         const rel = (t.attrs.get('rel') || '').toLowerCase().split(/[ \t\n\r\f]+/);
         const href = t.attrs.get('href');
@@ -703,12 +733,17 @@ function unverifiableSubresource(servedPath, body) {
           if (esc !== -1 && esc < end && /<script[ \t\n\f\/>]/.test(hay.slice(esc, end))) {
             throw new Error('cannot pin a <script> that holds a comment opener and then a script start tag: where it ends is ambiguous');
           }
-          if (t.attrs.has('src')) {
-            const pins = integritySources(t.attrs.get('integrity'));
-            if (!pins.length) throw new Error('<script src=' + t.attrs.get('src') + '> has no integrity to pin');
-            scripts.push(...pins);
-          } else {
-            scripts.push(await sha256Source(body));
+          if (scriptRuns(t.attrs)) {
+            // A template's content is inert, unless the template declares a
+            // shadow root; and which end tag closes one is not followed.
+            if (templates) throw new Error('cannot pin a <script> inside <template>: whether it runs is ambiguous');
+            if (t.attrs.has('src')) {
+              const pins = integritySources(t.attrs.get('integrity'));
+              if (!pins.length) throw new Error('<script src=' + t.attrs.get('src') + '> has no integrity to pin');
+              scripts.push(...pins);
+            } else {
+              scripts.push(await sha256Source(body));
+            }
           }
         }
         if (name === 'style') styles.push(await sha256Source(body));

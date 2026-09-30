@@ -234,10 +234,13 @@ const summary = site => ({
 // "Open anyway": run this tab's copy of the site without the pinned
 // policy, until the tab closes. Behind a deliberate second click in the
 // page; recorded so the badge keeps saying so.
-async function allow(tabId, repo) {
+// Its rule ids and stored entries go through the same queue as the sites':
+// two tabs allowed together would otherwise take the same id.
+const allow = (tabId, repo) => exclusive(async () => {
   const { allowed = {} } = await chrome.storage.session.get('allowed');
-  const id = Math.max(50_000, ...Object.values(allowed)) + 1;
-  allowed[allowedKey(tabId, repo)] = id;
+  const key = allowedKey(tabId, repo);
+  const id = allowed[key] || Math.max(50_000, ...Object.values(allowed)) + 1;
+  allowed[key] = id;
   await chrome.storage.session.set({ allowed });
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [id],
@@ -247,16 +250,16 @@ async function allow(tabId, repo) {
       condition: { ...entryCondition(repo), tabIds: [tabId] },
     }],
   });
-}
+});
 
-chrome.tabs.onRemoved.addListener(async tabId => {
+chrome.tabs.onRemoved.addListener(tabId => exclusive(async () => {
   const { allowed = {} } = await chrome.storage.session.get('allowed');
   const gone = Object.keys(allowed).filter(k => k.startsWith(tabId + ':'));
   if (!gone.length) return;
   await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: gone.map(k => allowed[k]) });
   for (const k of gone) delete allowed[k];
   await chrome.storage.session.set({ allowed });
-});
+}));
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = sender.tab && sender.tab.id;
