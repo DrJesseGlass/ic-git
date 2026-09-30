@@ -311,12 +311,19 @@ is submitted to a store, and the Releases table carries the version.
    policy above, written without a DOM (a service worker has none) and
    checked against a second derivation from the browser's own parser on
    both live pages; on both it produces exactly the policies tested here.
-3. Done, but for the wallet: the Chrome extension (`extension/`, tests in
+3. Done: the Chrome extension (`extension/`, tests in
    `tools/extension-test.mjs`) -- background verification through two
    RPCs, the static and pinned rules, the replaced document, the stop
    page with "check again" and a two-click "open anyway", the toolbar
-   badge. Still to do: wallet sign-in and a write on the console in a
-   real browser, through the replaced document.
+   badge. Tried in branded Chrome on macOS, loaded unpacked, 2026-09-30:
+   with the machine's TLS-inspecting proxy (NordVPN Threat Protection)
+   on, the console was stopped -- served hash 212c0fd7 against the
+   record, check E naming the proxy's injected script; with it paused,
+   "check again" verified and the console ran; OISY sign-in, and a push
+   token minted and revoked, all through the replaced document. That
+   test found a result reused after failure (a reload kept showing the
+   stop page until the entry went stale); failures are now rechecked on
+   every visit.
 3a. ic-vote: inline its stylesheet at staging, so it can be pinned (today
    the extension stops it as verified but unpinnable), then redeploy and
    republish its record.

@@ -250,6 +250,23 @@ const report = (name, ok, got) => {
   } finally { await b.close(); }
 }
 
+// 5b. The proxy goes away (a VPN's inspection paused): a plain reload checks
+// again rather than showing the remembered failure.
+{
+  let tampering = true;
+  const b = await open({ mitm: (url, t) => (tampering && url === '/site/ic-git/' ? t.replace('</head>', INJECT + '</head>') : null) });
+  try {
+    await b.go(CONSOLE, 20_000);
+    let s = await b.state();
+    const stopped = s.overlay && s.badge === '!';
+    tampering = false;
+    await b.go(CONSOLE, 20_000);
+    s = await b.state();
+    report('after a failure, a reload checks again: the proxy gone, the console runs',
+      stopped && !s.overlay && /repositories/.test(s.text) && s.badge === 'OK' && s.pwned === 0, { stopped, ...s });
+  } finally { await b.close(); }
+}
+
 // 6. A page under /site/ that no record covers.
 {
   const b = await open();

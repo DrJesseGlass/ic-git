@@ -189,7 +189,6 @@ async function visit(tabId, href, navStart) {
   }
   const sites = await load();
   const known = sites[repo];
-  const fresh = known && Date.now() - known.checkedAt < REFRESH_MINUTES * 60_000;
 
   const failSoft = e => {
     const site = { repo, status: 'failed', checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message || String(e) }] };
@@ -202,6 +201,7 @@ async function visit(tabId, href, navStart) {
   // verifies, reloads the tab, which then gets the new answer.
   if (known && known.status === 'verified' && known.pinnedAt <= navStart && known.text) {
     badge(tabId, 'verified', known);
+    const fresh = Date.now() - known.checkedAt < REFRESH_MINUTES * 60_000;
     (fresh ? recheck(known) : verifySite(repo)).then(site => {
       if (site.status !== 'verified' || site.policy !== known.policy || site.bundleHash !== known.bundleHash) {
         tell(tabId, { type: 'result', status: site.status, reload: true, site: summary(site) });
@@ -209,13 +209,12 @@ async function visit(tabId, href, navStart) {
     }, failSoft);
     return { status: 'verified', text: known.text, site: summary(known) };
   }
-  if (known && fresh && known.status !== 'verified') {
-    badge(tabId, known.status, known);
-    return { status: known.status, site: summary(known) };
-  }
-  // First visit, or a stale or unpinned state: check, then reload under
-  // the pinned policy (this load's policy is the static one, which would
-  // refuse the verified scripts too), or stop.
+  // First visit, a stale state, or one that did not verify: check again
+  // now. Only a verified result is reused -- a failure may have been a
+  // proxy that is since gone, or a record since republished, and the
+  // check costs seconds. Then reload under the pinned policy (this load's
+  // policy is the static one, which would refuse the verified scripts
+  // too), or stop.
   badge(tabId, 'checking', { repo });
   verifySite(repo).then(site => {
     const reload = site.status === 'verified';
