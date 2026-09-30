@@ -140,13 +140,17 @@ const Verifier = new Function(between(html, '// === core ===', '// === end core 
 
 // derivePolicy on fixed pages: what it pins, what it ignores, where it
 // refuses. Hashes are sha256 over the text as the parser leaves it.
+// `pinnedPages` keeps the pages it pins, for --browser to put to the
+// browser's own parser.
+const pinnedPages = [];
 {
   const { createHash } = await import('node:crypto');
   const h = t => "'sha256-" + createHash('sha256').update(t).digest('base64') + "'";
   const I = 'sha384-XIhEYmHnXytH69pjI0KFgnptcvdZ2ZdkD3c+uSIC3Xoxuc+tCO3UX4l1/JieQMTS';
   const J = 'sha512-' + 'A'.repeat(86) + '==';
   const page = 'https://example.raw.icp0.io/site/r/';
-  const tail = "; object-src 'none'; base-uri 'none'";
+  const tail = "; object-src 'none'; frame-src 'none'; base-uri 'none'";
+  const none = "script-src 'none'; style-src 'none'" + tail, one = `script-src ${h('x()')}; style-src 'none'` + tail;
   const policy = t => Verifier.derivePolicy(new TextEncoder().encode(t), page);
   const cases = [
     ['nothing to run', '<p>hi</p>', "script-src 'none'; style-src 'none'" + tail],
@@ -155,7 +159,7 @@ const Verifier = new Function(between(html, '// === core ===', '// === end core 
     ['CRLF and CR become LF before hashing', '<script>a()\r\nb()\rc()</script>', `script-src ${h('a()\nb()\nc()')}; style-src 'none'` + tail],
     ['uppercase tags, original text hashed', '<SCRIPT>Go()</SCRIPT>', `script-src ${h('Go()')}; style-src 'none'` + tail],
     ['external script by every integrity token', `<script src=a.js integrity="${I} ${J}?x"></script>`, `script-src '${I}' '${J}'; style-src 'none'` + tail],
-    ['stylesheet by its resolved URL', `<link rel="Stylesheet" href="./s.css" integrity="${I}">`, `script-src 'none'; style-src ${page}s.css` + tail],
+    ['an external stylesheet, even with integrity', `<link rel="Stylesheet" href="./s.css" integrity="${I}">`, /external stylesheet/],
     ['modulepreload by integrity', `<link rel=modulepreload href=m.js integrity="${I}">`, `script-src '${I}'; style-src 'none'` + tail],
     ['same script twice, pinned once', '<script>x()</script><script>x()</script>', `script-src ${h('x()')}; style-src 'none'` + tail],
     ['a script in a comment is not pinned', '\x3c!-- <script>no()</script> --><script>yes()</script>', `script-src ${h('yes()')}; style-src 'none'` + tail],
@@ -166,10 +170,24 @@ const Verifier = new Function(between(html, '// === core ===', '// === end core 
     ['a script inside svg', '<svg><script>x()</script></svg>', /inside <svg> or <math>/],
     ['a style inside math', '<math><style>a{}</style></math>', /inside <svg> or <math>/],
     ['a script never closed', '<script>x()', /never closed/],
-    ['a script under an svg title is not missed', '<svg><title><script>x()</script></title></svg>', /inside <svg> or <math>/],
-    ['a script under a raw-text tag in a select is not missed', '<select><xmp><script>x()</script></xmp></select>', `script-src ${h('x()')}; style-src 'none'` + tail],
-    ['a stylesheet href with a character reference', `<link rel=stylesheet href="s.css?a=1&amp;b=2" integrity="${I}">`, /character reference/],
-    ['a stylesheet href with a plain ampersand', `<link rel=stylesheet href="s.css?a=1&b=2" integrity="${I}">`, `script-src 'none'; style-src ${page}s.css?a=1&b=2` + tail],
+    ['a script under an svg title', '<svg><title><script>x()</script></title></svg>', /markup in <title> inside <svg> or <math>/],
+    ['a script under a raw-text tag in a select', '<select><xmp><script>x()</script></xmp></select>', /<xmp> inside <select>/],
+    ['a script after a closed svg', '<svg viewBox="0 0 1 1"><title>Icon</title><g><path d="M0 0"/></g></svg><script>x()</script>', one],
+    ['a script after a self-closing svg', '<svg/><script>x()</script>', one],
+    ['an unquoted value ending in / does not self-close', '<svg a=b/><script>x()</script>', /inside <svg> or <math>/],
+    ['a script after a nested svg closes', '<svg><svg></svg></svg><script>x()</script>', one],
+    ['a script between a nested svg and the outer end tag', '<svg><svg></svg><script>x()</script></svg>', /inside <svg> or <math>/],
+    ['CDATA in svg is text', '<svg><![CDATA[ </svg> ]]></svg><script>x()</script>', one],
+    ['a script after markup in foreignObject', '<svg><foreignObject><p>a</p></foreignObject></svg><script>x()</script>', /markup in <foreignobject>/],
+    ['a script after a tag that breaks out of svg', '<svg><p></svg><script>x()</script>', /<p> inside <svg> or <math>/],
+    ['a script after an end tag the svg does not own', '<div><svg></div><script>x()</script>', /<\/div> inside <svg> or <math>/],
+    ['foreignObject with nothing to pin after it', '<script>x()</script><svg><foreignObject><p>a</p></foreignObject></svg>', one],
+    ['svg textarea is markup, its script refused', '<svg><textarea><script>x()</script></textarea></svg>', /inside <svg> or <math>/],
+    ['a textarea after a closed select is raw text again', '<select><option>a</option></select><textarea><script>no()</script></textarea>', none],
+    ['a script after a closed select', '<select><optgroup><option>a</select><script>x()</script>', one],
+    ['a script after a select that holds more than options', '<select><button>a</button></select><script>x()</script>', /<button> inside <select>/],
+    ['a script in an iframe is not pinned', '<iframe><script>no()</script></iframe>', none],
+    ['a script after plaintext is not pinned', '<plaintext><script>no()</script>', none],
     ['a double-escaped script', '<script>\x3c!-- <script> </script> --></script>', /where it ends is ambiguous/],
   ];
   const bad = [];
@@ -177,6 +195,7 @@ const Verifier = new Function(between(html, '// === core ===', '// === end core 
     let got;
     try { got = await policy(input); } catch (e) { got = e; }
     const ok = want instanceof RegExp ? got instanceof Error && want.test(got.message) : got === want;
+    if (typeof want === 'string') pinnedPages.push([name, input, want]);
     if (!ok) bad.push(`${name}: got ${got instanceof Error ? 'Error ' + got.message : got}`);
   }
   for (const b of bad) console.log('        ' + b);
@@ -208,7 +227,9 @@ const provider = chainId => ({
 for (const repo of ['ic-vote', 'ic-git']) {
   const r = await Verifier.verify({ repo });
   pass(`${repo}: verified through the RPC`, r.verified && r.checks.map(c => c.id).join() === 'R,B,D,E', r);
-  pass(`${repo}: and pinned (${r.policy ? r.policy.split(';').slice(0, 2).map(d => d.trim().split(' ').length - 1).join(' script, ') + ' style source(s)' : r.policyError})`, typeof r.policy === 'string' && !r.policyError, r);
+  // A page that links a stylesheet cannot be pinned until it inlines it.
+  const unpinned = /external stylesheet/.test(r.policyError || '');
+  pass(`${repo}: and ${unpinned ? 'refused a pin' : 'pinned'} (${r.policy ? r.policy.split(';').slice(0, 2).map(d => d.trim().split(' ').length - 1).join(' script, ') + ' style source(s)' : r.policyError})`, unpinned || (typeof r.policy === 'string' && !r.policyError), r);
 }
 
 let r = await Verifier.verify({ repo: 'ic-vote', provider: provider(11155111) });
@@ -315,8 +336,8 @@ async function domCases(bin) {
     // derivePolicy against a second derivation written from the browser's
     // own parser, on both live pages: the scripts and styles the DOM holds,
     // in document order, hashed from their parsed text.
-    const fromDom = `async url => {
-      const doc = new DOMParser().parseFromString(await (await fetch(url, { cache: 'no-store' })).text(), 'text/html');
+    const fromDom = `async (url, html) => {
+      const doc = new DOMParser().parseFromString(html ?? await (await fetch(url, { cache: 'no-store' })).text(), 'text/html');
       const b64 = a => btoa(String.fromCharCode(...a));
       const h = async t => "'sha256-" + b64(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))) + "'";
       const ints = v => (v || '').split(/[ \\t\\n\\r\\f]+/).map(t => t.split('?')[0]).filter(t => /^sha(256|384|512)-[A-Za-z0-9+\\/]+={0,2}$/.test(t)).map(t => "'" + t + "'");
@@ -325,16 +346,26 @@ async function domCases(bin) {
         if (el.localName === 'link' || el.hasAttribute('src')) scripts.push(...ints(el.getAttribute('integrity')));
         else scripts.push(await h(el.textContent));
       }
-      for (const el of doc.querySelectorAll('style, link[rel~="stylesheet" i]')) {
-        styles.push(el.localName === 'link' ? new URL(el.getAttribute('href'), url).href : await h(el.textContent));
-      }
+      if (doc.querySelector('link[rel~="stylesheet" i][href]')) return 'refused: external stylesheet';
+      for (const el of doc.querySelectorAll('style')) styles.push(await h(el.textContent));
       const s = l => [...new Set(l)].join(' ') || "'none'";
-      return 'script-src ' + s(scripts) + '; style-src ' + s(styles) + "; object-src 'none'; base-uri 'none'";
+      return 'script-src ' + s(scripts) + '; style-src ' + s(styles) + "; object-src 'none'; frame-src 'none'; base-uri 'none'";
     }`;
+    // The same on the fixed pages derivePolicy pins: the browser's parser
+    // finds the scripts and styles it found, and no others.
+    const differ = [];
+    for (const [name, input, want] of pinnedPages) {
+      const dom = await send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(${fromDom})('https://example.raw.icp0.io/site/r/', ${JSON.stringify(input)})` });
+      if (dom.result?.value !== want) differ.push(`${name}: dom ${dom.result?.value ?? JSON.stringify(dom.exceptionDetails)}`);
+    }
+    for (const d of differ) console.log('        ' + d);
+    console.log(`${differ.length ? 'FAIL' : 'PASS'}  derivePolicy agrees with the browser's parser on ${pinnedPages.length - differ.length}/${pinnedPages.length} fixed pages it pins`);
+    if (differ.length) process.exitCode = 1;
     for (const repo of process.argv.includes('--offline') ? [] : ['ic-git', 'ic-vote']) {
       const url = `https://${Verifier.DEFAULTS.canister}.raw.icp0.io/site/${repo}/`;
       const dom = (await send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(${fromDom})(${JSON.stringify(url)})` }));
-      const mine = await Verifier.derivePolicy(new Uint8Array(await (await fetch(url, { cache: 'no-store' })).arrayBuffer()), url);
+      const mine = await Verifier.derivePolicy(new Uint8Array(await (await fetch(url, { cache: 'no-store' })).arrayBuffer()), url)
+        .catch(e => /external stylesheet/.test(e.message) ? 'refused: external stylesheet' : Promise.reject(e));
       const agree = dom.result?.value === mine;
       console.log(`${agree ? 'PASS' : 'FAIL'}  derivePolicy agrees with the browser's parser on live ${repo}${agree ? '' : `\n        core: ${mine}\n        dom:  ${dom.result?.value ?? JSON.stringify(dom.exceptionDetails)}`}`);
       if (!agree) process.exitCode = 1;

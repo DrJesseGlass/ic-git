@@ -439,18 +439,29 @@ function unverifiableSubresource(servedPath, body) {
   // The Content-Security-Policy that admits exactly the scripts and styles a
   // verified page loads and nothing else: each inline <script> and <style>
   // by the sha256 of its text, each external script (and modulepreload) by
-  // its integrity hashes, each external stylesheet by its exact URL (Chrome
-  // takes no hash source for one; its integrity, which check E requires,
-  // pins the contents). For a page that passed check E only, so every
-  // external reference carries an enforceable integrity.
+  // its integrity hashes; no frames, objects or <base>. An external
+  // stylesheet cannot be pinned and is refused: Chrome takes no hash source
+  // for one, and a URL source admits whatever is served there to markup
+  // that drops the integrity attribute. For a page that passed check E
+  // only, so every external reference carries an enforceable integrity.
   //
   // The page is walked as the scanner walks it -- the same tag-name,
-  // comment and raw-text rules -- over the original text, since hashes and
-  // URLs are case-sensitive. The parser turns CRLF and CR into LF before a
-  // script's text exists, and so does this. Where it cannot say exactly
-  // what the browser will hash -- a script or style inside <svg> or <math>,
-  // whose text is ordinary markup there -- it throws rather than guess: a
-  // wrong pin breaks the page, which is loud, but a missing one is not.
+  // comment and raw-text rules -- over the original text, since hashes are
+  // case-sensitive. The parser turns CRLF and CR into LF before a script's
+  // text exists, and so does this. It must pin exactly what the browser
+  // runs: a missing pin blocks a script of the verified page, and a pin for
+  // text the browser does not run admits that text as a script in altered
+  // markup. So where it cannot say what the browser will do it throws
+  // rather than guess. Inside <svg> or <math> it follows the open elements
+  // to the end tag that closes them, inside <select> to </select>, and
+  // takes up plain HTML again there; a script or style in either, or
+  // anything that leaves the simple case (a tag that breaks out of foreign
+  // content, markup in an integration point such as <foreignObject>,
+  // anything but options in a select), is refused if a script, style or
+  // link comes after it.
+  const BREAKOUT = ('b big blockquote body br center code dd div dl dt em embed font h1 h2 h3 h4 h5 h6 head hr i img li listing '
+    + 'menu meta nobr ol p pre ruby s small span strong strike sub sup table tt u ul var').split(' ');
+  const INTEGRATION = ['foreignobject', 'desc', 'title', 'mi', 'mo', 'mn', 'ms', 'mtext', 'annotation-xml'];
   const b64 = bytes => { let s = ''; for (const x of bytes) s += String.fromCharCode(x); return btoa(s); };
   const sha256Source = async text => "'sha256-" + b64(new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(text)))) + "'";
   const integritySources = value => (value || '').split(/[ \t\n\r\f]+/)
@@ -463,13 +474,16 @@ function unverifiableSubresource(servedPath, body) {
     const hay = text.replace(/[A-Z]/g, c => c.toLowerCase());
     const scripts = [], styles = [];
     // One start tag's attributes, first occurrence winning, values taken
-    // from the original text; {attrs, end} or null if it never closes.
+    // from the original text; {attrs, end, selfClosing} or null if it never
+    // closes. Self-closing as the tokenizer has it: a `/` right before the
+    // `>`, outside an unquoted value.
     const startTag = from => {
       const attrs = new Map();
       for (let i = from; ;) {
-        while (i < hay.length && (isWs(hay[i]) || hay[i] === '/')) i++;
+        let slash = false;
+        while (i < hay.length && (isWs(hay[i]) || hay[i] === '/')) slash = hay[i++] === '/';
         if (i >= hay.length) return null;
-        if (hay[i] === '>') return { attrs, end: i };
+        if (hay[i] === '>') return { attrs, end: i, selfClosing: slash };
         const ns = i;
         if (hay[i] === '=') i++;
         while (i < hay.length && !isWs(hay[i]) && !'/=>'.includes(hay[i])) i++;
@@ -495,11 +509,17 @@ function unverifiableSubresource(servedPath, body) {
         if (!attrs.has(name)) attrs.set(name, value);
       }
     };
-    // `plain` as in the scanner: false once <svg>, <math> or <select> has
-    // begun, where the raw-text elements below may be ordinary markup, so
-    // their bodies are walked rather than skipped (a script in one is then
-    // refused or pinned, never missed).
-    let foreign = false, plain = true;
+    // `foreign`: the open elements inside <svg> or <math>, outermost first,
+    // or null outside one. `select`: inside a <select>.
+    let foreign = null, select = false;
+    // The parse from `at` on is not one this can follow. True when nothing
+    // after it needs a pin, so the walk can stop there.
+    const lost = (at, where) => {
+      if (/<(?:script|style|link)/.test(hay.slice(at))) {
+        throw new Error('cannot pin a script, style or link after ' + where + ': how the browser parses from there is ambiguous');
+      }
+      return true;
+    };
     for (let i = 0; ;) {
       const lt = hay.indexOf('<', i);
       if (lt === -1) break;
@@ -510,11 +530,30 @@ function unverifiableSubresource(servedPath, body) {
         i = end;
         continue;
       }
+      if (foreign && text.startsWith('<![CDATA[', lt)) {
+        const end = hay.indexOf(']]>', lt);
+        if (end === -1) break;
+        i = end + 3;
+        continue;
+      }
       if (!/[a-z]/.test(c)) {
         if (c === '/' && /[a-z]/.test(hay[lt + 2] || '')) {
-          const t = startTag(tagNameEnd(hay, lt + 2));
+          const nameEnd = tagNameEnd(hay, lt + 2);
+          const name = hay.slice(lt + 2, nameEnd);
+          const t = startTag(nameEnd);
           if (!t) break;
           i = t.end + 1;
+          if (foreign) {
+            // The end tag closes the nearest open element of its name; one
+            // that matches none is handled by the HTML around the <svg>.
+            const open = foreign.lastIndexOf(name);
+            if (open === -1) { if (lost(lt, '</' + name + '> inside <svg> or <math>')) break; }
+            foreign.length = open;
+            if (!open) foreign = null;
+          } else if (select) {
+            if (name === 'select') select = false;
+            else if (name !== 'option' && name !== 'optgroup' && lost(lt, '</' + name + '> inside <select>')) break;
+          }
         } else if (c === '/' || c === '!' || c === '?') {
           const gt = hay.indexOf('>', lt + 1);
           if (gt === -1) break;
@@ -529,24 +568,41 @@ function unverifiableSubresource(servedPath, body) {
       const t = startTag(nameEnd);
       if (!t) throw new Error('<' + name + '> tag is never closed');
       i = t.end + 1;
-      if (name === 'svg' || name === 'math') foreign = true;
-      if (foreign || name === 'select') plain = false;
-      if ((name === 'script' || name === 'style') && foreign) {
-        throw new Error('cannot pin a <' + name + '> inside <svg> or <math>: its text is markup there');
+      if (foreign) {
+        if (name === 'script' || name === 'style') {
+          throw new Error('cannot pin a <' + name + '> inside <svg> or <math>: its text is markup there');
+        }
+        if (BREAKOUT.includes(name)) { if (lost(lt, '<' + name + '> inside <svg> or <math>')) break; }
+        if (t.selfClosing) continue;
+        if (INTEGRATION.includes(name)) {
+          // Its content is parsed as HTML; followed only while that is text.
+          const next = hay.indexOf('<', i);
+          if (next === -1) break;
+          if (!hay.startsWith('</' + name, next) || tagNameEnd(hay, next + 2) !== next + 2 + name.length) {
+            if (lost(lt, 'markup in <' + name + '> inside <svg> or <math>')) break;
+          }
+        }
+        foreign.push(name);
+        continue;
       }
+      if (select) {
+        // Browsers agree on a select that holds only options; on anything
+        // else in one, the old and the new select parsers differ.
+        if (!['option', 'optgroup', 'hr'].includes(name) && lost(lt, '<' + name + '> inside <select>')) break;
+        continue;
+      }
+      if (name === 'svg' || name === 'math') { if (!t.selfClosing) foreign = [name]; continue; }
+      if (name === 'select') { select = true; continue; }
+      if (name === 'plaintext') break;
       if (name === 'link') {
         const rel = (t.attrs.get('rel') || '').toLowerCase().split(/[ \t\n\r\f]+/);
         const href = t.attrs.get('href');
         if (href !== undefined && rel.includes('stylesheet')) {
-          // The browser decodes character references in the value; this does not.
-          if (/&(?:#|[a-z0-9]+(?![a-z0-9=]))/i.test(href)) throw new Error('stylesheet href holds a character reference this cannot decode: ' + href);
-          const u = new URL(href, pageUrl).href;
-          if (!/^[^\s;,']+$/.test(u)) throw new Error('stylesheet URL cannot be written as a CSP source: ' + u);
-          styles.push(u);
+          throw new Error('cannot pin an external stylesheet (' + href + '): inline it as a <style>');
         }
         if (href !== undefined && rel.includes('modulepreload')) scripts.push(...integritySources(t.attrs.get('integrity')));
       }
-      if (name === 'script' || name === 'style' || (plain && ['textarea', 'title', 'xmp', 'noembed', 'noframes', 'noscript'].includes(name))) {
+      if (['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript'].includes(name)) {
         const end = rawTextEnd(hay, i, name);
         if (end === -1) throw new Error('<' + name + '> is never closed');
         const body = text.slice(i, end);
@@ -570,7 +626,7 @@ function unverifiableSubresource(servedPath, body) {
       }
     }
     const sources = list => [...new Set(list)].join(' ') || "'none'";
-    return 'script-src ' + sources(scripts) + '; style-src ' + sources(styles) + "; object-src 'none'; base-uri 'none'";
+    return 'script-src ' + sources(scripts) + '; style-src ' + sources(styles) + "; object-src 'none'; frame-src 'none'; base-uri 'none'";
   }
 
   async function verify(options) {
