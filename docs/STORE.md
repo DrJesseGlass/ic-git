@@ -5,6 +5,7 @@ committed. Build it from git, not from the working tree, so nothing local
 (Chrome's `_metadata/`, a `.DS_Store`) gets in:
 
 ```sh
+V=$(git show main:extension/manifest.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
 git archive --format=zip -o ic-git-verifier-chrome-$V.zip main:extension
 git archive --format=zip -o ic-git-verifier-firefox-$V.zip main:extension-firefox
 ```
@@ -43,10 +44,17 @@ on-chain record before they run, and runs only the verified page.
 >
 > It reads public records only: the page itself, the ic-git canister's
 > public queries, and the registry through two public Ethereum RPC
-> endpoints that must agree. It collects nothing and sends nothing to
-> anyone. Its source, and the hash of every file in this package, are
-> public and recorded on chain, so you can check the copy you installed:
-> see docs/EXTENSION.md in the ic-git repository.
+> endpoints that must agree. To look a site's record up it has to name
+> the site, so the operators of those endpoints -- the Internet Computer's
+> public API gateway and the two RPC providers -- see which ic-git site
+> is being checked and from which network address, when you open it and
+> every ten minutes after while the browser stays open. That is all it
+> sends: no page content, nothing you type, no identifier, and nothing to
+> the extension's authors, who run no server and collect nothing.
+>
+> Its source, and the hash of every file in this package, are public and
+> recorded on chain, so you can check the copy you installed: see
+> docs/EXTENSION.md in the ic-git repository.
 
 **Category:** Developer Tools (Chrome) / Privacy & Security (Firefox).
 
@@ -58,7 +66,8 @@ not match.
 
 - `declarativeNetRequest`: to set a Content-Security-Policy on pages of
   the ic-git canister -- no scripts until a page verifies, then only that
-  page's own scripts.
+  page's own scripts -- and to send `/site/<repo>` to `/site/<repo>/`, the
+  address its record covers.
 - `storage`: to remember, for the browser session, which sites verified
   and with which policy, so a verified page needs no second check.
 - `alarms`: to re-check verified sites every ten minutes, so a new record
@@ -74,16 +83,21 @@ not match.
 **Remote code (Chrome):** No. All code is in the package; the extension
 runs none it fetches.
 
-**Data usage (Chrome privacy tab):** collects none of the listed
-categories; certify the three disclosures (no sale, no unrelated use, no
-creditworthiness use).
+**Data usage (Chrome privacy tab):** tick "Web history" and no other
+category -- the lookups name the site being checked, and Chrome counts
+anything sent off the device as collected, whoever receives it; certify
+the three disclosures (no sale, no unrelated use, no creditworthiness
+use).
 
 **Privacy policy URL:** a page stating the paragraph above ("It reads
-public records only ... sends nothing to anyone") is enough; the repo's
-docs/EXTENSION.md section on what it reads can serve.
+public records only ... collect nothing") is enough.
 
-**Firefox data collection:** the manifest declares none
-(`data_collection_permissions: { required: ["none"] }`).
+**Firefox data collection:** the manifest declares browsing activity as
+required (`data_collection_permissions: { required: ["browsingActivity"] }`),
+for the same lookups: Mozilla counts any data sent outside the browser,
+and the name of the site being checked goes to `icp-api.io` and the two
+RPC endpoints. Firefox shows this at install. Nothing else is sent, so no
+other category is declared.
 
 **Firefox source code:** not needed -- nothing is minified or built.
 
@@ -105,9 +119,11 @@ at the installed files and compare with the record's `bundleHash`:
 
 - Chrome (macOS):
   `~/Library/Application Support/Google/Chrome/Default/Extensions/<id>/<version>_0/`
-  -- the id is on `chrome://extensions` with Developer mode on.
+  -- the id is on `chrome://extensions` with Developer mode on. The
+  installed manifest carries the store's `key`, so the tool needs the id
+  it must give (`--id`), and refuses the copy without it.
   ```sh
-  node tools/extension-sums.mjs --digest "$HOME/Library/Application Support/Google/Chrome/Default/Extensions/<id>/<version>_0"
+  node tools/extension-sums.mjs --digest --id <id> "$HOME/Library/Application Support/Google/Chrome/Default/Extensions/<id>/<version>_0"
   ```
 - Firefox (macOS): the signed `.xpi` in
   `~/Library/Application Support/Firefox/Profiles/<profile>/extensions/verifier@ic-git.dev.xpi`.

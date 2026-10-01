@@ -45,11 +45,12 @@ const load = async () => (await chrome.storage.session.get('sites')).sites || {}
 const save = async sites => chrome.storage.session.set({ sites });
 
 // The entrypoint of a repo's site, as a DNR regex: /site/<repo>/ or its
-// index.html, with any query. Other paths under /site/ are covered by no
-// record and keep the static policy.
+// index.html, with any query and fragment (a navigation's URL is matched
+// with its fragment on). Other paths under /site/ are covered by no record
+// and keep the static policy.
 const escape = s => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 const siteUrl = repo => ORIGIN + '/site/' + encodeURIComponent(repo) + '/';
-const entryRegex = repo => '^' + escape(siteUrl(repo)) + '(index\\.html)?(\\?[^#]*)?$';
+const entryRegex = repo => '^' + escape(siteUrl(repo)) + '(index\\.html)?(\\?[^#]*)?(#.*)?$';
 // A rule for one repo's entrypoint. Case matters (DNR's default is that it
 // does not): /site/Foo/ and /site/foo/ are different sites to siteOf.
 const entryCondition = repo => ({ regexFilter: entryRegex(repo), isUrlFilterCaseSensitive: true, resourceTypes: ['main_frame'] });

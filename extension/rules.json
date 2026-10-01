@@ -25,11 +25,11 @@
     "action": {
       "type": "redirect",
       "redirect": {
-        "regexSubstitution": "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/\\1/\\2"
+        "regexSubstitution": "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/\\1/\\2\\3"
       }
     },
     "condition": {
-      "regexFilter": "^https://umobs-yiaaa-aaaab-agyrq-cai\\.raw\\.icp0\\.io/site/([^/?#]+)(\\?[^#]*)?$",
+      "regexFilter": "^https://umobs-yiaaa-aaaab-agyrq-cai\\.raw\\.icp0\\.io/site/([^/?#]+)(\\?[^#]*)?(#.*)?$",
       "resourceTypes": [
         "main_frame"
       ]

@@ -431,8 +431,8 @@ Then add a row to "Releases" below.
    is intercepted too; paused, the console ran and ic-vote showed YELLOW.
    That test found /site/<repo> without the slash stopped as uncovered
    although the canister serves the entrypoint there; both extensions now
-   redirect it to /site/<repo>/. The Firefox extension: the Firefox extension
-   (`extension-firefox/`, tests in `tools/extension-firefox-test.mjs`),
+   redirect it to /site/<repo>/, query and fragment kept. The extension
+   is `extension-firefox/` (tests in `tools/extension-firefox-test.mjs`),
    holding the response as above and sharing the core and the content
    script (stop page included) with Chrome through `tools/sync-core.mjs`.
 5. Tighten check E to the derived policy's contract (inline handlers,
