@@ -292,45 +292,87 @@ could be an opt-in "strict" mode for operators.
 ## How the extension's own package is verified
 
 The same answer as the loader's (docs/LOADER.md), adapted to a package of
-several files, and with no canister change.
+several files, and with no canister change. There are two packages,
+`extension/` (Chrome) and `extension-firefox/`, and each gets the same
+treatment and its own record.
 
-- The extension's source is one directory in this repo, `extension/`,
-  with no build step, so the files a store installs are the files in git.
-- `extension/SHA256SUMS` lists the sha256 of every other file in it, sorted
-  by path. It is committed with each release.
-- The canister repo `ic-git-extension` has its site root set to that file
-  (`set_site("ic-git-extension", "extension/SHA256SUMS")`; a site root may
-  name a blob), and `evm_registry_publish_site("ic-git-extension")` records
-  `ic-git-extension#site = (commit, sha256(SHA256SUMS))`. Check E runs on
-  it -- a root whose name has no extension is scanned, not exempted
-  (`site::unverifiable_subresource`) -- and passes because the listing
-  holds no `<`; no path in the listing may contain one.
-- A user, once per release: find the installed files (Chrome:
-  `.../Extensions/<id>/<version>/`, ignoring the store's `_metadata/`;
-  Firefox: unzip the `.xpi`, ignoring `META-INF/`), run
-  `tools/extension-sums.sh <dir>` -- `shasum -a 256` over the files in
-  byte order of path (`LC_ALL=C`, so the listing does not depend on the
-  user's locale), which is nearly all it does -- and compare the digest
-  of that listing with the record, exactly as for the loader.
-- The one thing more it does is for Chrome, whose installer does not
-  leave the files as packaged: it re-serializes `manifest.json` (and adds
-  `update_url`) and re-encodes the images the manifest names, so a byte
-  comparison of the install directory fails on every honest install. The
-  tool compares `manifest.json` as parsed JSON with `update_url` removed,
-  and manifest-named images by decoded pixels; everything else by bytes.
-  Firefox's `.xpi` keeps the packaged bytes when the manifest names its
-  id (`browser_specific_settings.gecko.id`), so it does, and the `.xpi` is
-  the byte-exact route. The extension keeps its icons few and ships no
-  locale catalog (`_locales/`, which Chrome also rewrites).
-- Auditors can skip the stores: clone at the recorded commit and load
-  `extension/` unpacked.
+- Each package is one directory in this repo with no build step, so the
+  files a store installs are the files in git.
+- `<package>/SHA256SUMS` is the package's file list:
+  `node tools/extension-sums.mjs --write <package>` writes it and `--check`
+  says whether it is current (tools/extension-sums-test.mjs checks both).
+  One line per file, `<sha256>  <path>`, in byte order of path, over every
+  file but `SHA256SUMS` itself and what a store adds (Chrome's
+  `_metadata/`, the `.xpi` signature in `META-INF/`).
+- Every file is listed by the sha256 of its bytes but one: Chrome's
+  installer re-serializes `manifest.json` and adds `update_url`, so
+  `manifest.json` is listed by the sha256 of its canonical JSON -- keys
+  sorted, no whitespace, `update_url` removed. An honest install lists
+  the same; a manifest with any other value changed does not. The same
+  rule applies to the Firefox package, whose `.xpi` keeps the packaged
+  bytes anyway, so one tool checks both. Chrome also re-encodes images
+  the manifest names and rewrites `_locales/`; neither package has any.
+- The canister repos `ic-git-extension` and `ic-git-extension-firefox`
+  have their site roots set to those files (a site root may name a blob),
+  and `evm_registry_publish_site` records
+  `<repo>#site = (commit, sha256(SHA256SUMS))`. Check E scans the listing
+  -- a root whose name has no extension is scanned, not exempted -- and it
+  passes because no line holds a `<` (the tool refuses a path that does).
+- A user, once per release: point the tool at the installed files
+  (Chrome: `.../Extensions/<id>/<version>/`; Firefox: the `.xpi`,
+  unzipped) with `--digest`, and compare the result with the record's
+  `bundleHash`, read as for the loader (docs/LOADER.md, "What a user
+  does"). The tool needs only node, and is short enough to read first.
+- Auditors can skip the stores: clone at the recorded commit and load the
+  package directory unpacked.
 - The extension can hash its own files (`runtime.getURL`) and show whether
   they match the record. That catches an honest mismatch (an unpublished
   update) and nothing more: a tampered extension would lie about itself.
-  The first check is the user's, with their own tools.
+  The first check is the user's, with their own tools. (Not built yet.)
 
 Store updates are automatic, so a release is published on chain before it
 is submitted to a store, and the Releases table carries the version.
+
+### Publishing a release (operator, mainnet)
+
+From a checkout of `main` with the release merged, as an operator
+identity, for each package -- `extension` with repo `ic-git-extension`,
+`extension-firefox` with repo `ic-git-extension-firefox`. Operators pay no
+cycles; each publish spends a little Sepolia gas from the canister's EOA.
+
+```sh
+C=umobs-yiaaa-aaaab-agyrq-cai
+PKG=extension; REPO=ic-git-extension          # or extension-firefox, ic-git-extension-firefox
+
+# 0. The listing is current (it is committed with the release).
+node tools/extension-sums.mjs --check $PKG
+
+# 1. First time only: the repo, with its site root at the listing.
+dfx canister --network ic call $C create_repo "(\"$REPO\")"
+dfx canister --network ic call $C set_site "(\"$REPO\", \"$PKG/SHA256SUMS\")"
+
+# 2. Push main.
+TOKEN=$(dfx canister --network ic call $C create_push_token "(\"$REPO\", opt (1 : nat32), null)" \
+  | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
+: "${TOKEN:?create_push_token returned no token}"
+git push "https://ic:$TOKEN@$C.raw.icp0.io/$REPO.git" main
+
+# 3. The canister serves the listing in git (from a terminal, not a browser).
+git show main:$PKG/SHA256SUMS | shasum -a 256
+curl -s "https://$C.raw.icp0.io/site/$REPO/" | shasum -a 256
+
+# 4. Publish, then confirm as for the loader (docs/LOADER.md, step 5).
+dfx canister --network ic call $C evm_registry_publish_site "(\"$REPO\")"
+node tools/verify.mjs $REPO / --record site
+```
+
+Then add a row to "Releases" below.
+
+### Releases
+
+| Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx |
+|---|---|---|---|---|---|
+| (not yet published) | | | | | |
 
 ## What it does not do (yet)
 
@@ -376,5 +418,7 @@ is submitted to a store, and the Releases table carries the version.
    and the import chain of a pinned module), so a page that publishes is a
    page that runs under the extension; the canister and the shared
    scanner block together.
-6. `extension/SHA256SUMS`, `tools/extension-sums.sh`, the `ic-git-extension`
-   record, and a Releases table -- before the first store submission.
+6. Done but for publishing: `extension/SHA256SUMS` and
+   `extension-firefox/SHA256SUMS`, `tools/extension-sums.mjs` (tested by
+   `tools/extension-sums-test.mjs`), the operator steps and the Releases
+   table above. Left: publish both records, then submit to the stores.
