@@ -89,8 +89,8 @@ anything sent off the device as collected, whoever receives it; certify
 the three disclosures (no sale, no unrelated use, no creditworthiness
 use).
 
-**Privacy policy URL:** a page stating the paragraph above ("It reads
-public records only ... collect nothing") is enough.
+**Privacy policy URL:**
+https://github.com/DrJesseGlass/ic-git/blob/main/PRIVACY.md
 
 **Firefox data collection:** the manifest declares browsing activity as
 required (`data_collection_permissions: { required: ["browsingActivity"] }`),
