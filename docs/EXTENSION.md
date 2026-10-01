@@ -222,14 +222,16 @@ Then add a row to Releases.
 ### Releases
 
 The newest row per package is the record on chain. 0.1.0 was published
-but never submitted to a store. The packages in git are 0.1.1, which has
-no record yet: publish it (above) and add its rows before it is submitted
-to a store.
+but never submitted to a store; 0.1.1 superseded it. The Chrome store id
+is filled in once the Chrome Web Store assigns one; users pass it to
+`--id`.
 
 | Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx | Chrome store id |
 |---|---|---|---|---|---|---|
 | 2026-10-01 | Chrome (`ic-git-extension`) | 0.1.0 | `0e80cf60a1e6530bd2565260f98c809f67551f53` | `c766bcb27281c20c5564eb322d63e094beaefd970b56e16b315ec740410a8a3a` | [`0xe1ad2e00...f8bb`](https://sepolia.etherscan.io/tx/0xe1ad2e004523fba7f117c0eb65cc06b76f38621eae4fcf3655efdb8fa898f8bb) (Sepolia 11822489) | -- |
 | 2026-10-01 | Firefox (`ic-git-extension-firefox`) | 0.1.0 | `0e80cf60a1e6530bd2565260f98c809f67551f53` | `6df0039686c702bff3207feaed50acfdedf257ef0016797a1805a8acb06d77f7` | [`0x4ddb7587...593a`](https://sepolia.etherscan.io/tx/0x4ddb7587547dd46fdcdc18e99138ffbaed945c73c4617d90dc9f9ece5a92593a) (Sepolia 11822495) | n/a |
+| 2026-10-01 | Chrome (`ic-git-extension`) | 0.1.1 | `848be9dd48c1db879884076f0e71f8ae1d52e010` | `70696452d02ef89721051b78e73d385e1c557436c65670f659dc57c8475d0cef` | [`0x757dd912...7d1b`](https://sepolia.etherscan.io/tx/0x757dd912d7a416ffbbdd4c84abadd7c0f88db547d3f01183bc11051cd5cc7d1b) (Sepolia 11824283) | -- (not yet submitted) |
+| 2026-10-01 | Firefox (`ic-git-extension-firefox`) | 0.1.1 | `848be9dd48c1db879884076f0e71f8ae1d52e010` | `44aa3e1d6b860c20be70dc57a91d197290c07efb5cb4c076378fba9bd1323174` | [`0x44169d53...7209`](https://sepolia.etherscan.io/tx/0x44169d53f85a8dcb5ca064f0557ec9feac3ac171f7a2ad366896dd0ade6c7209) (Sepolia 11824285) | n/a |
 
 ## Next
 
