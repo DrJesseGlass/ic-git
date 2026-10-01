@@ -386,10 +386,9 @@ only ADD warnings (a check can downgrade, never falsely upgrade):
        provider when there is one) and then runs only the bytes it checked.
        Checking every page load, on the site's own origin, cannot be a
        MetaMask Snap, since Snaps are isolated from the page and never see
-       the served bytes. It needs a content script -- so this step implies
-       an extension of our own, whether or not it ships in the same bundle
-       as the transaction reviewer. The loader's core block is written to
-       run in it unchanged.
+       the served bytes; it takes an extension of our own, and the
+       verifier extensions for Chrome and Firefox (docs/EXTENSION.md) do
+       it, sharing the loader's core.
 
     2. Read X's CERTIFIED module hash -> H_live (BLS-verified, fresh).
 

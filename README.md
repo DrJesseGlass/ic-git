@@ -127,8 +127,8 @@ rather than fetching them again. `?repo=ic-vote&run=1` does it in one step.
 What it cannot do: the page runs on the loader's origin, so its storage and
 any origin-bound sign-in are not the live site's, and a page that chooses
 hosts from `location` instead of `document.baseURI` sees the loader's host.
-An always-on check of the live site needs a browser extension; the loader's
-`// === core ===` block is written to run in one unchanged.
+For an always-on check of the live site, on its own origin, use the
+browser extensions (docs/EXTENSION.md), which run the same core.
 
 How a user gets a copy they can trust -- the loader's own hash, published
 in the registry like any site -- and the operator steps to publish it are

@@ -75,11 +75,7 @@ dfx canister --network ic call $C evm_registry_publish_site '("ic-git-loader")'
 
 It returns the transaction hash and nonce as soon as the transaction is
 broadcast. The canister refuses to publish an entrypoint that loads
-anything unpinned. The loader is self-contained, but it passes only on a
-canister whose scanner skips `<script>` and `<style>` bodies as a browser
-does: the loader's own JavaScript holds strings such as `"<base href=..."`
-that an older scanner reads as tags, and refuses. Run these steps only
-after the canister release that carries that scanner (v0.3.1 or later).
+anything unpinned; the loader is self-contained, so it passes.
 
 ### 5. Confirm on chain
 
