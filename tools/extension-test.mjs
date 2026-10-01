@@ -190,6 +190,11 @@ const report = (name, ok, got) => {
     await b.go(CONSOLE, 8_000);
     s = await b.state();
     report('second visit: no checking screen and no reload', !s.overlay && /repositories/.test(s.text) && s.badge === 'OK' && s.loads === 1, s);
+    await b.go(GW + '/site/ic-git', 15_000);
+    s = await b.state();
+    const href = await b.evaluate('location.href');
+    report('the address without the slash goes to the entrypoint and runs',
+      href === CONSOLE && !s.overlay && /repositories/.test(s.text), { href, ...s });
     await b.go(VOTE, 20_000);
     s = await b.state();
     report('ic-vote (stylesheet inlined in ic-vote #9) verifies and runs under its pinned policy, badge OK',

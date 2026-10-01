@@ -168,6 +168,11 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
 
 // --- the body: held until it is known to be the recorded page ---
 browser.webRequest.onBeforeRequest.addListener(d => {
+  // /site/<repo> without the slash: the canister serves the entrypoint
+  // there too, but relative URLs then resolve one level up and no record's
+  // rule matches it. Send it to the canonical /site/<repo>/ first.
+  const u = new URL(d.url);
+  if (/^\/site\/[^/]+$/.test(u.pathname)) { u.pathname += '/'; return { redirectUrl: u.href }; }
   latest.set(d.tabId, d.requestId);
   const filter = browser.webRequest.filterResponseData(d.requestId);
   const chunks = [];
