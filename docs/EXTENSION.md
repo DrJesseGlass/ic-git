@@ -387,7 +387,8 @@ Then add a row to "Releases" below.
 
 | Date | Package | Version | Store id | Commit | sha256 of SHA256SUMS | Registry tx |
 |---|---|---|---|---|---|---|
-| (not yet published) | | | | | | |
+| 2026-10-01 | Chrome (`ic-git-extension`) | 0.1.0 | `0e80cf60a1e6530bd2565260f98c809f67551f53` | `c766bcb27281c20c5564eb322d63e094beaefd970b56e16b315ec740410a8a3a` | [`0xe1ad2e004523fba7f117c0eb65cc06b76f38621eae4fcf3655efdb8fa898f8bb`](https://sepolia.etherscan.io/tx/0xe1ad2e004523fba7f117c0eb65cc06b76f38621eae4fcf3655efdb8fa898f8bb) (Sepolia, block 11822489) |
+| 2026-10-01 | Firefox (`ic-git-extension-firefox`) | 0.1.0 | `0e80cf60a1e6530bd2565260f98c809f67551f53` | `6df0039686c702bff3207feaed50acfdedf257ef0016797a1805a8acb06d77f7` | [`0x4ddb7587547dd46fdcdc18e99138ffbaed945c73c4617d90dc9f9ece5a92593a`](https://sepolia.etherscan.io/tx/0x4ddb7587547dd46fdcdc18e99138ffbaed945c73c4617d90dc9f9ece5a92593a) (Sepolia, block 11822495) | |
 
 ## What it does not do (yet)
 
@@ -436,4 +437,6 @@ Then add a row to "Releases" below.
 6. Done but for publishing: `extension/SHA256SUMS` and
    `extension-firefox/SHA256SUMS`, `tools/extension-sums.mjs` (tested by
    `tools/extension-sums-test.mjs`), the operator steps and the Releases
-   table above. Left: publish both records, then submit to the stores.
+   table above, and both records published (2026-10-01, Releases below).
+   Left: submit to the stores, and check the first store-installed copy
+   with `--digest` before users are told to rely on it.
