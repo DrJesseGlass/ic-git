@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The file list of an extension package, as its registry record attests it
-// (docs/EXTENSION.md, "How the extension's own package is verified").
+// (docs/EXTENSION.md, "The extension's own package, on chain").
 //
 //   node tools/extension-sums.mjs <dir>            # print the listing
 //   node tools/extension-sums.mjs --digest <dir>   # print sha256 of the listing

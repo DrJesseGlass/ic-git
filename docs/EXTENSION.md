@@ -4,8 +4,8 @@ Two browser extensions check every page they open on an ic-git canister's
 sites against the page's registry record, before anything on it runs, and
 stop the page if it is not the recorded one. They check the page where it
 is, on its own origin, so wallets and sign-in work as on the live site --
-which the loader (docs/LOADER.md), running the page on its own origin,
-cannot offer. This is the F2 rung of VISION.md.
+which the loader (docs/LOADER.md), running the page on the loader's
+origin, cannot offer. This is the F2 rung of VISION.md.
 
 - `extension/` -- Chrome (Manifest V3).
 - `extension-firefox/` -- Firefox (Manifest V3). The stronger of the two;
@@ -88,9 +88,10 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
   loads: the canister serves the page at both, but relative URLs only
   resolve at the second.
 - The derived policy is stricter than check E: it refuses inline event
-  handlers, `javascript:` URLs, workers, `style=` attributes and external
-  stylesheets, which check E lets through. Until check E is tightened to
-  match (below), a page that publishes can still be stopped as unpinnable.
+  handlers, `javascript:` URLs, workers, `style=` attributes, external
+  stylesheets and a pinned module's imports, which check E lets through.
+  Until check E is tightened to match (below), a page that publishes can
+  still be stopped as unpinnable, or run without what the policy refused.
 
 ## What the user sees
 
@@ -119,7 +120,7 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
 - `node tools/loader-test.mjs` covers the core and `derivePolicy`, and
   that every copy of the core is in step with `core/verifier.js`.
 - Real browsers, macOS, with NordVPN Threat Protection (a TLS-inspecting
-  proxy that injects a script into every page): Chrome 2026-09-30 and
+  proxy that injects a script into every page): Chrome on 2026-09-30 and
   Firefox 153 on 2026-10-01 both stopped the console while it was on, ran
   the console and ic-vote once it was paused, and carried an OISY
   sign-in and a push token minted and revoked through the verified page.
@@ -146,7 +147,7 @@ local page:
 8. Firefox can hold a response and replace it after an async check; a held
    page requests nothing; an async `onHeadersReceived` can set the CSP.
    Match patterns must not name a port (they fail silently).
-9. A rule or listener without host permission for the page does nothing.
+9. A rule without host permission for the page silently does nothing.
 
 ## The extension's own package, on chain
 
@@ -165,7 +166,7 @@ they installed with it.
   and `key` must give the id passed as `--id`, since the same files under
   another key would be another extension. The Firefox package carries its
   id in its manifest.
-- `node tools/extension-sums.mjs` prints a listing; `--digest` its hash,
+- `node tools/extension-sums.mjs <dir>` prints a listing; `--digest` its hash,
   `--write` and `--check` keep `SHA256SUMS` current
   (tools/extension-sums-test.mjs tests the rules). It needs only node.
 - The records: `ic-git-extension#site` and `ic-git-extension-firefox#site`,
@@ -209,7 +210,9 @@ git push "https://ic:$TOKEN@$C.raw.icp0.io/$REPO.git" main
 git show main:$PKG/SHA256SUMS | shasum -a 256
 curl -s "https://$C.raw.icp0.io/site/$REPO/" | shasum -a 256
 
-# Publish, then confirm.
+# Publish, then confirm once the transaction is mined: wait for the
+# receipt as for the loader (docs/LOADER.md, step 5), or verify.mjs still
+# reads the old record.
 dfx canister --network ic call $C evm_registry_publish_site "(\"$REPO\")"
 node tools/verify.mjs $REPO / --record site
 ```
@@ -218,8 +221,10 @@ Then add a row to Releases.
 
 ### Releases
 
-The newest row per package is current. 0.1.0 was published but never
-submitted to a store; 0.1.1 supersedes it.
+The newest row per package is the record on chain. 0.1.0 was published
+but never submitted to a store. The packages in git are 0.1.1, which has
+no record yet: publish it (above) and add its rows before it is submitted
+to a store.
 
 | Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx | Chrome store id |
 |---|---|---|---|---|---|---|
