@@ -45,6 +45,32 @@ their place. This is the strongest form: the page that runs is the page
 that was checked, byte for byte, with no second fetch. Firefox keeps
 blocking `webRequest` under Manifest V3, so this does not depend on MV2.
 
+As built (`extension-firefox/`, MV3, background scripts rather than a
+worker), in two blocking listeners on the site's main-frame requests:
+
+1. `onHeadersReceived`, before any body: make sure the site is verified
+   -- awaiting the check on a first visit, so there is no reload -- and
+   set the policy `derivePolicy` pins for it, or `script-src 'none'`.
+   Firefox lets a blocking listener return a promise, so the headers wait
+   for the check.
+2. The `onBeforeRequest` filter holds every byte of the body. If what
+   arrived hashes to the verified record, and the matching policy went out
+   with the headers, the bytes are released unchanged. Otherwise those
+   delivered bytes are checked against the record themselves (the core's
+   `verify` with the fetch of the entrypoint answered by them): if they
+   pass, a new deploy, the tab gets a one-line refresh that loads the page
+   again under its own policy; if not, a bare document under the shared
+   stop page. A delivered page that fails is that navigation's failure,
+   not the site's -- a targeted proxy can alter one response while the
+   record and every other fetch are honest -- so it does not overwrite the
+   site's verified state.
+
+Because the parser never sees a held response, a page that fails is not
+shown, not run, and makes no requests: the preload fetches that remain
+Chrome's residue do not happen here (measured below). So Firefox is the
+browser to recommend where the byte-level guarantee matters: operators
+and observers.
+
 ### Chrome: pin the page's scripts with a Content-Security-Policy
 
 Chrome's Manifest V3 gives an extension no access to response bodies and no
@@ -209,6 +235,21 @@ Run 2026-09-30, for the implementation:
    before any extension code ran, though neither was used. Recorded in
    step 5 as Chrome's residue.
 
+Run 2026-09-30 in Firefox 153 (headless, WebDriver BiDi, the add-on
+installed with `webExtension.install`), MV2 and MV3 alike:
+
+9. **Holding and replacing the response works.** A blocking
+   `onBeforeRequest` with `filterResponseData`, writing a different page
+   1.5 s after the body ended: the delivered page never reached the DOM,
+   its scripts never ran, and the replacement ran.
+10. **A held page asks for nothing.** The delivered page named a
+    stylesheet, an external script and an image; none was requested --
+    the parser, and its preload scanner, never saw those bytes.
+11. **An async `onHeadersReceived` sets the policy.** Returning a promise
+    that set `script-src 'none'` 0.8 s later: the replacement's script was
+    refused. (Match patterns must not name a port; one that does fails to
+    register, silently.)
+
 So Chrome gets both layers: the tab only ever shows the checked bytes,
 and they run under a policy that admits only their own scripts. What it
 does not get is Firefox's hold on the response itself, so the delivered
@@ -324,12 +365,12 @@ is submitted to a store, and the Releases table carries the version.
    test found a result reused after failure (a reload kept showing the
    stop page until the entry went stale); failures are now rechecked on
    every visit.
-3a. ic-vote: inline its stylesheet at staging, so it can be pinned (today
-   the extension stops it as verified but unpinnable), then redeploy and
-   republish its record.
-4. Firefox extension: `filterResponseData` and the same stop page; the
-   recommended browser where the byte-level guarantee matters (operators,
-   observers).
+3a. Done: ic-vote inlines its stylesheet at staging (ic-vote #9), served
+   and recorded at commit 4c500e4; both extensions now pin and run it.
+4. Done, but for a wallet in a real Firefox: the Firefox extension
+   (`extension-firefox/`, tests in `tools/extension-firefox-test.mjs`),
+   holding the response as above and sharing the core and the content
+   script (stop page included) with Chrome through `tools/sync-core.mjs`.
 5. Tighten check E to the derived policy's contract (inline handlers,
    `javascript:` URLs, workers, `style=` attributes, external stylesheets,
    and the import chain of a pinned module), so a page that publishes is a

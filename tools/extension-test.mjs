@@ -179,8 +179,7 @@ const report = (name, ok, got) => {
   if (!ok) failed++;
 };
 
-// 1-3. First and second visit to a pinnable site (the console), then ic-vote,
-// which verifies but loads an external stylesheet derivePolicy will not pin.
+// 1-3. First and second visit to the console, then ic-vote.
 {
   const b = await open();
   try {
@@ -193,8 +192,8 @@ const report = (name, ok, got) => {
     report('second visit: no checking screen and no reload', !s.overlay && /repositories/.test(s.text) && s.badge === 'OK' && s.loads === 1, s);
     await b.go(VOTE, 20_000);
     s = await b.state();
-    report('a verified page that cannot be pinned (ic-vote, external stylesheet): stop page, badge !, its code blocked',
-      s.overlay && !/YELLOW/.test(s.text) && s.badge === '!', s);
+    report('ic-vote (stylesheet inlined in ic-vote #9) verifies and runs under its pinned policy, badge OK',
+      !s.overlay && /YELLOW/.test(s.text) && s.badge === 'OK', s);
   } finally { await b.close(); }
 }
 
