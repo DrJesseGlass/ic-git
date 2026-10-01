@@ -62,6 +62,8 @@ tools/extension-sums.mjs
                         each extension package's file list (SHA256SUMS), whose
                         hash is its registry record; also how a user checks
                         an installed copy
+store/                  store-listing icon and screenshots (outside both
+                        packages); docs/STORE.md is the submission guide
 loader/index.html       the same check in a browser, then run the checked bytes
                         (see "Verifying a site in the browser")
 site/                   placeholder content for the asset canister ("www")
