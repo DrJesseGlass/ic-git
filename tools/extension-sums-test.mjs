@@ -4,14 +4,17 @@
 //   - each passes the canister's reference scan, as publishing requires;
 //   - an install that changes only what a store changes -- manifest.json
 //     re-serialized with update_url and key added, _metadata/ and META-INF/
-//     added -- has the same digest, and any other change has a different one.
+//     added -- has the same digest under the id the key gives, and any other
+//     change has a different one;
+//   - a copy with another key, no expected id, or another update_url is
+//     refused rather than digested.
 //
 //   node tools/extension-sums-test.mjs
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { digest, listing } from './extension-sums.mjs';
+import { CHROME_STORE, digest, extensionId, listing } from './extension-sums.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 let failed = 0;
@@ -40,19 +43,28 @@ for (const pkg of ['extension', 'extension-firefox']) {
 
     // What a store install changes: the manifest's layout and key order,
     // update_url and key (what Chrome's installer writes), and its own files.
-    let p = fresh();
-    const installed = {
-      ...manifest,
-      update_url: 'https://clients2.google.com/service/update2/crx',
-      key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA' + 'A'.repeat(348) + 'IDAQAB',
+    const key = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA' + 'A'.repeat(348) + 'IDAQAB';
+    const id = extensionId(key);
+    const install = (p, extra) => {
+      const reordered = Object.fromEntries(Object.entries({ ...manifest, update_url: CHROME_STORE, key, ...extra }).reverse());
+      writeFileSync(join(p, 'manifest.json'), JSON.stringify(reordered, null, 3) + '\r\n');
+      mkdirSync(join(p, '_metadata'), { recursive: true });
+      writeFileSync(join(p, '_metadata', 'verified_contents.json'), '{}');
+      mkdirSync(join(p, 'META-INF'), { recursive: true });
+      writeFileSync(join(p, 'META-INF', 'cose.sig'), 'sig');
     };
-    const reordered = Object.fromEntries(Object.entries(installed).reverse());
-    writeFileSync(join(p, 'manifest.json'), JSON.stringify(reordered, null, 3) + '\r\n');
-    mkdirSync(join(p, '_metadata'), { recursive: true });
-    writeFileSync(join(p, '_metadata', 'verified_contents.json'), '{}');
-    mkdirSync(join(p, 'META-INF'), { recursive: true });
-    writeFileSync(join(p, 'META-INF', 'cose.sig'), 'sig');
-    report(`${pkg}: a store-style install (manifest re-serialized, update_url, key, _metadata/, META-INF/) has the same digest`, digest(p) === want);
+    const refused = (p, id) => { try { digest(p, id); return false; } catch (e) { return /manifest\.json/.test(e.message); } };
+    let p = fresh();
+    install(p);
+    report(`${pkg}: a store-style install (manifest re-serialized, update_url, key, _metadata/, META-INF/) has the same digest under its id`, digest(p, id) === want);
+
+    // Whose package it is: the files alone do not say.
+    report(`${pkg}: an installed copy is refused without an expected id`, refused(p));
+    report(`${pkg}: an installed copy is refused under another id`, refused(p, id.replace(/^./, c => c === 'a' ? 'b' : 'a')));
+    report(`${pkg}: the package is refused with an expected id it carries no key for`, refused(dir, id));
+    p = fresh();
+    install(p, { update_url: 'https://example.com/update.xml' });
+    report(`${pkg}: a copy updating from outside the Chrome Web Store is refused`, refused(p, id));
 
     // What it must not hide.
     p = fresh();

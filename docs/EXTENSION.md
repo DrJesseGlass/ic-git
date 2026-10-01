@@ -310,11 +310,19 @@ treatment and its own record.
   extension id), so `manifest.json` is listed by the sha256 of its
   canonical JSON -- keys sorted, no whitespace, those two removed. An
   honest install lists the same; a manifest with any other value changed
-  does not. Neither package carries a `key` of its own, so the record does
-  not attest the id, only the files. The same
-  rule applies to the Firefox package, whose `.xpi` keeps the packaged
-  bytes anyway, so one tool checks both. Chrome also re-encodes images
-  the manifest names and rewrites `_locales/`; neither package has any.
+  does not. The same rule applies to the Firefox package, whose `.xpi`
+  keeps the packaged bytes anyway, so one tool checks both. Chrome also
+  re-encodes images the manifest names and rewrites `_locales/`; neither
+  package has any.
+- The two are checked before they are left out, because the files alone
+  do not say whose package this is: the same files repackaged under
+  another key would be another extension, with its own id and its own
+  updates to come, and would digest the same. So the tool refuses a copy
+  whose `update_url` is not the Chrome Web Store's, and a copy with a
+  `key` unless `--id` names the id it gives (the Releases table carries
+  it; the Chrome package carries no `key` of its own, as the store assigns
+  one). The Firefox package needs no `--id`: its id is in the manifest it
+  ships (`browser_specific_settings.gecko.id`), which the listing covers.
 - The canister repos `ic-git-extension` and `ic-git-extension-firefox`
   have their site roots set to those files (a site root may name a blob),
   and `evm_registry_publish_site` records
@@ -322,10 +330,14 @@ treatment and its own record.
   -- a root whose name has no extension is scanned, not exempted -- and it
   passes because no line holds a `<` (the tool refuses a path that does).
 - A user, once per release: point the tool at the installed files
-  (Chrome: `.../Extensions/<id>/<version>/`; Firefox: the `.xpi`,
-  unzipped) with `--digest`, and compare the result with the record's
-  `bundleHash`, read as for the loader (docs/LOADER.md, "What a user
-  does"). The tool needs only node, and is short enough to read first.
+  (Chrome: `.../Extensions/<id>/<version>/`, with `--id <id>` from the
+  Releases table; Firefox: the `.xpi`, unzipped) with `--digest`, and
+  compare the result with the record's `bundleHash`, read as for the
+  loader (docs/LOADER.md, "What a user does"). The tool needs only node,
+  and is short enough to read first. A store updates the extension on its
+  own, so the check holds for the files it was run on; the record is
+  published before the store is, and a release is the cue to run it
+  again.
 - Auditors can skip the stores: clone at the recorded commit and load the
   package directory unpacked.
 - The extension can hash its own files (`runtime.getURL`) and show whether
@@ -373,9 +385,9 @@ Then add a row to "Releases" below.
 
 ### Releases
 
-| Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx |
-|---|---|---|---|---|---|
-| (not yet published) | | | | | |
+| Date | Package | Version | Store id | Commit | sha256 of SHA256SUMS | Registry tx |
+|---|---|---|---|---|---|---|
+| (not yet published) | | | | | | |
 
 ## What it does not do (yet)
 
