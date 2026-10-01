@@ -130,11 +130,12 @@ gateway remains a trusted party for any user who does not hash the served
 bytes themselves and compare -- and note that the fix for that is the F2
 registry comparison, not F0.5 certification, which the gateway performs on
 the client's behalf and a hostile gateway therefore simply skips. The F2
-client so far is a zero-dependency CLI
-(`tools/verify.mjs`: registry entry vs served bytes vs deployed code vs an
-independent `git clone`) and a browser loader kept by the user
-(`loader/index.html`: the same comparison, then it runs only the bytes it
-checked), not yet an extension that checks every page load.
+clients: a zero-dependency CLI (`tools/verify.mjs`: registry entry vs
+served bytes vs deployed code vs an independent `git clone`), a browser
+loader kept by the user (`loader/index.html`: the same comparison, then
+it runs only the bytes it checked), and browser extensions for Chrome and
+Firefox that check every page load on the site's own origin
+(docs/EXTENSION.md).
 The registry makes the frontend *checkable*; F2 makes it *checked*.
 
 ## 3. Track C: the transaction reviewer (side project write-up)
