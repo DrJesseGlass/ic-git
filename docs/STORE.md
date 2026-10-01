@@ -118,12 +118,12 @@ Install from the store into a normal browser profile, then point the tool
 at the installed files and compare with the record's `bundleHash`:
 
 - Chrome (macOS):
-  `~/Library/Application Support/Google/Chrome/Default/Extensions/<id>/<version>_0/`
+  `~/Library/Application Support/Google/Chrome/Default/Extensions/fdcegfanhmpdnbcalfjdlboebhknkhco/<version>_0/`
   -- the id is on `chrome://extensions` with Developer mode on. The
   installed manifest carries the store's `key`, so the tool needs the id
   it must give (`--id`), and refuses the copy without it.
   ```sh
-  node tools/extension-sums.mjs --digest --id <id> "$HOME/Library/Application Support/Google/Chrome/Default/Extensions/<id>/<version>_0"
+  node tools/extension-sums.mjs --digest --id fdcegfanhmpdnbcalfjdlboebhknkhco "$HOME/Library/Application Support/Google/Chrome/Default/Extensions/fdcegfanhmpdnbcalfjdlboebhknkhco/<version>_0"
   ```
 - Firefox (macOS): the signed `.xpi` in
   `~/Library/Application Support/Firefox/Profiles/<profile>/extensions/verifier@ic-git.dev.xpi`.
