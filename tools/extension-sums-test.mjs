@@ -3,8 +3,8 @@
 //   - extension/SHA256SUMS and extension-firefox/SHA256SUMS are current;
 //   - each passes the canister's reference scan, as publishing requires;
 //   - an install that changes only what a store changes -- manifest.json
-//     re-serialized with update_url added, _metadata/ and META-INF/ added --
-//     has the same digest, and any other change has a different one.
+//     re-serialized with update_url and key added, _metadata/ and META-INF/
+//     added -- has the same digest, and any other change has a different one.
 //
 //   node tools/extension-sums-test.mjs
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -39,15 +39,20 @@ for (const pkg of ['extension', 'extension-firefox']) {
     const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'));
 
     // What a store install changes: the manifest's layout and key order,
-    // update_url, and its own files.
+    // update_url and key (what Chrome's installer writes), and its own files.
     let p = fresh();
-    const reordered = Object.fromEntries(Object.entries({ ...manifest, update_url: 'https://clients2.google.com/service/update2/crx' }).reverse());
+    const installed = {
+      ...manifest,
+      update_url: 'https://clients2.google.com/service/update2/crx',
+      key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA' + 'A'.repeat(348) + 'IDAQAB',
+    };
+    const reordered = Object.fromEntries(Object.entries(installed).reverse());
     writeFileSync(join(p, 'manifest.json'), JSON.stringify(reordered, null, 3) + '\r\n');
     mkdirSync(join(p, '_metadata'), { recursive: true });
     writeFileSync(join(p, '_metadata', 'verified_contents.json'), '{}');
     mkdirSync(join(p, 'META-INF'), { recursive: true });
     writeFileSync(join(p, 'META-INF', 'cose.sig'), 'sig');
-    report(`${pkg}: a store-style install (manifest re-serialized, update_url, _metadata/, META-INF/) has the same digest`, digest(p) === want);
+    report(`${pkg}: a store-style install (manifest re-serialized, update_url, key, _metadata/, META-INF/) has the same digest`, digest(p) === want);
 
     // What it must not hide.
     p = fresh();

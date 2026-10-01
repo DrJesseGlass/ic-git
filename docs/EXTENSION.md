@@ -305,10 +305,13 @@ treatment and its own record.
   file but `SHA256SUMS` itself and what a store adds (Chrome's
   `_metadata/`, the `.xpi` signature in `META-INF/`).
 - Every file is listed by the sha256 of its bytes but one: Chrome's
-  installer re-serializes `manifest.json` and adds `update_url`, so
-  `manifest.json` is listed by the sha256 of its canonical JSON -- keys
-  sorted, no whitespace, `update_url` removed. An honest install lists
-  the same; a manifest with any other value changed does not. The same
+  installer re-serializes `manifest.json` and adds `update_url` and `key`
+  (the package's public key, taken from the `.crx` header; it fixes the
+  extension id), so `manifest.json` is listed by the sha256 of its
+  canonical JSON -- keys sorted, no whitespace, those two removed. An
+  honest install lists the same; a manifest with any other value changed
+  does not. Neither package carries a `key` of its own, so the record does
+  not attest the id, only the files. The same
   rule applies to the Firefox package, whose `.xpi` keeps the packaged
   bytes anyway, so one tool checks both. Chrome also re-encodes images
   the manifest names and rewrites `_locales/`; neither package has any.

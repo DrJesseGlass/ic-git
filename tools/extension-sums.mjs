@@ -17,15 +17,19 @@
 // over every file in <dir> except SHA256SUMS itself and what a store adds
 // (Chrome's _metadata/, the .xpi signature in META-INF/). Every file is
 // hashed as its bytes but one: manifest.json, which Chrome's installer
-// re-serializes and adds update_url to, is hashed as its canonical JSON --
-// keys sorted, no whitespace, update_url removed. An honest install then
-// lists the same, and a manifest with any other value changed does not.
+// re-serializes and adds update_url and key (the package's public key, from
+// the .crx header) to, is hashed as its canonical JSON -- keys sorted, no
+// whitespace, those two removed. An honest install then lists the same,
+// and a manifest with any other value changed does not.
 // Zero dependencies (node >= 18).
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const SKIP_TOP = new Set(['SHA256SUMS', '_metadata', 'META-INF']);
+// What Chrome's installer writes into manifest.json that the package did not.
+const STORE_KEYS = ['update_url', 'key'];
 const sha256 = data => createHash('sha256').update(data).digest('hex');
 
 // Canonical JSON: object keys sorted by code unit, arrays in order, no
@@ -36,7 +40,7 @@ const canonical = v => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']'
 
 export function manifestHash(bytes) {
   const m = JSON.parse(bytes.toString('utf8'));
-  delete m.update_url;
+  for (const k of STORE_KEYS) delete m[k];
   return sha256(canonical(m));
 }
 
@@ -57,7 +61,7 @@ function files(dir) {
 
 export function listing(dir) {
   return files(dir).map(rel => {
-    if (rel.includes('<') || rel.includes('\n')) throw new Error('a path the listing cannot carry: ' + JSON.stringify(rel));
+    if (/[<\r\n]/.test(rel)) throw new Error('a path the listing cannot carry: ' + JSON.stringify(rel));
     const bytes = readFileSync(join(dir, rel));
     return (rel === 'manifest.json' ? manifestHash(bytes) : sha256(bytes)) + '  ' + rel + '\n';
   }).join('');
@@ -65,7 +69,7 @@ export function listing(dir) {
 
 export const digest = dir => sha256(listing(dir));
 
-if (process.argv[1] && import.meta.url === new URL('file://' + process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = process.argv.slice(2);
   const mode = args[0] && args[0].startsWith('--') ? args.shift() : '--list';
   if (!args.length) {
