@@ -58,6 +58,10 @@ extension/              the Chrome extension: checks ic-git sites as they load
 extension-firefox/      the Firefox extension: holds each page until what
                         arrived is the recorded page (docs/EXTENSION.md;
                         tools/extension-firefox-test.mjs drives it)
+tools/extension-sums.mjs
+                        each extension package's file list (SHA256SUMS), whose
+                        hash is its registry record; also how a user checks
+                        an installed copy
 loader/index.html       the same check in a browser, then run the checked bytes
                         (see "Verifying a site in the browser")
 site/                   placeholder content for the asset canister ("www")

@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+// The file list of an extension package, as its registry record attests it
+// (docs/EXTENSION.md, "How the extension's own package is verified").
+//
+//   node tools/extension-sums.mjs <dir>            # print the listing
+//   node tools/extension-sums.mjs --digest <dir>   # print sha256 of the listing
+//   node tools/extension-sums.mjs --write <dir>    # write <dir>/SHA256SUMS
+//   node tools/extension-sums.mjs --check <dir>... # exit 1 if a SHA256SUMS is stale
+//   ... --id <id> ...                               # the Chrome id the copy must have
+//
+// <dir> is the package as committed (extension/, extension-firefox/) or as
+// installed: Chrome's .../Extensions/<id>/<version>/, or an unzipped .xpi.
+// The digest of an installed copy equals the record's bundleHash exactly
+// when it holds the published files.
+//
+// The listing: one line per file, "<sha256>  <path>", in byte order of path
+// (the format of `shasum -a 256`, and independent of the user's locale),
+// over every file in <dir> except SHA256SUMS itself and what a store adds
+// (Chrome's _metadata/, the .xpi signature in META-INF/). Every file is
+// hashed as its bytes but one: manifest.json, which Chrome's installer
+// re-serializes and adds update_url and key (the package's public key, from
+// the .crx header) to, is hashed as its canonical JSON -- keys sorted, no
+// whitespace, those two removed. An honest install then lists the same,
+// and a manifest with any other value changed does not. The two are not
+// discarded unchecked, since the files alone do not say whose package this
+// is: update_url must be the Chrome Web Store's, and key must give the id
+// passed as --id (which the Releases table carries), or the tool refuses.
+// The Firefox package needs no --id: its id is in the manifest it ships.
+// Zero dependencies (node >= 18).
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const SKIP_TOP = new Set(['SHA256SUMS', '_metadata', 'META-INF']);
+export const CHROME_STORE = 'https://clients2.google.com/service/update2/crx';
+const sha256 = data => createHash('sha256').update(data).digest('hex');
+
+// Canonical JSON: object keys sorted by code unit, arrays in order, no
+// whitespace -- the same text whatever layout and key order a tool wrote.
+const canonical = v => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']'
+  : v && typeof v === 'object' ? '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}'
+  : JSON.stringify(v);
+
+// A Chrome extension id from a manifest key: the first 16 bytes of the
+// sha256 of the DER public key, each nibble a letter a..p.
+export const extensionId = key => [...createHash('sha256').update(Buffer.from(key, 'base64')).digest().subarray(0, 16)]
+  .map(b => String.fromCharCode(97 + (b >> 4)) + String.fromCharCode(97 + (b & 15))).join('');
+
+export function manifestHash(bytes, id) {
+  const m = JSON.parse(bytes.toString('utf8'));
+  if ('update_url' in m) {
+    if (m.update_url !== CHROME_STORE) throw new Error('manifest.json updates from ' + m.update_url + ', not the Chrome Web Store');
+    delete m.update_url;
+  }
+  if ('key' in m) {
+    const have = extensionId(m.key);
+    if (!id) throw new Error('manifest.json carries a key (extension id ' + have + '): pass --id to say which id is expected');
+    if (have !== id) throw new Error('manifest.json is extension ' + have + ', not ' + id);
+    delete m.key;
+  } else if (id) throw new Error('manifest.json carries no key, so nothing fixes its extension id');
+  return sha256(canonical(m));
+}
+
+function files(dir) {
+  const out = [];
+  const walk = d => {
+    for (const name of readdirSync(d)) {
+      const p = join(d, name);
+      const rel = relative(dir, p).split(sep).join('/');
+      if (!rel.includes('/') && SKIP_TOP.has(name)) continue;
+      if (statSync(p).isDirectory()) walk(p); else out.push(rel);
+    }
+  };
+  walk(dir);
+  // Byte order of path, not the locale's.
+  return out.sort((a, b) => (Buffer.compare(Buffer.from(a), Buffer.from(b))));
+}
+
+export function listing(dir, id) {
+  return files(dir).map(rel => {
+    if (/[<\r\n]/.test(rel)) throw new Error('a path the listing cannot carry: ' + JSON.stringify(rel));
+    const bytes = readFileSync(join(dir, rel));
+    return (rel === 'manifest.json' ? manifestHash(bytes, id) : sha256(bytes)) + '  ' + rel + '\n';
+  }).join('');
+}
+
+export const digest = (dir, id) => sha256(listing(dir, id));
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const usage = () => { console.error('usage: extension-sums.mjs [--digest|--write|--check] [--id <chrome extension id>] <dir>...'); process.exit(2); };
+  const args = process.argv.slice(2), dirs = [];
+  let mode = '--list', id;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--id') { id = args[++i]; if (!/^[a-p]{32}$/.test(id || '')) usage(); }
+    else if (args[i].startsWith('--')) mode = args[i];
+    else dirs.push(args[i]);
+  }
+  if (!dirs.length) usage();
+  let stale = 0;
+  for (const dir of dirs) {
+    if (!existsSync(join(dir, 'manifest.json'))) { console.error(`${dir}: no manifest.json -- not an extension package`); process.exit(2); }
+    let text;
+    try { text = listing(dir, id); } catch (e) { console.error(`${dir}: ${e.message}`); process.exit(2); }
+    if (mode === '--list') process.stdout.write(text);
+    else if (mode === '--digest') console.log(sha256(text) + (dirs.length > 1 ? '  ' + dir : ''));
+    else if (mode === '--write') { writeFileSync(join(dir, 'SHA256SUMS'), text); console.log(`${dir}/SHA256SUMS: ${sha256(text)}`); }
+    else if (mode === '--check') {
+      const have = existsSync(join(dir, 'SHA256SUMS')) ? readFileSync(join(dir, 'SHA256SUMS'), 'utf8') : '';
+      if (have !== text) { console.error(`${dir}/SHA256SUMS is stale: run node tools/extension-sums.mjs --write ${dir}`); stale++; }
+      else console.log(`${dir}/SHA256SUMS is current (${sha256(text)})`);
+    } else { console.error('unknown mode ' + mode); process.exit(2); }
+  }
+  process.exit(stale ? 1 : 0);
+}
