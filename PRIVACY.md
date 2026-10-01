@@ -15,15 +15,17 @@ example `ic-vote`):
   two public RPC endpoints, `ethereum-sepolia-rpc.publicnode.com` and
   `sepolia.gateway.tenderly.co`.
 
-Those services see an ordinary request for public data, as a browser
-visiting the same addresses would. This is why the Chrome Web Store
-listing declares "Web history" and the Firefox manifest declares
-browsing activity.
+So the operators of those endpoints -- the Internet Computer's public
+API gateway and the two RPC providers -- see which ic-git site is being
+checked and from which network address: when you open one of its pages,
+and every ten minutes after while the browser stays open. This is why
+the Chrome Web Store listing declares "Web history" and the Firefox
+manifest declares browsing activity.
 
-**What does not.** Nothing is sent to the extension's developer or to
-anyone else. The extension has no server, no analytics, no accounts, and
-does not read or send anything from other sites, forms, wallets or
-cookies.
+**What does not.** No page content, nothing you type, and no
+identifier; nothing at all to the extension's developer, who runs no
+server, analytics or accounts. The extension does not read or send
+anything from other sites, forms, wallets or cookies.
 
 **What is kept.** For the browser session only: which ic-git sites
 verified, their records, and the checked page (so a verified page loads
