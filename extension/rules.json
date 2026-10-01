@@ -5,12 +5,34 @@
     "action": {
       "type": "modifyHeaders",
       "responseHeaders": [
-        { "header": "Content-Security-Policy", "operation": "set", "value": "script-src 'none'; object-src 'none'; base-uri 'none'" }
+        {
+          "header": "Content-Security-Policy",
+          "operation": "set",
+          "value": "script-src 'none'; object-src 'none'; base-uri 'none'"
+        }
       ]
     },
     "condition": {
       "urlFilter": "|https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/",
-      "resourceTypes": ["main_frame"]
+      "resourceTypes": [
+        "main_frame"
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 3,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "regexSubstitution": "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/\\1/\\2\\3"
+      }
+    },
+    "condition": {
+      "regexFilter": "^https://umobs-yiaaa-aaaab-agyrq-cai\\.raw\\.icp0\\.io/site/([^/?#]+)(\\?[^#]*)?(#.*)?$",
+      "resourceTypes": [
+        "main_frame"
+      ]
     }
   }
 ]
