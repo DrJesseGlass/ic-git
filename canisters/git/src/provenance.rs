@@ -98,14 +98,18 @@ fn site_record(repo: &str) -> Result<Record, String> {
     // an uncovered subresource lets a hostile gateway pair the honest
     // entrypoint with malicious code and still pass the comparison -- the
     // verifier reports verified, which is worse than reporting nothing.
+    // The scan also refuses what the extensions' pinned policy would stop at
+    // run time, so the advice covers both: `why` names which it was.
     if let Some(why) = site::unverifiable_subresource(&served, &body) {
         return Err(format!(
             "{served}: {why}. This record attests only the entrypoint, so a \
              referenced file is covered by nothing and a verifier would report \
-             verified while it went unchecked. Inline it, or add \
+             verified while it went unchecked: inline it, or give a script \
              integrity=\"sha384-...\" so the browser enforces it -- bundlers \
              do not emit SRI by default, but their plugins do \
-             (vite-plugin-sri, webpack-subresource-integrity, rollup-plugin-sri)."
+             (vite-plugin-sri, webpack-subresource-integrity, rollup-plugin-sri). \
+             And what the extensions' pinned policy refuses (docs/EXTENSION.md) \
+             would publish and then be stopped: integrity does not admit it."
         ));
     }
     Ok(Record {

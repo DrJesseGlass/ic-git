@@ -7,7 +7,8 @@
 //     tampered page and a repo with no record;
 //   - its core is core/verifier.js, byte-identical (tools/sync-core.mjs);
 //   - derivePolicy pins exactly the scripts and styles a page loads: fixed
-//     cases offline, and both live sites produce a policy;
+//     cases offline, and both live sites produce a policy; and it refuses
+//     exactly the pages check E refuses, for the same reason;
 //   - with --browser, in headless Chrome: the crossorigin edit "run it" makes
 //     is refused whenever it would change anything but the pinned tags, the
 //     page runs when opened from disk, and derivePolicy agrees with a second
@@ -67,12 +68,13 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
 }
 
 // The shared scanner on its own, against the cases the canister's tests pin
-// (site.rs: text_the_browser_never_parses_as_markup_is_not_scanned and
-// skips_never_hide_what_the_browser_parses), and against the loader itself,
+// (site.rs, each list named for its test), and against the loader itself,
 // which is published as a site record and must pass its own check.
+let scanned;
 {
   const scan = new Function(between(html, ...SHARED) + '\nreturn unverifiableSubresource;')();
   const bytes = t => new TextEncoder().encode(t);
+  // text_the_browser_never_parses_as_markup_is_not_scanned
   const accepted = [
     "<script>const s = '<base href=x>' + '<script src=y>';</script>",
     "<script src=a.js integrity=sha384-AAAA></script><script>'<iframe>'</script>",
@@ -85,9 +87,91 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
     '<!-- <script src=x> --><p>after</p>',
     "<noscript>enable JavaScript</noscript><script>'<base href=x>'</script>",
     '<xmp><base href=x></xmp>',
+    "<svg></svg><script>'<base href=y>'</script>",
+    '<select><option>a</option></select><textarea><iframe src=x></textarea>',
+    '<svg><![CDATA[ <base href=y> ]]></svg>',
+    '<plaintext><script src=x></script>',
+    // accepts_self_contained_and_sri_complete_entrypoints
+    '<html><script>go()</script><style>b{}</style></html>',
+    '<script src="app.js" integrity="sha384-x"></script>',
+    '<script src="app.js" integrity="sha384-abc=="></script>',
+    '<SCRIPT SRC=app.js INTEGRITY=sha384-x></SCRIPT>',
+    "<link integrity='sha384-x' rel='preload modulepreload' href='m.js'>",
+    '<script type="module" src="m.js" integrity="sha384-abc"></script>',
+    '<link rel="icon" href="favicon.ico">',
+    '<link rel="canonical" href="https://example.com/">',
+    '<img src="logo.png"><p>text</p>',
+    '<div title="<script src=x>">inert</div>',
+    "<img alt=it's src=logo.png><p>fine</p>",
+    '<meta charset="utf-8"><meta name="viewport" content="w">',
+    '<base target="_blank">',
+    '<script-x src="a.js"></script-x>',
+    // refuses_where_it_cannot_follow_the_parser
+    '<svg viewBox="0 0 1 1"><title>Icon</title><g><path d="M0 0"/></g></svg><script>x()</script>',
+    '<svg/><script>x()</script>',
+    '<svg><svg></svg></svg><script>x()</script>',
+    '<svg><![CDATA[ </svg> ]]></svg><script>x()</script>',
+    '<math><mi>x</mi><mo>+</mo></math><script>x()</script>',
+    '<select><optgroup><option>a</select><script>x()</script>',
+    '<select><option>a</option><hr><option>b</option></select><style>b{}</style>',
+    '<noscript><svg><path d="M0 0"/></svg></noscript>',
+    // refuses_what_the_pinned_policy_refuses
+    '<details open><summary>x</summary></details>',
+    '<div data-on="x">x</div>',
+    '<a href="/search?a=1&amp;b=2">x</a>',
+    '<a href="https://example.com/javascript:not-a-scheme">x</a>',
+    '<form action="/go"><button formaction="/other">x</button></form>',
+    '<style>b { color: red }</style>',
+    '<svg><path d="M0 0"/></svg><p>after</p>',
+    '<svg><path d="M0 0"/></svg><script>x()</script>',
+    '<svg><g><path d="M0 0"/></g></svg><math><mi>x</mi></math><style>b{}</style>',
+    '<style>.\\@md\\:flex { display: flex } @media print { b{} }</style>',
+    '<template><script type="application/json">{}</script><p></template><script>x()</script>',
+    '<script type="text/plain" src="a.txt" integrity="sha384-abc"></script>',
   ];
-  // The pinned-policy rules (site.rs: refuses_what_the_pinned_policy_refuses).
-  const policyRefused = [
+  const refused = [
+    // skips_never_hide_what_the_browser_parses
+    '<!-- x --!><base href=y>',
+    '<!--><base href=y>',
+    '<!---><base href=y>',
+    '<!-- a --> <base href=y> -->',
+    '<script>a</script><base href=y>',
+    '<script><!--<script>x</script><base href=y></script>-->',
+    "<script>'<base href=y>'",
+    '<svg><script/><base href=y></svg>',
+    '<math><style><base href=y></style></math>',
+    '<p></p title="> <!--"><base href=y><!-- -->',
+    '<xmp><!--</xmp><base href=y>-->',
+    '<noembed><!--</noembed><base href=y>-->',
+    '<noframes><!--</noframes><base href=y>-->',
+    '<noscript><!--</noscript><base href=y>-->',
+    '<xmp><a title="</xmp><base href=y>">',
+    '<noscript><base href=y></noscript>',
+    '<noscript><!-- </noscript><a title=" --><base href=y>">',
+    '<script-x><base href=y></script>',
+    '<title:x><base href=y></title>',
+    '<select><style><base href=y></style></select>',
+    '<svg><![CDATA[ a > <!-- ]]><base href=y> -->',
+    `<a"b='><base href=y>'>`,
+    "<a ='><base href=y>'>",
+    '<svg></svg><!-- > <a title=" --><iframe src=x></iframe><!-- "> -->',
+    '<svg></svg><textarea><a title="</textarea><iframe src=x></iframe>"></textarea>',
+    '<select></select><title><a title="</title><base href=y>"></title>',
+    '<svg></svg><textarea>never closed',
+    '<frameset><textarea><frame src=x></textarea></frameset>',
+    '<template><col><textarea></template><iframe src=x></textarea>',
+    // refuses_where_it_cannot_follow_the_parser
+    '<svg><p></svg>',
+    '<svg><foreignObject><p>a</p></foreignObject></svg>',
+    '<svg><title><b>x</b></title></svg>',
+    '<div><svg></div>',
+    '<svg></math><link rel=icon href=x>',
+    '<select><button>a</button></select>',
+    '<select><option>a</option></div></select>',
+    '<script><!-- <script> </script> --></script>',
+    '<noscript><svg></noscript>',
+    '<noscript><select></noscript>',
+    // refuses_what_the_pinned_policy_refuses
     '<button onclick="go()">go</button>',
     '<svg><circle ONLOAD="x()"/></svg>',
     '<body onload=go()>',
@@ -104,58 +188,87 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
     '<svg><script>x()</script></svg>',
     '<math><style>a{}</style></math>',
     '<style>@import url(a.css); b{}</style>',
+    '<select><option>a</option></select><style>@import url(a.css);</style>',
+    '<style>@\\69mport url(a.css);</style>',
+    '<style>@im\\70 ort url(a.css);</style>',
+    '<svg><svg></svg><script>x()</script></svg>',
+    '<svg></math><script>x()</script></svg>',
+    '<svg><!-- > </svg> --><script>x()</script></svg>',
+    '<svg a=b/><script>x()</script>',
+    '<template><script>x()</script></template>',
+    '<script language="&#106;avascript">x()</script>',
+    '<script for="&#119;indow" event=onload>x()</script>',
+    '<script src=a.js integrity=sha384-abc type="text/&#106;avascript"></script>',
     '<div one="y">x</div>',
+    // refuses_entrypoints_whose_hash_would_not_prove_the_page
+    '<script src="app.js"></script>',
+    '<script src="https://cdn.example.com/a.js"></script>',
+    '<link rel="stylesheet" href="app.css">',
+    '<link rel="modulepreload" href="m.js">',
+    '<script/src=app.js></script>',
+    '<script data-x="y"src=app.js></script>',
+    '<script data-x="y integrity=sha384-q" src=app.js></script>',
+    "<img alt=it's><script src=app.js></script>",
+    '<iframe src="child.html"></iframe>',
+    '<frameset><frame src="child.html"></frameset>',
+    '<object data="x.swf"></object>',
+    '<embed src="x.svg">',
+    '<iframe src="child.html" integrity="sha384-x"></iframe>',
+    '<iframe srcdoc="<p>hi</p>"></iframe>',
+    '<base href="https://evil.example/">',
+    '<meta http-equiv="refresh" content="0;url=https://x/">',
+    '<svg><script href="x.js"></script></svg>',
+    '<svg><script xlink:href="x.js"/></svg>',
+    '<script type="text/plain" src="a.txt"></script>',
+    `<script type="module">import './app.js'</script>`,
+    '<script type="speculationrules">{"prerender":[{"urls":["/other.html"]}]}</script>',
+    '<script src="app.js" data-integrity="sha384-x"></script>',
+    '<script src="app.js" integrity></script>',
+    '<script src="app.js" integrity=""></script>',
+    '<script src="app.js" integrity="sha384-"></script>',
+    '<script src="app.js" integrity="lol"></script>',
+    '<link rel="stylesheet" href="a.css" integrity="md5-x">',
+    '<script src="app.js" integrity="sha384-===="></script>',
+    '<script src="app.js" integrity="sha384-ab=c"></script>',
+    '<script src="app.js" integrity="sha384-abc==="></script>',
+    '<script src="app.js" integrity="SHA384-abc"></script>',
+    '<link rel="modulepreload" href="m.js" integrity="Sha384-abc">',
+    '<script src=x\x0Bintegrity=sha384-x></script>',
+    '<link rel="style&#115;heet" href="a.css">',
+    '<script src="app.js"',
+    '<div class="x',
   ];
-  const policyAccepted = [
-    '<details open><summary>x</summary></details>',
-    '<div data-on="x">x</div>',
-    '<a href="/search?a=1&amp;b=2">x</a>',
-    '<a href="https://example.com/javascript:not-a-scheme">x</a>',
-    '<form action="/go"><button formaction="/other">x</button></form>',
-    '<style>b { color: red }</style>',
-    '<svg><path d="M0 0"/></svg><p>after</p>',
+  // scan_gates_on_served_name_not_exact_extension and refuses_xml_entrypoints:
+  // [path, page, refused].
+  const SVG = 'xmlns="http://www.w3.org/2000/svg"';
+  const named = [
+    ['data.json', '{"a":"<script src=x>"}', false],
+    ['contract.hex', '0x6001', false],
+    ['index.htm', '{"a":"<script src=x>"}', true],
+    ['app.HTML', '{"a":"<script src=x>"}', true],
+    ['entry', '{"a":"<script src=x>"}', true],
+    ['entry', "<script>'<base href=y>'</script>", false],
+    ['v1.2/entry', '{"a":"<script src=x>"}', true],
+    ['logo.svg', `<svg ${SVG}><path d="M0 0"/></svg>`, true],
+    ['logo.SVG', `<svg ${SVG}/>`, true],
+    ['page.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><body>x</body></html>', true],
+    ['logo.svg', `<?xml-stylesheet type="text/xsl" href="a.xsl"?><svg ${SVG}/>`, true],
+    ['logo.svg', `<svg ${SVG}><h:script xmlns:h="http://www.w3.org/1999/xhtml" src="a.js"/></svg>`, true],
+    ['logo.svg', `<svg ${SVG}><a x:href="javascript:go()" xmlns:x="http://www.w3.org/1999/xlink"/></svg>`, true],
+    ['logo.svg', `<!DOCTYPE svg [<!ENTITY s "<script href='a.js'/>">]><svg ${SVG}>&s;</svg>`, true],
   ];
-  const refused = [
-    ['index.html', '<!-- x --!><base href=y>'],
-    ['index.html', '<!--><base href=y>'],
-    ['index.html', '<!---><base href=y>'],
-    ['index.html', '<!-- a --> <base href=y> -->'],
-    ['index.html', '<script>a</script><base href=y>'],
-    ['index.html', '<script><!--<script>x</script><base href=y></script>-->'],
-    ['index.html', "<script>'<base href=y>'"],
-    ['index.html', '<svg><script/><base href=y></svg>'],
-    ['index.html', "<svg></svg><script>'<base href=y>'</script>"],
-    ['index.html', '<math><style><base href=y></style></math>'],
-    ['page.svg', "<svg><script>'<base href=y>'</script></svg>"],
-    ['page.xhtml', "<script>'<base href=y>'</script>"],
-    ['page', "<script>'<base href=y>'</script>"],
-    ['index.html', '<p></p title="> <!--"><base href=y><!-- -->'],
-    ['index.html', '<xmp><!--</xmp><base href=y>-->'],
-    ['index.html', '<noembed><!--</noembed><base href=y>-->'],
-    ['index.html', '<noframes><!--</noframes><base href=y>-->'],
-    ['index.html', '<noscript><!--</noscript><base href=y>-->'],
-    ['index.html', '<xmp><a title="</xmp><base href=y>">'],
-    ['index.html', '<noscript><base href=y></noscript>'],
-    ['index.html', '<noscript><!-- </noscript><a title=" --><base href=y>">'],
-    ['index.html', '<script-x><base href=y></script>'],
-    ['index.html', '<title:x><base href=y></title>'],
-    ['index.html', '<select><style><base href=y></style></select>'],
-    ['index.html', '<svg><![CDATA[ a > <!-- ]]><base href=y> -->'],
-    ['page.svg', '<?pi > <!-- ?><script href="y"/><!-- -->'],
-    ['index.html', `<a"b='><base href=y>'>`],
-    ['index.html', "<a ='><base href=y>'>"],
-  ];
-  accepted.push(...policyAccepted);
-  refused.push(...policyRefused.map(t => ['index.html', t]));
   const bad = [
     ...accepted.filter(t => scan('index.html', bytes(t)) !== null).map(t => 'refused: ' + t),
-    ...refused.filter(([p, t]) => scan(p, bytes(t)) === null).map(([p, t]) => 'accepted: ' + p + ' ' + t),
+    ...refused.filter(t => scan('index.html', bytes(t)) === null).map(t => 'accepted: ' + t),
+    ...named.filter(([p, t, want]) => (scan(p, bytes(t)) !== null) !== want).map(([p, t, want]) => (want ? 'accepted: ' : 'refused: ') + p + ' ' + t),
   ];
+  if (scan('index.html', Uint8Array.of(0xff, 0xfe)) === null) bad.push('accepted: bytes that are not UTF-8');
   for (const b of bad) console.log('        ' + b);
   const self = scan('index.html', readFileSync(new URL('../loader/index.html', import.meta.url)));
   const ok = bad.length === 0 && self === null;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  scanner: ${accepted.length} accepted, ${refused.length} refused, and the loader passes its own check${self ? ' (it did not: ' + self + ')' : ''}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  scanner: ${accepted.length} accepted, ${refused.length} refused, ${named.length} by name, and the loader passes its own check${self ? ' (it did not: ' + self + ')' : ''}`);
   if (!ok) process.exitCode = 1;
+  scanned = { scan, accepted, refused };
 }
 
 // The loader's core is core/verifier.js, not an edited copy of it.
@@ -199,7 +312,7 @@ const pinnedPages = [];
     ['a script in an attribute value is not pinned', '<p title="<script>no()</script>"><script>yes()</script>', `script-src ${h('yes()')}; style-src 'none'` + tail],
     ['a script in a title is not pinned', '<title><script>no()</script></title><script>yes()</script>', `script-src ${h('yes()')}; style-src 'none'` + tail],
     ['a <script-x> element is not a script', '<script-x>no()</script-x>', "script-src 'none'; style-src 'none'" + tail],
-    ['external script without integrity', '<script src=a.js></script>', /no integrity to pin/],
+    ['external script without integrity', '<script src=a.js></script>', /no enforceable integrity/],
     ['a script inside svg', '<svg><script>x()</script></svg>', /inside <svg> or <math>/],
     ['a style inside math', '<math><style>a{}</style></math>', /inside <svg> or <math>/],
     ['a script never closed', '<script>x()', /never closed/],
@@ -214,24 +327,26 @@ const pinnedPages = [];
     ['a script after markup in foreignObject', '<svg><foreignObject><p>a</p></foreignObject></svg><script>x()</script>', /markup in <foreignobject>/],
     ['a script after a tag that breaks out of svg', '<svg><p></svg><script>x()</script>', /<p> inside <svg> or <math>/],
     ['a script after an end tag the svg does not own', '<div><svg></div><script>x()</script>', /<\/div> inside <svg> or <math>/],
-    ['foreignObject with nothing to pin after it', '<script>x()</script><svg><foreignObject><p>a</p></foreignObject></svg>', one],
+    ['markup in foreignObject, even with nothing to pin after it', '<script>x()</script><svg><foreignObject><p>a</p></foreignObject></svg>', /markup in <foreignobject>/],
     ['svg textarea is markup, its script refused', '<svg><textarea><script>x()</script></textarea></svg>', /inside <svg> or <math>/],
     ['a textarea after a closed select is raw text again', '<select><option>a</option></select><textarea><script>no()</script></textarea>', none],
     ['a script after a closed select', '<select><optgroup><option>a</select><script>x()</script>', one],
     ['a script after a select that holds more than options', '<select><button>a</button></select><script>x()</script>', /<button> inside <select>/],
-    ['a script in an iframe is not pinned', '<iframe><script>no()</script></iframe>', none],
+    ['an iframe, whatever it holds', '<iframe><script>no()</script></iframe>', /<iframe> loads content/],
     ['a script after plaintext is not pinned', '<plaintext><script>no()</script>', none],
     ['a double-escaped script', '<script>\x3c!-- <script> </script> --></script>', /where it ends is ambiguous/],
     ['a data block is not pinned', '<script type="application/json">no()</script><script>x()</script>', one],
-    ['a data block with a src needs no integrity', '<script type=text/plain src=a.txt></script>', none],
+    ['a data block with a src still needs integrity', '<script type=text/plain src=a.txt></script>', /no enforceable integrity/],
+    ['a data block with a src and integrity is not pinned', `<script type=text/plain src=a.txt integrity="${I}"></script>`, none],
     ['a nomodule script is not pinned', '<script nomodule>no()</script><script>x()</script>', one],
     ['a JavaScript type with parameters is a data block', '<script type="text/javascript; charset=utf-8">no()</script>', none],
     ['a type of only spaces is a data block', '<script type=" ">no()</script>', none],
     ['an empty type, a padded type and a language run', '<script type="">a()</script><script type=" Text/JavaScript ">b()</script><script language=JavaScript1.2>c()</script>',
       `script-src ${h('a()')} ${h('b()')} ${h('c()')}; style-src 'none'` + tail],
     ['a language that is not JavaScript is not pinned', '<script language=vbscript>no()</script>', none],
-    ['type wins over language', '<script type=module language=vbscript>x()</script>', one],
-    ['a module with nomodule runs', '<script type=module nomodule>x()</script>', one],
+    ['type wins over language', `<script type=module language=vbscript src=m.js integrity="${I}"></script>`, `script-src '${I}'; style-src 'none'` + tail],
+    ['a module with nomodule runs', `<script type=module nomodule src=m.js integrity="${I}"></script>`, `script-src '${I}'; style-src 'none'` + tail],
+    ['an inline module', '<script type=module>x()</script>', /inline <script type=module>/],
     ['an import map is pinned', '<script type=importmap>{}</script>', `script-src ${h('{}')}; style-src 'none'` + tail],
     ['a handler for something else is not pinned', '<script for=document event=onclick>no()</script><script for=" Window " event="onload()">x()</script>', one],
     ['a type holding a character reference', '<script type="text/&#106;avascript">x()</script>', /character reference/],
@@ -249,6 +364,21 @@ const pinnedPages = [];
   for (const b of bad) console.log('        ' + b);
   console.log(`${bad.length ? 'FAIL' : 'PASS'}  derivePolicy: ${cases.length - bad.length}/${cases.length} fixed pages`);
   if (bad.length) process.exitCode = 1;
+
+  // Check E and derivePolicy are one walk: a page check E accepts gets a
+  // policy, and a page it refuses is refused a policy for the same reason.
+  const { scan, accepted, refused } = scanned;
+  const pages = [...accepted, ...refused, ...cases.map(c => c[1])];
+  const apart = [];
+  for (const t of pages) {
+    const why = scan('index.html', new TextEncoder().encode(t));
+    const got = await policy(t).catch(e => e);
+    if (why === null ? typeof got !== 'string' : !(got instanceof Error && got.message === why)) apart.push(t);
+    else if (why === null && accepted.includes(t)) pinnedPages.push(['check E accepts ' + t, t, got]);
+  }
+  for (const t of apart) console.log('        ' + t);
+  console.log(`${apart.length ? 'FAIL' : 'PASS'}  check E and derivePolicy agree on ${pages.length - apart.length}/${pages.length} fixed pages`);
+  if (apart.length) process.exitCode = 1;
 }
 
 const browser = process.argv[process.argv.indexOf('--browser') + 1];
