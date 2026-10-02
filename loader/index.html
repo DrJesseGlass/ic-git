@@ -747,9 +747,12 @@ function unverifiableSubresource(servedPath, body) {
     }
     out.path = path;
 
-    // Scanned as markup whatever the entrypoint is named: run() hands the
-    // bytes to the HTML parser, which never looks at the extension.
-    const why = unverifiableSubresource('index.html', served);
+    // Read as HTML whatever the entrypoint is named: run() hands the bytes
+    // to the HTML parser, which never looks at the name, so a .json root
+    // holding markup is not skipped. An XML name is the one exception,
+    // refused as at publish: a browser reads that page as XML, which the
+    // walk does not follow, and a record from before the guard may name one.
+    const why = unverifiableSubresource(/\.(svg|xhtml)$/i.test(path) ? path : 'index.html', served);
     check('E', why === null, 'everything the page loads is inline or SRI-pinned', why || '');
 
     out.verified = checks.every(c => c.ok);
