@@ -4,3 +4,4 @@
 FETCH_HEAD
 # Chrome writes this when it loads the unpacked extension
 /extension/_metadata
+.DS_Store
