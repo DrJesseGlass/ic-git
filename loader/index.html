@@ -177,6 +177,25 @@ const integrityEnforceable = (value) =>
     return m !== null && /^[a-zA-Z0-9+/]+={0,2}$/.test(m[1]);
   });
 
+// Whether URL attribute `name` runs script when followed: a `javascript:`
+// URL, which the pinned policy refuses. The browser decodes character
+// references and drops tabs, newlines, and leading spaces and controls
+// before reading the scheme; a reference before the first `/`, `?` or `#`
+// could spell one, so it is refused rather than decoded. Port of the
+// canister's script_url.
+function scriptUrl(tag, name, value) {
+  const m = /[/?#]/.exec(value);
+  const head = m ? m.index : value.length;
+  if (value.slice(0, head).includes("&")) {
+    return `<${tag} ${name}=...> holds a character reference where a URL scheme could be`;
+  }
+  const cleaned = value.replace(/[\t\n\r]/g, "").replace(/^[\x00-\x20]+/, "");
+  if (cleaned.startsWith("javascript:")) {
+    return `<${tag} ${name}="javascript:..."> runs script from a URL, which the pinned policy refuses`;
+  }
+  return null;
+}
+
 function unverifiableSubresource(servedPath, body) {
   // Gate on the served file's NAME, case-insensitively; an extensionless
   // blob could be a page, so it is scanned rather than skipped.
@@ -188,6 +207,8 @@ function unverifiableSubresource(servedPath, body) {
   // as HTML, until foreign content or a select begins. See the canister's
   // unverifiable_subresource for why bodies are skipped and where not.
   let plain = ext === "html" || ext === "htm";
+  // Inside <svg> or <math>: a <script> or <style> there cannot be pinned.
+  let foreign = false;
   let text;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(body);
@@ -282,6 +303,23 @@ function unverifiableSubresource(servedPath, body) {
       v.includes("&")
         ? `<${tag} ${an}=...> value holds a character reference this scanner does not decode`
         : null;
+    // What the pinned policy refuses, on any element.
+    for (const [n] of parsed.attrs) {
+      if (n.length > 2 && n.startsWith("on")) {
+        return `<${tag} ${n}=...> is an inline event handler, which the pinned policy refuses; attach it from a script`;
+      }
+    }
+    if (get("style") !== undefined) {
+      return `<${tag} style=...> is an inline style attribute, which the pinned policy refuses; move it into a <style>`;
+    }
+    for (const name of ["href", "xlink:href", "action", "formaction"]) {
+      const v = get(name);
+      const why = v === undefined ? null : scriptUrl(tag, name, v);
+      if (why) return why;
+    }
+    if (foreign && (tag === "script" || tag === "style")) {
+      return `<${tag}> inside <svg> or <math> cannot be pinned: its text is markup there`;
+    }
     if (tag === "iframe" || tag === "object" || tag === "embed") {
       return `<${tag}> loads content SRI cannot cover; inline the content instead`;
     }
@@ -322,24 +360,32 @@ function unverifiableSubresource(servedPath, body) {
       const rel = get("rel") ?? "";
       const bad = charRef("rel", rel);
       if (bad) return bad;
-      const enforced = rel
-        .split(/[ \t\n\r\f]+/)
-        .some((r) => r === "stylesheet" || r === "modulepreload");
+      const rels = rel.split(/[ \t\n\r\f]+/);
+      // The pinned policy pins styles by the hash of their text, and Chrome
+      // takes no hash for an external stylesheet.
+      if (get("href") !== undefined && rels.includes("stylesheet")) {
+        return `<link rel="${rel}"> is an external stylesheet, which the pinned policy refuses; inline it as a <style>`;
+      }
       const integ = get("integrity");
       if (
-        enforced &&
+        rels.includes("modulepreload") &&
         get("href") !== undefined &&
         (integ === undefined || !integrityEnforceable(integ))
       ) {
         return `<link rel="${rel}"> has no enforceable integrity=`;
       }
     }
-    if (tag === "svg" || tag === "math" || tag === "select") plain = false;
+    if (tag === "svg" || tag === "math") { plain = false; foreign = true; }
+    if (tag === "select") plain = false;
     // Raw text: the browser reads everything to the end tag as text.
     const raw = ["script", "style", "textarea", "title", "xmp", "noembed", "noframes", "noscript"];
     if (plain && exact && raw.includes(tag)) {
       const end = rawTextEnd(hay, i, tag);
       if (end === -1) return `<${tag}> is never closed`;
+      // An @import in a pinned inline style loads a stylesheet no hash admits.
+      if (tag === "style" && hay.slice(i, end).includes("@import")) {
+        return "<style> holds an @import, which the pinned policy refuses; inline what it imports";
+      }
       if (tag === "noscript") {
         // With scripting off the body is markup: scan it as a page of its
         // own; a comment still open at the end tag would run on past it.

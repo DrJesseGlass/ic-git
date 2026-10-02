@@ -86,6 +86,35 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
     "<noscript>enable JavaScript</noscript><script>'<base href=x>'</script>",
     '<xmp><base href=x></xmp>',
   ];
+  // The pinned-policy rules (site.rs: refuses_what_the_pinned_policy_refuses).
+  const policyRefused = [
+    '<button onclick="go()">go</button>',
+    '<svg><circle ONLOAD="x()"/></svg>',
+    '<body onload=go()>',
+    '<p style="color: red">x</p>',
+    '<a href="javascript:go()">x</a>',
+    '<a href="  JavaScript:go()">x</a>',
+    '<a href="java\tscript:go()">x</a>',
+    '<a href="&#106;avascript:go()">x</a>',
+    '<form action="javascript:go()"></form>',
+    '<button formaction="javascript:go()">x</button>',
+    '<svg><a xlink:href="javascript:go()"><text>x</text></a></svg>',
+    '<link rel="stylesheet" href="a.css" integrity="sha384-abc">',
+    '<link rel="alternate stylesheet" href="b.css" integrity="sha384-abc">',
+    '<svg><script>x()</script></svg>',
+    '<math><style>a{}</style></math>',
+    '<style>@import url(a.css); b{}</style>',
+    '<div one="y">x</div>',
+  ];
+  const policyAccepted = [
+    '<details open><summary>x</summary></details>',
+    '<div data-on="x">x</div>',
+    '<a href="/search?a=1&amp;b=2">x</a>',
+    '<a href="https://example.com/javascript:not-a-scheme">x</a>',
+    '<form action="/go"><button formaction="/other">x</button></form>',
+    '<style>b { color: red }</style>',
+    '<svg><path d="M0 0"/></svg><p>after</p>',
+  ];
   const refused = [
     ['index.html', '<!-- x --!><base href=y>'],
     ['index.html', '<!--><base href=y>'],
@@ -116,6 +145,8 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
     ['index.html', `<a"b='><base href=y>'>`],
     ['index.html', "<a ='><base href=y>'>"],
   ];
+  accepted.push(...policyAccepted);
+  refused.push(...policyRefused.map(t => ['index.html', t]));
   const bad = [
     ...accepted.filter(t => scan('index.html', bytes(t)) !== null).map(t => 'refused: ' + t),
     ...refused.filter(([p, t]) => scan(p, bytes(t)) === null).map(([p, t]) => 'accepted: ' + p + ' ' + t),

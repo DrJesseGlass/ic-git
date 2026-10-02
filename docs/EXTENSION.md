@@ -87,11 +87,15 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
 - `/site/<repo>` (no slash) is redirected to `/site/<repo>/` before it
   loads: the canister serves the page at both, but relative URLs only
   resolve at the second.
-- The derived policy is stricter than check E: it refuses inline event
-  handlers, `javascript:` URLs, workers, `style=` attributes, external
-  stylesheets and a pinned module's imports, which check E lets through.
-  Until check E is tightened to match (below), a page that publishes can
-  still be stopped as unpinnable, or run without what the policy refused.
+- Check E refuses what the pinned policy would: inline event handlers
+  (any `on...` attribute), `style=` attributes, `javascript:` URLs,
+  external stylesheets, `@import` in an inline `<style>`, and a `<script>`
+  or `<style>` inside `<svg>` or `<math>` -- in the canister, at publish,
+  and in the shared scanner the extensions and tools run. So a page that
+  publishes is a page the extensions run. Two things only code can start
+  stay out of a markup scan's reach and are refused by the policy at run
+  time, where the stop page names them: workers, and the import chain of
+  a pinned module.
 
 ## What the user sees
 
@@ -224,6 +228,8 @@ Then add a row to Releases.
 The newest row per package is the record on chain. 0.1.0 was published
 but never submitted to a store; 0.1.1 superseded it, and was submitted
 to both stores on 2026-10-01. Users pass the Chrome store id to `--id`.
+The packages in git are 0.1.2 -- the tightened check E in their shared
+scanner -- and are not yet published.
 
 | Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx | Chrome store id |
 |---|---|---|---|---|---|---|
@@ -234,10 +240,9 @@ to both stores on 2026-10-01. Users pass the Chrome store id to `--id`.
 
 ## Next
 
-- Tighten check E to the derived policy (inline handlers, `javascript:`
-  URLs, workers, `style=` attributes, external stylesheets, a pinned
-  module's import chain), in the canister and the shared scanner together,
-  so a page that publishes is a page the extensions run.
+- Release the tightened check E: the canister (the next canister release)
+  and the extensions (0.1.2, below) -- the 0.1.2 records published and
+  submitted once the stores have approved 0.1.1.
 - Check the first store-installed copy of each package with `--digest`
   before users are told to rely on it (docs/STORE.md).
 - The extension hashing its own files and showing whether they match the

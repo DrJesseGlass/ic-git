@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ic-git verifier",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Checks ic-git sites against their on-chain record and lets a page load only if what arrived is the recorded page, running only its verified scripts.",
   "browser_specific_settings": {
     "gecko": {

@@ -235,6 +235,28 @@ fn char_ref_free<'a>(tag: &str, name: &str, value: &'a str) -> Result<&'a str, S
 /// Why a served entrypoint's own bytes are not enough to verify the page, or
 /// `None` if they are.
 ///
+/// Whether URL attribute `name` on `tag` runs script when followed: a
+/// `javascript:` URL, which the pinned policy refuses (a hash matches no
+/// URL). The browser decodes character references and drops every tab and
+/// newline, and leading spaces and controls, before it reads the scheme; a
+/// reference before the first `/`, `?` or `#` could spell one, so it is
+/// refused rather than decoded -- query strings keep their `&`.
+fn script_url(tag: &str, name: &str, value: &str) -> Option<String> {
+    let head = value.find(['/', '?', '#']).unwrap_or(value.len());
+    if value[..head].contains('&') {
+        return Some(format!(
+            "<{tag} {name}=...> holds a character reference where a URL scheme could be"
+        ));
+    }
+    let cleaned: String = value.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    if cleaned.trim_start_matches(|c: char| c <= ' ').starts_with("javascript:") {
+        return Some(format!(
+            "<{tag} {name}=\"javascript:...\"> runs script from a URL, which the pinned policy refuses"
+        ));
+    }
+    None
+}
+
 /// The registry attests exactly ONE blob -- the entrypoint, since
 /// `provenance::site_record` resolves path "" -- so every file the entrypoint
 /// *names* is fetched in a separate request that no attestation covers. Without
@@ -263,6 +285,14 @@ fn char_ref_free<'a>(tag: &str, name: &str, value: &'a str) -> Result<&'a str, S
 ///   an inline `<script type=module>` imports files no integrity can pin.
 /// - A tag that never closes, a keyword value hiding behind a character
 ///   reference, or a body that is not UTF-8, is refused rather than skipped.
+/// - What the extensions' pinned policy would refuse at run time
+///   (docs/EXTENSION.md): it admits a page's own scripts and styles by hash
+///   and nothing else, so a page holding these would publish and then be
+///   stopped. Inline event handlers (`on...=`), `style=` attributes,
+///   `javascript:` URLs, every external stylesheet (pinned or not: inline
+///   it), `@import` in an inline `<style>`, and a `<script>` or `<style>`
+///   inside `<svg>` or `<math>`, whose text is markup there and cannot be
+///   hashed as the browser will read it.
 ///
 /// A false refusal costs the operator one inline-or-add-integrity edit; a false
 /// accept costs a user their funds. That asymmetry is the whole design.
@@ -290,7 +320,10 @@ fn char_ref_free<'a>(tag: &str, name: &str, value: &'a str) -> Result<&'a str, S
 /// browser would execute), so what follows may be rescanned and
 /// over-refuse -- the safe direction to be wrong in.
 ///
-/// NOT covered, stated rather than implied:
+/// NOT covered, stated rather than implied (the pinned policy refuses the
+/// first two at run time, where the extensions' stop page names them):
+/// - Workers (`new Worker(...)`) and an external module's import chain:
+///   both are started by code, not markup.
 /// - Images, fonts, and media. SRI has no mechanism for them, so refusing them
 ///   would reject every real site. They cannot execute; a swapped image can
 ///   mislead the eye but not the machine.
@@ -316,6 +349,8 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
     // page served as HTML (see content_type), until foreign content or a
     // select begins.
     let mut plain = ext_in(&["html", "htm"]);
+    // Inside <svg> or <math>: a <script> or <style> there cannot be pinned.
+    let mut foreign = false;
     let Ok(text) = core::str::from_utf8(body) else {
         return Some("entrypoint is not valid UTF-8, so its references cannot be read".to_string());
     };
@@ -372,6 +407,31 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
         };
         i = end + 1;
         let get = |n: &str| attr(&attrs, n);
+        // What the pinned policy refuses, on any element.
+        for (n, _) in &attrs {
+            if n.len() > 2 && n.starts_with("on") {
+                return Some(format!(
+                    "<{tag} {n}=...> is an inline event handler, which the pinned policy refuses; \
+                     attach it from a script"
+                ));
+            }
+        }
+        if get("style").is_some() {
+            return Some(format!(
+                "<{tag} style=...> is an inline style attribute, which the pinned policy refuses; \
+                 move it into a <style>"
+            ));
+        }
+        for name in ["href", "xlink:href", "action", "formaction"] {
+            if let Some(why) = get(name).and_then(|v| script_url(tag, name, v)) {
+                return Some(why);
+            }
+        }
+        if foreign && matches!(tag, "script" | "style") {
+            return Some(format!(
+                "<{tag}> inside <svg> or <math> cannot be pinned: its text is markup there"
+            ));
+        }
         match tag {
             // No SRI mechanism exists for anything these load -- src, data,
             // or a whole srcdoc document -- so integrity= on them is a
@@ -442,17 +502,28 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
                     Ok(rel) => rel,
                     Err(why) => return Some(why),
                 };
-                let enforced = rel
-                    .split_ascii_whitespace()
-                    .any(|r| matches!(r, "stylesheet" | "modulepreload"));
-                if enforced
+                let rels = || rel.split_ascii_whitespace();
+                // The pinned policy pins styles by the hash of their text, and
+                // Chrome takes no hash for an external stylesheet; a URL would
+                // pin nothing once the markup can be altered.
+                if get("href").is_some() && rels().any(|r| r == "stylesheet") {
+                    return Some(format!(
+                        "<link rel=\"{rel}\"> is an external stylesheet, which the pinned policy \
+                         refuses; inline it as a <style>"
+                    ));
+                }
+                if rels().any(|r| r == "modulepreload")
                     && get("href").is_some()
                     && !get("integrity").is_some_and(integrity_enforceable)
                 {
                     return Some(format!("<link rel=\"{rel}\"> has no enforceable integrity="));
                 }
             }
-            "svg" | "math" | "select" => plain = false,
+            "svg" | "math" => {
+                plain = false;
+                foreign = true;
+            }
+            "select" => plain = false,
             _ => {}
         }
         // Raw text: the browser reads everything to the end tag as text.
@@ -467,6 +538,14 @@ pub fn unverifiable_subresource(served_path: &str, body: &[u8]) -> Option<String
             let Some(end) = raw_text_end(&hay, i, tag) else {
                 return Some(format!("<{tag}> is never closed"));
             };
+            // An @import in a pinned inline style loads a stylesheet no hash
+            // admits.
+            if tag == "style" && hay[i..end].contains("@import") {
+                return Some(
+                    "<style> holds an @import, which the pinned policy refuses; inline what it imports"
+                        .to_string(),
+                );
+            }
             if tag == "noscript" {
                 // With scripting off the body is markup: scan it as a page of
                 // its own. A comment there that is still open at the end tag
@@ -1030,6 +1109,55 @@ mod tests {
         refused("index.html", "<a ='><base href=y>'>");
     }
 
+    /// What the extensions' pinned policy refuses at run time is refused at
+    /// publish too, so a page that publishes is a page they run -- and the
+    /// look-alikes that are honest still pass.
+    #[test]
+    fn refuses_what_the_pinned_policy_refuses() {
+        for bad in [
+            "<button onclick=\"go()\">go</button>",
+            "<svg><circle ONLOAD=\"x()\"/></svg>",
+            "<body onload=go()>",
+            "<p style=\"color: red\">x</p>",
+            "<a href=\"javascript:go()\">x</a>",
+            "<a href=\"  JavaScript:go()\">x</a>",
+            "<a href=\"java\tscript:go()\">x</a>",
+            "<a href=\"&#106;avascript:go()\">x</a>",
+            "<form action=\"javascript:go()\"></form>",
+            "<button formaction=\"javascript:go()\">x</button>",
+            "<svg><a xlink:href=\"javascript:go()\"><text>x</text></a></svg>",
+            "<link rel=\"stylesheet\" href=\"a.css\" integrity=\"sha384-abc\">",
+            "<link rel=\"alternate stylesheet\" href=\"b.css\" integrity=\"sha384-abc\">",
+            "<svg><script>x()</script></svg>",
+            "<math><style>a{}</style></math>",
+            "<style>@import url(a.css); b{}</style>",
+            // Over-refused on purpose: any attribute named on... counts as a
+            // handler, since browsers keep adding event names and a list
+            // would fall behind; an honest one is a rename away.
+            "<div one=\"y\">x</div>",
+        ] {
+            assert!(
+                unverifiable_subresource("index.html", bad.as_bytes()).is_some(),
+                "should refuse: {bad}"
+            );
+        }
+        for ok in [
+            "<details open><summary>x</summary></details>",
+            "<div data-on=\"x\">x</div>",
+            "<a href=\"/search?a=1&amp;b=2\">x</a>",
+            "<a href=\"https://example.com/javascript:not-a-scheme\">x</a>",
+            "<form action=\"/go\"><button formaction=\"/other\">x</button></form>",
+            "<style>b { color: red }</style>",
+            "<svg><path d=\"M0 0\"/></svg><p>after</p>",
+        ] {
+            assert_eq!(
+                unverifiable_subresource("index.html", ok.as_bytes()),
+                None,
+                "should accept: {ok}"
+            );
+        }
+    }
+
     /// The two entrypoint shapes whose attested hash actually proves something:
     /// self-contained, or SRI-complete so the browser enforces the rest.
     #[test]
@@ -1043,7 +1171,7 @@ mod tests {
             // Bare and single-quoted attributes, uppercase tags, attribute
             // order, and a multi-token rel all still parse.
             "<SCRIPT SRC=app.js INTEGRITY=sha384-x></SCRIPT>",
-            "<link integrity='sha384-x' rel='preload stylesheet' href='a.css'>",
+            "<link integrity='sha384-x' rel='preload modulepreload' href='m.js'>",
             // An SRI-pinned external module is enforced at the top; its import
             // chain is documented as out of the scanner's reach.
             "<script type=\"module\" src=\"m.js\" integrity=\"sha384-abc\"></script>",
