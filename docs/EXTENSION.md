@@ -32,8 +32,11 @@ sha256 of their text, external scripts by their `integrity` hashes, plus
 `object-src 'none'`, `frame-src 'none'`, `base-uri 'none'`. External
 stylesheets cannot be pinned (Chrome takes no hash for one, and a URL pins
 nothing once the markup can be altered), so a site inlines its CSS --
-ic-vote does at staging. A page the policy cannot pin exactly is refused
-as "verified but cannot be protected" rather than guessed at.
+ic-vote does at staging. Check E and `derivePolicy` are one walk over the
+page (`readPage`), which follows the browser's HTML parser and refuses
+wherever it cannot say what the parser will do: a page the policy could
+not pin exactly fails check E, at publish and here, rather than being
+guessed at.
 
 ## How each browser enforces it
 
@@ -87,11 +90,30 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
 - `/site/<repo>` (no slash) is redirected to `/site/<repo>/` before it
   loads: the canister serves the page at both, but relative URLs only
   resolve at the second.
-- The derived policy is stricter than check E: it refuses inline event
-  handlers, `javascript:` URLs, workers, `style=` attributes, external
-  stylesheets and a pinned module's imports, which check E lets through.
-  Until check E is tightened to match (below), a page that publishes can
-  still be stopped as unpinnable, or run without what the policy refused.
+- Check E refuses what the pinned policy would refuse or could not pin:
+  inline event handlers (any `on...` attribute), `style=` attributes,
+  `javascript:` URLs, external stylesheets, `@import` in an inline
+  `<style>`, and a script or style it cannot say the browser will run as
+  written (inside `<svg>` or `<math>`, a running script inside
+  `<template>`, anything after markup whose parse it does not follow) --
+  in the canister, at publish, and in the shared scanner the extensions
+  and tools run. So a page that publishes is a page the extensions load
+  under a policy that admits everything in its markup.
+- What the page's own code does once it runs is out of a markup scan's
+  reach, and the policy still governs it. Admitting by hash and nothing
+  else, it refuses (measurement 10): `eval`, `new Function` and string
+  timers; compiling WebAssembly; workers and service workers; `import()`,
+  and a module's static imports unless a `<link rel=modulepreload>` pins
+  the file -- a pinned module with an unpinned import does not run at
+  all; a script or `<style>` the code adds, unless its text is one the
+  page was published with or it carries a pinned `integrity`; an added
+  stylesheet link; `style=` and `on...` attributes however they are set
+  (`setAttribute`, `innerHTML`); frames and `<base>`. It leaves alone the
+  CSSOM (`el.style`, `insertRule`, constructed sheets), handlers set as
+  functions, `fetch`, and images. Nothing announces a refusal: the page
+  loads, the call throws or does nothing, and the browser's console names
+  the directive. A site that needs one of these does not work under the
+  extensions until it stops needing it.
 
 ## What the user sees
 
@@ -117,8 +139,15 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
   "Open anyway" (Chrome), and a page no record covers. On Firefox the
   tampered page's injected script and image are shown never to be
   requested.
-- `node tools/loader-test.mjs` covers the core and `derivePolicy`, and
-  that every copy of the core is in step with `core/verifier.js`.
+- `node tools/loader-test.mjs` covers the core, check E and `derivePolicy`
+  on fixed pages (the canister's test cases, mirrored), that the two agree
+  on every one, and that every copy of the core is in step with
+  `core/verifier.js`.
+- `node tools/walk-fuzz.mjs` puts pages to the walk. `--browser` (Chrome,
+  or Firefox with `--firefox`) checks it against the browser's own
+  parser, on random pages and on every context of up to two structural
+  tags; `--rust` checks that the canister's port gives each random page
+  the same verdict. Run both after any edit to the walk.
 - Real browsers, macOS, with NordVPN Threat Protection (a TLS-inspecting
   proxy that injects a script into every page): Chrome on 2026-09-30 and
   Firefox 153 on 2026-10-01 both stopped the console while it was on, ran
@@ -148,6 +177,36 @@ local page:
    page requests nothing; an async `onHeadersReceived` can set the CSP.
    Match patterns must not name a port (they fail silently).
 9. A rule without host permission for the page silently does nothing.
+
+Measured on 2026-10-02, in the same Chromium (153.0.8010) and Firefox 157:
+
+10. Under a derived policy, in both: `eval` and `new Function` throw, a
+    string timer does not run, WebAssembly does not compile; a worker
+    (from a URL or a blob), a service worker and `import()` are refused; a
+    pinned module with an unpinned static import does not run, and runs
+    once a `<link rel=modulepreload>` pins the import; an added script
+    runs only with the text of a pinned inline script or carrying a
+    pinned `integrity` (the URL of a pinned script is not enough), an
+    added `<style>` only with the text of a pinned one; an added
+    stylesheet link, `setAttribute('style')`, `style=` and `on...` through
+    `innerHTML`, `setAttribute('onclick')`, a followed `javascript:` URL,
+    an added frame and an added `<base>` do nothing; `el.style`,
+    `insertRule`, a constructed sheet, a handler set as a function,
+    `fetch` and an image work.
+11. Both discard an `integrity` whose algorithm is not in lower case: a
+    script with `integrity="SHA384-..."` and the wrong hash runs. Check E
+    reads the attribute as the page wrote it.
+12. Chrome prerenders a page named by an inline
+    `<script type=speculationrules>`, running its scripts on the origin
+    with no user action; Firefox does not. Check E refuses the script.
+13. The walk reads pages as both browsers' parsers do
+    (`tools/walk-fuzz.mjs`, at its defaults). Of 100,000 random pages
+    check E accepted 37,260, and on each the parsed document held nothing
+    check E refuses and exactly the scripts and styles the policy pins --
+    3,000 of them also by a navigation with scripting on. And in none of
+    9,049,755 pages -- every context of up to two structural tags, then
+    text the walk skips -- did the parser build an element the walk had
+    skipped. The canister's port gave the 100,000 the same verdicts.
 
 ## The extension's own package, on chain
 
@@ -224,6 +283,8 @@ Then add a row to Releases.
 The newest row per package is the record on chain. 0.1.0 was published
 but never submitted to a store; 0.1.1 superseded it, and was submitted
 to both stores on 2026-10-01. Users pass the Chrome store id to `--id`.
+The packages in git are 0.1.2 -- the tightened check E in their shared
+scanner -- and are not yet published.
 
 | Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx | Chrome store id |
 |---|---|---|---|---|---|---|
@@ -234,10 +295,9 @@ to both stores on 2026-10-01. Users pass the Chrome store id to `--id`.
 
 ## Next
 
-- Tighten check E to the derived policy (inline handlers, `javascript:`
-  URLs, workers, `style=` attributes, external stylesheets, a pinned
-  module's import chain), in the canister and the shared scanner together,
-  so a page that publishes is a page the extensions run.
+- Release the tightened check E: the canister (the next canister release)
+  and the extensions (0.1.2, below) -- the 0.1.2 records published and
+  submitted once the stores have approved 0.1.1.
 - Check the first store-installed copy of each package with `--digest`
   before users are told to rely on it (docs/STORE.md).
 - The extension hashing its own files and showing whether they match the
