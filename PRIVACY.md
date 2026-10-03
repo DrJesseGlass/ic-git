@@ -1,5 +1,8 @@
 # Privacy: ic-git verifier (browser extension)
 
+The published policy is the page https://drjesseglass.github.io/ic-git/privacy/
+(docs/privacy/index.html); this is the same text.
+
 The ic-git verifier extensions for Chrome and Firefox check pages served
 by the ic-git canister (`umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io`) against
 their public record on chain before the page runs.
