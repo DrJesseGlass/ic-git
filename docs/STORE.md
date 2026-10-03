@@ -90,7 +90,10 @@ the three disclosures (no sale, no unrelated use, no creditworthiness
 use).
 
 **Privacy policy URL:**
-https://github.com/DrJesseGlass/ic-git/blob/main/PRIVACY.md
+https://drjesseglass.github.io/ic-git/privacy/ -- a page of its own
+(`docs/privacy/index.html`, served by GitHub Pages from `/docs`); the
+Chrome Web Store rejected the GitHub file view of PRIVACY.md as not a
+privacy policy page
 
 **Firefox data collection:** the manifest declares browsing activity as
 required (`data_collection_permissions: { required: ["browsingActivity"] }`),

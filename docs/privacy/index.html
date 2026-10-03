@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy policy - ic-git verifier</title>
+<style>
+  :root { --fg:#1c1c1c; --muted:#6b6b6b; --bg:#fafaf8; --line:#e2e0da; --link:#0b57a4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e6e4dd; --muted:#9a978f; --bg:#161615; --line:#2c2b28; --link:#7fb3ea; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width:42rem; margin:0 auto; padding:2.5rem 1rem 4rem; }
+  h1 { font-size:1.5rem; margin:0 0 .3rem; }
+  h2 { font-size:1.05rem; margin:1.8rem 0 .4rem; }
+  p, li { margin:.4rem 0; }
+  .muted { color:var(--muted); }
+  code { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.9em; }
+  a { color:var(--link); }
+</style>
+</head>
+<body>
+<main>
+<h1>Privacy policy: ic-git verifier</h1>
+<p class="muted">Browser extension for Chrome and Firefox. Effective 2026-10-03.</p>
+
+<p>The ic-git verifier checks pages served by the ic-git canister
+(<code>umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io</code>) against their public
+record on chain before the page runs, and stops pages that do not match.</p>
+
+<h2>What leaves your browser</h2>
+<p>To check a site, the extension reads public records only, and these
+requests name the site being checked (for example <code>ic-vote</code>):</p>
+<ul>
+  <li>the page itself, from the ic-git canister;</li>
+  <li>the canister's public git objects, from the Internet Computer's public
+    query endpoint <code>icp-api.io</code>;</li>
+  <li>the site's record in the registry contract on Ethereum Sepolia, from two
+    public RPC endpoints, <code>ethereum-sepolia-rpc.publicnode.com</code> and
+    <code>sepolia.gateway.tenderly.co</code>.</li>
+</ul>
+<p>So the operators of those endpoints (the Internet Computer's public API
+gateway and the two RPC providers) see which ic-git site is being checked and
+from which network address: when you open one of its pages, and every ten
+minutes after while the browser stays open. This is why the Chrome Web Store
+listing declares "Web history" and the Firefox add-on declares browsing
+activity.</p>
+
+<h2>What does not</h2>
+<p>No page content, nothing you type, and no identifier. Nothing at all is sent
+to the extension's developer, who runs no server, analytics or accounts. The
+extension does not read or send anything from other sites, forms, wallets or
+cookies, and no data is sold or shared for any other purpose.</p>
+
+<h2>What is kept</h2>
+<p>For the browser session only: which ic-git sites verified, their records,
+and the checked page, so that a verified page loads without another check.
+Nothing is kept after the browser closes.</p>
+
+<h2>Source</h2>
+<p>The extension's code is public at
+<a href="https://github.com/DrJesseGlass/ic-git">github.com/DrJesseGlass/ic-git</a>
+(<code>extension/</code> and <code>extension-firefox/</code>), and the hash of
+every file in each release is recorded on chain.</p>
+
+<h2>Changes and contact</h2>
+<p>Changes to this policy are made in the same repository and dated here.
+Questions: open an issue at
+<a href="https://github.com/DrJesseGlass/ic-git/issues">github.com/DrJesseGlass/ic-git/issues</a>.</p>
+</main>
+</body>
+</html>
