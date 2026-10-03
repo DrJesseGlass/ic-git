@@ -275,6 +275,43 @@
         "note": "upgrade from v0.3.0, after tools/e2e-local.sh passed 69/69 on this commit including an upgrade from v0.3.0 over state it wrote. The canister crate changed in #37-#42: EVM sends sign with a stored next nonce and refund pre-broadcast failures (#37); every operator-only endpoint uses the one operator guard (#38) and billing exemption the same rule (#39); the subresource scanner skips what the browser never parses as markup (#42)"
       },
       "wasm_sha256": "5ab7c2f6d743331fe755e1f299421694ae3ed82020f5e68bc46aa49842b841e6"
+    },
+    {
+      "commit": "dcb4aa7ad5f5f19de720d0bbb7852555e4916949",
+      "tag": "v0.3.2",
+      "module_hash": "1efa766581c2ed9d83025f5008b7cd32c3fb86887c5f0b3c4ca74139eac90f92",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, linux/amd64 image under emulation",
+          "date": "2026-10-02"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/37075637669",
+          "date": "2026-10-02",
+          "check": "identical hash (1efa7665...0f92 gz, 66df85cc...6e77 raw); the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-10-03",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh (live module hash) against the reproducible build's module sha256",
+        "note": "upgrade from v0.3.1, after tools/e2e-local.sh passed 69/69 on this commit including an upgrade from v0.3.1 over state it wrote. The canister crate changed in #60 only: check E (site::unverifiable_subresource, run when a site record is published) refuses what the extensions' pinned policy refuses -- on... handlers, style= attributes, javascript: URLs, external stylesheets, @import in an inline style, script or style inside svg or math. Every published site (ic-git, ic-vote, ic-git-loader, ic-git-extension, ic-git-extension-firefox) passes it and still verifies after the upgrade"
+      },
+      "wasm_sha256": "66df85ccff0817d16dc080eb5374b383c378ca5978af61063eeefa06beac6e77"
     }
   ]
 }
