@@ -17,6 +17,27 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-09-24 to 26 | `5b2b55f` | `v0.2.2` | `f13ff2226676f02cffe3906f641a63e6df0806ef25c093ae159444aeb278cca1` (gz) | MATCH, 2026-09-26 (recorded late) | GitHub Actions amd64 runner, [run 36039724742](https://github.com/DrJesseGlass/ic-git/actions/runs/36039724742), identical hash; deployer (pinned container, macOS arm64 host under emulation), MATCH |
 | 2026-09-26 | `07fd244` | `v0.3.0` | `3afcac754d55c6747abda09568412517602710eb91e68a2ac3c7937e4f76db03` (gz) | MATCH, 2026-09-26 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 36220841774](https://github.com/DrJesseGlass/ic-git/actions/runs/36220841774), identical hash |
 | 2026-09-28 | `0d1d466` | `v0.3.1` | `5f283447bc72c028dd7e2feb51f9edd91e4b1861e1979cb161e8e4f6a1d7ad32` (gz) | MATCH, 2026-09-28 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 36506401506](https://github.com/DrJesseGlass/ic-git/actions/runs/36506401506), identical hash |
+| 2026-10-03 | `dcb4aa7` | `v0.3.2` | `1efa766581c2ed9d83025f5008b7cd32c3fb86887c5f0b3c4ca74139eac90f92` (gz) | MATCH, 2026-10-03 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37075637669](https://github.com/DrJesseGlass/ic-git/actions/runs/37075637669), identical hash |
+
+## v0.3.2 -- 2026-10-03
+
+One canister change, #60: check E, the scan run when a site record is
+published, now refuses what the browser extensions' pinned policy
+refuses at run time -- inline event handlers, `style=` attributes,
+`javascript:` URLs, external stylesheets, `@import` in an inline style,
+and a script or style inside SVG or MathML -- so a page that publishes
+is a page the extensions run. Every published site passes it.
+
+Gated before the deploy by `tools/e2e-local.sh`: 69 checks on this
+commit, including an upgrade from v0.3.1 -- what mainnet ran -- over
+state that release wrote. After the upgrade all five published site
+records (ic-git, ic-vote, ic-git-loader, ic-git-extension,
+ic-git-extension-firefox) still verified with `tools/verify.mjs`.
+
+Same recipe and base image digest as v0.3.1. The raw wasm inside the
+gzip hashes to `66df85cc...6e77`. Two hosts agreed byte for byte: the
+deployer's arm64 machine running the amd64 image under emulation, and a
+native x86_64 GitHub runner triggered by the tag push.
 
 ## v0.3.1 -- 2026-09-28
 
