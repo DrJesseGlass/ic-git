@@ -489,21 +489,62 @@ pub fn repos_of(p: &Principal) -> Vec<String> {
 
 use ic_multisig::{Approval, Approver, Ballots, Decision, Policy, Store, Subject, Tally};
 
+/// Which way a ballot goes. Approve counts 1, Reject 0 (a "no", or an
+/// approval withdrawn), Object -1 with a reason: a commit passes when
+/// approvals minus objections reach the threshold. The crate's `Decision`
+/// with ic-git's candid name.
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vote {
+    Approve,
+    Reject,
+    Object,
+}
+
+impl From<Vote> for Decision {
+    fn from(v: Vote) -> Self {
+        match v {
+            Vote::Approve => Decision::Approve,
+            Vote::Reject => Decision::Reject,
+            Vote::Object => Decision::Object,
+        }
+    }
+}
+
+impl From<Decision> for Vote {
+    fn from(d: Decision) -> Self {
+        match d {
+            Decision::Approve => Vote::Approve,
+            Decision::Reject => Vote::Reject,
+            Decision::Object => Vote::Object,
+        }
+    }
+}
+
 /// A ballot as the API reports it. Converted from the crate's record.
+/// `approve` stays for clients that predate `decision`.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Ballot {
     pub principal: Principal,
     pub approve: bool,
+    pub decision: Vote,
+    pub reason: Option<String>,
     pub at_ns: u64,
+    /// Whether the tally counts this ballot: its caster is the owner or a
+    /// voter right now. A ballot stays on record when its caster leaves the
+    /// policy, and stops counting.
+    pub counts: bool,
 }
 
-/// The API view of a stored record. `None` only for an approver that is not
-/// a principal, which this store never writes: every ballot here comes from
-/// an authenticated caller.
-fn ballot(a: Approval) -> Option<Ballot> {
+/// The API view of a stored record under `pol`, the repo's policy if it has
+/// one. `None` only for an approver that is not a principal, which this
+/// store never writes: every ballot here comes from an authenticated caller.
+fn ballot(a: Approval, pol: Option<&Policy>) -> Option<Ballot> {
     Some(Ballot {
         principal: a.approver.principal()?,
+        counts: pol.is_some_and(|p| p.is_approver(&a.approver)),
         approve: a.approves(),
+        decision: a.decision.into(),
+        reason: a.reason,
         at_ns: a.at_ns,
     })
 }
@@ -555,33 +596,87 @@ pub fn votes(repo: &str, commit_hex: &str) -> Vec<Ballot> {
     let Ok(oid) = store::parse_oid(commit_hex) else {
         return Vec::new();
     };
+    let pol = meta(repo).map(|m| policy(&m));
     VoteStore { repo }
         .load(&subject(&oid))
         .into_iter()
-        .filter_map(ballot)
+        .filter_map(|a| ballot(a, pol.as_ref()))
         .collect()
 }
 
-/// Cast or replace a ballot. Returns the tally: approvals so far, the
-/// threshold, and whether it is reached.
-pub fn vote(
+/// The count of a commit's stored ballots under `pol`.
+fn count(repo: &str, pol: &Policy, oid: &store::Oid) -> Tally {
+    // These ballots came out of the store `record` wrote, and each was
+    // checked on the way in (the caller was authenticated by the IC; there
+    // is no signature to verify). The crate is told so, rather than asked
+    // to re-verify a list that has nothing to verify.
+    let subj = subject(oid);
+    let ballots = Ballots::assume_checked(&subj, VoteStore { repo }.load(&subj));
+    ic_multisig::tally_checked(pol, &subj, &ballots)
+}
+
+/// A count as ic-git reports it: the same answer as `approved`. With no
+/// votes required an objection is on record but gates nothing, where the
+/// crate alone would have it wait for an approval.
+fn ungated(mut t: Tally, m: &RepoMeta) -> Tally {
+    t.reached |= m.required_votes == 0;
+    t
+}
+
+/// The standing of a commit under its repo's policy: the ballots that count
+/// and whether they reach the threshold. With no votes required there is
+/// nothing to count, and `reached` is true. `None` for a repo without
+/// tenancy metadata, or a commit id that does not parse.
+pub fn tally(repo: &str, commit_hex: &str) -> Option<Tally> {
+    let m = meta(repo)?;
+    let oid = store::parse_oid(commit_hex).ok()?;
+    Some(ungated(count(repo, &policy(&m), &oid), &m))
+}
+
+/// A ballot's reason as it is stored, or why the ballot is refused: trimmed,
+/// and an empty one is no reason. An objection must have one, and none may
+/// be longer than 1 KB. The rule is the crate's (`Approval::validate`); it
+/// is here so the consent message describes only a ballot `cast_ballot`
+/// would accept.
+pub fn ballot_reason(decision: Vote, reason: Option<String>) -> Result<Option<String>, String> {
+    let mut probe = Approval::new(Approver::from_bytes(Vec::new()), decision.into(), 0);
+    probe.reason = reason.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    probe.validate().map_err(|e| e.to_string())?;
+    Ok(probe.reason)
+}
+
+/// Cast or replace a ballot. An objection must give a reason (at most 1 KB);
+/// a reason on an approval or rejection is kept but not required. Returns
+/// the tally: approvals and objections so far, the threshold, and whether
+/// it is reached.
+pub fn cast_ballot(
     repo: &str,
     who: &Principal,
     commit_hex: &str,
-    approve: bool,
+    decision: Vote,
+    reason: Option<String>,
 ) -> Result<Tally, String> {
     let m = can_vote(repo, who)?;
     let oid = store::parse_oid(commit_hex)?;
     if !store::has_object(&oid) {
         return Err(format!("no such commit in {repo}: {commit_hex}"));
     }
-    let approval = Approval::new(
-        Approver::from(*who),
-        if approve { Decision::Approve } else { Decision::Reject },
-        now_ns(),
-    );
+    let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
+    approval.reason = ballot_reason(decision, reason)?;
     ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
+        .map(|t| ungated(t, &m))
         .map_err(|e| e.to_string())
+}
+
+/// The original two-way ballot, kept for clients that predate objections.
+pub fn vote(
+    repo: &str,
+    who: &Principal,
+    commit_hex: &str,
+    approve: bool,
+) -> Result<Tally, String> {
+    let decision = if approve { Vote::Approve } else { Vote::Reject };
+    cast_ballot(repo, who, commit_hex, decision, None)
 }
 
 /// May the deploy queue run this commit? Yes when the repo requires no votes
@@ -611,13 +706,7 @@ pub fn first_approved(
 }
 
 fn reached(repo: &str, pol: &Policy, oid: &store::Oid) -> bool {
-    // These ballots came out of the store `record` wrote, and each was
-    // checked on the way in (the caller was authenticated by the IC; there
-    // is no signature to verify). The crate is told so, rather than asked
-    // to re-verify a list that has nothing to verify.
-    let subj = subject(oid);
-    let ballots = Ballots::assume_checked(&subj, VoteStore { repo }.load(&subj));
-    ic_multisig::tally_checked(pol, &subj, &ballots).reached
+    count(repo, pol, oid).reached
 }
 
 // --- charges ------------------------------------------------------------------------
@@ -1010,5 +1099,71 @@ mod tests {
         assert!(transfer_repo("t-vote", &alice, false, v1).is_err());
         assert_eq!(meta("t-vote").unwrap().owner, Some(alice));
         assert_eq!(repos_of(&v1), vec!["t-vote".to_string()]);
+    }
+
+    /// An objection counts -1 and must say why; one more approval outweighs
+    /// it. The wiring here is thin (the rule is the crate's), so this checks
+    /// what ic-git adds: the reason's handling, the API view, and that
+    /// `approved` -- what the site and the deploy queue ask -- follows the
+    /// net count.
+    #[test]
+    fn objections_count_against_and_carry_a_reason() {
+        let (alice, v1, v2) = (p(61), p(62), p(63));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-obj", &alice, false).unwrap();
+        let blob = store::put_object(store::ObjectType::Blob, b"y");
+        let commit = store::oid_hex(&blob);
+        add_member("t-obj", &alice, false, v1, Role::Voter).unwrap();
+        add_member("t-obj", &alice, false, v2, Role::Voter).unwrap();
+        // With no votes required an objection is recorded and gates
+        // nothing: the ballot's reply, the API's count and `approved` agree.
+        let t = cast_ballot("t-obj", &v1, &commit, Vote::Object, Some("early".into())).unwrap();
+        assert_eq!((t.objections, t.required, t.reached), (1, 0, true));
+        assert!(tally("t-obj", &commit).is_some_and(|t| t.reached) && approved("t-obj", &commit));
+        vote("t-obj", &v1, &commit, false).unwrap();
+        set_required_votes("t-obj", &alice, false, 1).unwrap();
+        assert!(tally("t-obj", &commit).is_some_and(|t| !t.reached));
+
+        let t = cast_ballot("t-obj", &alice, &commit, Vote::Approve, None).unwrap();
+        assert_eq!((t.approvals, t.objections, t.required, t.reached), (1, 0, 1, true));
+        assert!(approved("t-obj", &commit));
+
+        // No reason, or a blank one: refused, and the approval still stands.
+        let e = cast_ballot("t-obj", &v1, &commit, Vote::Object, None).unwrap_err();
+        assert!(e.contains("reason"), "{e}");
+        assert!(cast_ballot("t-obj", &v1, &commit, Vote::Object, Some("  ".into())).is_err());
+        assert!(cast_ballot("t-obj", &v1, &commit, Vote::Object, Some("x".repeat(1025))).is_err());
+        assert!(approved("t-obj", &commit));
+
+        // With a reason: the commit drops below the threshold.
+        let t = cast_ballot("t-obj", &v1, &commit, Vote::Object, Some(" skips the migration ".into())).unwrap();
+        assert_eq!((t.approvals, t.objections, t.reached), (1, 1, false));
+        assert!(!approved("t-obj", &commit));
+        let b = votes("t-obj", &commit);
+        let obj = b.iter().find(|b| b.principal == v1).unwrap();
+        assert_eq!((obj.decision, obj.approve), (Vote::Object, false));
+        assert_eq!(obj.reason.as_deref(), Some("skips the migration"));
+        let yes = b.iter().find(|b| b.principal == alice).unwrap();
+        assert_eq!((yes.decision, yes.approve, yes.reason.as_deref()), (Vote::Approve, true, None));
+
+        // Not a veto: one more approval outweighs it.
+        let t = cast_ballot("t-obj", &v2, &commit, Vote::Approve, None).unwrap();
+        assert_eq!((t.approvals, t.objections, t.reached), (2, 1, true));
+        assert!(approved("t-obj", &commit));
+
+        // A rejection weighs nothing either way; the old two-way call maps
+        // onto it. The objector changing to reject lifts the objection.
+        assert_eq!(counts(vote("t-obj", &v2, &commit, false)), (1, 1));
+        assert!(!approved("t-obj", &commit));
+        let t = vote("t-obj", &v1, &commit, false).unwrap();
+        assert_eq!((t.approvals, t.objections, t.reached), (1, 0, true));
+        assert!(approved("t-obj", &commit));
+        // An approval may carry a reason too; a rejection may as well.
+        let t = cast_ballot("t-obj", &v2, &commit, Vote::Approve, Some("reviewed".into())).unwrap();
+        assert_eq!(t.approvals, 2);
+        assert_eq!(
+            votes("t-obj", &commit).iter().find(|b| b.principal == v2).unwrap().reason.as_deref(),
+            Some("reviewed")
+        );
     }
 }

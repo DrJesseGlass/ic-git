@@ -190,10 +190,36 @@ Balances are not refundable yet; that needs the reverse of the ledger flow.
 
 `set_required_votes(repo, k)` makes the deploy queue hold a commit until `k`
 voters (the owner counts as one) have approved it with
-`vote(repo, commit, true)`. Ballots can be changed; a removed voter's ballot
-stops counting. A `k` above the owner plus voters is refused, and so is
-removing a voter or transferring the repo when that would leave `k` out of
-reach: lower `k` first. `k = 0`, the default, deploys on push as before.
+`cast_ballot(repo, commit, Approve, null)`. Ballots can be changed; a
+removed voter's ballot stops counting. A `k` above the owner plus voters is
+refused, and so is removing a voter or transferring the repo when that
+would leave `k` out of reach: lower `k` first. `k = 0`, the default,
+deploys on push as before.
+
+A ballot is one of three. `Approve` counts 1. `Reject` counts 0: it says
+"no", or withdraws an earlier approval or objection, and raises the bar
+for nobody.
+`Object` counts -1 and must give a reason (up to 1 KB, shown to the other
+voters): a commit passes when approvals minus objections reach `k`. An
+objection is not a veto. It costs one more approval to overcome, and it
+puts a reason in front of the people who would cast it. That holds while
+the policy has an approval to spare: an objector cannot also approve, so
+with `k` at the number of voters or one below it a single objection
+holds the commit until its author changes their ballot or leaves the
+policy. Keep `k` lower where no one voter should be able to do that.
+`vote(repo, commit, approve)` is the older two-way form, kept for clients
+that predate objections; it maps onto `Approve` and `Reject`.
+
+`cast_ballot` returns the count it left behind -- approvals, objections,
+the threshold, and whether it is reached -- and
+`GET /api/<repo>/votes/<commit>` reports the same count with the ballots,
+each with its decision, reason and time, and `counts`: false for a ballot
+whose caster has since left the policy, which stays on record and is left
+out of the count. `get_votes` carries the same flag. The wallet's consent
+message for an objection quotes the reason, so the signer sees what the
+other voters will read. The one for a rejection says that it replaces the
+signer's earlier ballot: after an objection that withdraws the -1, and the
+commit may deploy.
 
 With `k > 0` the repo has one approved commit, and both the app and the
 site follow it: the newest commit on the deploy branch's first-parent line
@@ -203,8 +229,9 @@ ballot, `set_required_votes`, adding or removing a member, a transfer, a
 push -- and when it moves, `/site/<repo>/` serves it from then on and its
 deploy is queued. That holds whichever way it moves: approving a commit
 below the tip deploys and serves it, and withdrawing the approval on the
-served commit rolls both the site and the app back to the approved commit
-before it. An unapproved push is not served and does not deploy. Only a
+served commit, or objecting to it, rolls both the site and the app back to
+the approved commit before it. An unapproved push is not served and does
+not deploy. Only a
 commit on the branch counts: deleting the branch, or replacing it with
 history nobody approved, serves nothing rather than leaving an old commit
 live, and burying an approved commit under 10,000 unapproved ones takes
@@ -239,8 +266,10 @@ https://github.com/DrJesseGlass/ic-multisig), shared with ic-vote:
 required votes), the subject (`Subject::of_short_hash("commit", oid)`), and
 a `Store` over the VOTES stable map scoped by repo. Ballots are keyed by
 the subject, so nothing written under the earlier per-commit key is read;
-no votes had been cast on mainnet when the adapter landed. A signed flavor
-of the same record type is what the module-hash attestations will use.
+no votes had been cast on mainnet when the adapter landed. Objections
+came with the crate's 0.2.0; ballots recorded before it read as having no
+reason, which is what they had. A signed flavor of the same record type is
+what the module-hash attestations will use.
 
 ## App canisters
 

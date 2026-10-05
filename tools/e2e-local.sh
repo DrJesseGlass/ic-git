@@ -50,6 +50,10 @@ BASE_REF=${BASE_REF-$(git -C "$(dirname "$0")/.." describe --tags --abbrev=0 2>/
 NAMES_REPO=${NAMES_REPO:-$ROOT/../ic-name-service}
 OP=e2e-local
 TEN=e2e-tenant
+# Two more voters, for the objections section: 1 of 3 lets one objection be
+# outweighed by one more approval.
+V1=e2e-voter1
+V2=e2e-voter2
 ICP_LEDGER=ryjl3-tyaaa-aaaaa-aaaba-cai
 CMC=rkp4c-7iaaa-aaaaa-aaaca-cai
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ic-git-e2e.XXXXXX")
@@ -82,7 +86,7 @@ for tool in dfx git ssh-keygen curl cargo; do
 done
 # Read the list first: grep -q closing the pipe early makes dfx abort.
 IDS=$(dfx identity list 2>/dev/null)
-for id in "$OP" "$TEN"; do
+for id in "$OP" "$TEN" "$V1" "$V2"; do
   printf '%s\n' "$IDS" | grep -qx "$id" || dfx identity new "$id" --storage-mode plaintext >/dev/null 2>&1
 done
 
@@ -286,6 +290,67 @@ if [ -n "$NAMES_WASM" ]; then
   expect "  ...record names the commit" "$REC" "\"commit\"; \"$A1\""
   expect "  ...and the module hash" "$REC" "\"$WASM_SHA\""
 fi
+
+section "objections"
+# An objection counts -1 with a reason: a commit passes when approvals minus
+# objections reach the threshold (docs/TENANCY.md, "Votes"). The site and the
+# app are on $A1; the tenant is the only voter so far, with 1 required.
+P1=$(dfx identity get-principal --identity "$V1")
+P2=$(dfx identity get-principal --identity "$V2")
+call "$TEN" git add_member "(\"e2e-app\", principal \"$P1\", \"voter\")" >/dev/null
+call "$TEN" git add_member "(\"e2e-app\", principal \"$P2\", \"voter\")" >/dev/null
+commit app.wat '(module (func (export "canister_query hello")) (func (export "canister_query hi")))' app-v2
+signed "$URL" >/dev/null || true
+A2=$(git -C "$W" rev-parse HEAD)
+expect "an objection without a reason is refused" "$(call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, null)")" 'needs a reason'
+expect "  ...and a blank one" "$(call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"  \")")" 'needs a reason'
+OUT=$(call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"the second export is untested\")")
+expect "objection recorded" "$OUT" 'objections = 1'
+expect "  ...nothing approved" "$OUT" 'approvals = 0'
+OUT=$(call "$TEN" git vote "(\"e2e-app\", \"$A2\", true)")
+expect "one approval over one objection: 1 of 1 by the old count" "$OUT" 'Ok = record \{ 1 : nat32; 1 : nat32 \}'
+expect "  ...but held: net 0" "$(call "$TEN" git get_deploy_status '("e2e-app")')" 'awaiting voter approval'
+expect "  ...and the site stays on the commit before it" "$(served)" "^200 $A1"
+VOTES=$(curl -s "http://$HOST/api/e2e-app/votes/$A2")
+expect "/api votes: the objection with its reason" "$VOTES" '"decision":"object","approve":false,"reason":"the second export is untested"'
+expect "  ...and the count" "$VOTES" '"approvals":1,"objections":1,"required":1,"reached":false'
+# The wallet's consent message for an objection names the reason: OISY shows
+# it to the signer. The encoded argument comes from the codec vectors.
+ARG=$(cd "$ROOT" && cargo test -q -p git_canister --test candid_vectors -- --nocapture 2>/dev/null | awk '$1 == "args:cast_ballot_object" { print $2 }' | sed 's/../\\&/g')
+CONSENT=$(call anonymous git icrc21_canister_call_consent_message "(record { method = \"cast_ballot\"; arg = blob \"$ARG\"; user_preferences = record { metadata = record { language = \"en\"; utc_offset_minutes = null }; device_spec = null } })")
+expect "consent message: an objection, with its reason" "$CONSENT" 'Object to commit 0123456789ab.*Reason: skips the migration'
+OUT=$(call "$V2" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Approve }, null)")
+expect "a second approval outweighs the objection" "$OUT" 'reached = true'
+for _ in $(seq 1 30); do
+  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  echo "$STATUS" | grep -q "$A2" && echo "$STATUS" | grep -q 'ok = true' && break
+  sleep 1
+done
+expect "  ...and it deploys" "$(printf '%s' "$STATUS" | tr '\n' ' ')" "ok = true.*commit = \"$A2\""
+expect "  ...and is served" "$(served)" "^200 $A2"
+# An objection after the deploy drops the commit below the threshold: the
+# site rolls back to the approved commit before it, and so does the app,
+# the same way a withdrawn approval does.
+call "$V2" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"regressed in production\")" >/dev/null
+expect "an objection after the deploy rolls the site back" "$(served)" "^200 $A1"
+for _ in $(seq 1 30); do
+  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  echo "$STATUS" | grep -q "$A1" && echo "$STATUS" | grep -q 'ok = true' && break
+  sleep 1
+done
+expect "  ...and the app" "$(printf '%s' "$STATUS" | tr '\n' ' ')" "ok = true.*commit = \"$A1\""
+expect "  ...two objections on record" "$(curl -s "http://$HOST/api/e2e-app/votes/$A2")" '"objections":2'
+# Withdrawing both (a rejection weighs nothing) approves it again.
+call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Reject }, null)" >/dev/null
+call "$V2" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Reject }, null)" >/dev/null
+expect "objections withdrawn: served again" "$(served)" "^200 $A2"
+# Let the app's re-deploy finish before the canister is upgraded underneath it.
+for _ in $(seq 1 30); do
+  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  echo "$STATUS" | grep -q "$A2" && echo "$STATUS" | grep -q 'ok = true' && break
+  sleep 1
+done
+expect "  ...and deployed again" "$(printf '%s' "$STATUS" | tr '\n' ' ')" "ok = true.*commit = \"$A2\""
 
 section "upgrade in place (same build)"
 BEFORE=$(served)
