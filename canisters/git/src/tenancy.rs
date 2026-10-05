@@ -529,14 +529,19 @@ pub struct Ballot {
     pub decision: Vote,
     pub reason: Option<String>,
     pub at_ns: u64,
+    /// Whether the tally counts this ballot: its caster is the owner or a
+    /// voter right now. A ballot stays on record when its caster leaves the
+    /// policy, and stops counting.
+    pub counts: bool,
 }
 
-/// The API view of a stored record. `None` only for an approver that is not
-/// a principal, which this store never writes: every ballot here comes from
-/// an authenticated caller.
-fn ballot(a: Approval) -> Option<Ballot> {
+/// The API view of a stored record under `pol`, the repo's policy if it has
+/// one. `None` only for an approver that is not a principal, which this
+/// store never writes: every ballot here comes from an authenticated caller.
+fn ballot(a: Approval, pol: Option<&Policy>) -> Option<Ballot> {
     Some(Ballot {
         principal: a.approver.principal()?,
+        counts: pol.is_some_and(|p| p.is_approver(&a.approver)),
         approve: a.approves(),
         decision: a.decision.into(),
         reason: a.reason,
@@ -591,26 +596,53 @@ pub fn votes(repo: &str, commit_hex: &str) -> Vec<Ballot> {
     let Ok(oid) = store::parse_oid(commit_hex) else {
         return Vec::new();
     };
+    let pol = meta(repo).map(|m| policy(&m));
     VoteStore { repo }
         .load(&subject(&oid))
         .into_iter()
-        .filter_map(ballot)
+        .filter_map(|a| ballot(a, pol.as_ref()))
         .collect()
+}
+
+/// The count of a commit's stored ballots under `pol`.
+fn count(repo: &str, pol: &Policy, oid: &store::Oid) -> Tally {
+    // These ballots came out of the store `record` wrote, and each was
+    // checked on the way in (the caller was authenticated by the IC; there
+    // is no signature to verify). The crate is told so, rather than asked
+    // to re-verify a list that has nothing to verify.
+    let subj = subject(oid);
+    let ballots = Ballots::assume_checked(&subj, VoteStore { repo }.load(&subj));
+    ic_multisig::tally_checked(pol, &subj, &ballots)
+}
+
+/// A count as ic-git reports it: the same answer as `approved`. With no
+/// votes required an objection is on record but gates nothing, where the
+/// crate alone would have it wait for an approval.
+fn ungated(mut t: Tally, m: &RepoMeta) -> Tally {
+    t.reached |= m.required_votes == 0;
+    t
 }
 
 /// The standing of a commit under its repo's policy: the ballots that count
 /// and whether they reach the threshold. With no votes required there is
-/// nothing to count, and `reached` is true.
+/// nothing to count, and `reached` is true. `None` for a repo without
+/// tenancy metadata, or a commit id that does not parse.
 pub fn tally(repo: &str, commit_hex: &str) -> Option<Tally> {
     let m = meta(repo)?;
     let oid = store::parse_oid(commit_hex).ok()?;
-    let subj = subject(&oid);
-    let ballots = Ballots::assume_checked(&subj, VoteStore { repo }.load(&subj));
-    let mut t = ic_multisig::tally_checked(&policy(&m), &subj, &ballots);
-    // Same answer as `approved`: with no votes required an objection is
-    // on record but gates nothing.
-    t.reached |= m.required_votes == 0;
-    Some(t)
+    Some(ungated(count(repo, &policy(&m), &oid), &m))
+}
+
+/// A ballot's reason as it is stored, or why the ballot is refused: trimmed,
+/// and an empty one is no reason. An objection must have one, and none may
+/// be longer than 1 KB. The rule is the crate's (`Approval::validate`); it
+/// is here so the consent message describes only a ballot `cast_ballot`
+/// would accept.
+pub fn ballot_reason(decision: Vote, reason: Option<String>) -> Result<Option<String>, String> {
+    let mut probe = Approval::new(Approver::from_bytes(Vec::new()), decision.into(), 0);
+    probe.reason = reason.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    probe.validate().map_err(|e| e.to_string())?;
+    Ok(probe.reason)
 }
 
 /// Cast or replace a ballot. An objection must give a reason (at most 1 KB);
@@ -630,10 +662,9 @@ pub fn cast_ballot(
         return Err(format!("no such commit in {repo}: {commit_hex}"));
     }
     let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
-    // An empty reason is no reason: the crate's check for a missing one
-    // then applies to an objection, and nothing is stored for the others.
-    approval.reason = reason.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    approval.reason = ballot_reason(decision, reason)?;
     ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
+        .map(|t| ungated(t, &m))
         .map_err(|e| e.to_string())
 }
 
@@ -675,13 +706,7 @@ pub fn first_approved(
 }
 
 fn reached(repo: &str, pol: &Policy, oid: &store::Oid) -> bool {
-    // These ballots came out of the store `record` wrote, and each was
-    // checked on the way in (the caller was authenticated by the IC; there
-    // is no signature to verify). The crate is told so, rather than asked
-    // to re-verify a list that has nothing to verify.
-    let subj = subject(oid);
-    let ballots = Ballots::assume_checked(&subj, VoteStore { repo }.load(&subj));
-    ic_multisig::tally_checked(pol, &subj, &ballots).reached
+    count(repo, pol, oid).reached
 }
 
 // --- charges ------------------------------------------------------------------------
@@ -1090,6 +1115,12 @@ mod tests {
         let commit = store::oid_hex(&blob);
         add_member("t-obj", &alice, false, v1, Role::Voter).unwrap();
         add_member("t-obj", &alice, false, v2, Role::Voter).unwrap();
+        // With no votes required an objection is recorded and gates
+        // nothing: the ballot's reply, the API's count and `approved` agree.
+        let t = cast_ballot("t-obj", &v1, &commit, Vote::Object, Some("early".into())).unwrap();
+        assert_eq!((t.objections, t.required, t.reached), (1, 0, true));
+        assert!(tally("t-obj", &commit).is_some_and(|t| t.reached) && approved("t-obj", &commit));
+        vote("t-obj", &v1, &commit, false).unwrap();
         set_required_votes("t-obj", &alice, false, 1).unwrap();
         assert!(tally("t-obj", &commit).is_some_and(|t| !t.reached));
 

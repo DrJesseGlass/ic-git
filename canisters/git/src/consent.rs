@@ -262,9 +262,14 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "cast_ballot" => {
             let (repo, commit, decision, reason): (String, String, Vote, Option<String>) = args(arg, m)?;
             let commit = prefix(&commit, 12);
+            // Describe only a ballot the call would accept: an objection
+            // has a reason, and no reason is longer than the call allows.
+            let reason = crate::tenancy::ballot_reason(decision, reason).map_err(|e| {
+                Icrc21Error::ConsentMessageUnavailable(ErrorInfo { description: format!("{m}: {e}") })
+            })?;
             // The reason is the signer's own words, shown back verbatim: it
             // is what the other voters will read.
-            let because = match reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+            let because = match reason {
                 Some(r) => format!(" Reason: {r}"),
                 None => String::new(),
             };
@@ -512,6 +517,18 @@ mod tests {
         // The wrong shape for create_repo: a number where the name goes.
         let err = generic("create_repo", encode_args((7u64,)).unwrap()).unwrap_err();
         assert!(matches!(err, Icrc21Error::ConsentMessageUnavailable(ErrorInfo { ref description }) if description.contains("create_repo")));
+    }
+
+    #[test]
+    fn a_ballot_the_call_would_refuse_is_not_described() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        for reason in [None, Some("  ".to_string()), Some("x".repeat(1025))] {
+            let err = generic("cast_ballot", encode_args(("ic-vote", commit, Vote::Object, reason)).unwrap()).unwrap_err();
+            assert!(matches!(err, Icrc21Error::ConsentMessageUnavailable(ErrorInfo { ref description }) if description.contains("reason")));
+        }
+        // A reason is trimmed the way the call stores it.
+        let text = generic("cast_ballot", encode_args(("ic-vote", commit, Vote::Approve, Some(" reviewed \n"))).unwrap()).unwrap();
+        assert!(text.ends_with("Reason: reviewed"), "{text:?}");
     }
 
     #[test]

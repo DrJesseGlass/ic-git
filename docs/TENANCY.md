@@ -203,7 +203,7 @@ voters): a commit passes when approvals minus objections reach `k`. An
 objection is not a veto. It costs one more approval to overcome, and it
 puts a reason in front of the people who would cast it. That holds while
 the policy has an approval to spare: an objector cannot also approve, so
-with `k` at one or two below the number of voters a single objection
+with `k` at the number of voters or one below it a single objection
 holds the commit until its author changes their ballot or leaves the
 policy. Keep `k` lower where no one voter should be able to do that.
 `vote(repo, commit, approve)` is the older two-way form, kept for clients
@@ -212,7 +212,9 @@ that predate objections; it maps onto `Approve` and `Reject`.
 `cast_ballot` returns the count it left behind -- approvals, objections,
 the threshold, and whether it is reached -- and
 `GET /api/<repo>/votes/<commit>` reports the same count with the ballots,
-each with its decision, reason and time. The wallet's consent message for
+each with its decision, reason and time, and `counts`: false for a ballot
+whose caster has since left the policy, which stays on record and is left
+out of the count. `get_votes` carries the same flag. The wallet's consent message for
 an objection quotes the reason, so the signer sees what the other voters
 will read.
 

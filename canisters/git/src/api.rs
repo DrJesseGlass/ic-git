@@ -122,11 +122,14 @@ struct BallotInfo {
     approve: bool,
     reason: Option<String>,
     at_ns: u64,
+    /// False for a ballot whose caster has left the policy: it is listed,
+    /// and the count below leaves it out.
+    counts: bool,
 }
 
 /// The ballots on a commit and where they leave it: a commit passes when
-/// `approvals - objections >= required`. `required` is 0 and `reached` true
-/// for a repo that needs no votes.
+/// `approvals - objections >= required`, over the ballots that count.
+/// `required` is 0 and `reached` true for a repo that needs no votes.
 #[derive(Serialize)]
 struct VotesView {
     ballots: Vec<BallotInfo>,
@@ -217,6 +220,11 @@ pub fn handle(url: &str) -> HttpResponse {
             None => error(404, "no such repo"),
         },
         ("votes", Some(commit), None) => {
+            // A commit id that does not parse has no count: say so rather
+            // than report it as a commit that requires nothing.
+            if let Err(e) = store::parse_oid(commit) {
+                return error(400, &e);
+            }
             let ballots: Vec<BallotInfo> = tenancy::votes(&repo, commit)
                 .into_iter()
                 .map(|b| BallotInfo {
@@ -229,6 +237,7 @@ pub fn handle(url: &str) -> HttpResponse {
                     approve: b.approve,
                     reason: b.reason,
                     at_ns: b.at_ns,
+                    counts: b.counts,
                 })
                 .collect();
             // A repo without tenancy metadata (legacy, operator-owned) has
@@ -654,6 +663,7 @@ mod tests {
         let v = body_json(&handle(&format!("/api/api-ten/votes/{}", store::oid_hex(&c2))));
         assert_eq!(v["ballots"].as_array().unwrap().len(), 0);
         assert_eq!((v["required"].as_u64(), v["reached"].as_bool()), (Some(0), Some(true)));
+        assert_eq!(handle("/api/api-ten-owned/votes/not-an-oid").status_code, 400);
 
         // On the owned repo: an approval and an objection with its reason,
         // and the count they leave: 1 - 1 against a threshold of 1. Objects
@@ -674,6 +684,21 @@ mod tests {
         let yes = ballots.iter().find(|b| b["principal"] == owner.to_text()).unwrap();
         assert_eq!((yes["decision"].as_str(), yes["approve"].as_bool()), (Some("approve"), Some(true)));
         assert!(yes["reason"].is_null());
+        assert_eq!((obj["counts"].as_bool(), yes["counts"].as_bool()), (Some(true), Some(true)));
+
+        // The objector leaves the policy: the ballot stays on record, marked
+        // as no longer counting, and the count goes on without it.
+        tenancy::remove_member("api-ten-owned", &owner, false, voter).unwrap();
+        let v = body_json(&handle(&format!("/api/api-ten-owned/votes/{hex}")));
+        assert_eq!(
+            (v["approvals"].as_u64(), v["objections"].as_u64(), v["reached"].as_bool()),
+            (Some(1), Some(0), Some(true))
+        );
+        let ballots = v["ballots"].as_array().unwrap();
+        let obj = ballots.iter().find(|b| b["principal"] == voter.to_text()).unwrap();
+        assert_eq!((obj["decision"].as_str(), obj["counts"].as_bool()), (Some("object"), Some(false)));
+        let yes = ballots.iter().find(|b| b["principal"] == owner.to_text()).unwrap();
+        assert_eq!(yes["counts"], true);
     }
 
     #[test]

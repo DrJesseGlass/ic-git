@@ -66,6 +66,7 @@ type Ballot = record {
   decision : Vote;
   reason : opt text;
   at_ns : nat64;
+  counts : bool;
 };
 type BallotTally = record { approvals : nat32; objections : nat32; required : nat32; reached : bool };
 type Pricing = record {
