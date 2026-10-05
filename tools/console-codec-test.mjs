@@ -37,6 +37,11 @@ assert.deepEqual(IC.decode(IC.encode(['text', { opt: 'nat32' }], ['r', 30])), IC
 assert.deepEqual(IC.decode(IC.encode(['text', { opt: 'nat32' }], ['r', null])), IC.decode(unhex(vectors['args:text,opt_nat32_none'])));
 // ...and the SSH key a token is bound to, another trailing opt.
 assert.deepEqual(IC.decode(IC.encode(['text', { opt: 'nat32' }, { opt: 'text' }], ['r', null, 'ssh-ed25519 AAAA'])), IC.decode(unhex(vectors['args:text,opt_nat32,opt_text'])));
+// cast_ballot: a variant for the decision and a trailing opt text reason.
+const VOTE = { variant: { Approve: 'null', Reject: 'null', Object: 'null' } };
+assert.deepEqual(IC.decode(IC.encode(['text', 'text', VOTE, { opt: 'text' }], ['r', '0123456789abcdef0123456789abcdef01234567', { Object: null }, 'skips the migration'])), IC.decode(unhex(vectors['args:cast_ballot_object'])));
+assert.deepEqual(IC.decode(IC.encode(['text', 'text', VOTE, { opt: 'text' }], ['r', '0123456789abcdef0123456789abcdef01234567', { Approve: null }, null])), IC.decode(unhex(vectors['args:cast_ballot_approve'])));
+assert.equal(hex(IC.encode(['text', 'text', VOTE, { opt: 'text' }], ['r', '0123456789abcdef0123456789abcdef01234567', { Object: null }, 'skips the migration'])).slice(-60), vectors['args:cast_ballot_object'].slice(-60), 'value bytes identical');
 // Composite types: the Rust crate orders its type table differently (both
 // are valid Candid), so compare structurally after decoding both.
 const approve = { from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: 5_000_000_000n, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null };
@@ -51,6 +56,7 @@ assert.deepEqual(dec('reply:result_unit_err'), { Err: 'insufficient balance' });
 assert.deepEqual(dec('reply:result_text_ok'), { Ok: '274f84a4' });
 assert.deepEqual(dec('reply:result_nat64_ok'), { Ok: 123_456_789_012n });
 assert.deepEqual(dec('reply:result_vote_ok'), { Ok: { 0: 1, 1: 2 } });
+assert.deepEqual(dec('reply:result_ballot_ok'), { Ok: { approvals: 3, objections: 1, required: 3, reached: false } });
 assert.deepEqual(dec('reply:result_members_ok'), { Ok: [{ principal: USER, role: { Voter: null } }] });
 assert.deepEqual(dec('reply:result_account_ok'), { Ok: { balance: 7n, deposited: 8n, spent: 1n, created_ns: 1_700_000_000_000_000_000n } });
 assert.deepEqual(dec('reply:result_principal_ok'), { Ok: CANISTER });

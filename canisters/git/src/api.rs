@@ -7,7 +7,7 @@
 //!   GET /api/<repo>/tree/<rev>[/<path>]
 //!   GET /api/<repo>/blob/<rev>/<path>
 //!   GET /api/<repo>/info                        tenancy: owner, members, rent state
-//!   GET /api/<repo>/votes/<commit>              ballots on a commit
+//!   GET /api/<repo>/votes/<commit>              ballots on a commit, and their count
 //!   GET /api/<repo>/deploys                     wasm deploy config, last status, provenance log
 //!   GET /api/account/<principal>                balance and repos of a principal
 //!   GET /api/pricing                            the fee table
@@ -116,8 +116,24 @@ struct DeployView {
 #[derive(Serialize)]
 struct BallotInfo {
     principal: String,
+    /// "approve", "reject" or "object". `approve` says the same as a bool,
+    /// for the clients that read it before objections existed.
+    decision: &'static str,
     approve: bool,
+    reason: Option<String>,
     at_ns: u64,
+}
+
+/// The ballots on a commit and where they leave it: a commit passes when
+/// `approvals - objections >= required`. `required` is 0 and `reached` true
+/// for a repo that needs no votes.
+#[derive(Serialize)]
+struct VotesView {
+    ballots: Vec<BallotInfo>,
+    approvals: u32,
+    objections: u32,
+    required: u32,
+    reached: bool,
 }
 
 #[derive(Serialize)]
@@ -205,11 +221,27 @@ pub fn handle(url: &str) -> HttpResponse {
                 .into_iter()
                 .map(|b| BallotInfo {
                     principal: b.principal.to_text(),
+                    decision: match b.decision {
+                        tenancy::Vote::Approve => "approve",
+                        tenancy::Vote::Reject => "reject",
+                        tenancy::Vote::Object => "object",
+                    },
                     approve: b.approve,
+                    reason: b.reason,
                     at_ns: b.at_ns,
                 })
                 .collect();
-            json(200, &ballots, None)
+            // A repo without tenancy metadata (legacy, operator-owned) has
+            // no policy: it requires nothing, so every commit is reached.
+            let t = tenancy::tally(&repo, commit);
+            let view = VotesView {
+                ballots,
+                approvals: t.as_ref().map_or(0, |t| t.approvals),
+                objections: t.as_ref().map_or(0, |t| t.objections),
+                required: t.as_ref().map_or(0, |t| t.required),
+                reached: t.as_ref().is_none_or(|t| t.reached),
+            };
+            json(200, &view, None)
         }
         ("deploys", None, None) => json(
             200,
@@ -617,9 +649,31 @@ mod tests {
         assert_eq!(handle("/api/account/not-a-principal").status_code, 400);
 
         assert_eq!(body_json(&handle("/api/pricing"))["push_base"], tenancy::pricing().push_base);
-        // Votes on the seeded repo's tip (an object that exists): none yet.
+        // Votes on the seeded repo's tip (an object that exists): none yet,
+        // and the legacy repo requires none.
         let v = body_json(&handle(&format!("/api/api-ten/votes/{}", store::oid_hex(&c2))));
-        assert_eq!(v.as_array().unwrap().len(), 0);
+        assert_eq!(v["ballots"].as_array().unwrap().len(), 0);
+        assert_eq!((v["required"].as_u64(), v["reached"].as_bool()), (Some(0), Some(true)));
+
+        // On the owned repo: an approval and an objection with its reason,
+        // and the count they leave: 1 - 1 against a threshold of 1. Objects
+        // are shared across repos, so the seeded commit stands in.
+        let hex = store::oid_hex(&c2);
+        tenancy::set_required_votes("api-ten-owned", &owner, false, 1).unwrap();
+        tenancy::cast_ballot("api-ten-owned", &owner, &hex, tenancy::Vote::Approve, None).unwrap();
+        tenancy::cast_ballot("api-ten-owned", &voter, &hex, tenancy::Vote::Object, Some("needs a test".into())).unwrap();
+        let v = body_json(&handle(&format!("/api/api-ten-owned/votes/{hex}")));
+        assert_eq!(
+            (v["approvals"].as_u64(), v["objections"].as_u64(), v["required"].as_u64(), v["reached"].as_bool()),
+            (Some(1), Some(1), Some(1), Some(false))
+        );
+        let ballots = v["ballots"].as_array().unwrap();
+        let obj = ballots.iter().find(|b| b["principal"] == voter.to_text()).unwrap();
+        assert_eq!((obj["decision"].as_str(), obj["approve"].as_bool()), (Some("object"), Some(false)));
+        assert_eq!(obj["reason"], "needs a test");
+        let yes = ballots.iter().find(|b| b["principal"] == owner.to_text()).unwrap();
+        assert_eq!((yes["decision"].as_str(), yes["approve"].as_bool()), (Some("approve"), Some(true)));
+        assert!(yes["reason"].is_null());
     }
 
     #[test]

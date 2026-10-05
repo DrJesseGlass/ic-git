@@ -19,6 +19,21 @@ enum Role {
 }
 
 #[derive(CandidType, Deserialize)]
+enum Vote {
+    Approve,
+    Reject,
+    Object,
+}
+
+#[derive(CandidType, Deserialize)]
+struct BallotTally {
+    approvals: u32,
+    objections: u32,
+    required: u32,
+    reached: bool,
+}
+
+#[derive(CandidType, Deserialize)]
 struct Member {
     principal: Principal,
     role: Role,
@@ -112,6 +127,8 @@ fn print_vectors() {
         ("args:text,principal,text", encode_args(("ic-git", q, "writer")).unwrap()),
         ("args:nat64", encode_args((1_000_000_000_000u64,)).unwrap()),
         ("args:text,text,bool", encode_args(("r", "0123456789abcdef0123456789abcdef01234567", true)).unwrap()),
+        ("args:cast_ballot_object", encode_args(("r", "0123456789abcdef0123456789abcdef01234567", Vote::Object, Some("skips the migration"))).unwrap()),
+        ("args:cast_ballot_approve", encode_args(("r", "0123456789abcdef0123456789abcdef01234567", Vote::Approve, None::<String>)).unwrap()),
         ("args:text,nat32", encode_args(("r", 2u32)).unwrap()),
         ("args:text,opt_nat32_some", encode_args(("r", Some(30u32))).unwrap()),
         ("args:text,opt_nat32_none", encode_args(("r", None::<u32>)).unwrap()),
@@ -131,6 +148,7 @@ fn print_vectors() {
         ("reply:result_text_ok", encode_one(Ok::<String, String>("274f84a4".into())).unwrap()),
         ("reply:result_nat64_ok", encode_one(Ok::<u64, String>(123_456_789_012u64)).unwrap()),
         ("reply:result_vote_ok", encode_one(Ok::<(u32, u32), String>((1, 2))).unwrap()),
+        ("reply:result_ballot_ok", encode_one(Ok::<BallotTally, String>(BallotTally { approvals: 3, objections: 1, required: 3, reached: false })).unwrap()),
         ("reply:result_members_ok", encode_one(Ok::<Vec<Member>, String>(vec![Member { principal: q, role: Role::Voter }])).unwrap()),
         ("reply:result_account_ok", encode_one(Ok::<Account, String>(Account { balance: 7, deposited: 8, spent: 1, created_ns: 1_700_000_000_000_000_000 })).unwrap()),
         ("reply:result_principal_ok", encode_one(Ok::<Principal, String>(p)).unwrap()),

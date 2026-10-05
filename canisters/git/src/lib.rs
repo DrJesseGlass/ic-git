@@ -654,12 +654,43 @@ fn set_required_votes(repo: String, k: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Cast (or change) a ballot on a commit. Returns (approvals, required).
+/// What a ballot did to its commit's count.
+#[derive(candid::CandidType)]
+struct BallotTally {
+    approvals: u32,
+    objections: u32,
+    required: u32,
+    reached: bool,
+}
+
+/// Cast (or change) a ballot on a commit: approve, reject (a "no", or an
+/// approval withdrawn) or object with a reason. An objection counts -1: the
+/// commit passes when approvals minus objections reach the threshold.
 /// When the ballot changes which commit is the newest approved one -- tip
-/// or not, approving or withdrawing -- the site moves to it and its deploy
-/// is queued. Any ballot also retries the approved commit's deploy if the
-/// app is not running it (an earlier attempt failed), so voters can get the
-/// app back in step with the site without first taking the site down.
+/// or not, approving, withdrawing or objecting -- the site moves to it and
+/// its deploy is queued. Any ballot also retries the approved commit's
+/// deploy if the app is not running it (an earlier attempt failed), so
+/// voters can get the app back in step with the site without first taking
+/// the site down.
+#[ic_cdk::update]
+fn cast_ballot(
+    repo: String,
+    commit: String,
+    decision: tenancy::Vote,
+    reason: Option<String>,
+) -> Result<BallotTally, String> {
+    let t = tenancy::cast_ballot(&repo, &caller(), &commit, decision, reason)?;
+    follow_approvals(&repo, true);
+    Ok(BallotTally {
+        approvals: t.approvals,
+        objections: t.objections,
+        required: t.required,
+        reached: t.reached,
+    })
+}
+
+/// The two-way form of `cast_ballot`, kept for clients that predate
+/// objections. Returns (approvals, required).
 #[ic_cdk::update]
 fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
     let t = tenancy::vote(&repo, &caller(), &commit, approve)?;

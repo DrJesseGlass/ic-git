@@ -13,6 +13,7 @@
 //! The text describes what the call does to the caller's balance and repos,
 //! since that is what the person is consenting to.
 
+use crate::tenancy::Vote;
 use candid::{CandidType, Deserialize, Nat, Principal};
 
 // --- ICRC-10 -----------------------------------------------------------------
@@ -217,7 +218,7 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
             let (repo, who, role): (String, Principal, String) = args(arg, m)?;
             let power = match role.as_str() {
                 "writer" => "push, mint push tokens, and configure what the repository deploys and serves",
-                "voter" => "approve or reject commits before the repository deploys them",
+                "voter" => "approve, reject or object to commits before the repository deploys them",
                 _ => "hold that role",
             };
             format!("Add {who} to \"{repo}\" as a {role}: they will be able to {power}.")
@@ -257,6 +258,28 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
                 if approve { "Approve" } else { "Reject" },
                 prefix(&commit, 12)
             )
+        }
+        "cast_ballot" => {
+            let (repo, commit, decision, reason): (String, String, Vote, Option<String>) = args(arg, m)?;
+            let commit = prefix(&commit, 12);
+            // The reason is the signer's own words, shown back verbatim: it
+            // is what the other voters will read.
+            let because = match reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+                Some(r) => format!(" Reason: {r}"),
+                None => String::new(),
+            };
+            match decision {
+                Vote::Approve => format!(
+                    "Approve commit {commit} in \"{repo}\" for deployment and for serving as its site.{because}"
+                ),
+                Vote::Reject => format!(
+                    "Reject commit {commit} in \"{repo}\": do not count you as approving it.{because}"
+                ),
+                Vote::Object => format!(
+                    "Object to commit {commit} in \"{repo}\": it needs one more approval than \
+                     usual to deploy or to be served as the site, and the other voters see why.{because}"
+                ),
+            }
         }
         "set_wasm_deploy" => {
             let (repo, target, path): (String, String, String) = args(arg, m)?;
@@ -449,12 +472,15 @@ mod tests {
             ("set_require_signed_push", encode_args(("ic-vote", false)).unwrap(), &["Stop requiring"]),
             ("revoke_push_token_id", encode_args(("0123456789abcdef",)).unwrap(), &["id 0123456789abcdef", "refused"]),
             ("revoke_push_token", encode_args(("0123456789abcdef0123456789abcdef",)).unwrap(), &["01234567...", "refused"]),
-            ("add_member", encode_args(("ic-vote", p, "voter")).unwrap(), &["3kq6u-eptpm", "voter", "approve or reject"]),
+            ("add_member", encode_args(("ic-vote", p, "voter")).unwrap(), &["3kq6u-eptpm", "voter", "approve, reject or object"]),
             ("remove_member", encode_args(("ic-vote", p)).unwrap(), &["Remove 3kq6u-eptpm", "every role"]),
             ("set_required_votes", encode_args(("ic-vote", 2u32)).unwrap(), &["Require 2 approvals"]),
             ("set_required_votes", encode_args(("ic-vote", 0u32)).unwrap(), &["without any approvals"]),
             ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", true)).unwrap(), &["Approve commit 0123456789ab..."]),
             ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", false)).unwrap(), &["Reject commit"]),
+            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Approve, None::<String>)).unwrap(), &["Approve commit 0123456789ab..."]),
+            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Reject, None::<String>)).unwrap(), &["Reject commit 0123456789ab...", "not count you"]),
+            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Object, Some("skips the schema migration"))).unwrap(), &["Object to commit 0123456789ab...", "one more approval", "Reason: skips the schema migration"]),
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
             ("set_deploy_mode", encode_args(("ic-vote", "upgrade")).unwrap(), &["keeps its state"]),

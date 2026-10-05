@@ -59,7 +59,15 @@ type RepoInfo = record {
   exempt : bool;
   require_signed_push : bool;
 };
-type Ballot = record { "principal" : principal; approve : bool; at_ns : nat64 };
+type Vote = variant { Approve; Reject; Object };
+type Ballot = record {
+  "principal" : principal;
+  approve : bool;
+  decision : Vote;
+  reason : opt text;
+  at_ns : nat64;
+};
+type BallotTally = record { approvals : nat32; objections : nat32; required : nat32; reached : bool };
 type Pricing = record {
   create_repo : nat64;
   push_base : nat64;
@@ -92,6 +100,7 @@ type FailedIcpDeposit = record {
 type ResultAccount = variant { Ok : Account; Err : text };
 type ResultMembers = variant { Ok : vec Member; Err : text };
 type ResultVote = variant { Ok : record { nat32; nat32 }; Err : text };
+type ResultBallot = variant { Ok : BallotTally; Err : text };
 type ResultPrincipal = variant { Ok : principal; Err : text };
 type ResultBlob = variant { Ok : blob; Err : text };
 
@@ -292,6 +301,7 @@ service : {
   transfer_repo : (text, principal) -> (Result);
   set_required_votes : (text, nat32) -> (Result);
   vote : (text, text, bool) -> (ResultVote);
+  cast_ballot : (text, text, Vote, opt text) -> (ResultBallot);
   get_votes : (text, text) -> (vec Ballot) query;
   get_pricing : () -> (Pricing) query;
   set_pricing : (Pricing) -> (Result);
