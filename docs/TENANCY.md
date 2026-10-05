@@ -197,7 +197,8 @@ would leave `k` out of reach: lower `k` first. `k = 0`, the default,
 deploys on push as before.
 
 A ballot is one of three. `Approve` counts 1. `Reject` counts 0: it says
-"no", or withdraws an earlier approval, and raises the bar for nobody.
+"no", or withdraws an earlier approval or objection, and raises the bar
+for nobody.
 `Object` counts -1 and must give a reason (up to 1 KB, shown to the other
 voters): a commit passes when approvals minus objections reach `k`. An
 objection is not a veto. It costs one more approval to overcome, and it
@@ -214,9 +215,11 @@ the threshold, and whether it is reached -- and
 `GET /api/<repo>/votes/<commit>` reports the same count with the ballots,
 each with its decision, reason and time, and `counts`: false for a ballot
 whose caster has since left the policy, which stays on record and is left
-out of the count. `get_votes` carries the same flag. The wallet's consent message for
-an objection quotes the reason, so the signer sees what the other voters
-will read.
+out of the count. `get_votes` carries the same flag. The wallet's consent
+message for an objection quotes the reason, so the signer sees what the
+other voters will read. The one for a rejection says that it replaces the
+signer's earlier ballot: after an objection that withdraws the -1, and the
+commit may deploy.
 
 With `k > 0` the repo has one approved commit, and both the app and the
 site follow it: the newest commit on the deploy branch's first-parent line

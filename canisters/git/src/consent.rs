@@ -253,11 +253,12 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         }
         "vote" => {
             let (repo, commit, approve): (String, String, bool) = args(arg, m)?;
-            format!(
-                "{} commit {} in \"{repo}\" for deployment and for serving as its site.",
-                if approve { "Approve" } else { "Reject" },
-                prefix(&commit, 12)
-            )
+            let commit = prefix(&commit, 12);
+            if approve {
+                format!("Approve commit {commit} in \"{repo}\" for deployment and for serving as its site.")
+            } else {
+                rejection(&commit, &repo)
+            }
         }
         "cast_ballot" => {
             let (repo, commit, decision, reason): (String, String, Vote, Option<String>) = args(arg, m)?;
@@ -277,9 +278,7 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
                 Vote::Approve => format!(
                     "Approve commit {commit} in \"{repo}\" for deployment and for serving as its site.{because}"
                 ),
-                Vote::Reject => format!(
-                    "Reject commit {commit} in \"{repo}\": do not count you as approving it.{because}"
-                ),
+                Vote::Reject => format!("{}{because}", rejection(&commit, &repo)),
                 Vote::Object => format!(
                     "Object to commit {commit} in \"{repo}\": it needs one more approval than \
                      usual to deploy or to be served as the site, and the other voters see why.{because}"
@@ -374,6 +373,19 @@ fn cycles(n: u64) -> String {
     } else {
         format!("{} M cycles", n / M)
     }
+}
+
+/// What a rejection does, for both calls that cast one. A ballot replaces
+/// the caller's earlier one, so a rejection from someone who had objected
+/// takes the objection's -1 away, and the commit can pass on the spot. The
+/// message is built from the arguments alone and cannot know which ballot
+/// is on record, so every rejection says it.
+fn rejection(commit: &str, repo: &str) -> String {
+    format!(
+        "Reject commit {commit} in \"{repo}\": do not count you as approving it. This \
+         replaces any earlier ballot of yours. If you had objected, the objection is \
+         withdrawn, and the commit may then be deployed and served as the site."
+    )
 }
 
 /// The first `n` characters of `s` with an ellipsis, or all of it if it is
@@ -482,9 +494,9 @@ mod tests {
             ("set_required_votes", encode_args(("ic-vote", 2u32)).unwrap(), &["Require 2 approvals"]),
             ("set_required_votes", encode_args(("ic-vote", 0u32)).unwrap(), &["without any approvals"]),
             ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", true)).unwrap(), &["Approve commit 0123456789ab..."]),
-            ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", false)).unwrap(), &["Reject commit"]),
+            ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", false)).unwrap(), &["Reject commit 0123456789ab...", "not count you", "objection is withdrawn", "may then be deployed"]),
             ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Approve, None::<String>)).unwrap(), &["Approve commit 0123456789ab..."]),
-            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Reject, None::<String>)).unwrap(), &["Reject commit 0123456789ab...", "not count you"]),
+            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Reject, None::<String>)).unwrap(), &["Reject commit 0123456789ab...", "not count you", "objection is withdrawn", "may then be deployed"]),
             ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Object, Some("skips the schema migration"))).unwrap(), &["Object to commit 0123456789ab...", "one more approval", "Reason: skips the schema migration"]),
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
