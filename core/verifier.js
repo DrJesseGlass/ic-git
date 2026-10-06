@@ -1,7 +1,12 @@
 // === core ===
-// Verification with no DOM: Verifier.verify(options) -> result, and
+// Verification with no DOM: Verifier.verify(options) -> result,
 // Verifier.derivePolicy(bytes, url) -> the CSP that pins a verified page's
-// scripts and styles (docs/EXTENSION.md).
+// scripts and styles (docs/EXTENSION.md), and
+// Verifier.readCanisterState(canisterId, options) -> a canister's module
+// hash and controllers out of a certificate the IC signed (docs/CERTIFIED.md).
+// The last needs core/bls12-381.js loaded first (a vendored verifier,
+// tools/vendor-bls.mjs); without it a certificate is reported unverified,
+// never trusted.
 //
 // The source of truth is core/verifier.js. loader/index.html carries it
 // inline, byte-identical, because the loader must stay one file (its hash
@@ -23,6 +28,18 @@ const Verifier = (() => {
     provider: null, // an EIP-1193 provider (window.ethereum), preferred for the registry read
     providerName: 'wallet', // how a read through it is reported
     providerOnly: false, // true: a provider that fails or is on another chain fails the read
+    // The NNS root public key (DER, 133 bytes), the one key every mainnet
+    // certificate chains to. Pinned: a reader that fetched it from the
+    // network it is checking would prove nothing. /api/v2/status reports
+    // the same bytes; tools/certified-test.mjs compares them.
+    rootKey: '308182301d060d2b0601040182dc7c0503010201060c2b0601040182dc7c05030201036100'
+      + '814c0e6ec71fab583b08bd81373c255c3c371b2e84863c98a4f1e08b74235d14fb5d9c0cd546d9685f913a0c0b2cc534'
+      + '1583bf4b4392e467db96d65b9bb4cb717112f8472e0d5a4d14505ffd7484b01291091c5f87b98883463f98091a0baaae',
+    // How old a certificate may be before readCanisterState reports it
+    // stale. Stale is a warning, not a failure: the certificate is still
+    // the IC's word, only about an earlier moment.
+    freshMs: 5 * 60_000,
+    now: null, // Date.now() unless a test says otherwise
   };
   const GET_SELECTOR = '693ec85e'; // keccak256("get(string)")[..4], as in tools/verify.mjs
   const SITE_SUFFIX = '#site'; // provenance.rs::SITE_KEY_SUFFIX
@@ -489,6 +506,13 @@ function unverifiableSubresource(servedPath, body) {
     if (out.length <= 4 || ((out[0] << 24) | (out[1] << 16) | (out[2] << 8) | out[3]) >>> 0 !== crc32(b)) throw new Error('bad canister id checksum: ' + text);
     return b;
   }
+  function principalText(bytes) {
+    const c = crc32(bytes), all = Uint8Array.of(c >>> 24, (c >>> 16) & 255, (c >>> 8) & 255, c & 255, ...bytes);
+    let bits = 0, val = 0, s = '';
+    for (const b of all) { val = ((val << 8) | b) >>> 0; bits += 8; while (bits >= 5) { s += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } }
+    if (bits) s += B32[(val << (5 - bits)) & 31];
+    return s.match(/.{1,5}/g).join('-');
+  }
   const uleb = n => { const o = []; do { let b = n & 0x7f; n = Math.floor(n / 128); if (n) b |= 0x80; o.push(b); } while (n); return o; };
   const textArg = s => { const u = te.encode(s); return Uint8Array.from([...te.encode('DIDL'), 0, 1, 0x71, ...uleb(u.length), ...u]); };
   // Candid replies: opt, vec, record over text and nat8 -- all get_object
@@ -523,6 +547,7 @@ function unverifiableSubresource(servedPath, body) {
       if (typeof v === 'bigint' || typeof v === 'number') head(0, v);
       else if (typeof v === 'string') { const u = te.encode(v); head(3, u.length); out.push(...u); }
       else if (v instanceof Uint8Array) { head(2, v.length); out.push(...v); }
+      else if (Array.isArray(v)) { head(4, v.length); for (const x of v) item(x); }
       else { const k = Object.keys(v); head(5, k.length); for (const x of k) { item(x); item(v[x]); } }
     };
     item(v);
@@ -555,6 +580,147 @@ function unverifiableSubresource(servedPath, body) {
     const res = cbor(new Uint8Array(await r.arrayBuffer()));
     if (res.status !== 'replied') throw new Error(method + ': ' + (res.reject_message || res.status));
     return candid(res.reply.arg);
+  }
+
+  // --- certified reads: a canister's module hash and controllers, out of a
+  // state certificate (docs/CERTIFIED.md). Unlike the queries above, whose
+  // replies are checked against hashes the caller already holds, these values
+  // are the IC's own word and nothing else vouches for them, so the
+  // certificate's signature chain is what is checked: the subnet's key signs
+  // the state root, and the NNS root key (pinned) signs the subnet's key.
+  const concat = (...a) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let p = 0; for (const x of a) { o.set(x, p); p += x.length; } return o; };
+  const sha256 = async b => new Uint8Array(await crypto.subtle.digest('SHA-256', b));
+  const sep = s => concat(Uint8Array.of(s.length), te.encode(s));
+  const unhex = h => Uint8Array.from(h.match(/../g), x => parseInt(x, 16));
+  const unleb = b => { let r = 0n, s = 0n; for (const x of b) { r |= BigInt(x & 0x7f) << s; s += 7n; if (!(x & 0x80)) break; } return r; };
+  // A hash tree as CBOR gives it: [0] empty, [1,l,r] fork, [2,label,sub]
+  // labeled, [3,leaf], [4,hash] pruned. Its root hash is what is signed.
+  async function treeHash(t) {
+    switch (t[0]) {
+      case 0: return sha256(sep('ic-hashtree-empty'));
+      case 1: return sha256(concat(sep('ic-hashtree-fork'), await treeHash(t[1]), await treeHash(t[2])));
+      case 2: return sha256(concat(sep('ic-hashtree-labeled'), t[1], await treeHash(t[2])));
+      case 3: return sha256(concat(sep('ic-hashtree-leaf'), t[1]));
+      case 4: return t[1];
+      default: throw new Error('certificate: malformed hash tree');
+    }
+  }
+  // Lookup as the interface spec defines it: `found` with the leaf, `absent`
+  // when the labels at some level show the path is not in the state, or
+  // `unknown` when a pruned subtree hides whether it is. The three are not
+  // the same answer: a missing module hash means no module is installed
+  // only when the tree says so, not when it says nothing.
+  function lookup(tree, path) {
+    const labels = t => t[0] === 1 ? [...labels(t[1]), ...labels(t[2])] : t[0] === 2 ? [t] : t[0] === 4 ? ['pruned'] : [];
+    let node = tree;
+    for (const seg of path) {
+      const label = typeof seg === 'string' ? te.encode(seg) : seg;
+      const here = labels(node);
+      const hit = here.find(l => l !== 'pruned' && equal(l[1], label));
+      if (hit) { node = hit[2]; continue; }
+      return { status: here.includes('pruned') ? 'unknown' : 'absent' };
+    }
+    return node[0] === 3 ? { status: 'found', value: node[1] } : { status: node[0] === 4 ? 'unknown' : 'absent' };
+  }
+  // The 96-byte G2 public key inside the IC's DER wrapping (a fixed 37-byte
+  // prefix: the BLS12-381 G2 algorithm identifier).
+  const DER_PREFIX = '308182301d060d2b0601040182dc7c0503010201060c2b0601040182dc7c05030201036100';
+  function blsKey(der) {
+    if (der.length !== 133 || hex(der.subarray(0, 37)) !== DER_PREFIX) throw new Error('public key is not a DER-wrapped BLS12-381 G2 key');
+    return der.subarray(37);
+  }
+  // Does `sig` (G1, 48 bytes) sign the state root under `key`? The message
+  // is the domain-separated root. A signature that does not decode (not a
+  // curve point) is a failed verification, not an error.
+  async function signedRoot(tree, sig, key) {
+    if (typeof NobleBls === 'undefined') throw new Error('BLS verifier not loaded (core/bls12-381.js)');
+    const msg = concat(sep('ic-state-root'), await treeHash(tree));
+    try { return NobleBls.shortSignatures.verify(sig, NobleBls.shortSignatures.hash(msg), key); } catch { return false; }
+  }
+  const cmpBytes = (a, b) => { const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i] - b[i]; return a.length - b.length; };
+
+  async function readCanisterState(canisterId, options) {
+    const o = { ...DEFAULTS, ...options };
+    o.fetch = o.fetch || globalThis.fetch.bind(globalThis);
+    const now = o.now ?? Date.now();
+    const checks = [];
+    const check = (id, ok, label, detail) => { checks.push({ id, ok, label, detail: detail || '' }); return ok; };
+    const out = { canister: canisterId, checks, certified: false, moduleHash: null, controllers: null, time: null, stale: false, subnet: null };
+    const fail = (id, label, detail) => { check(id, false, label, detail); return out; };
+
+    let cid;
+    try { cid = principalBytes(canisterId); } catch (e) { return fail('C1', 'read the canister\'s certified state', e.message); }
+    const paths = [['canister', cid, 'module_hash'], ['canister', cid, 'controllers']].map(p => p.map(x => typeof x === 'string' ? te.encode(x) : x));
+    let cert;
+    try {
+      const content = { request_type: 'read_state', sender: Uint8Array.of(4), paths, ingress_expiry: BigInt(now + 240_000) * 1_000_000n };
+      const r = await o.fetch(o.icApi + '/api/v2/canister/' + canisterId + '/read_state', { method: 'POST', headers: { 'content-type': 'application/cbor' }, body: cborEnc({ content }), signal: AbortSignal.timeout(TIMEOUT_MS) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const res = cbor(new Uint8Array(await r.arrayBuffer()));
+      if (!(res.certificate instanceof Uint8Array)) throw new Error('reply holds no certificate');
+      cert = cbor(res.certificate);
+      if (!Array.isArray(cert.tree) || !(cert.signature instanceof Uint8Array)) throw new Error('certificate is malformed');
+    } catch (e) {
+      return fail('C1', 'read the canister\'s certified state', e.message);
+    }
+    check('C1', true, 'read the canister\'s certified state', 'read_state at ' + new URL(o.icApi).host);
+
+    // The key that must have signed this certificate. A canister on an
+    // application subnet comes with a delegation: a certificate signed by
+    // the root key that names the subnet's key and the canister ranges it
+    // speaks for. One without (an NNS canister) is signed by the root key
+    // itself. Either way the chain ends at the pinned key and nowhere else.
+    let key;
+    try {
+      key = blsKey(unhex(o.rootKey));
+      if (cert.delegation) {
+        const d = cert.delegation;
+        if (!(d.subnet_id instanceof Uint8Array) || !(d.certificate instanceof Uint8Array)) throw new Error('delegation is malformed');
+        const dc = cbor(d.certificate);
+        if (dc.delegation) throw new Error('delegation certificate carries a delegation of its own, which the spec forbids');
+        if (!await signedRoot(dc.tree, dc.signature, key)) throw new Error('delegation certificate is not signed by the NNS root key');
+        const pk = lookup(dc.tree, ['subnet', d.subnet_id, 'public_key']);
+        if (pk.status !== 'found') throw new Error('delegation certificate shows no public key for the subnet');
+        const ranges = lookup(dc.tree, ['subnet', d.subnet_id, 'canister_ranges']);
+        if (ranges.status !== 'found') throw new Error('delegation certificate shows no canister ranges for the subnet');
+        const inRange = cbor(ranges.value).some(([lo, hi]) => cmpBytes(lo, cid) <= 0 && cmpBytes(cid, hi) <= 0);
+        if (!inRange) throw new Error('the canister is outside the ranges the subnet is delegated');
+        key = blsKey(pk.value);
+        out.subnet = principalText(d.subnet_id);
+      }
+    } catch (e) {
+      return fail('C2', 'the signing key is delegated by the NNS root key', e.message);
+    }
+    check('C2', true, 'the signing key is delegated by the NNS root key', out.subnet ? 'subnet ' + out.subnet : 'signed by the root key directly (no delegation)');
+
+    const ok = await signedRoot(cert.tree, cert.signature, key).catch(e => { check('C3', false, 'the certificate is signed by that key', e.message); return null; });
+    if (ok === null) return out;
+    if (!check('C3', ok, 'the certificate is signed by that key', ok ? 'BLS12-381 over the state root' : 'signature does not verify')) return out;
+
+    // From here the tree is the IC's word. Time first: a certificate is a
+    // statement about one moment, and an old one, however genuine, can show
+    // a module since replaced.
+    const t = lookup(cert.tree, ['time']);
+    if (t.status !== 'found') return fail('C4', 'the certificate is dated', 'no /time in the certificate');
+    out.time = Number(unleb(t.value) / 1_000_000n);
+    out.stale = Math.abs(now - out.time) > o.freshMs;
+    check('C4', true, 'the certificate is dated', (out.stale ? 'STALE: ' : '') + 'certified at ' + new Date(out.time).toISOString() + ', ' + Math.round((now - out.time) / 1000) + 's ago');
+
+    const mh = lookup(cert.tree, ['canister', cid, 'module_hash']);
+    if (mh.status === 'unknown') return fail('C5', 'the certificate shows the canister\'s module hash', 'the path is pruned from the certificate');
+    out.moduleHash = mh.status === 'found' ? hex(mh.value) : null;
+    const ctl = lookup(cert.tree, ['canister', cid, 'controllers']);
+    if (ctl.status !== 'found') return fail('C5', 'the certificate shows the canister\'s controllers', ctl.status === 'unknown' ? 'the path is pruned from the certificate' : 'no controllers in the certificate');
+    try {
+      const list = cbor(ctl.value);
+      if (!Array.isArray(list)) throw new Error('controllers are not a list');
+      out.controllers = list.map(principalText).sort();
+    } catch (e) {
+      return fail('C5', 'the certificate shows the canister\'s controllers', e.message);
+    }
+    check('C5', true, 'the certificate shows the canister\'s module hash and controllers', (out.moduleHash ? 'module ' + out.moduleHash.slice(0, 16) + '...' : 'no module installed') + ', ' + out.controllers.length + ' controller' + (out.controllers.length === 1 ? '' : 's'));
+    out.certified = checks.every(c => c.ok);
+    return out;
   }
 
   // --- git objects, each checked against its id before it is believed.
@@ -679,6 +845,6 @@ function unverifiableSubresource(servedPath, body) {
     return out;
   }
 
-  return { verify, derivePolicy, DEFAULTS };
+  return { verify, derivePolicy, readCanisterState, DEFAULTS };
 })();
 // === end core ===

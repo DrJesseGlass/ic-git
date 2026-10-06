@@ -303,9 +303,10 @@ scanner -- and are not yet published.
 - The extension hashing its own files and showing whether they match the
   record: catches an unpublished update, not a tampered extension, which
   would lie about itself.
-- The certified module-hash read and the K-of-N attestations
-  (docs/ATTESTATION.md): today the extensions verify the frontend, not the
-  canister's running code; those checks would sit behind the same stop
-  page.
+- The backend check (docs/GOVERNANCE.md, section 3) and the K-of-N
+  attestations (docs/ATTESTATION.md): today the extensions verify the
+  frontend, not the canister's running code. The certified read the check
+  needs is in the core (`readCanisterState`, docs/CERTIFIED.md); judging
+  what it returns, and stopping on a wrong answer, is the next leg.
 - Safari (no `filterResponseData`; CSP injection unexamined), other
   hosting, and pages outside `/site/`.

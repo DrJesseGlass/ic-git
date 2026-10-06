@@ -51,7 +51,12 @@ tools/e2e-local.sh      end-to-end pass on a throwaway local replica, run
                         before every mainnet upgrade
 tools/verify.mjs        check a served site against its registry record (CLI)
 core/verifier.js        the verification core: the loader inlines it and the
-                        extension copies it (both synced by tools/sync-core.mjs)
+                        extension copies it (both synced by tools/sync-core.mjs);
+                        readCanisterState reads a canister's module hash and
+                        controllers from a certificate the IC signed
+                        (docs/CERTIFIED.md; tools/certified-test.mjs)
+core/bls12-381.js       the BLS verifier that check needs, vendored from
+                        @noble/curves by tools/vendor-bls.mjs; generated, not edited
 extension/              the Chrome extension: checks ic-git sites as they load
                         and shows only the checked page (docs/EXTENSION.md;
                         tools/extension-test.mjs drives it)
