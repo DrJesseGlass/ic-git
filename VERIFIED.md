@@ -18,6 +18,38 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-09-26 | `07fd244` | `v0.3.0` | `3afcac754d55c6747abda09568412517602710eb91e68a2ac3c7937e4f76db03` (gz) | MATCH, 2026-09-26 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 36220841774](https://github.com/DrJesseGlass/ic-git/actions/runs/36220841774), identical hash |
 | 2026-09-28 | `0d1d466` | `v0.3.1` | `5f283447bc72c028dd7e2feb51f9edd91e4b1861e1979cb161e8e4f6a1d7ad32` (gz) | MATCH, 2026-09-28 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 36506401506](https://github.com/DrJesseGlass/ic-git/actions/runs/36506401506), identical hash |
 | 2026-10-03 | `dcb4aa7` | `v0.3.2` | `1efa766581c2ed9d83025f5008b7cd32c3fb86887c5f0b3c4ca74139eac90f92` (gz) | MATCH, 2026-10-03 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37075637669](https://github.com/DrJesseGlass/ic-git/actions/runs/37075637669), identical hash |
+| 2026-10-06 | `e48ebdb` | `v0.3.3` | `2bfd212775e572b82ff35997309f2753a273cff114035bc015d14d0841ddcec3` (gz) | MATCH, 2026-10-06 | deployer (pinned container, macOS arm64 host under emulation, built twice); GitHub Actions amd64 runner, [run 37478919057](https://github.com/DrJesseGlass/ic-git/actions/runs/37478919057), identical hash |
+
+## v0.3.3 -- 2026-10-06
+
+Objection ballots (#64, #65). A voter can now approve, reject, or
+object with a reason. An objection counts -1: a commit passes when
+approvals minus objections reach `required_votes`, so it is not a veto
+but costs one more approval to overcome, and its reason is in front of
+the other voters -- in `get_votes`, in `/api/<repo>/votes/<commit>`
+with the running count, and in the wallet's consent message for the
+objection itself. `cast_ballot(repo, commit, Approve|Reject|Object,
+opt reason)` is the new call; `vote(repo, commit, bool)` stays and maps
+onto it. An objection on a served commit rolls the site and the app
+back to the approved commit before it, the way a withdrawn approval
+does. The rule is `ic-multisig` 0.2.0's, from crates.io, shared with
+ic-vote; ballots recorded by earlier releases read unchanged.
+docs/TENANCY.md, "Votes".
+
+Gated before the deploy by `tools/e2e-local.sh`: 87 checks on this
+commit, including the new objections section (an objection holds a
+deploy until one more approval outweighs it; the reason reaches the
+API and the consent message; an objection after a deploy rolls back)
+and an upgrade from v0.3.2 -- what mainnet ran -- over state that
+release wrote. After the upgrade all five published site records
+(ic-git, ic-vote, ic-git-loader, ic-git-extension,
+ic-git-extension-firefox) still verified with `tools/verify.mjs`.
+
+Same recipe and base image digest as v0.3.2. The raw wasm inside the
+gzip hashes to `2bbe2009...a172`. Three builds agreed byte for byte:
+the deployer's arm64 machine running the amd64 image under emulation,
+once on the branch before the merge and once on the tag, and a native
+x86_64 GitHub runner triggered by the tag push.
 
 ## v0.3.2 -- 2026-10-03
 
