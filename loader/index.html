@@ -4242,6 +4242,9 @@ var NobleBls = (() => {
 const Verifier = (() => {
   'use strict';
   const te = new TextEncoder(), td = new TextDecoder();
+  // The IC's DER wrapping of a 96-byte BLS12-381 G2 public key: a fixed
+  // 37-byte prefix, the algorithm identifier, then the key.
+  const DER_PREFIX = '308182301d060d2b0601040182dc7c0503010201060c2b0601040182dc7c05030201036100';
   const DEFAULTS = {
     canister: 'umobs-yiaaa-aaaab-agyrq-cai',
     registry: '0xa1362DAda583c56a395D305a8C7A458E0B62A209',
@@ -4255,7 +4258,7 @@ const Verifier = (() => {
     // certificate chains to. Pinned: a reader that fetched it from the
     // network it is checking would prove nothing. /api/v2/status reports
     // the same bytes; tools/certified-test.mjs compares them.
-    rootKey: '308182301d060d2b0601040182dc7c0503010201060c2b0601040182dc7c05030201036100'
+    rootKey: DER_PREFIX
       + '814c0e6ec71fab583b08bd81373c255c3c371b2e84863c98a4f1e08b74235d14fb5d9c0cd546d9685f913a0c0b2cc534'
       + '1583bf4b4392e467db96d65b9bb4cb717112f8472e0d5a4d14505ffd7484b01291091c5f87b98883463f98091a0baaae',
     // How old a certificate may be before readCanisterState reports it
@@ -4828,26 +4831,40 @@ function unverifiableSubresource(servedPath, body) {
       default: throw new Error('certificate: malformed hash tree');
     }
   }
+  const cmpBytes = (a, b) => { const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i] - b[i]; return a.length - b.length; };
   // Lookup as the interface spec defines it: `found` with the leaf, `absent`
   // when the labels at some level show the path is not in the state, or
   // `unknown` when a pruned subtree hides whether it is. The three are not
   // the same answer: a missing module hash means no module is installed
-  // only when the tree says so, not when it says nothing.
+  // only when the tree says so, not when it says nothing. Labels at a level
+  // are sorted, and a reply prunes the siblings it was not asked for, so
+  // absence is proved by the neighbours: the label falls before the first
+  // labeled node, after the last, or between two adjacent ones. Anywhere
+  // else a pruned node could be hiding it.
   function lookup(tree, path) {
-    const labels = t => t[0] === 1 ? [...labels(t[1]), ...labels(t[2])] : t[0] === 2 ? [t] : t[0] === 4 ? ['pruned'] : [];
+    const flat = t => t[0] === 0 ? [] : t[0] === 1 ? [...flat(t[1]), ...flat(t[2])] : [t];
+    const labeled = n => n !== undefined && n[0] === 2;
     let node = tree;
     for (const seg of path) {
       const label = typeof seg === 'string' ? te.encode(seg) : seg;
-      const here = labels(node);
-      const hit = here.find(l => l !== 'pruned' && equal(l[1], label));
+      const here = flat(node);
+      const hit = here.find(n => labeled(n) && cmpBytes(n[1], label) === 0);
       if (hit) { node = hit[2]; continue; }
-      return { status: here.includes('pruned') ? 'unknown' : 'absent' };
+      const last = here[here.length - 1];
+      let absent = here.length === 0
+        || (labeled(here[0]) && cmpBytes(label, here[0][1]) < 0)
+        || (labeled(last) && cmpBytes(last[1], label) < 0);
+      for (let i = 0; !absent && i + 1 < here.length; i++) {
+        absent = labeled(here[i]) && labeled(here[i + 1]) && cmpBytes(here[i][1], label) < 0 && cmpBytes(label, here[i + 1][1]) < 0;
+      }
+      return { status: absent ? 'absent' : 'unknown' };
     }
-    return node[0] === 3 ? { status: 'found', value: node[1] } : { status: node[0] === 4 ? 'unknown' : 'absent' };
+    // The path ends on a leaf, or it ends on something the tree does not
+    // vouch for as a value: a pruned node, or a subtree. Neither is an
+    // absence.
+    return node[0] === 3 ? { status: 'found', value: node[1] } : { status: 'unknown' };
   }
-  // The 96-byte G2 public key inside the IC's DER wrapping (a fixed 37-byte
-  // prefix: the BLS12-381 G2 algorithm identifier).
-  const DER_PREFIX = '308182301d060d2b0601040182dc7c0503010201060c2b0601040182dc7c05030201036100';
+  // The 96-byte G2 public key inside the IC's DER wrapping (DER_PREFIX).
   function blsKey(der) {
     if (der.length !== 133 || hex(der.subarray(0, 37)) !== DER_PREFIX) throw new Error('public key is not a DER-wrapped BLS12-381 G2 key');
     return der.subarray(37);
@@ -4860,7 +4877,6 @@ function unverifiableSubresource(servedPath, body) {
     const msg = concat(sep('ic-state-root'), await treeHash(tree));
     try { return NobleBls.shortSignatures.verify(sig, NobleBls.shortSignatures.hash(msg), key); } catch { return false; }
   }
-  const cmpBytes = (a, b) => { const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i] - b[i]; return a.length - b.length; };
 
   async function readCanisterState(canisterId, options) {
     const o = { ...DEFAULTS, ...options };
@@ -4916,9 +4932,9 @@ function unverifiableSubresource(servedPath, body) {
     }
     check('C2', true, 'the signing key is delegated by the NNS root key', out.subnet ? 'subnet ' + out.subnet : 'signed by the root key directly (no delegation)');
 
-    const ok = await signedRoot(cert.tree, cert.signature, key).catch(e => { check('C3', false, 'the certificate is signed by that key', e.message); return null; });
-    if (ok === null) return out;
-    if (!check('C3', ok, 'the certificate is signed by that key', ok ? 'BLS12-381 over the state root' : 'signature does not verify')) return out;
+    let signed;
+    try { signed = await signedRoot(cert.tree, cert.signature, key); } catch (e) { return fail('C3', 'the certificate is signed by that key', e.message); }
+    if (!check('C3', signed, 'the certificate is signed by that key', signed ? 'BLS12-381 over the state root' : 'signature does not verify')) return out;
 
     // From here the tree is the IC's word. Time first: a certificate is a
     // statement about one moment, and an old one, however genuine, can show
@@ -4929,19 +4945,20 @@ function unverifiableSubresource(servedPath, body) {
     out.stale = Math.abs(now - out.time) > o.freshMs;
     check('C4', true, 'the certificate is dated', (out.stale ? 'STALE: ' : '') + 'certified at ' + new Date(out.time).toISOString() + ', ' + Math.round((now - out.time) / 1000) + 's ago');
 
+    const SHOWS = 'the certificate shows the canister\'s module hash and controllers';
     const mh = lookup(cert.tree, ['canister', cid, 'module_hash']);
-    if (mh.status === 'unknown') return fail('C5', 'the certificate shows the canister\'s module hash', 'the path is pruned from the certificate');
+    if (mh.status === 'unknown') return fail('C5', SHOWS, 'the module hash path is pruned from the certificate');
     out.moduleHash = mh.status === 'found' ? hex(mh.value) : null;
     const ctl = lookup(cert.tree, ['canister', cid, 'controllers']);
-    if (ctl.status !== 'found') return fail('C5', 'the certificate shows the canister\'s controllers', ctl.status === 'unknown' ? 'the path is pruned from the certificate' : 'no controllers in the certificate');
+    if (ctl.status !== 'found') return fail('C5', SHOWS, ctl.status === 'unknown' ? 'the controllers path is pruned from the certificate' : 'no controllers in the certificate');
     try {
       const list = cbor(ctl.value);
       if (!Array.isArray(list)) throw new Error('controllers are not a list');
       out.controllers = list.map(principalText).sort();
     } catch (e) {
-      return fail('C5', 'the certificate shows the canister\'s controllers', e.message);
+      return fail('C5', SHOWS, e.message);
     }
-    check('C5', true, 'the certificate shows the canister\'s module hash and controllers', (out.moduleHash ? 'module ' + out.moduleHash.slice(0, 16) + '...' : 'no module installed') + ', ' + out.controllers.length + ' controller' + (out.controllers.length === 1 ? '' : 's'));
+    check('C5', true, SHOWS, (out.moduleHash ? 'module ' + out.moduleHash.slice(0, 16) + '...' : 'no module installed') + ', ' + out.controllers.length + ' controller' + (out.controllers.length === 1 ? '' : 's'));
     out.certified = checks.every(c => c.ok);
     return out;
   }

@@ -50,9 +50,11 @@ try {
     '--global-name=NobleBls', '--target=es2022', '--legal-comments=inline', '--outfile=bundle.js'], { cwd: work, stdio: 'inherit' });
   let bundle = readFileSync(join(work, 'bundle.js'), 'utf8');
   // The loader inlines this in a <script>: these two sequences would end
-  // the element or put the parser in the escaped state.
-  for (const bad of ['\x3c!--', '\x3c/script']) {
-    if (bundle.includes(bad)) throw new Error(`bundle contains "${bad}"; it cannot be inlined`);
+  // the element or put the parser in the escaped state. The end tag
+  // matches in any letter case.
+  for (const bad of [/\x3c!--/, /\x3c\/script/i]) {
+    const m = bundle.match(bad);
+    if (m) throw new Error(`bundle contains "${m[0]}"; it cannot be inlined`);
   }
   // The repo is ASCII-only (.githooks/pre-commit). The package's comments
   // use a few mathematical and typographic characters; each is spelled out
