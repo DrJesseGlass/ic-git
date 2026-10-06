@@ -58,6 +58,7 @@ type RepoInfo = record {
   app_canister : opt principal;
   exempt : bool;
   require_signed_push : bool;
+  governed : bool;
 };
 type Vote = variant { Approve; Reject; Object };
 type Ballot = record {
@@ -69,6 +70,24 @@ type Ballot = record {
   counts : bool;
 };
 type BallotTally = record { approvals : nat32; objections : nat32; required : nat32; reached : bool };
+// A change to a governed repo's policy or deploy config, decided by a vote
+// (docs/GOVERNANCE.md).
+type PolicyChange = variant {
+  RequiredVotes : record { k : nat32 };
+  AddVoter : record { "principal" : principal };
+  RemoveVoter : record { "principal" : principal };
+  Transfer : record { new_owner : principal };
+  WasmDeploy : record { target : text; source_path : text };
+  DeployMode : record { mode : text };
+};
+type Proposal = record {
+  change : PolicyChange;
+  ballots : vec Ballot;
+  approvals : nat32;
+  objections : nat32;
+  required : nat32;
+  reached : bool;
+};
 type Pricing = record {
   create_repo : nat64;
   push_base : nat64;
@@ -312,6 +331,10 @@ service : {
   stranded_deposits : () -> (vec Stranded) query;
   create_app_canister : (text, nat64) -> (ResultPrincipal);
   top_up_app_canister : (text, nat64) -> (Result);
+  // governance (docs/GOVERNANCE.md): one-way; then policy changes are votes
+  govern_app_canister : (text) -> (ResultPrincipal);
+  propose_policy_change : (text, PolicyChange, Vote, opt text) -> (ResultBallot);
+  get_policy_proposals : (text) -> (vec Proposal) query;
 
   // admin allowlist (callable by controllers or authorized principals)
   authorize : (principal) -> (Result);

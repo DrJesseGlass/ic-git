@@ -280,14 +280,67 @@ the repo, and `set_wasm_deploy(repo, "app", path)` then targets it by name.
 `top_up_app_canister(repo, cycles)` moves more balance into it. The owner
 can also top it up from any wallet, since it is theirs.
 
+## Governed app canisters
+
+docs/GOVERNANCE.md, section 2. With the owner a controller, the owner can
+install code no vote approved. `govern_app_canister(repo)` closes that:
+ic-git becomes the app canister's only controller and the owner is
+removed, so from then on its code changes only by an approved commit's
+deploy. Owner only; refused without an app canister, with required votes
+at 0 (a governed repo whose pushes deploy unapproved would lock in
+nothing), or when already governed. One-way: nothing but an approved
+commit can give control back, and that is the point and the price -- a
+broken backend is fixed by an approved commit, not directly. The console
+puts it behind a typed confirmation like a reinstall.
+
+Governing locks the policy, or the owner could set `k` to 0, or make
+themselves sole approver, and push anything:
+
+- `set_required_votes`, adding or removing a voter, `transfer_repo`,
+  `set_wasm_deploy` and `set_deploy_mode` are refused on a governed repo;
+  each names the path that takes it. Writers stay the owner's to manage:
+  a writer pushes, and a push deploys only once approved.
+- `propose_policy_change(repo, change, decision, reason)` is that path: a
+  ballot on the change itself -- `RequiredVotes { k }`, `AddVoter`,
+  `RemoveVoter`, `Transfer { new_owner }`, `WasmDeploy { target,
+  source_path }` or `DeployMode { mode }` -- under the same rule as a
+  commit: approve, reject or object with a reason, counted over the
+  current approvers, applied the moment approvals minus objections reach
+  `k`. Any approver may propose, and proposing is approving. A change
+  nobody could apply (`k` of 0 or above the approvers, an unknown mode,
+  removing a non-voter) is refused before any ballot. The same change
+  proposed by two approvers is one subject, so approvals accumulate; once
+  applied its ballots are cleared, so proposing it again starts from
+  nothing. `get_policy_proposals(repo)` and `GET /api/<repo>/proposals`
+  list what is pending, with ballots and count. The console shows them
+  with approve, reject and object controls, and a form to propose.
+- `k` can never return to 0 on a governed repo, by vote or otherwise.
+
+Every install into a governed app canister is recorded on chain: the
+deploy queue publishes `<repo>#app` -- the commit and the sha256 of the
+module it installed, which is the module hash the IC certifies for the
+canister -- the way `evm_registry_publish_site` publishes `<repo>#site`,
+charging one `evm_action` with the deploy (refunded if the publish fails
+before broadcast; a failed install publishes nothing, since the canister
+still runs what the last record says). A verifier that reads the
+canister's certified module hash (docs/CERTIFIED.md) can thus check it is
+an approved commit's build without asking ic-git. The record follows what
+runs: a rollback after an objection installs the earlier commit and
+records that. On a network with no registry configured the deploy says
+nothing of it.
+
+`/api/<repo>/info` reports `governed`. ic-vote's poll canister is the first
+intended user (docs/GOVERNANCE.md, section 7).
+
 ## Console
 
 The repo browser page gains a signed-in mode: connect a wallet, see balance
 and repos, create repos, mint, list and revoke push tokens, manage members and votes, deposit,
 and set what a push deploys (`set_wasm_deploy`, into the repo's app
 canister) and what is served as a site (`set_site`), run the configured
-deploy without a push (`deploy_now`), and reinstall. That is the whole
-tenant flow: nothing between a funded wallet and a deployed push needs dfx.
+deploy without a push (`deploy_now`), reinstall, and govern the backend.
+That is the whole tenant flow: nothing between a funded wallet and a
+deployed push needs dfx.
 
 A wallet that signs for its user asks this canister, before signing, for a
 readable description of the call (ICRC-21, `icrc21_canister_call_consent_

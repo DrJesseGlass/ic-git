@@ -76,7 +76,7 @@ pub struct DeployStatus {
 /// What builds the configured source, chosen by file extension. The single
 /// place the extension list lives: `set_config` validates by parsing it, `run`
 /// dispatches on it.
-enum SourceKind {
+pub(crate) enum SourceKind {
     /// R0 assembler.
     Wat,
     /// R1 language compiler.
@@ -87,7 +87,7 @@ enum SourceKind {
 }
 
 impl SourceKind {
-    fn from_path(path: &str) -> Result<Self, String> {
+    pub(crate) fn from_path(path: &str) -> Result<Self, String> {
         if path.ends_with(".wat") {
             Ok(Self::Wat)
         } else if path.ends_with(".lang") {
@@ -683,8 +683,14 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         return st;
     }
     let pricing = crate::tenancy::pricing();
+    // A governed repo's install into its app canister is recorded on chain
+    // as <repo>#app (docs/GOVERNANCE.md, section 3): one EVM action, charged
+    // with the deploy and refunded if the publish fails before broadcast.
+    let app_record = wasm_cfg.as_ref().is_some_and(|cfg| crate::tenancy::governed_target(repo, &cfg.target))
+        && crate::evm::get_registry().is_some();
     let cost = wasm_cfg.as_ref().map_or(0, |_| pricing.ic_deploy)
-        + evm_cfg.as_ref().map_or(0, |_| pricing.evm_action);
+        + evm_cfg.as_ref().map_or(0, |_| pricing.evm_action)
+        + if app_record { pricing.evm_action } else { 0 };
     let payer = match crate::tenancy::charge_action(repo, cost, "deploy") {
         Ok(payer) => payer,
         Err(e) => {
@@ -721,6 +727,33 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     // into `st.ok`: the announce is about what the canister runs, which the
     // EVM leg does not change.
     let wasm_installed = wasm_cfg.is_some() && st.ok;
+
+    // The backend record, right after the install it describes: the commit
+    // and the hash of the module now running. Like the announce below it
+    // never affects `ok` -- the install happened -- and its outcome lands in
+    // the message. A failed install publishes nothing: the canister still
+    // runs what the last record says.
+    if app_record {
+        if wasm_installed {
+            let note = match crate::provenance::app_record(repo, &commit_oid, &st.wasm_sha256) {
+                Ok(rec) => match rec.publish().await {
+                    Ok(reg) => format!("; app record {}", reg.tx_hash),
+                    Err(e) => {
+                        crate::tenancy::refund_action(payer, e.refundable(pricing.evm_action));
+                        format!("; app record failed: {}", e.message)
+                    }
+                },
+                Err(e) => {
+                    crate::tenancy::refund_action(payer, pricing.evm_action);
+                    format!("; app record failed: {e}")
+                }
+            };
+            st.message.push_str(&note);
+            put_status(repo, &st);
+        } else {
+            crate::tenancy::refund_action(payer, pricing.evm_action);
+        }
+    }
 
     if let Some(cfg) = evm_cfg {
         let (evm_st, unused) = run_evm(repo, &cfg, &commit_oid, force, pricing.evm_action).await;

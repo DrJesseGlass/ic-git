@@ -42,6 +42,15 @@ const VOTE = { variant: { Approve: 'null', Reject: 'null', Object: 'null' } };
 assert.deepEqual(IC.decode(IC.encode(['text', 'text', VOTE, { opt: 'text' }], ['r', '0123456789abcdef0123456789abcdef01234567', { Object: null }, 'skips the migration'])), IC.decode(unhex(vectors['args:cast_ballot_object'])));
 assert.deepEqual(IC.decode(IC.encode(['text', 'text', VOTE, { opt: 'text' }], ['r', '0123456789abcdef0123456789abcdef01234567', { Approve: null }, null])), IC.decode(unhex(vectors['args:cast_ballot_approve'])));
 assert.equal(hex(IC.encode(['text', 'text', VOTE, { opt: 'text' }], ['r', '0123456789abcdef0123456789abcdef01234567', { Object: null }, 'skips the migration'])).slice(-60), vectors['args:cast_ballot_object'].slice(-60), 'value bytes identical');
+// propose_policy_change: a variant of records, then the decision and reason.
+const CHANGE = { variant: { RequiredVotes: { record: { k: 'nat32' } }, AddVoter: { record: { principal: 'principal' } }, RemoveVoter: { record: { principal: 'principal' } }, Transfer: { record: { new_owner: 'principal' } }, WasmDeploy: { record: { target: 'text', source_path: 'text' } }, DeployMode: { record: { mode: 'text' } } } };
+const propose = (c, d, r) => IC.decode(IC.encode(['text', CHANGE, VOTE, { opt: 'text' }], ['r', c, { [d]: null }, r]));
+// The Rust side knows three of the six arms; a subtype encodes the same
+// values, so compare decoded values (the console's decoder resolves names).
+const strip = v => JSON.parse(JSON.stringify(v, (k, x) => typeof x === 'bigint' ? Number(x) : x));
+assert.deepEqual(strip(propose({ AddVoter: { principal: USER } }, 'Approve', null)), strip(IC.decode(unhex(vectors['args:propose_add_voter']))));
+assert.deepEqual(strip(propose({ RequiredVotes: { k: 2 } }, 'Object', 'too few')), strip(IC.decode(unhex(vectors['args:propose_required_votes']))));
+assert.deepEqual(strip(propose({ WasmDeploy: { target: CANISTER, source_path: 'app.wasm' } }, 'Approve', null)), strip(IC.decode(unhex(vectors['args:propose_wasm_deploy']))));
 // Composite types: the Rust crate orders its type table differently (both
 // are valid Candid), so compare structurally after decoding both.
 const approve = { from_subaccount: null, spender: { owner: CANISTER, subaccount: null }, amount: 5_000_000_000n, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null };
