@@ -29,6 +29,7 @@
   ],
   "background": {
     "scripts": [
+      "bls12-381.js",
       "verifier.js",
       "background.js"
     ]

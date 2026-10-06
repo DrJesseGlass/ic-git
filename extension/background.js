@@ -13,7 +13,7 @@
 //   session rule that replaces it with the policy derivePolicy pins for the
 //   verified page: its own scripts and styles, nothing else. The written
 //   document keeps that policy.
-importScripts('verifier.js');
+importScripts('bls12-381.js', 'verifier.js');
 
 const CANISTER = Verifier.DEFAULTS.canister;
 const ORIGIN = 'https://' + CANISTER + '.raw.icp0.io';
