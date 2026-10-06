@@ -670,7 +670,8 @@ dependencies = [
 [[package]]
 name = "ic-multisig"
 version = "0.2.0"
-source = "git+https://github.com/DrJesseGlass/ic-multisig?rev=64a41ae#64a41aec8fbedca861541f3caefa42c200d6e5ff"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5ca4ba25316bfe3c68c131cfa1cdf1ee3170e9133b4d836acc52ffddb3d8bc4"
 dependencies = [
  "candid",
  "hex",
