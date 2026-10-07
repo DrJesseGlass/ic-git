@@ -350,6 +350,43 @@
         "note": "upgrade from v0.3.2, after tools/e2e-local.sh passed 87/87 on this commit including an upgrade from v0.3.2 over state it wrote. The canister crate changed in #64 and #65: objection ballots. ic-multisig moves to 0.2.0 (crates.io), whose tally counts an objection as -1: a commit passes when approvals minus objections reach required_votes. cast_ballot(repo, commit, Approve|Reject|Object, opt reason) joins vote(repo, commit, bool), which maps onto it; an objection needs a reason of up to 1 KB; Ballot and /api/<repo>/votes/<commit> carry decision, reason and the count; the ICRC-21 consent message for an objection quotes the reason. Ballots recorded by earlier releases read unchanged. Every published site (ic-git, ic-vote, ic-git-loader, ic-git-extension, ic-git-extension-firefox) still verifies after the upgrade"
       },
       "wasm_sha256": "2bbe20096457159684bc5fd6c1320343cb81fc33bf3d4070c92eb3971cffa172"
+    },
+    {
+      "commit": "db8f2bda5f1880eacf55282cbe118ca12d4e3cc2",
+      "tag": "v0.3.4",
+      "module_hash": "e25610892fe279e4355d47c16cc1e03cd27732dad8187565e2eb1c36de5b9bad",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, linux/amd64 image under emulation",
+          "date": "2026-10-07"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/37653678100",
+          "date": "2026-10-07",
+          "check": "identical hash (e2561089...9bad gz, cae6fc73...48f5 raw); the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-10-07",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh (live module hash) against the reproducible build's module sha256; also Verifier.readCanisterState (core/verifier.js) certified the same hash and controllers from the IC's state certificate",
+        "note": "upgrade from v0.3.3, after tools/e2e-local.sh passed 120/120 on this commit including an upgrade from v0.3.3 over state it wrote. The canister crate changed in #69: governed app canisters (docs/GOVERNANCE.md section 2, docs/TENANCY.md). govern_app_canister(repo) makes this canister the app canister's only controller, owner only and one-way; the policy locks with it -- set_required_votes, voter changes, transfer_repo, set_wasm_deploy and set_deploy_mode refuse, required votes never 0 -- and propose_policy_change casts a ballot on the change itself under the commit rule, applied when reached. Every install into a governed app canister publishes <repo>#app (commit, module sha256) to the registry. /api/<repo>/info reports governed; /api/<repo>/proposals lists pending changes. Metadata written by earlier releases reads with governed = false and no proposals. Every published site (ic-git, ic-vote, ic-git-loader, ic-git-extension, ic-git-extension-firefox) still verifies after the upgrade"
+      },
+      "wasm_sha256": "cae6fc7353e14074e53f8a38bb8007e76ba853bd197ce44a29760d36cd1748f5"
     }
   ]
 }
