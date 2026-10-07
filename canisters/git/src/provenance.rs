@@ -21,6 +21,13 @@ use sha2::Digest;
 /// silently clobber the other on the next push. See docs/ATTESTATION.md,
 /// "The two record types". `tools/verify.mjs` hardcodes the same suffix.
 const SITE_KEY_SUFFIX: &str = "#site";
+/// Suffix of a governed repo's backend record: the commit the deploy queue
+/// installed into the app canister and the sha256 of the module it
+/// installed, which is the module hash the IC certifies for that canister
+/// (docs/GOVERNANCE.md, section 3). Published by the queue after every
+/// install on a governed repo, so what the chain says the backend runs is
+/// an approved commit's build, by a key nobody but this canister can write.
+const APP_KEY_SUFFIX: &str = "#app";
 
 /// A resolved provenance record: the registry key, the commit being attested,
 /// and the artifact hash bound to it.
@@ -68,6 +75,19 @@ fn commit20(oid: &Oid) -> Result<[u8; 20], String> {
 fn deploy_record(repo: &str, commit_oid: &Oid, bundle: [u8; 32]) -> Result<Record, String> {
     Ok(Record {
         key: repo.to_string(),
+        commit: commit20(commit_oid)?,
+        bundle,
+    })
+}
+
+/// The backend record for an install the deploy queue just made: the commit
+/// and the installed module's sha256 as the queue computed it from the bytes
+/// it sent (`DeployStatus::wasm_sha256`), never re-derived.
+pub fn app_record(repo: &str, commit_oid: &Oid, wasm_sha256_hex: &str) -> Result<Record, String> {
+    let bytes = hex::decode(wasm_sha256_hex).map_err(|e| format!("bad module hash: {e}"))?;
+    let bundle: [u8; 32] = bytes.try_into().map_err(|_| "module hash is not 32 bytes".to_string())?;
+    Ok(Record {
+        key: format!("{repo}{APP_KEY_SUFFIX}"),
         commit: commit20(commit_oid)?,
         bundle,
     })
@@ -232,6 +252,21 @@ mod tests {
             b"<script src=\"app.js\" integrity=\"sha384-x\"></script>",
         );
         assert!(site_record("srirepo").is_ok());
+    }
+
+    /// An app record is namespaced like a site record and carries the
+    /// installed module's hash as the queue reported it, so the registry
+    /// holds exactly the bytes the IC's certified module hash names.
+    #[test]
+    fn app_record_is_namespaced_and_carries_the_module_hash() {
+        let commit_oid = store::put_object(ObjectType::Commit, b"tree x\n\ncommit\n");
+        let hash = "2bfd212775e572b82ff35997309f2753a273cff114035bc015d14d0841ddcec3";
+        let rec = app_record("apprepo", &commit_oid, hash).expect("record resolves");
+        assert_eq!(rec.key, "apprepo#app");
+        assert_eq!(hex::encode(rec.bundle), hash);
+        assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
+        assert!(app_record("apprepo", &commit_oid, "abcd").is_err(), "a short hash is refused");
+        assert!(app_record("apprepo", &commit_oid, "").is_err(), "no hash is refused");
     }
 
     /// A deploy record's key is the bare repo name and its bundle is the

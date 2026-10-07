@@ -144,7 +144,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc', 'approvals', 'objections', 'required', 'reached']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc', 'approvals', 'objections', 'required', 'reached', 'governed', 'counts', 'change', 'ballots', 'RequiredVotes', 'AddVoter', 'RemoveVoter', 'Transfer', 'WasmDeploy', 'DeployMode', 'k', 'new_owner']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -738,18 +738,22 @@ const Console = (() => {
       ' &middot; storage ' + info.storage_bytes + ' bytes' + (info.delinquent ? ' &middot; <b class="bad">behind on rent</b>' : '') +
       ' &middot; deploys need ' + info.required_votes + ' approval' + (info.required_votes === 1 ? '' : 's') +
       (info.app_canister ? ' &middot; app canister <span class="oid">' + esc(info.app_canister) + '</span>' : '') +
+      (info.governed ? ' &middot; <b>GOVERNED</b>: ic-git is the app canister\'s only controller' : '') +
       (info.require_signed_push ? ' &middot; <b>pushes must be signed</b>' : '') + '</p>' +
       '<p>on push, deploys <b id="cfg-deploy">...</b> &middot; site <b id="cfg-site">...</b></p>';
-    if (info.members.length) html += '<table><tr><th>member</th><th>role</th>' + (isOwner ? '<th></th>' : '') + '</tr>' + info.members.map(m => '<tr><td class="oid">' + esc(m.principal) + '</td><td>' + esc(m.role) + '</td>' + (isOwner ? '<td><button class="rm" data-p="' + esc(m.principal) + '">remove</button></td>' : '') + '</tr>').join('') + '</table>';
+    // On a governed repo a voter is the policy: removed by vote (below), not here.
+    if (info.members.length) html += '<table><tr><th>member</th><th>role</th>' + (isOwner ? '<th></th>' : '') + '</tr>' + info.members.map(m => '<tr><td class="oid">' + esc(m.principal) + '</td><td>' + esc(m.role) + '</td>' + (isOwner ? '<td>' + (info.governed && m.role === 'voter' ? '<span class="muted">by vote</span>' : '<button class="rm" data-p="' + esc(m.principal) + '">remove</button>') + '</td>' : '') + '</tr>').join('') + '</table>';
     if (isWriter) html += form('f-token', [{ name: 'days', placeholder: 'lifetime in days (1-365, default 30)' }, { name: 'key', placeholder: 'bind to an SSH key: contents of ~/.ssh/id_ed25519.pub' + (info.require_signed_push ? ' (required here)' : ' (optional)') }], 'mint push token') + '<p id="f-token-st" class="status tok"></p>' +
       '<div id="tok-list"><p class="muted">push tokens: ...</p></div><p id="tok-list-st" class="status"></p>';
-    if (isOwner) html += form('f-member', [{ name: 'principal', placeholder: 'principal' }, { name: 'role', placeholder: 'writer or voter', value: 'writer' }], 'add member') + '<p id="f-member-st" class="status"></p>' +
-      form('f-votes', [{ name: 'k', placeholder: 'approvals required before deploy', value: String(info.required_votes) }], 'set required votes') + '<p id="f-votes-st" class="status"></p>' +
+    if (isOwner) html += form('f-member', [{ name: 'principal', placeholder: 'principal' }, { name: 'role', placeholder: info.governed ? 'writer (voters are added by vote)' : 'writer or voter', value: 'writer' }], 'add member') + '<p id="f-member-st" class="status"></p>' +
+      (info.governed ? '' : form('f-votes', [{ name: 'k', placeholder: 'approvals required before deploy', value: String(info.required_votes) }], 'set required votes') + '<p id="f-votes-st" class="status"></p>') +
       form('f-signed', [], info.require_signed_push ? 'stop requiring signed pushes' : 'require signed pushes (key-bound tokens only)') + '<p id="f-signed-st" class="status"></p>' +
       (info.app_canister
         ? form('f-topup', [{ name: 'amount', placeholder: 'T cycles to add' }], 'top up app canister') + '<p id="f-topup-st" class="status"></p>'
         : form('f-app', [{ name: 'amount', placeholder: 'T cycles (min 1)' }], 'create app canister') + '<p id="f-app-st" class="status"></p>');
-    if (isOwner) html += (info.app_canister
+    if (isOwner) html += (info.governed
+        ? '<p class="muted">what each push deploys, and the install mode, are policy changes: propose them in the governance panel.</p>'
+        : info.app_canister
         ? form('f-deploy', [{ name: 'path', placeholder: 'path in the commit, e.g. app.wasm (.wasm, .wat or .lang)' }], 'deploy on push into the app canister') + '<p id="f-deploy-st" class="status"></p>'
         : '<p class="muted">create the app canister above, then choose what each push deploys into it.</p>') +
       form('f-site', [{ name: 'root', placeholder: 'directory to serve, e.g. site (empty = repo root)' }], 'serve as site') + '<p id="f-site-st" class="status"></p>' +
@@ -758,7 +762,7 @@ const Console = (() => {
       // for a repo that serves no site.
       '<div id="box-pubsite" hidden>' + form('f-pubsite', [], 'publish site record to the EVM registry') + '<p id="pubsite-cost" class="muted">...</p><p id="f-pubsite-st" class="status"></p></div>' +
       (info.app_canister
-        ? form('f-deploynow', [], 'deploy now') + ' <button id="btn-reinstall" class="danger" type="button" disabled>reinstall...</button>' +
+        ? form('f-deploynow', [], 'deploy now') + (info.governed ? '' : ' <button id="btn-reinstall" class="danger" type="button" disabled>reinstall...</button>') +
           '<p id="deploy-cost" class="muted">...</p><p id="f-deploynow-st" class="status"></p>' +
           // The guard: no native dialog (those block the page), a box the
           // owner has to read, and a run button that stays disabled until
@@ -772,6 +776,7 @@ const Console = (() => {
         : '');
     if (!me) html += '<p class="muted">connect a wallet to manage this repo.</p>';
     html += '</div>';
+    html += await governancePanel(repo, info, isOwner);
     setTimeout(() => {
       // Live tokens by id, with a revoke button each. Redrawn in place after
       // a mint or a revoke: a reload would wipe the minted token, which is
@@ -830,6 +835,7 @@ const Console = (() => {
       });
       onsubmit('f-member', async v => { await write('add_member', ['text', 'principal', 'text'], [repo, v.principal.trim(), v.role.trim()]); setTimeout(() => location.reload(), 800); return 'added'; });
       onsubmit('f-votes', async v => { await write('set_required_votes', ['text', 'nat32'], [repo, Number(v.k)]); setTimeout(() => location.reload(), 800); return 'saved'; });
+      governanceWire(repo, info);
       onsubmit('f-app', async v => { const id = await write('create_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]); setTimeout(() => location.reload(), 800); return 'created app canister ' + id; });
       onsubmit('f-topup', async v => { await write('top_up_app_canister', ['text', 'nat64'], [repo, cycles(v.amount)]); return 'topped up'; });
       const wasmLeg = c => c.source_path + ' into ' + (c.target === info.app_canister ? 'the app canister' : short(c.target)) + ' (' + Object.keys(c.mode)[0] + ')';
@@ -863,13 +869,20 @@ const Console = (() => {
       // A deploy runs every configured leg: the EVM leg broadcasts a new
       // CREATE transaction each time, which costs ic-git's fee here and gas
       // on the other chain, and is not undone by anything on this side.
-      if (btn) Promise.all([deployCfg, evmCfg, pricing]).then(([w, e, pr]) => {
-        const cost = document.getElementById('deploy-cost'), what = document.getElementById('reinstall-what');
+      // The cost line is on every repo with an app canister; the reinstall
+      // button only where the repo is not governed, so it alone is optional.
+      const cost = document.getElementById('deploy-cost');
+      if (cost) Promise.all([deployCfg, evmCfg, pricing]).then(([w, e, pr]) => {
+        const what = document.getElementById('reinstall-what');
         if (w === undefined || e === undefined || pr === undefined) { cost.textContent = 'could not read the deploy config or the fee table; reload before deploying.'; return; }
         const fee = (w ? pr.ic_deploy : 0) + (e ? pr.evm_action : 0);
         const evmNote = e ? 'a new CREATE transaction for ' + e.source_path + ' on the EVM chain (gas limit ' + e.gas_limit + '): a fresh contract at a new address, gas paid on that chain by the signer, not in cycles.' : '';
+        // A governed repo's install into its app canister also publishes the
+        // <repo>#app record, one more evm_action, where a registry is set.
+        const appNote = w && info.governed && w.target === info.app_canister ? ' Governed: the install is recorded on chain as ' + repo + '#app, ' + fmtT(pr.evm_action) + ' more where a registry is configured.' : '';
         cost.textContent = !w && !e ? 'nothing is configured to deploy.'
-          : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '');
+          : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '') + appNote;
+        if (!btn) return;
         if (!w) { btn.title = 'nothing is configured to deploy into a canister'; return; }
         const target = w.target === info.app_canister
           ? 'app canister ' + w.target
@@ -913,6 +926,87 @@ const Console = (() => {
       document.querySelectorAll('button.rm').forEach(b => { b.onclick = async () => { try { await write('remove_member', ['text', 'principal'], [repo, b.dataset.p]); location.reload(); } catch (e) { alert(e.message); } }; });
     }, 0);
     return html;
+  }
+
+  // --- governance (docs/GOVERNANCE.md) ---
+  // The candid shape of a policy change, for the encoder and for reading
+  // the JSON the API returns ({"RequiredVotes":{"k":2}}, ...).
+  const CHANGE = { variant: { RequiredVotes: { record: { k: 'nat32' } }, AddVoter: { record: { principal: 'principal' } }, RemoveVoter: { record: { principal: 'principal' } }, Transfer: { record: { new_owner: 'principal' } }, WasmDeploy: { record: { target: 'text', source_path: 'text' } }, DeployMode: { record: { mode: 'text' } } } };
+  const VOTE = { variant: { Approve: 'null', Reject: 'null', Object: 'null' } };
+  const describe = c => {
+    const [kind, v] = Object.entries(c)[0];
+    return kind === 'RequiredVotes' ? 'require ' + v.k + ' approval' + (v.k === 1 ? '' : 's') + ' per commit'
+      : kind === 'AddVoter' ? 'add voter ' + short(v.principal)
+      : kind === 'RemoveVoter' ? 'remove voter ' + short(v.principal)
+      : kind === 'Transfer' ? 'transfer the repository to ' + short(v.new_owner)
+      : kind === 'WasmDeploy' ? 'deploy ' + v.source_path + ' into ' + short(v.target)
+      : kind === 'DeployMode' ? 'install mode ' + v.mode + (v.mode === 'reinstall' ? ' (WIPES the target\'s state on every deploy)' : '')
+      : JSON.stringify(c);
+  };
+  const count = p => p.approvals + ' approve' + (p.objections ? ', ' + p.objections + ' object: net ' + (p.approvals - p.objections) : '') + ' of ' + p.required + ' required';
+  async function governancePanel(repo, info, isOwner) {
+    const canVote = me && (info.owner === me || info.members.some(m => m.principal === me && m.role === 'voter'));
+    let html = '<div class="panel"><h3>governance</h3>';
+    if (!info.governed) {
+      html += '<p>not governed: the owner controls the app canister alongside ic-git, and can change its code or this repo\'s policy without a vote.</p>';
+      if (isOwner && info.app_canister) {
+        // The one-way step, behind the same typed guard as a reinstall.
+        html += '<button id="btn-govern" class="danger" type="button"' + (info.required_votes ? '' : ' disabled title="set required votes to 1 or more first"') + '>govern this backend...</button>' +
+          (info.required_votes ? '' : ' <span class="muted">set required votes to 1 or more first</span>') +
+          '<div id="box-govern" class="confirm" hidden><p class="bad"><b>This cannot be undone.</b> ic-git becomes the ONLY controller of app canister ' + esc(info.app_canister) + ' and you are removed: from then on its code changes only by a commit the voters approve (' + info.required_votes + ' of ' + (1 + info.members.filter(m => m.role === 'voter').length) + ' today). The required votes, the voters, the owner and what deploys become votes too, and the required votes can never go back to 0. A broken backend is then fixed by an approved commit, not by you directly.</p>' +
+          '<p>Type the repository name <b>' + esc(repo) + '</b> to confirm: <input id="in-govern" autocomplete="off"> <button id="go-govern" class="danger" type="button" disabled>govern now</button> <button id="cancel-govern" type="button">cancel</button></p><p id="govern-st" class="status"></p></div>';
+      } else if (isOwner) {
+        html += '<p class="muted">create the app canister first; governing hands its control to ic-git alone.</p>';
+      }
+      return html + '</div>';
+    }
+    html += '<p><b>governed</b>: app canister <span class="oid">' + esc(info.app_canister) + '</span> is controlled by ic-git alone, so it runs only commits the voters approve, ' + info.required_votes + ' of ' + (1 + info.members.filter(m => m.role === 'voter').length) + '. Changing that policy, the voters, the owner, or what deploys is itself a vote under it.</p>';
+    let props = [];
+    try { props = await get(encodeURIComponent(repo) + '/proposals'); } catch (e) { html += '<p class="muted">proposals could not be read: ' + esc(e.message) + '</p>'; }
+    // Each row carries its change: the ballot buttons cast on exactly what
+    // the row shows, not on whatever a later read of the list puts at the
+    // same index after another voter's ballot applied one.
+    html += props.length ? '<table><tr><th>proposed change</th><th>count</th><th>ballots</th>' + (canVote ? '<th></th>' : '') + '</tr>' + props.map(p =>
+      '<tr><td>' + esc(describe(p.change)) + '</td><td>' + esc(count(p)) + '</td><td>' + p.ballots.map(b => '<span class="oid" title="' + esc(b.principal) + '">' + esc(short(b.principal)) + '</span> ' + (b.decision === 'object' ? '<span class="objection">objects' + (b.reason ? ': ' + esc(b.reason) : '') + '</span>' : esc(b.decision + (b.reason ? ' (' + b.reason + ')' : '')))).join('<br>') + '</td>' +
+      (canVote ? '<td><form class="f-prop" data-change="' + esc(JSON.stringify(p.change)) + '"><button data-v="Approve">approve</button><button data-v="Reject">reject</button><textarea name="reason" maxlength="1024" placeholder="reason, required to object"></textarea><button data-v="Object">object</button></form></td>' : '') + '</tr>').join('') + '</table><p id="prop-st" class="status"></p>'
+      : '<p class="muted">no pending policy changes.</p>';
+    if (canVote) html += '<form id="f-propose"><select name="kind"><option value="RequiredVotes">required votes</option><option value="AddVoter">add voter</option><option value="RemoveVoter">remove voter</option><option value="Transfer">transfer to</option><option value="WasmDeploy">deploy path (into the app canister)</option><option value="DeployMode">install mode</option></select><input name="value" placeholder="value"><textarea name="reason" maxlength="1024" placeholder="reason (optional)"></textarea><button>propose and approve</button></form><p id="f-propose-st" class="status"></p>';
+    return html + '</div>';
+  }
+  function governanceWire(repo, info) {
+    const box = document.getElementById('box-govern'), inp = document.getElementById('in-govern'), go = document.getElementById('go-govern'), btn = document.getElementById('btn-govern'), cancel = document.getElementById('cancel-govern');
+    if (btn) btn.onclick = () => { box.hidden = false; inp.value = ''; go.disabled = true; inp.focus(); };
+    if (cancel) cancel.onclick = () => { box.hidden = true; };
+    if (inp) inp.oninput = () => { go.disabled = inp.value.trim() !== repo; };
+    if (go) go.onclick = async () => {
+      if (inp.value.trim() !== repo) return;
+      go.disabled = true; btn.disabled = true;
+      status('govern-st', 'waiting for wallet...', true);
+      try { const id = await write('govern_app_canister', ['text'], [repo]); status('govern-st', 'governed: ' + id + ' is now controlled by ic-git alone', true); setTimeout(() => location.reload(), 1200); }
+      catch (e) { status('govern-st', e.message, false); btn.disabled = false; }
+    };
+    const change = (kind, value) => {
+      value = value.trim();
+      if (kind === 'RequiredVotes') { const k = Number(value); if (!(Number.isInteger(k) && k >= 1)) throw new Error('required votes is a whole number, 1 or more'); return { RequiredVotes: { k } }; }
+      if (kind === 'AddVoter' || kind === 'RemoveVoter') { if (!value) throw new Error('enter the voter\'s principal'); return { [kind]: { principal: value } }; }
+      if (kind === 'Transfer') { if (!value) throw new Error('enter the new owner\'s principal'); return { Transfer: { new_owner: value } }; }
+      if (kind === 'WasmDeploy') { if (!value) throw new Error('enter the path in the commit, e.g. app.wasm'); return { WasmDeploy: { target: info.app_canister, source_path: value } }; }
+      if (kind === 'DeployMode') { if (value !== 'upgrade' && value !== 'reinstall') throw new Error('the install mode is upgrade or reinstall'); return { DeployMode: { mode: value } }; }
+      throw new Error('unknown change');
+    };
+    const cast = async (st, c, decision, reason) => {
+      status(st, 'waiting for wallet...', true);
+      const r = await write('propose_policy_change', ['text', CHANGE, VOTE, { opt: 'text' }], [repo, c, { [decision]: null }, reason || null]);
+      status(st, 'recorded: ' + count(r) + (r.reached ? '; applied' : ''), true);
+      setTimeout(() => location.reload(), 800);
+    };
+    onsubmit('f-propose', async v => { await cast('f-propose-st', change(v.kind, v.value), 'Approve', v.reason.trim()); return 'recorded'; });
+    document.querySelectorAll('form.f-prop').forEach(f => f.querySelectorAll('button').forEach(b => { b.onclick = async e => {
+      e.preventDefault();
+      const decision = b.dataset.v, reason = f.reason.value.trim();
+      if (decision === 'Object' && !reason) { status('prop-st', 'an objection needs a reason', false); f.reason.focus(); return; }
+      try { await cast('prop-st', JSON.parse(f.dataset.change), decision, reason); } catch (err) { status('prop-st', err.message, false); }
+    }; }));
   }
 
   async function commitPanel(repo, oid) {

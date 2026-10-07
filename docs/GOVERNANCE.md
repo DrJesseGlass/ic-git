@@ -51,6 +51,15 @@ and for good:
   is the point, and the price: a broken backend is fixed by an approved
   commit, not directly.
 
+The lock is a vote on the change itself: `propose_policy_change` takes a
+ballot on "require K", "add or remove this voter", "transfer to", or "what
+the deploy installs" (the deploy config is part of it, since a source path
+or an install mode changed by the owner alone would put unapproved code,
+or a wipe, into the governed canister), counted over the current approvers
+with the same objection rule as a commit, and applied the moment it is
+reached. Writers stay the owner's: a writer only pushes, and a push
+deploys only once approved. docs/TENANCY.md, "Governed app canisters".
+
 Governance stays opt-in, because ungoverned use has real reasons (fast
 iteration, frontend provenance only, a backend governed by its own DAO).
 What keeps that honest is that users see the difference (section 4).
@@ -133,17 +142,20 @@ need to look.
 ## Order of work
 
 1. The tally rule in `ic-multisig` (object -1), and ic-git's adapter.
-2. Governed app canisters and the policy lock (canister release).
-3. Activity feeds.
-4. The certified `read_state` reader in the core.
-5. The `<repo>#app` deploy record, and the extensions' backend check.
+   Done: ic-multisig 0.2.0, ic-git v0.3.3 (`cast_ballot`).
+2. Governed app canisters, the policy lock and the `<repo>#app` deploy
+   record (canister release). Built: `govern_app_canister`,
+   `propose_policy_change`, docs/TENANCY.md "Governed app canisters".
+3. The certified `read_state` reader in the core. Done: docs/CERTIFIED.md.
+4. The extensions' backend check (section 4), on 2 and 3.
+5. Activity feeds.
 6. The governor: build, rehearse locally, record, then the mainnet handover.
 7. Push notifications (Dmail), once confirmed.
 
 ## Open questions
 
-- Freshness bound for certified reads, and what a check does when the
-  certificate is older (stop, or warn).
+- Freshness bound for certified reads: settled at five minutes, stale is
+  a warning, a signature or delegation failure stops (docs/CERTIFIED.md).
 - How a governed backend's emergency is handled without an escape hatch
   (expedited proposals with a lower K and a short delay, or none).
 - Whether objections should also extend a waiting period before a passing

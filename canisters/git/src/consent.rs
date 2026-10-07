@@ -13,7 +13,7 @@
 //! The text describes what the call does to the caller's balance and repos,
 //! since that is what the person is consenting to.
 
-use crate::tenancy::Vote;
+use crate::tenancy::{PolicyChange, Vote};
 use candid::{CandidType, Deserialize, Nat, Principal};
 
 // --- ICRC-10 -----------------------------------------------------------------
@@ -174,6 +174,44 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "top_up_app_canister" => {
             let (repo, amount): (String, u64) = args(arg, m)?;
             format!("Send {} from your ic-git balance to the app canister of \"{repo}\".", cycles(amount))
+        }
+        "govern_app_canister" => {
+            let (repo,): (String,) = args(arg, m)?;
+            format!(
+                "GOVERN the app canister of \"{repo}\": ic-git becomes its ONLY controller and you \
+                 are removed, so its code changes only by a commit the voters approve. The required \
+                 votes, the voters, the owner and the deploy config become votes too, and required \
+                 votes can no longer be 0. THIS CANNOT BE UNDONE."
+            )
+        }
+        "propose_policy_change" => {
+            let (repo, change, decision, reason): (String, PolicyChange, Vote, Option<String>) = args(arg, m)?;
+            let what = match &change {
+                PolicyChange::RequiredVotes { k } => format!("require {k} approval{} per commit", if *k == 1 { "" } else { "s" }),
+                PolicyChange::AddVoter { principal } => format!("add {} as a voter", prefix(&principal.to_text(), 11)),
+                PolicyChange::RemoveVoter { principal } => format!("remove voter {}", prefix(&principal.to_text(), 11)),
+                PolicyChange::Transfer { new_owner } => format!("transfer the repository to {}", prefix(&new_owner.to_text(), 11)),
+                PolicyChange::WasmDeploy { target, source_path } => format!("deploy \"{source_path}\" to canister {target}"),
+                PolicyChange::DeployMode { mode } => match mode.as_str() {
+                    "reinstall" => "set the install mode to REINSTALL, which WIPES ALL STATE of the target on every deploy".to_string(),
+                    other => format!("set the install mode to \"{other}\""),
+                },
+            };
+            let because = match reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+                Some(r) => format!(" Reason: {r}"),
+                None => String::new(),
+            };
+            match decision {
+                Vote::Approve => format!(
+                    "Approve a policy change on \"{repo}\": {what}. It applies once approvals minus \
+                     objections reach the required votes.{because}"
+                ),
+                Vote::Reject => format!("Reject the policy change on \"{repo}\": {what}.{because}"),
+                Vote::Object => format!(
+                    "Object to the policy change on \"{repo}\": {what}. It then needs one more approval \
+                     than usual, and the other voters see why.{because}"
+                ),
+            }
         }
         "create_push_token" => {
             // `days` and `key` are trailing opts: an argument without them
@@ -498,6 +536,11 @@ mod tests {
             ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Approve, None::<String>)).unwrap(), &["Approve commit 0123456789ab..."]),
             ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Reject, None::<String>)).unwrap(), &["Reject commit 0123456789ab...", "not count you", "objection is withdrawn", "may then be deployed"]),
             ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Object, Some("skips the schema migration"))).unwrap(), &["Object to commit 0123456789ab...", "one more approval", "Reason: skips the schema migration"]),
+            ("govern_app_canister", encode_args(("ic-vote",)).unwrap(), &["GOVERN", "ONLY controller", "CANNOT BE UNDONE"]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::RequiredVotes { k: 2 }, Vote::Approve, None::<String>)).unwrap(), &["Approve a policy change", "require 2 approvals", "applies once"]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::AddVoter { principal: p }, Vote::Object, Some("not reviewed yet"))).unwrap(), &["Object to the policy change", "add 3kq6u-eptpm... as a voter", "Reason: not reviewed yet"]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None::<String>)).unwrap(), &["REINSTALL", "WIPES ALL STATE"]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::Transfer { new_owner: p }, Vote::Reject, None::<String>)).unwrap(), &["Reject the policy change", "transfer the repository to 3kq6u-eptpm..."]),
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
             ("set_deploy_mode", encode_args(("ic-vote", "upgrade")).unwrap(), &["keeps its state"]),

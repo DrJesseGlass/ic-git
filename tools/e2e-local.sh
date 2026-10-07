@@ -352,6 +352,69 @@ for _ in $(seq 1 30); do
 done
 expect "  ...and deployed again" "$(printf '%s' "$STATUS" | tr '\n' ' ')" "ok = true.*commit = \"$A2\""
 
+section "governed backend"
+# docs/GOVERNANCE.md, section 2. Governing hands the app canister to ic-git
+# alone and locks the policy: the owner's direct changes to it are refused,
+# and every such change is a ballot under the current K of N.
+flat() { printf '%s' "$1" | tr '\n' ' '; }
+INFO=$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)
+expect "before: the owner and ic-git control the app canister" "$(flat "$INFO")" "Controllers:.*$T"
+expect "a voter cannot govern" "$(call "$V1" git govern_app_canister '("e2e-app")')" 'only the owner'
+expect "the owner governs" "$(call "$TEN" git govern_app_canister '("e2e-app")')" "Ok = principal \"$APP\""
+INFO=$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)
+expect "after: ic-git is the only controller" "$(flat "$INFO")" "Controllers: $G *Module"
+refuse "  ...the owner is gone" "$INFO" "$T"
+expect "governing twice is refused" "$(call "$TEN" git govern_app_canister '("e2e-app")')" 'already governed'
+expect "/api info says governed" "$(curl -s "http://$HOST/api/e2e-app/info")" '"governed":true'
+expect "owner: required votes locked" "$(call "$TEN" git set_required_votes '("e2e-app", 0 : nat32)')" 'propose_policy_change'
+expect "owner: voters locked" "$(call "$TEN" git add_member "(\"e2e-app\", principal \"$P1\", \"writer\")")" 'propose_policy_change'
+expect "owner: removing a voter locked" "$(call "$TEN" git remove_member "(\"e2e-app\", principal \"$P1\")")" 'propose_policy_change'
+expect "owner: transfer locked" "$(call "$TEN" git transfer_repo "(\"e2e-app\", principal \"$P1\")")" 'propose_policy_change'
+expect "owner: deploy config locked" "$(call "$TEN" git set_wasm_deploy '("e2e-app", "app", "other.wat")')" 'propose_policy_change'
+expect "owner: install mode locked" "$(call "$TEN" git set_deploy_mode '("e2e-app", "reinstall")')" 'propose_policy_change'
+OPP=$(dfx identity get-principal --identity "$OP")
+expect "writers are still the owner's to manage" "$(call "$TEN" git add_member "(\"e2e-app\", principal \"$OPP\", \"writer\")")" 'Ok'
+call "$TEN" git remove_member "(\"e2e-app\", principal \"$OPP\")" >/dev/null
+# Policy changes by vote. K is 1 of 3, so the proposer's approval applies.
+expect "required votes 1 -> 2 by vote: applied at once under K = 1" "$(flat "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 2 : nat32 } }, variant { Approve }, null)')")" 'reached = true'
+expect "  ...and in effect" "$(curl -s "http://$HOST/api/e2e-app/info")" '"required_votes":2'
+expect "k = 0 is refused before any ballot" "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 0 : nat32 } }, variant { Approve }, null)')" 'at least one required vote'
+# Under K = 2 a change waits, is listed with its count, and an objection holds it.
+expect "lowering back to 1 waits for a second approval" "$(flat "$(call "$V1" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Approve }, null)')")" 'reached = false'
+PROPS=$(curl -s "http://$HOST/api/e2e-app/proposals")
+expect "/api proposals lists it" "$PROPS" '"change":\{"RequiredVotes":\{"k":1\}\}'
+expect "  ...with the count" "$PROPS" '"approvals":1,"objections":0,"required":2,"reached":false'
+expect "an objection with a reason holds it" "$(flat "$(call "$V2" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Object }, opt "two sets of eyes on the backend")')")" 'objections = 1'
+expect "  ...the reason is in the API" "$(curl -s "http://$HOST/api/e2e-app/proposals")" '"reason":"two sets of eyes on the backend"'
+expect "  ...and the owner's approval does not outweigh it (2 - 1 < 2)" "$(flat "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Approve }, null)')")" 'reached = false'
+expect "still 2 required" "$(curl -s "http://$HOST/api/e2e-app/info")" '"required_votes":2'
+# The governed canister still deploys approved commits, and only those.
+commit app.wat '(module (func (export "canister_query hello")) (func (export "canister_query hi")) (func (export "canister_query hey")))' app-v3
+signed "$URL" >/dev/null || true
+A3=$(git -C "$W" rev-parse HEAD)
+call "$TEN" git cast_ballot "(\"e2e-app\", \"$A3\", variant { Approve }, null)" >/dev/null
+expect "one of two approvals: held" "$(call "$TEN" git get_deploy_status '("e2e-app")')" 'awaiting voter approval'
+call "$V1" git cast_ballot "(\"e2e-app\", \"$A3\", variant { Approve }, null)" >/dev/null
+for _ in $(seq 1 30); do
+  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  echo "$STATUS" | grep -q "$A3" && echo "$STATUS" | grep -q 'ok = true' && break
+  sleep 1
+done
+expect "two approvals: the governed canister is upgraded" "$(flat "$STATUS")" "ok = true.*commit = \"$A3\""
+WASM_SHA=$(echo "$STATUS" | sed -n 's/.*wasm_sha256 = "\([0-9a-f]*\)".*/\1/p')
+expect "  ...to the module the status names" "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)" "Module hash: 0x$WASM_SHA"
+refuse "  ...no app record here: no registry on this network" "$STATUS" 'app record'
+expect "  ...and served" "$(served)" "^200 $A3"
+# A deploy config change by vote (K = 2): applied when the second approval lands.
+call "$V1" git propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "reinstall" } }, variant { Approve }, null)' >/dev/null
+expect "install mode unchanged after one approval" "$(call "$TEN" git get_deploy_config '("e2e-app")')" 'upgrade'
+expect "second approval applies the deploy config change" "$(flat "$(call "$V2" git propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "reinstall" } }, variant { Approve }, null)')")" 'reached = true'
+expect "  ...install mode is now reinstall" "$(call "$TEN" git get_deploy_config '("e2e-app")')" 'reinstall'
+# Back to upgrade the same way, so the rest of the run keeps its state.
+call "$V1" git propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "upgrade" } }, variant { Approve }, null)' >/dev/null
+call "$V2" git propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "upgrade" } }, variant { Approve }, null)' >/dev/null
+expect "  ...and back to upgrade" "$(call "$TEN" git get_deploy_config '("e2e-app")')" 'upgrade'
+
 section "upgrade in place (same build)"
 BEFORE=$(served)
 (cd "$WORK" && dfx canister install git --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)

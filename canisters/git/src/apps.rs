@@ -41,6 +41,13 @@ struct CanisterIdArg {
     canister_id: Principal,
 }
 
+#[derive(CandidType)]
+struct UpdateSettingsArgs {
+    canister_id: Principal,
+    settings: CanisterSettings,
+    sender_canister_version: Option<u64>,
+}
+
 /// Create the repo's app canister with `cycles` from the owner's balance.
 /// Controllers: the owner and this canister.
 pub async fn create_app_canister(
@@ -110,6 +117,40 @@ pub async fn top_up_app_canister(
         return Err(format!("deposit_cycles: {e}"));
     }
     Ok(())
+}
+
+/// Govern the repo's app canister (docs/GOVERNANCE.md, section 2): make
+/// this canister its only controller, removing the owner, and lock the
+/// repo's policy. One-way: from here the canister's code changes only by an
+/// approved commit's deploy, and nothing but such a deploy can give control
+/// back. Owner only, and only with votes required; refused when there is no
+/// app canister. Free: the one management call costs this canister nothing
+/// worth metering, and the step should not fail for want of a balance.
+pub async fn govern_app_canister(repo: &str, who: &Principal) -> Result<Principal, String> {
+    // The flag goes on before the await, so the policy is locked while the
+    // controller call is in flight: nothing can move the repo out from
+    // under the lock (required votes to 0, a transfer, a second govern)
+    // between the check and the controllers changing. Off again only if
+    // the call fails, with the canister as it was.
+    let target = tenancy::mark_governed(repo, who)?;
+    let me = ic_cdk::api::canister_self();
+    let done: Result<(), String> = intercanister::call(
+        Principal::management_canister(),
+        "update_settings",
+        (UpdateSettingsArgs {
+            canister_id: target,
+            settings: CanisterSettings {
+                controllers: Some(vec![me]),
+            },
+            sender_canister_version: None,
+        },),
+    )
+    .await;
+    if let Err(e) = done {
+        tenancy::unmark_governed(repo);
+        return Err(format!("update_settings: {e}"));
+    }
+    Ok(target)
 }
 
 /// Debit the owner unless the repo is exempt (operator repos spend this

@@ -772,6 +772,60 @@ async fn top_up_app_canister(repo: String, cycles: u64) -> Result<(), String> {
     apps::top_up_app_canister(&repo, &caller(), operator(), cycles).await
 }
 
+/// Govern the repo's app canister (docs/GOVERNANCE.md): this canister
+/// becomes its only controller and the owner is removed, so its code
+/// changes only by an approved commit's deploy; the repo's required votes,
+/// voters, owner and deploy config become votes too (propose_policy_change),
+/// and required votes can no longer be 0. One-way. Owner only, with votes
+/// required and an app canister. Returns the governed canister.
+#[ic_cdk::update]
+async fn govern_app_canister(repo: String) -> Result<candid::Principal, String> {
+    apps::govern_app_canister(&repo, &caller()).await
+}
+
+/// Cast a ballot on a change to the repo's policy or deploy config, under
+/// the same rule as a commit: approve, reject or object with a reason, and
+/// the change applies the moment approvals minus objections reach the
+/// required votes. Any voter may. On a governed repo this is the only way
+/// to make such a change; on another, the owner could also make it directly.
+#[ic_cdk::update]
+fn propose_policy_change(
+    repo: String,
+    change: tenancy::PolicyChange,
+    decision: tenancy::Vote,
+    reason: Option<String>,
+) -> Result<BallotTally, String> {
+    let (t, apply) = tenancy::propose_policy_change(&repo, &caller(), change, decision, reason)?;
+    // The deploy config lives in deploy.rs; tenancy decided, this applies.
+    match apply {
+        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => deploy::set_config(&repo, target, source_path)?,
+        Some(tenancy::PolicyChange::DeployMode { mode }) => deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)?,
+        _ => {}
+    }
+    if t.reached {
+        // A changed threshold or voter set can change which commit is the
+        // newest approved one.
+        follow_approvals(&repo, false);
+        // The same as after add_member, remove_member and transfer_repo: a
+        // writer re-added as a voter is demoted, and a transferred-away
+        // owner can no longer write, so their push tokens go.
+        revoke_tokens_of_non_writers(&repo);
+    }
+    Ok(BallotTally {
+        approvals: t.approvals,
+        objections: t.objections,
+        required: t.required,
+        reached: t.reached,
+    })
+}
+
+/// Policy changes proposed on the repo and not yet applied, with their
+/// ballots and count.
+#[ic_cdk::query]
+fn get_policy_proposals(repo: String) -> Vec<tenancy::Proposal> {
+    tenancy::proposals(&repo)
+}
+
 /// Deposits whose cycles reached this canister's ledger account but could
 /// not be withdrawn into it; the tenant was credited, the operator sweeps.
 #[ic_cdk::query]
@@ -986,6 +1040,8 @@ async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeRepo
 #[ic_cdk::update]
 fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
     let m = tenancy::can_admin(&repo, &caller(), operator())?;
+    // Governed: what the queue installs is the voters' decision.
+    tenancy::locked(&m, "the deploy config", Some("WasmDeploy"))?;
     // "app" names the repo's own app canister (create_app_canister).
     let target = if target == "app" {
         m.app_canister
@@ -1001,7 +1057,8 @@ fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<
 /// "reinstall" (wipes target state).
 #[ic_cdk::update]
 fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
-    tenancy::can_admin(&repo, &caller(), operator())?;
+    let m = tenancy::can_admin(&repo, &caller(), operator())?;
+    tenancy::locked(&m, "the install mode", Some("DeployMode"))?;
     deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
 }
 

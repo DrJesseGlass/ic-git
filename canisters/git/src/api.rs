@@ -8,6 +8,7 @@
 //!   GET /api/<repo>/blob/<rev>/<path>
 //!   GET /api/<repo>/info                        tenancy: owner, members, rent state
 //!   GET /api/<repo>/votes/<commit>              ballots on a commit, and their count
+//!   GET /api/<repo>/proposals                   pending policy changes, with their ballots
 //!   GET /api/<repo>/deploys                     wasm deploy config, last status, provenance log
 //!   GET /api/account/<principal>                balance and repos of a principal
 //!   GET /api/pricing                            the fee table
@@ -99,6 +100,7 @@ struct RepoTenancy {
     app_canister: Option<String>,
     exempt: bool,
     require_signed_push: bool,
+    governed: bool,
 }
 
 /// What a deployed app can show about itself: the config that names its
@@ -132,6 +134,34 @@ struct BallotInfo {
 /// `required` is 0 and `reached` true for a repo that needs no votes.
 #[derive(Serialize)]
 struct VotesView {
+    ballots: Vec<BallotInfo>,
+    approvals: u32,
+    objections: u32,
+    required: u32,
+    reached: bool,
+}
+
+fn ballot_info(b: tenancy::Ballot) -> BallotInfo {
+    BallotInfo {
+        principal: b.principal.to_text(),
+        decision: match b.decision {
+            tenancy::Vote::Approve => "approve",
+            tenancy::Vote::Reject => "reject",
+            tenancy::Vote::Object => "object",
+        },
+        approve: b.approve,
+        reason: b.reason,
+        at_ns: b.at_ns,
+        counts: b.counts,
+    }
+}
+
+/// A pending policy change (docs/GOVERNANCE.md) and where its ballots
+/// stand; `change` is the candid variant as JSON, e.g.
+/// {"RequiredVotes":{"k":2}} or {"AddVoter":{"principal":"..."}}.
+#[derive(Serialize)]
+struct ProposalView {
+    change: tenancy::PolicyChange,
     ballots: Vec<BallotInfo>,
     approvals: u32,
     objections: u32,
@@ -214,6 +244,7 @@ pub fn handle(url: &str) -> HttpResponse {
                     app_canister: i.app_canister.map(|p| p.to_text()),
                     exempt: i.exempt,
                     require_signed_push: i.require_signed_push,
+                    governed: i.governed,
                 },
                 None,
             ),
@@ -225,21 +256,7 @@ pub fn handle(url: &str) -> HttpResponse {
             if let Err(e) = store::parse_oid(commit) {
                 return error(400, &e);
             }
-            let ballots: Vec<BallotInfo> = tenancy::votes(&repo, commit)
-                .into_iter()
-                .map(|b| BallotInfo {
-                    principal: b.principal.to_text(),
-                    decision: match b.decision {
-                        tenancy::Vote::Approve => "approve",
-                        tenancy::Vote::Reject => "reject",
-                        tenancy::Vote::Object => "object",
-                    },
-                    approve: b.approve,
-                    reason: b.reason,
-                    at_ns: b.at_ns,
-                    counts: b.counts,
-                })
-                .collect();
+            let ballots: Vec<BallotInfo> = tenancy::votes(&repo, commit).into_iter().map(ballot_info).collect();
             // A repo without tenancy metadata (legacy, operator-owned) has
             // no policy: it requires nothing, so every commit is reached.
             let t = tenancy::tally(&repo, commit);
@@ -250,6 +267,20 @@ pub fn handle(url: &str) -> HttpResponse {
                 required: t.as_ref().map_or(0, |t| t.required),
                 reached: t.as_ref().is_none_or(|t| t.reached),
             };
+            json(200, &view, None)
+        }
+        ("proposals", None, None) => {
+            let view: Vec<ProposalView> = tenancy::proposals(&repo)
+                .into_iter()
+                .map(|p| ProposalView {
+                    change: p.change,
+                    ballots: p.ballots.into_iter().map(ballot_info).collect(),
+                    approvals: p.approvals,
+                    objections: p.objections,
+                    required: p.required,
+                    reached: p.reached,
+                })
+                .collect();
             json(200, &view, None)
         }
         ("deploys", None, None) => json(
@@ -651,6 +682,8 @@ mod tests {
         assert_eq!(owned["owner"], owner.to_text());
         assert_eq!(owned["members"][0]["role"], "voter");
         assert_eq!(owned["exempt"], false);
+        assert_eq!(owned["governed"], false);
+        assert_eq!(body_json(&handle("/api/api-ten-owned/proposals")).as_array().unwrap().len(), 0);
 
         let acct = body_json(&handle(&format!("/api/account/{}", owner.to_text())));
         assert_eq!(acct["balance"], 10_000_000_000u64 - tenancy::pricing().create_repo);
@@ -684,6 +717,7 @@ mod tests {
         let yes = ballots.iter().find(|b| b["principal"] == owner.to_text()).unwrap();
         assert_eq!((yes["decision"].as_str(), yes["approve"].as_bool()), (Some("approve"), Some(true)));
         assert!(yes["reason"].is_null());
+
         assert_eq!((obj["counts"].as_bool(), yes["counts"].as_bool()), (Some(true), Some(true)));
 
         // The objector leaves the policy: the ballot stays on record, marked
@@ -699,6 +733,26 @@ mod tests {
         assert_eq!((obj["decision"].as_str(), obj["counts"].as_bool()), (Some("object"), Some(false)));
         let yes = ballots.iter().find(|b| b["principal"] == owner.to_text()).unwrap();
         assert_eq!(yes["counts"], true);
+
+        // Governed: info says so, and a pending policy change is listed with
+        // its ballots and the candid variant as JSON.
+        tenancy::set_app_canister("api-ten-owned", Principal::from_slice(&[6; 8])).unwrap();
+        tenancy::mark_governed("api-ten-owned", &owner).unwrap();
+        assert_eq!(body_json(&handle("/api/api-ten-owned/info"))["governed"], true);
+        // The owner is the one approver and K = 1: each approval applies at
+        // once, nothing pending.
+        tenancy::propose_policy_change("api-ten-owned", &owner, tenancy::PolicyChange::AddVoter { principal: voter }, tenancy::Vote::Approve, None).unwrap();
+        tenancy::propose_policy_change("api-ten-owned", &owner, tenancy::PolicyChange::RequiredVotes { k: 2 }, tenancy::Vote::Approve, None).unwrap();
+        assert_eq!(body_json(&handle("/api/api-ten-owned/proposals")).as_array().unwrap().len(), 0);
+        // With K = 2 a proposal waits, and is listed.
+        let third = Principal::from_slice(&[5; 8]);
+        tenancy::propose_policy_change("api-ten-owned", &voter, tenancy::PolicyChange::AddVoter { principal: third }, tenancy::Vote::Approve, Some("two eyes".into())).unwrap();
+        let props = body_json(&handle("/api/api-ten-owned/proposals"));
+        let props = props.as_array().unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0]["change"]["AddVoter"]["principal"], third.to_text());
+        assert_eq!((props[0]["approvals"].as_u64(), props[0]["required"].as_u64(), props[0]["reached"].as_bool()), (Some(1), Some(2), Some(false)));
+        assert_eq!(props[0]["ballots"][0]["reason"], "two eyes");
     }
 
     #[test]
