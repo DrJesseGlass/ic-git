@@ -19,6 +19,46 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-09-28 | `0d1d466` | `v0.3.1` | `5f283447bc72c028dd7e2feb51f9edd91e4b1861e1979cb161e8e4f6a1d7ad32` (gz) | MATCH, 2026-09-28 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 36506401506](https://github.com/DrJesseGlass/ic-git/actions/runs/36506401506), identical hash |
 | 2026-10-03 | `dcb4aa7` | `v0.3.2` | `1efa766581c2ed9d83025f5008b7cd32c3fb86887c5f0b3c4ca74139eac90f92` (gz) | MATCH, 2026-10-03 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37075637669](https://github.com/DrJesseGlass/ic-git/actions/runs/37075637669), identical hash |
 | 2026-10-06 | `e48ebdb` | `v0.3.3` | `2bfd212775e572b82ff35997309f2753a273cff114035bc015d14d0841ddcec3` (gz) | MATCH, 2026-10-06 | deployer (pinned container, macOS arm64 host under emulation, built twice); GitHub Actions amd64 runner, [run 37478919057](https://github.com/DrJesseGlass/ic-git/actions/runs/37478919057), identical hash |
+| 2026-10-07 | `db8f2bd` | `v0.3.4` | `e25610892fe279e4355d47c16cc1e03cd27732dad8187565e2eb1c36de5b9bad` (gz) | MATCH, 2026-10-07 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37653678100](https://github.com/DrJesseGlass/ic-git/actions/runs/37653678100), identical hash |
+
+## v0.3.4 -- 2026-10-07
+
+Governed app canisters (#69; docs/GOVERNANCE.md section 2, docs/TENANCY.md
+"Governed app canisters"). A repo's owner can hand its app canister to
+ic-git alone with `govern_app_canister`: the owner is removed as a
+controller, so the backend's code changes only by a commit the voters
+approve. One-way, owner only, and only with votes required. The policy
+locks with it: the owner's direct changes to the required votes, the
+voters, the ownership and the deploy config are refused, required votes
+can never return to 0, and `propose_policy_change` is the one path left,
+a ballot on the change itself under the same K-of-N and objection rule as
+a commit, applied the moment it is reached. Every install into a governed
+canister is recorded on chain as `<repo>#app` (the commit and the module's
+sha256, which is the hash the IC certifies for the canister), the way
+`<repo>#site` records a served page. `/api/<repo>/info` reports
+`governed`; `/api/<repo>/proposals` lists pending changes with their
+ballots. The console shows a GOVERNED badge, a governance panel, and the
+governing step behind a typed confirmation. No repo is governed yet;
+ic-vote's poll canister is the first intended one.
+
+Gated before the deploy by `tools/e2e-local.sh`: 120 checks on this
+commit, including a governed-backend section (the controller change on
+the replica, every lock, policy changes applied under K = 1 and held
+under K = 2 by a second approval or an objection, an install into the
+governed canister after two approvals with the IC's module hash equal to
+the status's) and an upgrade from v0.3.3 -- what mainnet ran -- over
+state that release wrote. After the upgrade all five published site
+records still verified with `tools/verify.mjs`, and the core's own
+certified reader (`readCanisterState`, docs/CERTIFIED.md) certified the
+new module hash and the controller from the IC's state certificate. The
+console (`/site/ic-git/`) was then moved to this commit -- `main` pushed
+into the canister's `ic-git` repo and `ic-git#site` republished (Sepolia
+nonce 19, tx `0xc4a8d96a...bf48`) -- and verifies at `db8f2bd`.
+
+Same recipe and base image digest as v0.3.3. The raw wasm inside the
+gzip hashes to `cae6fc73...48f5`. Two hosts agreed byte for byte: the
+deployer's arm64 machine running the amd64 image under emulation, and a
+native x86_64 GitHub runner triggered by the tag push.
 
 ## v0.3.3 -- 2026-10-06
 
