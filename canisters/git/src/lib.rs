@@ -806,6 +806,10 @@ fn propose_policy_change(
         // A changed threshold or voter set can change which commit is the
         // newest approved one.
         follow_approvals(&repo, false);
+        // The same as after add_member, remove_member and transfer_repo: a
+        // writer re-added as a voter is demoted, and a transferred-away
+        // owner can no longer write, so their push tokens go.
+        revoke_tokens_of_non_writers(&repo);
     }
     Ok(BallotTally {
         approvals: t.approvals,
@@ -1037,10 +1041,7 @@ async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeRepo
 fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
     let m = tenancy::can_admin(&repo, &caller(), operator())?;
     // Governed: what the queue installs is the voters' decision.
-    if m.governed {
-        return Err("repo is governed: the deploy config is a policy change, which the voters decide; \
-                    cast it with propose_policy_change (WasmDeploy)".into());
-    }
+    tenancy::locked(&m, "the deploy config", Some("WasmDeploy"))?;
     // "app" names the repo's own app canister (create_app_canister).
     let target = if target == "app" {
         m.app_canister
@@ -1057,10 +1058,7 @@ fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<
 #[ic_cdk::update]
 fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
     let m = tenancy::can_admin(&repo, &caller(), operator())?;
-    if m.governed {
-        return Err("repo is governed: the install mode is a policy change, which the voters decide; \
-                    cast it with propose_policy_change (DeployMode)".into());
-    }
+    tenancy::locked(&m, "the install mode", Some("DeployMode"))?;
     deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
 }
 

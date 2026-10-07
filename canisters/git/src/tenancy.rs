@@ -418,12 +418,14 @@ pub fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), St
 
 /// On a governed repo, a change to who approves or what deploys is a vote,
 /// not an owner's call: the owner-only mutators refuse it and point at the
-/// one path that takes it.
-fn locked(m: &RepoMeta, what: &str) -> Result<(), String> {
+/// one path that takes it. `variant` names the PolicyChange arm when the
+/// caller has one to point at.
+pub fn locked(m: &RepoMeta, what: &str, variant: Option<&str>) -> Result<(), String> {
     if m.governed {
+        let arm = variant.map(|v| format!(" ({v})")).unwrap_or_default();
         return Err(format!(
             "repo is governed: {what} is a policy change, which the voters decide; \
-             cast it with propose_policy_change"
+             cast it with propose_policy_change{arm}"
         ));
     }
     Ok(())
@@ -440,7 +442,7 @@ pub fn add_member(
     // Writers do not approve, so a governed repo's owner still manages them;
     // a voter row, added or replaced, is the policy.
     if role == Role::Voter || has_role(&m, &target, Role::Voter) {
-        locked(&m, "changing the voters")?;
+        locked(&m, "changing the voters", Some("AddVoter, RemoveVoter"))?;
     }
     add_member_in(&mut m, target, role)?;
     save_meta(repo, &m);
@@ -470,7 +472,7 @@ pub fn remove_member(
 ) -> Result<Vec<Member>, String> {
     let mut m = can_admin(repo, who, operator)?;
     if has_role(&m, &target, Role::Voter) {
-        locked(&m, "removing a voter")?;
+        locked(&m, "removing a voter", Some("RemoveVoter"))?;
     }
     remove_member_in(&mut m, repo, target)?;
     save_meta(repo, &m);
@@ -494,7 +496,7 @@ pub fn transfer_repo(
     new_owner: Principal,
 ) -> Result<(), String> {
     let mut m = can_admin(repo, who, operator)?;
-    locked(&m, "transferring the repo")?;
+    locked(&m, "transferring the repo", Some("Transfer"))?;
     transfer_in(&mut m, new_owner)?;
     save_meta(repo, &m);
     Ok(())
@@ -514,7 +516,7 @@ fn transfer_in(m: &mut RepoMeta, new_owner: Principal) -> Result<(), String> {
 /// error, not a strict policy, and `vote` would refuse every ballot under it.
 pub fn set_required_votes(repo: &str, who: &Principal, operator: bool, k: u32) -> Result<(), String> {
     let mut m = can_admin(repo, who, operator)?;
-    locked(&m, "changing the required votes")?;
+    locked(&m, "changing the required votes", Some("RequiredVotes"))?;
     set_required_votes_in(&mut m, k)?;
     save_meta(repo, &m);
     Ok(())
@@ -562,13 +564,15 @@ impl PolicyChange {
     /// Why this change could not apply to `m` now, if it could not. Checked
     /// when proposed, so nobody votes on an impossible change, and again
     /// when applied, since the policy may have moved under it.
-    fn check(&self, m: &RepoMeta) -> Result<(), String> {
+    fn check(&self, m: &RepoMeta, repo: &str) -> Result<(), String> {
         let mut trial = m.clone();
-        self.apply_to(&mut trial, "repo")
+        self.apply_to(&mut trial, repo)
     }
 
     /// Apply to the metadata (the deploy config is applied by the caller,
-    /// which owns that module). Fails without saving anything.
+    /// which owns that module; here it is only checked to be applicable, so
+    /// the caller's apply cannot fail after the ballots are cleared). Fails
+    /// without saving anything.
     fn apply_to(&self, m: &mut RepoMeta, repo: &str) -> Result<(), String> {
         match self {
             PolicyChange::RequiredVotes { k } => set_required_votes_in(m, *k),
@@ -584,10 +588,22 @@ impl PolicyChange {
                 Principal::from_text(target).map_err(|e| format!("bad target principal: {e}"))?;
                 crate::deploy::SourceKind::from_path(source_path).map(|_| ())
             }
-            PolicyChange::DeployMode { mode } => crate::deploy::DeployMode::parse(mode).map(|_| ()),
+            PolicyChange::DeployMode { mode } => {
+                crate::deploy::DeployMode::parse(mode)?;
+                // set_mode has nothing to change the mode of without one.
+                if crate::deploy::get_config(repo).is_none() {
+                    return Err(format!("{repo} has no deploy config to set the install mode of; propose WasmDeploy first"));
+                }
+                Ok(())
+            }
         }
     }
 }
+
+/// How many policy changes a repo can have pending at once. Any approver
+/// can propose, and a proposal costs nothing, so without a bound one voter
+/// could grow the repo's metadata (and the vote store) without limit.
+const MAX_PENDING_PROPOSALS: usize = 16;
 
 /// A pending or just-decided policy change and where its ballots stand.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -603,22 +619,21 @@ pub struct Proposal {
 /// Record that the repo's app canister is now controlled by this canister
 /// alone (the caller has made it so). Refused with no app canister, when
 /// already governed, or with required votes at 0: governing a repo whose
-/// pushes deploy unapproved would lock in nothing.
+/// pushes deploy unapproved would lock in nothing. The caller checked the
+/// same before its await; this re-checks after it, since the owner could
+/// have set required votes to 0 meanwhile and a repo marked governed under
+/// K = 0 would wear the badge while deploying unapproved code.
 pub fn mark_governed(repo: &str) -> Result<(), String> {
     let mut m = meta(repo).ok_or_else(|| format!("no such repo: {repo}"))?;
+    governable(repo, &m)?;
     m.governed = true;
     save_meta(repo, &m);
     Ok(())
 }
 
-/// What `govern` needs true of the repo before it changes the controllers.
-/// Owner only: an operator may do anything to this canister, but handing a
-/// tenant's backend to it is the tenant's decision.
-pub fn can_govern(repo: &str, who: &Principal) -> Result<Principal, String> {
-    let m = meta(repo).ok_or_else(|| format!("no such repo: {repo}"))?;
-    if !is_owner(&m, who) {
-        return Err(format!("{who} does not own repo {repo}; only the owner can govern it"));
-    }
+/// The state `govern` needs true of the repo, before and after it changes
+/// the controllers; returns the app canister.
+fn governable(repo: &str, m: &RepoMeta) -> Result<Principal, String> {
     if m.governed {
         return Err(format!("repo {repo} is already governed"));
     }
@@ -631,13 +646,27 @@ pub fn can_govern(repo: &str, who: &Principal) -> Result<Principal, String> {
     Ok(app)
 }
 
+/// What `govern` needs true of the repo before it changes the controllers.
+/// Owner only: an operator may do anything to this canister, but handing a
+/// tenant's backend to it is the tenant's decision.
+pub fn can_govern(repo: &str, who: &Principal) -> Result<Principal, String> {
+    let m = meta(repo).ok_or_else(|| format!("no such repo: {repo}"))?;
+    if !is_owner(&m, who) {
+        return Err(format!("{who} does not own repo {repo}; only the owner can govern it"));
+    }
+    governable(repo, &m)
+}
+
 /// Cast a ballot on a policy change. Any approver may; the change is
 /// validated against the current policy before the ballot is taken, and
 /// applied -- to the metadata here, to the deploy config by the caller when
 /// `apply_deploy` is returned -- the moment approvals minus objections reach
 /// the threshold. Its ballots are then cleared, so proposing the same change
 /// again later starts from nothing. Works on an ungoverned repo too, where
-/// the owner could also just make the change.
+/// the owner could also just make the change -- but not with no votes
+/// required: under K = 0 every subject is reached at once, so any voter's
+/// ballot, a rejection included, would apply any change (the repo to
+/// themselves, say). There is nothing to vote on; the owner changes it.
 pub fn propose_policy_change(
     repo: &str,
     who: &Principal,
@@ -646,22 +675,42 @@ pub fn propose_policy_change(
     reason: Option<String>,
 ) -> Result<(Tally, Option<PolicyChange>), String> {
     let mut m = can_vote(repo, who)?;
-    change.check(&m)?;
+    if m.required_votes == 0 {
+        return Err(format!("{repo} requires no votes, so there is nothing to vote on; the owner changes its policy directly"));
+    }
+    let subj = change.subject();
+    let pending = m.proposals.contains(&change);
+    if let Err(e) = change.check(&m, repo) {
+        if pending {
+            // It could apply when proposed; the policy has moved under it
+            // since (a voter it would remove left, say). Every later ballot
+            // would be refused here, so it is dropped, ballots and all,
+            // rather than listed as pending for good.
+            VoteStore { repo }.save(&subj, Vec::new());
+            m.proposals.retain(|p| p != &change);
+            save_meta(repo, &m);
+            return Err(format!("{e}; the pending proposal is dropped"));
+        }
+        return Err(e);
+    }
+    if !pending && m.proposals.len() >= MAX_PENDING_PROPOSALS {
+        return Err(format!("{repo} already has {MAX_PENDING_PROPOSALS} policy changes pending; decide one of those first"));
+    }
     let reason = ballot_reason(decision, reason)?;
     let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
     approval.reason = reason;
-    let subj = change.subject();
     let tally = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subj, approval)
         .map_err(|e| e.to_string())?;
     let mut apply_deploy = None;
     if tally.reached {
+        // `check` just passed on this same `m`, so this applies.
         change.apply_to(&mut m, repo)?;
         if matches!(change, PolicyChange::WasmDeploy { .. } | PolicyChange::DeployMode { .. }) {
             apply_deploy = Some(change.clone());
         }
         VoteStore { repo }.save(&subj, Vec::new());
         m.proposals.retain(|p| p != &change);
-    } else if !m.proposals.contains(&change) {
+    } else if !pending {
         m.proposals.push(change);
     }
     save_meta(repo, &m);
@@ -1409,10 +1458,20 @@ mod tests {
         add_member("t-gov", &alice, false, v1, Role::Voter).unwrap();
         add_member("t-gov", &alice, false, w, Role::Writer).unwrap();
 
+        // Ungoverned with no votes required there is nothing to vote on: a
+        // ballot would be reached at once, whatever it said.
+        let e = propose_policy_change("t-gov", &v1, PolicyChange::Transfer { new_owner: v1 }, Vote::Reject, None).unwrap_err();
+        assert!(e.contains("requires no votes"), "{e}");
+        assert_eq!(meta("t-gov").unwrap().owner, Some(alice));
+
         // Preconditions: an app canister and votes required; owner only.
+        // mark_governed holds them too: they were checked before an await.
         assert!(can_govern("t-gov", &alice).unwrap_err().contains("no app canister"));
+        assert!(mark_governed("t-gov").unwrap_err().contains("no app canister"));
         set_app_canister("t-gov", app).unwrap();
         assert!(can_govern("t-gov", &alice).unwrap_err().contains("required votes"));
+        assert!(mark_governed("t-gov").unwrap_err().contains("required votes"));
+        assert!(!meta("t-gov").unwrap().governed);
         set_required_votes("t-gov", &alice, false, 1).unwrap();
         assert!(can_govern("t-gov", &v1).unwrap_err().contains("only the owner"));
         assert_eq!(can_govern("t-gov", &alice).unwrap(), app);
@@ -1481,7 +1540,12 @@ mod tests {
         let (t, _) = propose_policy_change("t-gov", &v1, PolicyChange::RequiredVotes { k: 1 }, Vote::Approve, None).unwrap();
         assert_eq!((t.approvals, t.reached), (1, false), "the old ballots on this change were cleared");
 
-        // Deploy config changes are decided here but applied by the caller.
+        // Deploy config changes are decided here but applied by the caller;
+        // an install mode with no config to set it on is refused up front,
+        // not after the ballots are cleared.
+        let e = propose_policy_change("t-gov", &v1, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap_err();
+        assert!(e.contains("no deploy config"), "{e}");
+        crate::deploy::set_config("t-gov", app.to_text(), "app.wasm".into()).unwrap();
         let (t, apply) = propose_policy_change("t-gov", &v1, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap();
         assert!(!t.reached && apply.is_none());
         let (t, apply) = propose_policy_change("t-gov", &alice, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap();
@@ -1499,5 +1563,37 @@ mod tests {
         // alice is now a non-member: she cannot propose, and governance holds.
         assert!(propose_policy_change("t-gov", &alice, PolicyChange::RequiredVotes { k: 1 }, Vote::Approve, None).is_err());
         assert!(meta("t-gov").unwrap().governed);
+
+        // A pending change the policy moved under is dropped at the next
+        // ballot, not listed for good. Owner v1, voter v2, K = 2; alice is
+        // voted back in so that removing v2 would leave a reachable policy
+        // and the proposal waits. v2 then becomes the owner by vote, which
+        // takes v2 out of the members: removing v2 as a voter can no longer
+        // apply.
+        for who in [&v1, &v2] {
+            propose_policy_change("t-gov", who, PolicyChange::AddVoter { principal: alice }, Vote::Approve, None).unwrap();
+        }
+        let (t, _) = propose_policy_change("t-gov", &v2, PolicyChange::RemoveVoter { principal: v2 }, Vote::Approve, None).unwrap();
+        assert!(!t.reached);
+        assert_eq!(proposals("t-gov").len(), 2, "k:1 and remove v2 pending");
+        for who in [&v1, &v2] {
+            propose_policy_change("t-gov", who, PolicyChange::Transfer { new_owner: v2 }, Vote::Approve, None).unwrap();
+        }
+        assert_eq!(meta("t-gov").unwrap().owner, Some(v2));
+        let e = propose_policy_change("t-gov", &alice, PolicyChange::RemoveVoter { principal: v2 }, Vote::Approve, None).unwrap_err();
+        assert!(e.contains("dropped"), "{e}");
+        assert_eq!(proposals("t-gov").len(), 1, "only k:1 is still pending");
+
+        // Pending proposals are bounded.
+        for i in 0..MAX_PENDING_PROPOSALS {
+            let r = propose_policy_change("t-gov", &alice, PolicyChange::WasmDeploy { target: app.to_text(), source_path: format!("{i}.wasm") }, Vote::Approve, None);
+            if i + 1 < MAX_PENDING_PROPOSALS {
+                assert!(r.is_ok(), "{i}: {r:?}");
+            } else {
+                assert!(r.unwrap_err().contains("pending"));
+            }
+        }
+        // A ballot on one already pending still goes through.
+        assert!(propose_policy_change("t-gov", &v2, PolicyChange::RequiredVotes { k: 1 }, Vote::Reject, None).is_ok());
     }
 }

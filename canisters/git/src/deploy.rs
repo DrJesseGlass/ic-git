@@ -735,6 +735,10 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
     // runs what the last record says.
     if app_record {
         if wasm_installed {
+            // As for the announce below: deploy_now runs outside the queue,
+            // so a newer deploy can write its status during the publish
+            // await; annotate only while the status is still this one.
+            let before = st.clone();
             let note = match crate::provenance::app_record(repo, &commit_oid, &st.wasm_sha256) {
                 Ok(rec) => match rec.publish().await {
                     Ok(reg) => format!("; app record {}", reg.tx_hash),
@@ -749,7 +753,9 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
                 }
             };
             st.message.push_str(&note);
-            put_status(repo, &st);
+            if is_current(repo, &before) {
+                put_status(repo, &st);
+            }
         } else {
             crate::tenancy::refund_action(payer, pricing.evm_action);
         }

@@ -874,8 +874,11 @@ const Console = (() => {
         if (w === undefined || e === undefined || pr === undefined) { cost.textContent = 'could not read the deploy config or the fee table; reload before deploying.'; return; }
         const fee = (w ? pr.ic_deploy : 0) + (e ? pr.evm_action : 0);
         const evmNote = e ? 'a new CREATE transaction for ' + e.source_path + ' on the EVM chain (gas limit ' + e.gas_limit + '): a fresh contract at a new address, gas paid on that chain by the signer, not in cycles.' : '';
+        // A governed repo's install into its app canister also publishes the
+        // <repo>#app record, one more evm_action, where a registry is set.
+        const appNote = w && info.governed && w.target === info.app_canister ? ' Governed: the install is recorded on chain as ' + repo + '#app, ' + fmtT(pr.evm_action) + ' more where a registry is configured.' : '';
         cost.textContent = !w && !e ? 'nothing is configured to deploy.'
-          : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '');
+          : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '') + appNote;
         if (!w) { btn.title = 'nothing is configured to deploy into a canister'; return; }
         const target = w.target === info.app_canister
           ? 'app canister ' + w.target
@@ -956,9 +959,12 @@ const Console = (() => {
     html += '<p><b>governed</b>: app canister <span class="oid">' + esc(info.app_canister) + '</span> is controlled by ic-git alone, so it runs only commits the voters approve, ' + info.required_votes + ' of ' + (1 + info.members.filter(m => m.role === 'voter').length) + '. Changing that policy, the voters, the owner, or what deploys is itself a vote under it.</p>';
     let props = [];
     try { props = await get(encodeURIComponent(repo) + '/proposals'); } catch (e) { html += '<p class="muted">proposals could not be read: ' + esc(e.message) + '</p>'; }
-    html += props.length ? '<table><tr><th>proposed change</th><th>count</th><th>ballots</th>' + (canVote ? '<th></th>' : '') + '</tr>' + props.map((p, i) =>
+    // Each row carries its change: the ballot buttons cast on exactly what
+    // the row shows, not on whatever a later read of the list puts at the
+    // same index after another voter's ballot applied one.
+    html += props.length ? '<table><tr><th>proposed change</th><th>count</th><th>ballots</th>' + (canVote ? '<th></th>' : '') + '</tr>' + props.map(p =>
       '<tr><td>' + esc(describe(p.change)) + '</td><td>' + esc(count(p)) + '</td><td>' + p.ballots.map(b => '<span class="oid" title="' + esc(b.principal) + '">' + esc(short(b.principal)) + '</span> ' + (b.decision === 'object' ? '<span class="objection">objects' + (b.reason ? ': ' + esc(b.reason) : '') + '</span>' : esc(b.decision + (b.reason ? ' (' + b.reason + ')' : '')))).join('<br>') + '</td>' +
-      (canVote ? '<td><form class="f-prop" data-i="' + i + '"><button data-v="Approve">approve</button><button data-v="Reject">reject</button><textarea name="reason" maxlength="1024" placeholder="reason, required to object"></textarea><button data-v="Object">object</button></form></td>' : '') + '</tr>').join('') + '</table><p id="prop-st" class="status"></p>'
+      (canVote ? '<td><form class="f-prop" data-change="' + esc(JSON.stringify(p.change)) + '"><button data-v="Approve">approve</button><button data-v="Reject">reject</button><textarea name="reason" maxlength="1024" placeholder="reason, required to object"></textarea><button data-v="Object">object</button></form></td>' : '') + '</tr>').join('') + '</table><p id="prop-st" class="status"></p>'
       : '<p class="muted">no pending policy changes.</p>';
     if (canVote) html += '<form id="f-propose"><select name="kind"><option value="RequiredVotes">required votes</option><option value="AddVoter">add voter</option><option value="RemoveVoter">remove voter</option><option value="Transfer">transfer to</option><option value="WasmDeploy">deploy path (into the app canister)</option><option value="DeployMode">install mode</option></select><input name="value" placeholder="value"><textarea name="reason" maxlength="1024" placeholder="reason (optional)"></textarea><button>propose and approve</button></form><p id="f-propose-st" class="status"></p>';
     return html + '</div>';
@@ -991,14 +997,12 @@ const Console = (() => {
       setTimeout(() => location.reload(), 800);
     };
     onsubmit('f-propose', async v => { await cast('f-propose-st', change(v.kind, v.value), 'Approve', v.reason.trim()); return 'recorded'; });
-    get(encodeURIComponent(repo) + '/proposals').then(props => {
-      document.querySelectorAll('form.f-prop').forEach(f => f.querySelectorAll('button').forEach(b => { b.onclick = async e => {
-        e.preventDefault();
-        const decision = b.dataset.v, reason = f.reason.value.trim();
-        if (decision === 'Object' && !reason) { status('prop-st', 'an objection needs a reason', false); f.reason.focus(); return; }
-        try { await cast('prop-st', props[Number(f.dataset.i)].change, decision, reason); } catch (err) { status('prop-st', err.message, false); }
-      }; }));
-    }, () => {});
+    document.querySelectorAll('form.f-prop').forEach(f => f.querySelectorAll('button').forEach(b => { b.onclick = async e => {
+      e.preventDefault();
+      const decision = b.dataset.v, reason = f.reason.value.trim();
+      if (decision === 'Object' && !reason) { status('prop-st', 'an objection needs a reason', false); f.reason.focus(); return; }
+      try { await cast('prop-st', JSON.parse(f.dataset.change), decision, reason); } catch (err) { status('prop-st', err.message, false); }
+    }; }));
   }
 
   async function commitPanel(repo, oid) {

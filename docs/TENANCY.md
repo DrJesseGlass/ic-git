@@ -308,7 +308,12 @@ themselves sole approver, and push anything:
   current approvers, applied the moment approvals minus objections reach
   `k`. Any approver may propose, and proposing is approving. A change
   nobody could apply (`k` of 0 or above the approvers, an unknown mode,
-  removing a non-voter) is refused before any ballot. The same change
+  an install mode with no deploy config, removing a non-voter) is refused
+  before any ballot; a pending change the policy has since moved under is
+  dropped, ballots and all, at the next ballot on it. A repo requiring no
+  votes refuses every proposal: under `k` of 0 any ballot would be reached
+  at once, so there is nothing to vote on and the owner changes it
+  directly. At most 16 changes can be pending at once. The same change
   proposed by two approvers is one subject, so approvals accumulate; once
   applied its ballots are cleared, so proposing it again starts from
   nothing. `get_policy_proposals(repo)` and `GET /api/<repo>/proposals`
