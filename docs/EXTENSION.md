@@ -58,11 +58,14 @@ controllers, never ic-git's. For each canister:
   module it runs, or there is no record. The one case a verified page
   must not reach, since governance promised otherwise: the site fails
   check G and the stop page names the canister and the two hashes.
+- **immutable** -- nobody holds it: its code can never change. Allowed.
 - **ungoverned** -- anyone else holds it (an owner, ic-git among others,
   ic-git itself until the governor of docs/GOVERNANCE.md section 5). Its
   code is not tampered, but its holder can change it without a vote.
   Allowed, and said: the badge stays OK but turns amber, and its hover
   text says the site's owner can change its backend without approval.
+  A stale certificate (over five minutes) on an allowed backend turns the
+  badge amber too, with its own words.
 - **unreadable** -- no certified answer. Not allowed.
 
 Which canisters are judged: ic-git itself (every page reads it), the
@@ -77,19 +80,35 @@ Enforcement:
 
 - **Chrome:** a static rule in `rules.json` blocks every call a `/site/`
   page makes to the IC's API (`icp-api.io`, `icp0.io`, `ic0.app` and
-  their subdomains, any `/api/vN/` path). Session allow rules, one per
-  allowed canister on `icp-api.io` only, are installed together with the
-  site's pinned policy, before the page is told to reload under it -- so
-  no first-visit reload is spent on them (decision 4 of
-  docs/GOVERNANCE.md, settled: derive the list, do not reload). A call to
-  a canister nobody judged is blocked with no feedback but the badge
-  text; "open anyway" opens that tab's calls along with its scripts.
+  their subdomains; `/api/vN/canister/`, `/subnet/` and `/status`, not a
+  canister's own `/api/` routes on the gateway). Session allow rules, one
+  per allowed canister on `icp-api.io` only and scoped to the tab, are
+  installed before the tab is given the page -- on a first visit, before
+  it is told to reload under the pinned policy -- so no first-visit
+  reload is spent on them (decision 4 of docs/GOVERNANCE.md, settled:
+  derive the list, do not reload). Per tab, because the verdict is per
+  site and every site shares one origin: a canister approved for site A
+  is not thereby open to site B. A call to a canister nobody judged is
+  blocked with no feedback but the badge text; "open anyway" opens that
+  tab's calls along with its scripts.
 - **Firefox:** the request listener holds each call from a `/site/` page
   to an IC API host, finds the canister in the site's judged backends or
-  judges it on the spot (and keeps the verdict with the site), and
-  releases or cancels it. A cancelled call turns the badge red and names
-  the canister on hover. Only `icp-api.io` is released; a call through
-  another IC host is cancelled unjudged.
+  judges it on the spot (a verdict from a certified read is kept with
+  the site; an unreadable one is not, so a transient failure costs one
+  call), and releases or cancels it. A cancelled call turns the badge red
+  and says what was cancelled on hover. Only `icp-api.io` is released; a
+  call through another IC host is cancelled unjudged -- which needs host
+  permissions on `icp0.io` and `ic0.app` that MV3 Firefox grants on
+  install but not on an update; when they are missing the badge's hover
+  text says so, and such calls go through unjudged.
+
+Two edges. A page run through the loader (`/site/ic-git-loader/`) under
+an extension calls as the loader's site, whose own list has no app
+canister, so its backend's calls are blocked: open a site directly under
+the extensions; the loader is for a browser without them. And a site's
+backend list is refreshed with the site, every ten minutes: an app
+canister created since is blocked until then, or until the next visit
+after a page change.
 
 What this cannot see: a call the page asks the wallet to make. OISY sends
 it from its own window, which neither extension observes; OISY's consent

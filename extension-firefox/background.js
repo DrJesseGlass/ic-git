@@ -35,9 +35,20 @@ const BLOCK = "script-src 'none'; object-src 'none'; base-uri 'none'";
 const BARE = '<!doctype html><html><head><meta charset="utf-8"><title>ic-git verifier</title></head><body></body></html>';
 const REFRESH = '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0"><title>ic-git verifier</title></head><body></body></html>';
 const FILTER = { urls: [ORIGIN + '/site/*'], types: ['main_frame'] };
-// The IC's API, on every host that serves it; pages use icp-api.io.
+// The IC's API, on every host that serves it; pages use icp-api.io. The
+// others need host permissions MV3 Firefox grants on install but not on
+// an update, so whether a call through them can be cancelled is checked
+// at start and said on the badge.
 const API_FILTER = { urls: ['https://icp-api.io/*', 'https://icp0.io/*', 'https://*.icp0.io/*', 'https://ic0.app/*', 'https://*.ic0.app/*'], types: ['xmlhttprequest'] };
-const API_PATH = /^\/api\/v[0-9]+\/canister\/([a-z0-9-]+)\//;
+// Canister calls, subnet reads and the status endpoint, under /api/vN/:
+// not a canister's own /api/ routes on the gateway (ic-git's JSON API,
+// whatever a repo is named).
+const API_PATH = /^\/api\/v[0-9]+\/(canister\/|subnet\/|status)/;
+const CANISTER_PATH = /^\/api\/v[0-9]+\/canister\/([a-z0-9-]+)\//;
+let hostsNote = '';
+browser.permissions.contains({ origins: ['https://*.icp0.io/*', 'https://*.ic0.app/*'] }).then(ok => {
+  if (!ok) hostsNote = ' (calls through icp0.io or ic0.app cannot be cancelled: grant the extension those sites in its permissions)';
+}).catch(() => {});
 
 const twoRpcs = {
   async request({ method, params = [] }) {
@@ -99,27 +110,28 @@ async function check(repo, delivered) {
   const r = await Verifier.verify(opts);
   // The backends only matter for a page that will run; they are judged
   // with the site so its first calls find their verdicts waiting.
-  let backends = [], warn = false;
+  let backends = [], warning = '';
   if (r.verified) {
-    const be = await Verifier.checkBackends(repo, opts).catch(e => ({ ok: false, warn: false, backends: [], note: e.message || String(e) }));
-    r.checks.push({ id: 'G', ok: be.ok, label: 'the canisters the page may call are approved or system canisters',
-      detail: be.backends.map(b => b.canister.slice(0, 5) + ': ' + b.detail).concat(be.note ? [be.note] : []).join('; ') });
+    const be = await Verifier.checkBackends(repo, opts).catch(e => ({ ok: false, warning: '', backends: [],
+      check: { id: 'G', ok: false, label: 'the canisters the page may call are approved or system canisters', detail: e.message || String(e) } }));
+    r.checks.push(be.check);
     r.verified = be.ok;
     backends = be.backends;
-    warn = be.warn;
+    warning = be.warning;
   }
   return {
     repo, checkedAt: Date.now(),
     status: r.verified && r.policy ? 'verified' : r.verified ? 'unpinnable' : 'failed',
     commit: r.record && r.record.commit, bundleHash: r.record && r.record.bundleHash,
     policy: r.policy || null, policyError: r.policyError || null, checks: r.checks, via: r.via,
-    backends, warn,
+    backends, warning,
   };
 }
 
 // The verdict on one canister a page of `repo` is calling, from the site's
-// judged backends or, for one not among them, a judgment made now (and
-// kept with the site). Unknown repo or site: nothing is vouched for.
+// judged backends or, for one not among them, a judgment made now. A
+// verdict from a certified read is kept with the site until its next
+// check; an unreadable one is not, since the next call may well read.
 async function backend(repo, canisterId) {
   const site = (await load())[repo];
   const known = site && (site.backends || []).find(b => b.canister === canisterId);
@@ -127,7 +139,7 @@ async function backend(repo, canisterId) {
   const be = await Verifier.checkBackends(repo, { provider: twoRpcs, providerOnly: true, providerName: 'two RPCs', canisters: [canisterId] })
     .catch(e => ({ backends: [{ canister: canisterId, kind: 'unreadable', ok: false, warn: false, detail: e.message || String(e) }] }));
   const b = be.backends[0];
-  if (site) await exclusive(async () => {
+  if (site && b.kind !== 'unreadable') await exclusive(async () => {
     const sites = await load();
     const s = sites[repo];
     if (s && !(s.backends || []).some(x => x.canister === canisterId)) { s.backends = [...(s.backends || []), b]; await browser.storage.session.set({ sites }); }
@@ -159,11 +171,11 @@ async function allowed(tabId, repo) {
 
 function badge(tabId, state, site) {
   if (tabId < 0) return;
-  if (state === 'verified' && site && site.warn) state = 'warned';
+  if (state === 'verified' && site && site.warning) state = 'warned';
   const look = {
-    verified: ['OK', '#1a7f37', 'verified at commit ' + (site && site.commit || '').slice(0, 12) + '; its backends are approved or system canisters'],
-    warned: ['OK', '#b35c00', 'verified at commit ' + (site && site.commit || '').slice(0, 12) + ', but its backend is not governed: the site owner can change it without approval'],
-    blockedCall: ['!', '#b3261e', 'verified, but a call to a canister no record approves was blocked: ' + (site && site.blocked || '')],
+    verified: ['OK', '#1a7f37', 'verified at commit ' + (site && site.commit || '').slice(0, 12) + '; its backends are approved or system canisters' + hostsNote],
+    warned: ['OK', '#b35c00', 'verified at commit ' + (site && site.commit || '').slice(0, 12) + ', but ' + (site && site.warning || '') + hostsNote],
+    blockedCall: ['!', '#b3261e', 'verified, but a call it made was cancelled: ' + (site && site.blocked || '')],
     checking: ['...', '#6b6b6b', 'checking against its registry record'],
     failed: ['!', '#b3261e', 'NOT verified -- the page was not loaded'],
     unpinnable: ['!', '#b3261e', 'verified, but its scripts cannot be pinned -- the page was not loaded'],
@@ -184,7 +196,7 @@ const results = new Map(); // tabId -> { url, status, site } of that navigation
 const summary = site => ({
   repo: site.repo, commit: site.commit || null, checks: site.checks || [],
   via: site.via || null, policyError: site.policyError || null,
-  backends: site.backends || [], warn: Boolean(site.warn),
+  backends: site.backends || [], warning: site.warning || '',
 });
 function settle(d, status, site) {
   if (latest.get(d.tabId) !== d.requestId) return;
@@ -271,17 +283,17 @@ browser.webRequest.onBeforeRequest.addListener(async d => {
   try { const u = new URL(page); if (u.origin !== ORIGIN || !u.pathname.startsWith('/site/')) return {}; repo = siteOf(page); } catch (_) { return {}; }
   if (repo === null) return { cancel: true }; // no record covers the page: it may call nothing
   const u = new URL(d.url);
-  // The IC's API lives under /api/vN/; the gateway hosts serve other things
-  // too (a canister's own /api/<repo>/... routes, say), which are not ours.
-  if (!/^\/api\/v[0-9]+\//.test(u.pathname)) return {};
+  // The gateway hosts serve other things too (a canister's own
+  // /api/<repo>/... routes, say), which are not ours.
+  if (!API_PATH.test(u.pathname)) return {};
   if (await allowed(d.tabId, repo)) return {};
-  const m = API_PATH.exec(u.pathname);
+  const m = CANISTER_PATH.exec(u.pathname);
   // Only the one host pages are expected to use, and only canister calls:
   // anything else of the IC's API is cancelled unjudged.
-  if (u.host !== 'icp-api.io' || !m) { noteBlocked(d.tabId, repo, u.host + u.pathname); return { cancel: true }; }
+  if (u.host !== 'icp-api.io' || !m) { noteBlocked(d.tabId, repo, u.host + u.pathname + ' (not a canister call on icp-api.io)'); return { cancel: true }; }
   const b = await backend(repo, m[1]);
   if (b.ok) return {};
-  noteBlocked(d.tabId, repo, m[1] + ' (' + b.detail + ')');
+  noteBlocked(d.tabId, repo, 'canister ' + m[1] + ', ' + b.detail);
   return { cancel: true };
 }, API_FILTER, ['blocking']);
 

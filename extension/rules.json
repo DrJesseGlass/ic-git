@@ -42,7 +42,7 @@
       "type": "block"
     },
     "condition": {
-      "regexFilter": "^https://([a-z0-9-]+\\.)*(icp-api\\.io|icp0\\.io|ic0\\.app)/api/v[0-9]+/",
+      "regexFilter": "^https://([a-z0-9-]+\\.)*(icp-api\\.io|icp0\\.io|ic0\\.app)/api/v[0-9]+/(canister/|subnet/|status)",
       "initiatorDomains": [
         "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io"
       ],

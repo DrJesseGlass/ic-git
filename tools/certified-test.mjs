@@ -267,19 +267,23 @@ for (const id of [UMOBS, LEDGER]) {
   assert.equal(r.backends[0].kind, 'unreadable'); assert.ok(!r.ok); assert.match(r.backends[0].detail, /could not be certified/);
   pass('a canister whose certificate fails is unreadable: not allowed');
 
-  // Stale is a warning on an allowed verdict.
+  // Stale is a warning on an allowed verdict, and says so -- not that the
+  // backend is ungoverned.
   r = await judge([LEDGER], { now: ledger.time + 10 * 60_000 });
-  assert.equal(r.backends[0].kind, 'system'); assert.ok(r.ok && r.warn); assert.match(r.backends[0].detail, /stale/);
-  pass('a stale certificate warns on an otherwise allowed backend');
+  assert.equal(r.backends[0].kind, 'system'); assert.ok(r.ok && r.warn); assert.match(r.backends[0].detail, /stale \(10 min old\)/);
+  assert.equal(r.warning, "a backend's certificate is stale");
+  pass('a stale certificate warns on an otherwise allowed backend, in its own words');
 
   // The default list: ic-git, the system canisters, and the site's app
   // canister from /info; the vectors cover two of them, the rest 404.
   r = await Verifier.checkBackends('r', { ...base, fetch: fetchFor({ app_canister: LEDGER }) });
   assert.deepEqual(r.backends.map(b => b.canister).slice(0, 1), [UMOBS]);
-  assert.equal(r.backends.length, 5);
+  assert.equal(r.backends.length, 4, 'an app canister already on the list is judged once');
   assert.equal(r.backends.find(b => b.canister === LEDGER).kind, 'system');
   assert.ok(!r.ok, 'the unreachable system canisters are unreadable, so not ok');
   assert.equal(r.note, '');
+  assert.equal(r.check.id, 'G'); assert.equal(r.check.ok, false); assert.match(r.check.detail, /^umobs: not governed/);
+  assert.match(r.warning, /not governed.*\(umobs\)/);
   r = await Verifier.checkBackends('r', { ...base, fetch: fetchFor({}) });
   assert.equal(r.note, 'the site has no app canister');
   r = await Verifier.checkBackends('r', { ...base, fetch: async url => /read_state/.test(url) ? fetchFor({})(url) : { ok: false, status: 500 } });

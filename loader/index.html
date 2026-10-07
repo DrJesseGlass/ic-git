@@ -4989,6 +4989,7 @@ function unverifiableSubresource(servedPath, body) {
   //   blocked     controllers are exactly ic-git but no record approves the
   //               module it runs -- the one case a verified page must not
   //               reach, since governance promised otherwise.
+  //   immutable   nobody holds it: its code can never change. Allowed.
   //   ungoverned  anyone else holds it (an owner, ic-git among others, ic-git
   //               itself today): its code is not tampered, but its holder
   //               can change it without a vote. Allowed, and said.
@@ -5019,11 +5020,13 @@ function unverifiableSubresource(servedPath, body) {
       } else {
         Object.assign(b, { kind: 'blocked', detail: 'governed by ic-git, but runs module ' + (st.moduleHash || 'none').slice(0, 16) + '... where the record approves ' + rec.bundleHash.slice(0, 16) + '... (commit ' + rec.commit.slice(0, 12) + ')' });
       }
+    } else if (ctl.length === 0) {
+      Object.assign(b, { kind: 'immutable', ok: true, detail: 'controlled by nobody: its code can never change' });
     } else {
-      const who = ctl.length === 0 ? 'nobody (immutable)' : ctl.map(c => c === o.canister ? 'ic-git' : c.slice(0, 5) + '...').join(', ');
+      const who = ctl.map(c => c === o.canister ? 'ic-git' : c.slice(0, 5) + '...').join(', ');
       Object.assign(b, { kind: 'ungoverned', ok: true, warn: true, detail: 'not governed: controlled by ' + who + ', who can change its code without a vote' });
     }
-    if (b.ok && st.stale) { b.warn = true; b.detail += '; the certificate is stale (' + Math.round((Date.now() - st.time) / 60_000) + ' min old)'; }
+    if (b.ok && st.stale) { b.warn = true; b.detail += '; the certificate is stale (' + Math.round(((o.now ?? Date.now()) - st.time) / 60_000) + ' min old)'; }
     return b;
   }
 
@@ -5033,8 +5036,10 @@ function unverifiableSubresource(servedPath, body) {
   // ic-git's API, which may lie about the id -- the judgment of that id is
   // certified, so the worst a lie buys is a different canister allowed on
   // its own merits). `ok` is false if any is blocked or unreadable; `warn`
-  // is true if any is ungoverned or stale. Set `canisters` to judge a list
-  // of your own instead.
+  // is true if any is ungoverned or stale, and `warning` says which. Set
+  // `canisters` to judge a list of your own instead. `check` is the row
+  // the callers add to a site's checks (G), built once here so the loader
+  // and both extensions describe it alike.
   async function checkBackends(repo, options) {
     const o = { ...DEFAULTS, ...options };
     o.fetch = o.fetch || globalThis.fetch.bind(globalThis);
@@ -5052,12 +5057,18 @@ function unverifiableSubresource(servedPath, body) {
         note = 'could not read the site\'s info (' + (e.message || e) + '); only ic-git and the system canisters were judged';
       }
     }
+    ids = [...new Set(ids)];
     const backends = await Promise.all(ids.map(id => judge(o, repo, id).catch(e => ({ canister: id, kind: 'unreadable', ok: false, warn: false, detail: e.message || String(e) }))));
+    const ok = backends.every(b => b.ok);
+    const ungoverned = backends.filter(b => b.kind === 'ungoverned');
+    const warning = ungoverned.length ? 'its backend is not governed: the site owner can change it without approval (' + ungoverned.map(b => b.canister.slice(0, 5)).join(', ') + ')'
+      : backends.some(b => b.warn) ? 'a backend\'s certificate is stale' : '';
     return {
-      repo, backends, note,
-      ok: backends.every(b => b.ok),
-      warn: backends.some(b => b.warn),
+      repo, backends, note, ok, warning,
+      warn: warning !== '',
       allowed: backends.filter(b => b.ok).map(b => b.canister),
+      check: { id: 'G', ok, warn: warning !== '', label: 'the canisters the page may call are approved or system canisters',
+        detail: backends.map(b => b.canister.slice(0, 5) + ': ' + b.detail).concat(note ? [note] : []).join('; ') },
     };
   }
 
@@ -5286,8 +5297,11 @@ function unverifiableSubresource(servedPath, body) {
       // section 4): a governed one must run its approved build, a system
       // one belong to the NNS; an ungoverned one is allowed and said.
       if (r.verified) {
-        const be = await Verifier.checkBackends(repo, opts).catch(e => ({ ok: false, warn: false, backends: [], note: e.message || String(e) }));
-        r.checks.push({ id: 'G', ok: be.ok, warn: be.warn, label: 'the canisters the page may call are approved or system canisters', detail: be.note || '' });
+        const be = await Verifier.checkBackends(repo, opts).catch(e => ({ ok: false, backends: [],
+          check: { id: 'G', ok: false, label: 'the canisters the page may call are approved or system canisters', detail: e.message || String(e) } }));
+        // The rows below name each canister, so the check's own detail
+        // keeps only the note.
+        r.checks.push({ ...be.check, detail: be.note || '' });
         r.backends = be.backends;
         r.verified = be.ok;
       }
