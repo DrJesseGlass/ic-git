@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ic-git verifier",
-  "version": "0.1.2",
-  "description": "Checks ic-git sites against their on-chain record and shows only the checked page, running only its verified scripts.",
+  "version": "0.2.0",
+  "description": "Checks ic-git sites against their on-chain record, shows only the checked page running only its verified scripts, and lets it call only approved canisters.",
   "permissions": [
     "declarativeNetRequest",
     "storage",

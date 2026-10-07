@@ -38,6 +38,67 @@ wherever it cannot say what the parser will do: a page the policy could
 not pin exactly fails check E, at publish and here, rather than being
 guessed at.
 
+## What the page talks to: the backend check
+
+A verified page's code is known; what it calls is not, unless that is
+judged too (docs/GOVERNANCE.md, section 4). So the extensions judge the
+canisters a page may call and enforce the verdict on the wire. The
+judgment is the core's `checkBackends(repo)`, shared with the loader, and
+every verdict rests on a certified read (`readCanisterState`,
+docs/CERTIFIED.md): the IC's own word on a canister's module hash and
+controllers, never ic-git's. For each canister:
+
+- **system** -- its one controller is the NNS root (`r7inp-...`): the ICP
+  ledger, the cycles ledger, the cycles minting canister. Allowed.
+- **approved** -- its one controller is ic-git and its certified module
+  hash is the repo's `<repo>#app` record, read from the registry through
+  the same two RPCs that must agree: a governed backend running a build
+  the voters approved. Allowed.
+- **blocked** -- its one controller is ic-git, but no record approves the
+  module it runs, or there is no record. The one case a verified page
+  must not reach, since governance promised otherwise: the site fails
+  check G and the stop page names the canister and the two hashes.
+- **ungoverned** -- anyone else holds it (an owner, ic-git among others,
+  ic-git itself until the governor of docs/GOVERNANCE.md section 5). Its
+  code is not tampered, but its holder can change it without a vote.
+  Allowed, and said: the badge stays OK but turns amber, and its hover
+  text says the site's owner can change its backend without approval.
+- **unreadable** -- no certified answer. Not allowed.
+
+Which canisters are judged: ic-git itself (every page reads it), the
+three system canisters, and the site's app canister as `/api/<repo>/info`
+names it -- the one thing taken from ic-git's API, and the judgment of
+that id is certified, so a lie there buys only a different canister
+allowed on its own merits. They are judged with the site, so a page's
+first calls do not wait, and a stale certificate (over five minutes)
+warns without blocking.
+
+Enforcement:
+
+- **Chrome:** a static rule in `rules.json` blocks every call a `/site/`
+  page makes to the IC's API (`icp-api.io`, `icp0.io`, `ic0.app` and
+  their subdomains, any `/api/vN/` path). Session allow rules, one per
+  allowed canister on `icp-api.io` only, are installed together with the
+  site's pinned policy, before the page is told to reload under it -- so
+  no first-visit reload is spent on them (decision 4 of
+  docs/GOVERNANCE.md, settled: derive the list, do not reload). A call to
+  a canister nobody judged is blocked with no feedback but the badge
+  text; "open anyway" opens that tab's calls along with its scripts.
+- **Firefox:** the request listener holds each call from a `/site/` page
+  to an IC API host, finds the canister in the site's judged backends or
+  judges it on the spot (and keeps the verdict with the site), and
+  releases or cancels it. A cancelled call turns the badge red and names
+  the canister on hover. Only `icp-api.io` is released; a call through
+  another IC host is cancelled unjudged.
+
+What this cannot see: a call the page asks the wallet to make. OISY sends
+it from its own window, which neither extension observes; OISY's consent
+screen names the target canister and method, and the user reads it. A
+page-world shim that refuses wallet calls to unapproved canisters is
+defence in depth the extensions could add; it is not watertight (a page
+can sometimes reach an unwrapped copy of the messaging function) and is
+not built.
+
 ## How each browser enforces it
 
 ### Firefox: the page that loads is the page that arrived
@@ -118,7 +179,8 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
 ## What the user sees
 
 - Verified: the page, as published. The toolbar badge says OK, with the
-  commit on hover.
+  commit on hover -- green when every backend it may call is approved or
+  a system canister, amber when one is ungoverned (hover says so).
 - Not verified: a stop page naming each check that failed, the record and
   what was served, with "Check again" and "Open anyway" -- the second
   armed by a first click and then running the page as served, for that
@@ -283,8 +345,11 @@ Then add a row to Releases.
 The newest row per package is the record on chain. 0.1.0 was published
 but never submitted to a store; 0.1.1 superseded it, and was submitted
 to both stores on 2026-10-01. Users pass the Chrome store id to `--id`.
-The packages in git are 0.1.2 -- the tightened check E in their shared
-scanner -- and are not yet published.
+The packages in git are 0.2.0 -- the tightened check E in their shared
+scanner (0.1.2, never published on its own), the certified reader, and
+the backend check -- and are not yet published. Firefox's 0.2.0 asks for
+host permissions on `icp0.io` and `ic0.app` too, to cancel a page's calls
+through those hosts.
 
 | Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx | Chrome store id |
 |---|---|---|---|---|---|---|
@@ -303,10 +368,11 @@ scanner -- and are not yet published.
 - The extension hashing its own files and showing whether they match the
   record: catches an unpublished update, not a tampered extension, which
   would lie about itself.
-- The backend check (docs/GOVERNANCE.md, section 3) and the K-of-N
-  attestations (docs/ATTESTATION.md): today the extensions verify the
-  frontend, not the canister's running code. The certified read the check
-  needs is in the core (`readCanisterState`, docs/CERTIFIED.md); judging
-  what it returns, and stopping on a wrong answer, is the next leg.
+- ic-git's own canister under the backend check: today it is
+  "ungoverned" (its controller is the operator), which every site's badge
+  says in amber. The governor (docs/GOVERNANCE.md, section 5) makes it
+  "approved": controllers exactly the governor, module hash the recorded
+  one; the governor's id is then written into the packages.
+- The K-of-N attestations (docs/ATTESTATION.md) behind the same stop page.
 - Safari (no `filterResponseData`; CSP injection unexamined), other
   hosting, and pages outside `/site/`.

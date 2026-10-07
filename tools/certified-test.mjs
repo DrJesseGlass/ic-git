@@ -10,6 +10,12 @@
 //     outside the delegated ranges, a nested delegation, a pruned path, a
 //     reply with no certificate, and the core loaded without the BLS code;
 //   - freshness: a certificate older than the bound is stale, not failed;
+//   - checkBackends, offline over the same vectors: a canister under the NNS
+//     root is a system canister; one under anyone else is ungoverned and
+//     warned; one under ic-git alone is approved only when its certified
+//     module hash is the <repo>#app record's, blocked otherwise or with no
+//     record, and unreadable when its certificate fails -- and only the
+//     approved and system and ungoverned ones are allowed;
 //   - with --live: umobs and the ICP ledger verify against mainnet now, and
 //     the pinned root key is the one /api/v2/status reports.
 //
@@ -212,6 +218,75 @@ for (const id of [UMOBS, LEDGER]) {
   pass('a reply without a certificate, an HTTP error, and a bad id fail C1 before anything is believed');
 }
 
+// --- checkBackends: the judgment over the reads
+{
+  const umobs = vectors[UMOBS], ledger = vectors[LEDGER];
+  const owner = umobs.controllers[0]; // umobs's one controller
+  // read_state by canister id; anything else is the site's /info.
+  const fetchFor = (info, tamper) => async (url) => {
+    const id = /canister\/([a-z0-9-]+)\/read_state/.exec(url);
+    if (id) {
+      const v = vectors[id[1]];
+      if (!v) return { ok: false, status: 404 };
+      let bytes = unhex(v.reply_hex);
+      if (tamper === id[1]) { bytes = Uint8Array.from(bytes); bytes[bytes.length - 20] ^= 1; }
+      return { ok: true, status: 200, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
+    }
+    return { ok: true, status: 200, json: async () => info };
+  };
+  // A registry whose <repo>#app record is (commit, hash), or none.
+  const word = h => h.padEnd(64, '0');
+  const registry = rec => ({ request: async ({ method }) => method === 'eth_chainId' ? '0xaa36a7'
+    : rec ? '0x' + word('ab'.repeat(20)) + rec + (1_700_000_000).toString(16).padStart(64, '0') : '0x' + '0'.repeat(192) });
+  const base = { now: umobs.time + 1000, provider: registry(null), providerOnly: true, providerName: 'stub' };
+  const judge = (ids, extra = {}) => Verifier.checkBackends('r', { ...base, canisters: ids, fetch: fetchFor({}), ...extra });
+
+  let r = await judge([LEDGER]);
+  assert.equal(r.backends[0].kind, 'system'); assert.ok(r.ok && !r.warn); assert.deepEqual(r.allowed, [LEDGER]);
+  pass('a canister controlled by the NNS root is a system canister: allowed');
+
+  r = await judge([UMOBS]);
+  assert.equal(r.backends[0].kind, 'ungoverned'); assert.ok(r.ok && r.warn); assert.match(r.backends[0].detail, /without a vote/);
+  pass('a canister under anyone else is ungoverned: allowed, warned');
+
+  // With "ic-git" being umobs's controller, umobs reads as governed by it.
+  r = await judge([UMOBS], { canister: owner, provider: registry(umobs.moduleHash) });
+  assert.equal(r.backends[0].kind, 'approved'); assert.ok(r.ok && !r.warn); assert.match(r.backends[0].detail, /approved build of commit abababab/);
+  pass('under ic-git alone with the recorded module hash: approved');
+  r = await judge([UMOBS], { canister: owner, provider: registry('11'.repeat(32)) });
+  assert.equal(r.backends[0].kind, 'blocked'); assert.ok(!r.ok); assert.deepEqual(r.allowed, []); assert.match(r.backends[0].detail, /runs module 2bfd2127/);
+  pass('under ic-git alone with another module hash: blocked');
+  r = await judge([UMOBS], { canister: owner });
+  assert.equal(r.backends[0].kind, 'blocked'); assert.match(r.backends[0].detail, /no "r#app" record/);
+  pass('under ic-git alone with no record: blocked');
+  r = await judge([UMOBS], { canister: owner, provider: { request: async () => { throw new Error('rpc down'); } } });
+  assert.equal(r.backends[0].kind, 'unreadable'); assert.match(r.backends[0].detail, /record could not be read/);
+  pass('under ic-git alone with the registry unreachable: unreadable, not allowed');
+
+  r = await judge([UMOBS], { fetch: fetchFor({}, UMOBS) });
+  assert.equal(r.backends[0].kind, 'unreadable'); assert.ok(!r.ok); assert.match(r.backends[0].detail, /could not be certified/);
+  pass('a canister whose certificate fails is unreadable: not allowed');
+
+  // Stale is a warning on an allowed verdict.
+  r = await judge([LEDGER], { now: ledger.time + 10 * 60_000 });
+  assert.equal(r.backends[0].kind, 'system'); assert.ok(r.ok && r.warn); assert.match(r.backends[0].detail, /stale/);
+  pass('a stale certificate warns on an otherwise allowed backend');
+
+  // The default list: ic-git, the system canisters, and the site's app
+  // canister from /info; the vectors cover two of them, the rest 404.
+  r = await Verifier.checkBackends('r', { ...base, fetch: fetchFor({ app_canister: LEDGER }) });
+  assert.deepEqual(r.backends.map(b => b.canister).slice(0, 1), [UMOBS]);
+  assert.equal(r.backends.length, 5);
+  assert.equal(r.backends.find(b => b.canister === LEDGER).kind, 'system');
+  assert.ok(!r.ok, 'the unreachable system canisters are unreadable, so not ok');
+  assert.equal(r.note, '');
+  r = await Verifier.checkBackends('r', { ...base, fetch: fetchFor({}) });
+  assert.equal(r.note, 'the site has no app canister');
+  r = await Verifier.checkBackends('r', { ...base, fetch: async url => /read_state/.test(url) ? fetchFor({})(url) : { ok: false, status: 500 } });
+  assert.match(r.note, /could not read the site's info/);
+  pass('the default list is ic-git, the system canisters and the app canister /info names, with the note saying what was not read');
+}
+
 if (process.argv.includes('--live')) {
   for (const id of [UMOBS, LEDGER]) {
     const r = await Verifier.readCanisterState(id);
@@ -223,6 +298,11 @@ if (process.argv.includes('--live')) {
   const status = dec(new Uint8Array(await (await fetch(Verifier.DEFAULTS.icApi + '/api/v2/status')).arrayBuffer()));
   assert.equal(hex(status.root_key), Verifier.DEFAULTS.rootKey);
   pass('live: the pinned root key is the one /api/v2/status reports');
+  const be = await Verifier.checkBackends('ic-vote');
+  assert.ok(be.ok, JSON.stringify(be.backends));
+  assert.equal(be.backends.filter(b => b.kind === 'system').length, 3);
+  assert.ok(be.backends.every(b => ['system', 'approved', 'ungoverned'].includes(b.kind)));
+  pass('live: ic-vote\'s backends judge as ' + be.backends.map(b => b.kind).join(', '));
 }
 
 console.log(`certified reader: ${passed} checks passed`);

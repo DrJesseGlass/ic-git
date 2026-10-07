@@ -147,7 +147,9 @@ need to look.
    record (canister release). Built: `govern_app_canister`,
    `propose_policy_change`, docs/TENANCY.md "Governed app canisters".
 3. The certified `read_state` reader in the core. Done: docs/CERTIFIED.md.
-4. The extensions' backend check (section 4), on 2 and 3.
+4. The extensions' backend check (section 4), on 2 and 3. Built:
+   `checkBackends` in the core, enforced by both extensions, shown by the
+   loader (docs/EXTENSION.md, "What the page talks to").
 5. Activity feeds.
 6. The governor: build, rehearse locally, record, then the mainnet handover.
 7. Push notifications (Dmail), once confirmed.
@@ -156,6 +158,12 @@ need to look.
 
 - Freshness bound for certified reads: settled at five minutes, stale is
   a warning, a signature or delegation failure stops (docs/CERTIFIED.md).
+- Chrome's first visit to a site with new backend canisters: settled by
+  judging the expected list (ic-git, the system canisters, the site's app
+  canister) with the site and installing the allow rules with the pin, so
+  no extra reload; a canister outside that list is blocked.
+- The wallet path (OISY sending a page's call from its own window): out
+  of the extensions' sight; documented, not shimmed (docs/EXTENSION.md).
 - How a governed backend's emergency is handled without an escape hatch
   (expedited proposals with a lower K and a short delay, or none).
 - Whether objections should also extend a waiting period before a passing
