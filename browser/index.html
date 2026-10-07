@@ -869,8 +869,11 @@ const Console = (() => {
       // A deploy runs every configured leg: the EVM leg broadcasts a new
       // CREATE transaction each time, which costs ic-git's fee here and gas
       // on the other chain, and is not undone by anything on this side.
-      if (btn) Promise.all([deployCfg, evmCfg, pricing]).then(([w, e, pr]) => {
-        const cost = document.getElementById('deploy-cost'), what = document.getElementById('reinstall-what');
+      // The cost line is on every repo with an app canister; the reinstall
+      // button only where the repo is not governed, so it alone is optional.
+      const cost = document.getElementById('deploy-cost');
+      if (cost) Promise.all([deployCfg, evmCfg, pricing]).then(([w, e, pr]) => {
+        const what = document.getElementById('reinstall-what');
         if (w === undefined || e === undefined || pr === undefined) { cost.textContent = 'could not read the deploy config or the fee table; reload before deploying.'; return; }
         const fee = (w ? pr.ic_deploy : 0) + (e ? pr.evm_action : 0);
         const evmNote = e ? 'a new CREATE transaction for ' + e.source_path + ' on the EVM chain (gas limit ' + e.gas_limit + '): a fresh contract at a new address, gas paid on that chain by the signer, not in cycles.' : '';
@@ -879,6 +882,7 @@ const Console = (() => {
         const appNote = w && info.governed && w.target === info.app_canister ? ' Governed: the install is recorded on chain as ' + repo + '#app, ' + fmtT(pr.evm_action) + ' more where a registry is configured.' : '';
         cost.textContent = !w && !e ? 'nothing is configured to deploy.'
           : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '') + appNote;
+        if (!btn) return;
         if (!w) { btn.title = 'nothing is configured to deploy into a canister'; return; }
         const target = w.target === info.app_canister
           ? 'app canister ' + w.target

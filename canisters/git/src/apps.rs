@@ -127,7 +127,12 @@ pub async fn top_up_app_canister(
 /// app canister. Free: the one management call costs this canister nothing
 /// worth metering, and the step should not fail for want of a balance.
 pub async fn govern_app_canister(repo: &str, who: &Principal) -> Result<Principal, String> {
-    let target = tenancy::can_govern(repo, who)?;
+    // The flag goes on before the await, so the policy is locked while the
+    // controller call is in flight: nothing can move the repo out from
+    // under the lock (required votes to 0, a transfer, a second govern)
+    // between the check and the controllers changing. Off again only if
+    // the call fails, with the canister as it was.
+    let target = tenancy::mark_governed(repo, who)?;
     let me = ic_cdk::api::canister_self();
     let done: Result<(), String> = intercanister::call(
         Principal::management_canister(),
@@ -141,10 +146,10 @@ pub async fn govern_app_canister(repo: &str, who: &Principal) -> Result<Principa
         },),
     )
     .await;
-    done.map_err(|e| format!("update_settings: {e}"))?;
-    // The controllers changed before this line; the flag must follow even
-    // if the repo's metadata moved during the await (it is re-read).
-    tenancy::mark_governed(repo)?;
+    if let Err(e) = done {
+        tenancy::unmark_governed(repo);
+        return Err(format!("update_settings: {e}"));
+    }
     Ok(target)
 }
 

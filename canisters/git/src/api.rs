@@ -737,7 +737,7 @@ mod tests {
         // Governed: info says so, and a pending policy change is listed with
         // its ballots and the candid variant as JSON.
         tenancy::set_app_canister("api-ten-owned", Principal::from_slice(&[6; 8])).unwrap();
-        tenancy::mark_governed("api-ten-owned").unwrap();
+        tenancy::mark_governed("api-ten-owned", &owner).unwrap();
         assert_eq!(body_json(&handle("/api/api-ten-owned/info"))["governed"], true);
         // The owner is the one approver and K = 1: each approval applies at
         // once, nothing pending.

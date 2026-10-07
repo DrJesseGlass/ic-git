@@ -600,10 +600,16 @@ impl PolicyChange {
     }
 }
 
-/// How many policy changes a repo can have pending at once. Any approver
-/// can propose, and a proposal costs nothing, so without a bound one voter
-/// could grow the repo's metadata (and the vote store) without limit.
-const MAX_PENDING_PROPOSALS: usize = 16;
+/// How many pending policy changes one approver may hold an approval on. A
+/// change is pending by approval: the ballot that proposes it is an
+/// approval, and a change nobody approves any more is dropped. So the
+/// pending list is bounded by this times the approvers, and no one voter
+/// can fill it for the others: the changes they hold are theirs to
+/// withdraw, and a slot nobody else approves goes with the withdrawal. A
+/// single cap on the repo would let one voter propose up to it and lock
+/// everyone else's policy changes out, with nothing the others could do
+/// but approve one of theirs.
+const MAX_HELD_PROPOSALS: usize = 8;
 
 /// A pending or just-decided policy change and where its ballots stand.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -616,24 +622,22 @@ pub struct Proposal {
     pub reached: bool,
 }
 
-/// Record that the repo's app canister is now controlled by this canister
-/// alone (the caller has made it so). Refused with no app canister, when
-/// already governed, or with required votes at 0: governing a repo whose
-/// pushes deploy unapproved would lock in nothing. The caller checked the
-/// same before its await; this re-checks after it, since the owner could
-/// have set required votes to 0 meanwhile and a repo marked governed under
-/// K = 0 would wear the badge while deploying unapproved code.
-pub fn mark_governed(repo: &str) -> Result<(), String> {
+/// Mark the repo governed, before its app canister's controllers change:
+/// the flag locks the policy, and the lock must hold while the controller
+/// call is in flight, or the owner could set required votes to 0 meanwhile
+/// and the repo would end up governed in name while every push deploys
+/// unapproved into a canister this canister alone controls. The caller
+/// clears the flag again (`unmark_governed`) if the controller call fails.
+/// Owner only: an operator may do anything to this canister, but handing a
+/// tenant's backend to it is the tenant's decision. Refused with no app
+/// canister, when already governed (a second call while the first is in
+/// flight included), or with required votes at 0: governing a repo whose
+/// pushes deploy unapproved would lock in nothing. Returns the app canister.
+pub fn mark_governed(repo: &str, who: &Principal) -> Result<Principal, String> {
     let mut m = meta(repo).ok_or_else(|| format!("no such repo: {repo}"))?;
-    governable(repo, &m)?;
-    m.governed = true;
-    save_meta(repo, &m);
-    Ok(())
-}
-
-/// The state `govern` needs true of the repo, before and after it changes
-/// the controllers; returns the app canister.
-fn governable(repo: &str, m: &RepoMeta) -> Result<Principal, String> {
+    if !is_owner(&m, who) {
+        return Err(format!("{who} does not own repo {repo}; only the owner can govern it"));
+    }
     if m.governed {
         return Err(format!("repo {repo} is already governed"));
     }
@@ -643,18 +647,19 @@ fn governable(repo: &str, m: &RepoMeta) -> Result<Principal, String> {
     if m.required_votes == 0 {
         return Err("set required votes to 1 or more first: a governed repo deploys only approved commits".into());
     }
+    m.governed = true;
+    save_meta(repo, &m);
     Ok(app)
 }
 
-/// What `govern` needs true of the repo before it changes the controllers.
-/// Owner only: an operator may do anything to this canister, but handing a
-/// tenant's backend to it is the tenant's decision.
-pub fn can_govern(repo: &str, who: &Principal) -> Result<Principal, String> {
-    let m = meta(repo).ok_or_else(|| format!("no such repo: {repo}"))?;
-    if !is_owner(&m, who) {
-        return Err(format!("{who} does not own repo {repo}; only the owner can govern it"));
+/// The controller call `mark_governed` was made for has failed: the app
+/// canister is as it was, so the repo is not governed after all. The only
+/// way the flag comes off.
+pub fn unmark_governed(repo: &str) {
+    if let Some(mut m) = meta(repo) {
+        m.governed = false;
+        save_meta(repo, &m);
     }
-    governable(repo, &m)
 }
 
 /// Cast a ballot on a policy change. Any approver may; the change is
@@ -662,11 +667,19 @@ pub fn can_govern(repo: &str, who: &Principal) -> Result<Principal, String> {
 /// applied -- to the metadata here, to the deploy config by the caller when
 /// `apply_deploy` is returned -- the moment approvals minus objections reach
 /// the threshold. Its ballots are then cleared, so proposing the same change
-/// again later starts from nothing. Works on an ungoverned repo too, where
-/// the owner could also just make the change -- but not with no votes
-/// required: under K = 0 every subject is reached at once, so any voter's
-/// ballot, a rejection included, would apply any change (the repo to
-/// themselves, say). There is nothing to vote on; the owner changes it.
+/// again later starts from nothing.
+///
+/// A change is proposed by approving it: the first ballot on a change not
+/// pending must be an approval (there is nothing to reject yet), and a
+/// pending change whose approvals fall to none -- its approvers having
+/// replaced theirs with rejections -- is withdrawn, ballots and all. Each
+/// approver holds at most `MAX_HELD_PROPOSALS` pending changes that way.
+///
+/// Works on an ungoverned repo too, where the owner could also just make
+/// the change -- but not with no votes required: under K = 0 every subject
+/// is reached at once, so any voter's ballot would apply any change (the
+/// repo to themselves, say). There is nothing to vote on; the owner changes
+/// it.
 pub fn propose_policy_change(
     repo: &str,
     who: &Principal,
@@ -680,6 +693,9 @@ pub fn propose_policy_change(
     }
     let subj = change.subject();
     let pending = m.proposals.contains(&change);
+    if !pending && decision != Vote::Approve {
+        return Err(format!("no such policy change is pending on {repo}; a change is proposed by approving it"));
+    }
     if let Err(e) = change.check(&m, repo) {
         if pending {
             // It could apply when proposed; the policy has moved under it
@@ -693,8 +709,11 @@ pub fn propose_policy_change(
         }
         return Err(e);
     }
-    if !pending && m.proposals.len() >= MAX_PENDING_PROPOSALS {
-        return Err(format!("{repo} already has {MAX_PENDING_PROPOSALS} policy changes pending; decide one of those first"));
+    if !pending && held_proposals(repo, &m, who) >= MAX_HELD_PROPOSALS {
+        return Err(format!(
+            "{who} already approves {MAX_HELD_PROPOSALS} pending policy changes on {repo}; \
+             withdraw one (a Reject ballot on it) or see one decided first"
+        ));
     }
     let reason = ballot_reason(decision, reason)?;
     let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
@@ -710,11 +729,30 @@ pub fn propose_policy_change(
         }
         VoteStore { repo }.save(&subj, Vec::new());
         m.proposals.retain(|p| p != &change);
+    } else if tally.approvals == 0 {
+        // The last approval it had was just replaced: withdrawn. The other
+        // ballots go with it; they were on a change nobody proposes.
+        VoteStore { repo }.save(&subj, Vec::new());
+        m.proposals.retain(|p| p != &change);
     } else if !pending {
         m.proposals.push(change);
     }
     save_meta(repo, &m);
     Ok((tally, apply_deploy))
+}
+
+/// The pending changes `who` holds an approval on.
+fn held_proposals(repo: &str, m: &RepoMeta, who: &Principal) -> usize {
+    let me = Approver::from(*who);
+    m.proposals
+        .iter()
+        .filter(|c| {
+            VoteStore { repo }
+                .load(&c.subject())
+                .iter()
+                .any(|a| a.approver == me && a.decision == Decision::Approve)
+        })
+        .count()
 }
 
 /// The repo's pending policy changes, each with its ballots and count.
@@ -1465,19 +1503,23 @@ mod tests {
         assert_eq!(meta("t-gov").unwrap().owner, Some(alice));
 
         // Preconditions: an app canister and votes required; owner only.
-        // mark_governed holds them too: they were checked before an await.
-        assert!(can_govern("t-gov", &alice).unwrap_err().contains("no app canister"));
-        assert!(mark_governed("t-gov").unwrap_err().contains("no app canister"));
+        assert!(mark_governed("t-gov", &alice).unwrap_err().contains("no app canister"));
         set_app_canister("t-gov", app).unwrap();
-        assert!(can_govern("t-gov", &alice).unwrap_err().contains("required votes"));
-        assert!(mark_governed("t-gov").unwrap_err().contains("required votes"));
+        assert!(mark_governed("t-gov", &alice).unwrap_err().contains("required votes"));
         assert!(!meta("t-gov").unwrap().governed);
         set_required_votes("t-gov", &alice, false, 1).unwrap();
-        assert!(can_govern("t-gov", &v1).unwrap_err().contains("only the owner"));
-        assert_eq!(can_govern("t-gov", &alice).unwrap(), app);
-        mark_governed("t-gov").unwrap();
+        assert!(mark_governed("t-gov", &v1).unwrap_err().contains("only the owner"));
+        // The flag goes on before the controller call and locks the policy
+        // while it is in flight; a failed call takes it off again.
+        assert_eq!(mark_governed("t-gov", &alice).unwrap(), app);
         assert!(repo_info("t-gov").unwrap().governed);
-        assert!(can_govern("t-gov", &alice).unwrap_err().contains("already governed"));
+        assert!(set_required_votes("t-gov", &alice, false, 0).unwrap_err().contains("propose_policy_change"));
+        assert!(mark_governed("t-gov", &alice).unwrap_err().contains("already governed"));
+        unmark_governed("t-gov");
+        assert!(!repo_info("t-gov").unwrap().governed);
+        set_required_votes("t-gov", &alice, false, 1).unwrap();
+        assert_eq!(mark_governed("t-gov", &alice).unwrap(), app);
+        assert!(repo_info("t-gov").unwrap().governed);
         assert!(governed_target("t-gov", &app.to_text()));
         assert!(!governed_target("t-gov", &p(99).to_text()));
 
@@ -1584,16 +1626,41 @@ mod tests {
         assert!(e.contains("dropped"), "{e}");
         assert_eq!(proposals("t-gov").len(), 1, "only k:1 is still pending");
 
-        // Pending proposals are bounded.
-        for i in 0..MAX_PENDING_PROPOSALS {
-            let r = propose_policy_change("t-gov", &alice, PolicyChange::WasmDeploy { target: app.to_text(), source_path: format!("{i}.wasm") }, Vote::Approve, None);
-            if i + 1 < MAX_PENDING_PROPOSALS {
+        // A change is proposed by approving it: a rejection of nothing is
+        // refused. The k:1 change still pending was v1's, and v1 is no
+        // approver since the transfer: the next ballot on it finds no
+        // approval that counts and withdraws it.
+        let wasm = |i: usize| PolicyChange::WasmDeploy { target: app.to_text(), source_path: format!("{i}.wasm") };
+        let e = propose_policy_change("t-gov", &v2, wasm(0), Vote::Reject, None).unwrap_err();
+        assert!(e.contains("proposed by approving"), "{e}");
+        assert_eq!(proposals("t-gov").len(), 1);
+        let (t, _) = propose_policy_change("t-gov", &v2, PolicyChange::RequiredVotes { k: 1 }, Vote::Reject, None).unwrap();
+        assert_eq!(t.approvals, 0);
+        assert!(proposals("t-gov").is_empty(), "nobody who counts approves it");
+
+        // Each approver holds a bounded number of pending changes, and one
+        // at the bound locks nobody else out. Owner v2, voter alice, K = 2.
+        for i in 0..=MAX_HELD_PROPOSALS {
+            let r = propose_policy_change("t-gov", &alice, wasm(i), Vote::Approve, None);
+            if i < MAX_HELD_PROPOSALS {
                 assert!(r.is_ok(), "{i}: {r:?}");
             } else {
-                assert!(r.unwrap_err().contains("pending"));
+                assert!(r.unwrap_err().contains("already approves"));
             }
         }
-        // A ballot on one already pending still goes through.
-        assert!(propose_policy_change("t-gov", &v2, PolicyChange::RequiredVotes { k: 1 }, Vote::Reject, None).is_ok());
+        assert_eq!(proposals("t-gov").len(), MAX_HELD_PROPOSALS);
+        assert!(propose_policy_change("t-gov", &v2, wasm(MAX_HELD_PROPOSALS), Vote::Approve, None).is_ok());
+        // A ballot on a change already pending is not a new one, and a
+        // rejection beside a counting approval leaves it pending.
+        let (t, _) = propose_policy_change("t-gov", &alice, wasm(MAX_HELD_PROPOSALS), Vote::Object, Some("no".into())).unwrap();
+        assert_eq!((t.approvals, t.objections, t.reached), (1, 1, false));
+        assert_eq!(proposals("t-gov").len(), MAX_HELD_PROPOSALS + 1);
+        // Withdrawing: alice replaces her sole approval on one with a
+        // rejection, so it is dropped, and the slot is hers again.
+        let (t, _) = propose_policy_change("t-gov", &alice, wasm(0), Vote::Reject, None).unwrap();
+        assert_eq!((t.approvals, t.reached), (0, false));
+        assert!(!proposals("t-gov").iter().any(|p| p.change == wasm(0)), "withdrawn");
+        assert!(propose_policy_change("t-gov", &alice, wasm(0), Vote::Reject, None).is_err(), "and its ballots went with it");
+        assert!(propose_policy_change("t-gov", &alice, wasm(99), Vote::Approve, None).is_ok());
     }
 }

@@ -288,10 +288,12 @@ ic-git becomes the app canister's only controller and the owner is
 removed, so from then on its code changes only by an approved commit's
 deploy. Owner only; refused without an app canister, with required votes
 at 0 (a governed repo whose pushes deploy unapproved would lock in
-nothing), or when already governed. One-way: nothing but an approved
-commit can give control back, and that is the point and the price -- a
-broken backend is fixed by an approved commit, not directly. The console
-puts it behind a typed confirmation like a reinstall.
+nothing), or when already governed. The repo is marked governed before
+the controller call goes out, so the policy is locked while it is in
+flight (the mark comes off only if the call fails). One-way: nothing but
+an approved commit can give control back, and that is the point and the
+price -- a broken backend is fixed by an approved commit, not directly.
+The console puts it behind a typed confirmation like a reinstall.
 
 Governing locks the policy, or the owner could set `k` to 0, or make
 themselves sole approver, and push anything:
@@ -306,17 +308,21 @@ themselves sole approver, and push anything:
   source_path }` or `DeployMode { mode }` -- under the same rule as a
   commit: approve, reject or object with a reason, counted over the
   current approvers, applied the moment approvals minus objections reach
-  `k`. Any approver may propose, and proposing is approving. A change
-  nobody could apply (`k` of 0 or above the approvers, an unknown mode,
-  an install mode with no deploy config, removing a non-voter) is refused
-  before any ballot; a pending change the policy has since moved under is
-  dropped, ballots and all, at the next ballot on it. A repo requiring no
-  votes refuses every proposal: under `k` of 0 any ballot would be reached
-  at once, so there is nothing to vote on and the owner changes it
-  directly. At most 16 changes can be pending at once. The same change
-  proposed by two approvers is one subject, so approvals accumulate; once
-  applied its ballots are cleared, so proposing it again starts from
-  nothing. `get_policy_proposals(repo)` and `GET /api/<repo>/proposals`
+  `k`. Any approver may propose, and proposing is approving: the first
+  ballot on a change must be an approval (a rejection of nothing is
+  refused), and a pending change whose approvals fall to none -- its
+  approvers having replaced theirs with rejections -- is withdrawn,
+  ballots and all. Each approver holds at most 8 pending changes that
+  way, so one voter can fill no one else's slots. A change nobody could
+  apply (`k` of 0 or above the approvers, an unknown mode, an install
+  mode with no deploy config, removing a non-voter) is refused before any
+  ballot; a pending change the policy has since moved under is dropped,
+  ballots and all, at the next ballot on it. A repo requiring no votes
+  refuses every proposal: under `k` of 0 any ballot would be reached at
+  once, so there is nothing to vote on and the owner changes it directly.
+  The same change proposed by two approvers is one subject, so approvals
+  accumulate; once applied its ballots are cleared, so proposing it again
+  starts from nothing. `get_policy_proposals(repo)` and `GET /api/<repo>/proposals`
   list what is pending, with ballots and count. The console shows them
   with approve, reject and object controls, and a form to propose.
 - `k` can never return to 0 on a governed repo, by vote or otherwise.
