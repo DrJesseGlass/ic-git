@@ -3,8 +3,10 @@
 // Verifier.derivePolicy(bytes, url) -> the CSP that pins a verified page's
 // scripts and styles (docs/EXTENSION.md), and
 // Verifier.readCanisterState(canisterId, options) -> a canister's module
-// hash and controllers out of a certificate the IC signed (docs/CERTIFIED.md).
-// The last needs core/bls12-381.js loaded first (a vendored verifier,
+// hash and controllers out of a certificate the IC signed (docs/CERTIFIED.md),
+// and Verifier.checkBackends(repo, options) -> which canisters a verified
+// page may call, judged from those reads (docs/GOVERNANCE.md, section 4).
+// The last two need core/bls12-381.js loaded first (a vendored verifier,
 // tools/vendor-bls.mjs); without it a certificate is reported unverified,
 // never trusted.
 //
@@ -46,6 +48,15 @@ const Verifier = (() => {
   };
   const GET_SELECTOR = '693ec85e'; // keccak256("get(string)")[..4], as in tools/verify.mjs
   const SITE_SUFFIX = '#site'; // provenance.rs::SITE_KEY_SUFFIX
+  const APP_SUFFIX = '#app'; // provenance.rs::APP_KEY_SUFFIX: (commit, sha256 of the installed module)
+  // The NNS root canister: the one controller of the system canisters a page
+  // may call (the ledgers, the cycles minting canister).
+  const NNS_ROOT = 'r7inp-6aaaa-aaaaa-aaabq-cai';
+  const SYSTEM = {
+    'ryjl3-tyaaa-aaaaa-aaaba-cai': 'the ICP ledger',
+    'um5iw-rqaaa-aaaaq-qaaba-cai': 'the cycles ledger',
+    'rkp4c-7iaaa-aaaaa-aaaca-cai': 'the cycles minting canister',
+  };
   const TIMEOUT_MS = 15_000;
 
   const hex = b => Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
@@ -740,6 +751,104 @@ function unverifiableSubresource(servedPath, body) {
     return out;
   }
 
+  // --- backends: which canisters a verified page may call (docs/GOVERNANCE.md,
+  // section 4). A page's code is verified; what it talks to is not, unless
+  // that is judged too. Every judgment below rests on a certified read, so
+  // nothing here takes ic-git's word for what a canister runs or who holds
+  // it: ic-git's own API only names which canister is the site's backend,
+  // and the registry record only says which module hash is approved.
+  //
+  // Kinds, in the order they are tried:
+  //   system      controllers are exactly the NNS root: a ledger, the CMC.
+  //   approved    controllers are exactly ic-git, and the certified module
+  //               hash is the repo's <repo>#app record: a governed backend
+  //               running an approved commit's build.
+  //   blocked     controllers are exactly ic-git but no record approves the
+  //               module it runs -- the one case a verified page must not
+  //               reach, since governance promised otherwise.
+  //   immutable   nobody holds it: its code can never change. Allowed.
+  //   ungoverned  anyone else holds it (an owner, ic-git among others, ic-git
+  //               itself today): its code is not tampered, but its holder
+  //               can change it without a vote. Allowed, and said.
+  //   unreadable  no certified answer: the certificate failed, or the record
+  //               could not be read. Not allowed: a backend nobody can vouch
+  //               for is treated as the worst it could be.
+  async function judge(o, repo, canisterId) {
+    const st = await readCanisterState(canisterId, o);
+    const b = { canister: canisterId, kind: 'unreadable', ok: false, warn: false, detail: '', moduleHash: st.moduleHash, controllers: st.controllers, stale: st.stale };
+    if (!st.certified) {
+      const bad = st.checks.find(c => !c.ok);
+      b.detail = 'its state could not be certified: ' + (bad ? bad.detail || bad.label : 'unknown');
+      return b;
+    }
+    const ctl = st.controllers;
+    if (ctl.length === 1 && ctl[0] === NNS_ROOT) {
+      Object.assign(b, { kind: 'system', ok: true, detail: (SYSTEM[canisterId] || 'a canister') + ', controlled by the NNS root' });
+    } else if (ctl.length === 1 && ctl[0] === o.canister) {
+      // Governed by ic-git: approved only if the chain says this is what
+      // the repo's voters approved. The record names the repo it is for, so
+      // a canister ic-git holds for another repo is not this site's backend.
+      let rec;
+      try { rec = decodeGet((await readRecord(o, repo + APP_SUFFIX)).ret); } catch (e) { b.detail = 'controlled by ic-git, but its record could not be read: ' + e.message; return b; }
+      if (!rec.present) {
+        Object.assign(b, { kind: 'blocked', detail: 'controlled by ic-git alone, but the registry holds no "' + repo + APP_SUFFIX + '" record: no approved build is on record for it' });
+      } else if (st.moduleHash === rec.bundleHash) {
+        Object.assign(b, { kind: 'approved', ok: true, detail: 'governed by ic-git; runs the approved build of commit ' + rec.commit.slice(0, 12) });
+      } else {
+        Object.assign(b, { kind: 'blocked', detail: 'governed by ic-git, but runs module ' + (st.moduleHash || 'none').slice(0, 16) + '... where the record approves ' + rec.bundleHash.slice(0, 16) + '... (commit ' + rec.commit.slice(0, 12) + ')' });
+      }
+    } else if (ctl.length === 0) {
+      Object.assign(b, { kind: 'immutable', ok: true, detail: 'controlled by nobody: its code can never change' });
+    } else {
+      const who = ctl.map(c => c === o.canister ? 'ic-git' : c.slice(0, 5) + '...').join(', ');
+      Object.assign(b, { kind: 'ungoverned', ok: true, warn: true, detail: 'not governed: controlled by ' + who + ', who can change its code without a vote' });
+    }
+    if (b.ok && st.stale) { b.warn = true; b.detail += '; the certificate is stale (' + Math.round(((o.now ?? Date.now()) - st.time) / 60_000) + ' min old)'; }
+    return b;
+  }
+
+  // The canisters a verified page of `repo` may call, judged one by one:
+  // ic-git itself (every page reads it), the system canisters the console
+  // and wallets use, and the repo's app canister if it has one (asked of
+  // ic-git's API, which may lie about the id -- the judgment of that id is
+  // certified, so the worst a lie buys is a different canister allowed on
+  // its own merits). `ok` is false if any is blocked or unreadable; `warn`
+  // is true if any is ungoverned or stale, and `warning` says which. Set
+  // `canisters` to judge a list of your own instead. `check` is the row
+  // the callers add to a site's checks (G), built once here so the loader
+  // and both extensions describe it alike.
+  async function checkBackends(repo, options) {
+    const o = { ...DEFAULTS, ...options };
+    o.fetch = o.fetch || globalThis.fetch.bind(globalThis);
+    let ids = o.canisters;
+    let note = '';
+    if (!ids) {
+      ids = [o.canister, ...Object.keys(SYSTEM)];
+      try {
+        const r = await o.fetch('https://' + o.canister + '.raw.icp0.io/api/' + encodeURIComponent(repo) + '/info', { cache: 'no-store', signal: AbortSignal.timeout(TIMEOUT_MS) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const info = await r.json();
+        if (info.app_canister) ids.push(info.app_canister);
+        else note = 'the site has no app canister';
+      } catch (e) {
+        note = 'could not read the site\'s info (' + (e.message || e) + '); only ic-git and the system canisters were judged';
+      }
+    }
+    ids = [...new Set(ids)];
+    const backends = await Promise.all(ids.map(id => judge(o, repo, id).catch(e => ({ canister: id, kind: 'unreadable', ok: false, warn: false, detail: e.message || String(e) }))));
+    const ok = backends.every(b => b.ok);
+    const ungoverned = backends.filter(b => b.kind === 'ungoverned');
+    const warning = ungoverned.length ? 'its backend is not governed: the site owner can change it without approval (' + ungoverned.map(b => b.canister.slice(0, 5)).join(', ') + ')'
+      : backends.some(b => b.warn) ? 'a backend\'s certificate is stale' : '';
+    return {
+      repo, backends, note, ok, warning,
+      warn: warning !== '',
+      allowed: backends.filter(b => b.ok).map(b => b.canister),
+      check: { id: 'G', ok, warn: warning !== '', label: 'the canisters the page may call are approved or system canisters',
+        detail: backends.map(b => b.canister.slice(0, 5) + ': ' + b.detail).concat(note ? [note] : []).join('; ') },
+    };
+  }
+
   // --- git objects, each checked against its id before it is believed.
   async function object(o, oid) {
     const [raw] = await query(o, 'get_object', oid);
@@ -862,6 +971,6 @@ function unverifiableSubresource(servedPath, body) {
     return out;
   }
 
-  return { verify, derivePolicy, readCanisterState, DEFAULTS };
+  return { verify, derivePolicy, readCanisterState, checkBackends, DEFAULTS };
 })();
 // === end core ===

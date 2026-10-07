@@ -141,8 +141,12 @@ async function open({ mitm } = {}) {
     pwned: await evaluate('window.__pwned || 0'),
     // The test's tab is the newest one (the first is the browser's own).
     badge: await evaluate('(async () => { const ts = await chrome.tabs.query({}); const text = await chrome.action.getBadgeText({ tabId: Math.max(...ts.map(t => t.id)) }); return text; })()', sw),
+    color: await evaluate('(async () => { const ts = await chrome.tabs.query({}); const c = await chrome.action.getBadgeBackgroundColor({ tabId: Math.max(...ts.map(t => t.id)) }); return c.slice(0, 3).join(","); })()', sw),
     loads,
   });
+  // What a call from the page to the IC's API comes to: an HTTP status, or
+  // "blocked" when the extension's rules cancel it before it leaves.
+  const call = url => evaluate(`fetch(${JSON.stringify(url)}, { method: 'POST', headers: { 'content-type': 'application/cbor' }, body: new Uint8Array([0]) }).then(r => 'http ' + r.status, e => 'blocked')`);
   // Press a button on the stop page by its text. The page is in a closed
   // shadow root, which page scripts cannot reach but DevTools can.
   const press = async label => {
@@ -170,7 +174,7 @@ async function open({ mitm } = {}) {
     if (server) server.close();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
   };
-  return { send, page, sw, go, state, intercept, evaluate, refused, press, close };
+  return { send, page, sw, go, state, intercept, evaluate, refused, press, close, call };
 }
 
 let failed = 0;
@@ -205,6 +209,24 @@ const report = (name, ok, got) => {
     s = await b.state();
     report('ic-vote (stylesheet inlined in ic-vote #9) verifies and runs under its pinned policy, badge OK',
       !s.overlay && /YELLOW/.test(s.text) && s.badge === 'OK', s);
+    // The backend check (docs/GOVERNANCE.md, section 4). ic-vote's poll
+    // canister and ic-git itself are ungoverned today, so the badge is OK
+    // in amber, and the page's calls reach them and the system canisters;
+    // a canister nobody judged, or any IC API host but icp-api.io, is
+    // blocked before the request leaves.
+    report('an ungoverned backend: the badge is OK in amber (warned)', s.badge === 'OK' && s.color === '179,92,0', s);
+    const calls = {
+      ledger: await b.call('https://icp-api.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
+      poll: await b.call('https://icp-api.io/api/v2/canister/gjob4-qqaaa-aaaab-ag4mq-cai/query'),
+      icgit: await b.call('https://icp-api.io/api/v2/canister/umobs-yiaaa-aaaab-agyrq-cai/read_state'),
+      unknown: await b.call('https://icp-api.io/api/v2/canister/aaaaa-aa/query'),
+      otherHost: await b.call('https://icp0.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
+      status: await b.call('https://icp-api.io/api/v2/status'),
+    };
+    report('the page\'s calls to judged canisters go through (the ledger, its poll canister, ic-git)',
+      /^http/.test(calls.ledger) && /^http/.test(calls.poll) && /^http/.test(calls.icgit), calls);
+    report('a call to a canister nobody judged, through another IC host, or to the API root is blocked',
+      calls.unknown === 'blocked' && calls.otherHost === 'blocked' && calls.status === 'blocked', calls);
   } finally { await b.close(); }
 }
 

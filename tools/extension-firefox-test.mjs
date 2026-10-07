@@ -143,7 +143,10 @@ async function open({ rewrite = () => null } = {}) {
     server.close();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
   };
-  return { go, state, evaluate, log, close, set rewrite(f) { rewrite = f; } };
+  // What a call from the page to the IC's API comes to: an HTTP status, or
+  // "blocked" when the extension's listener cancels it.
+  const call = url => evaluate(`fetch(${JSON.stringify(url)}, { method: 'POST', headers: { 'content-type': 'application/cbor' }, body: new Uint8Array([0]) }).then(r => 'http ' + r.status, e => 'blocked')`);
+  return { go, state, evaluate, log, close, call, set rewrite(f) { rewrite = f; } };
 }
 
 let failed = 0;
@@ -182,6 +185,20 @@ const tamper = (only) => (path, text, headers) => {
     s = await b.state();
     report('ic-vote (stylesheet inlined in ic-vote #9) verifies and runs under its pinned policy',
       !s.overlay && /YELLOW/.test(s.text) && s.loads === 1, s);
+    // The backend check (docs/GOVERNANCE.md, section 4): the page's calls
+    // to judged canisters are released, the rest cancelled in the listener.
+    const calls = {
+      ledger: await b.call('https://icp-api.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
+      poll: await b.call('https://icp-api.io/api/v2/canister/gjob4-qqaaa-aaaab-ag4mq-cai/query'),
+      icgit: await b.call('https://icp-api.io/api/v2/canister/umobs-yiaaa-aaaab-agyrq-cai/read_state'),
+      unknown: await b.call('https://icp-api.io/api/v2/canister/aaaaa-aa/query'),
+      otherHost: await b.call('https://icp0.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
+      status: await b.call('https://icp-api.io/api/v2/status'),
+    };
+    report('the page\'s calls to judged canisters go through (the ledger, its poll canister, ic-git)',
+      /^http/.test(calls.ledger) && /^http/.test(calls.poll) && /^http/.test(calls.icgit), calls);
+    report('a call to a canister nobody judged, through another IC host, or to the API root is blocked',
+      calls.unknown === 'blocked' && calls.otherHost === 'blocked' && calls.status === 'blocked', calls);
   } finally { await b.close(); }
 }
 

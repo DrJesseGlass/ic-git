@@ -13,6 +13,16 @@
 //   session rule that replaces it with the policy derivePolicy pins for the
 //   verified page: its own scripts and styles, nothing else. The written
 //   document keeps that policy.
+//
+// And a third, for what the verified page talks to (docs/GOVERNANCE.md,
+// section 4): a static rule blocks every call a /site/ page makes to the
+// IC's API, and session allow rules scoped to the tab, installed before
+// the page runs, open exactly the canisters checkBackends judged for that
+// tab's site -- governed ones running their approved build, and the NNS's
+// system canisters -- plus, with a warning, ungoverned ones. Per tab,
+// because the verdict is per site and every site shares one origin. A
+// canister controlled by ic-git that runs no approved build fails the
+// site (check G), so the stop page says which and why.
 importScripts('bls12-381.js', 'verifier.js');
 
 const CANISTER = Verifier.DEFAULTS.canister;
@@ -21,6 +31,15 @@ const ORIGIN = 'https://' + CANISTER + '.raw.icp0.io';
 const RPCS = ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'];
 const REFRESH_MINUTES = 10;
 const PINNED_PRIORITY = 2, ALLOW_PRIORITY = 3;
+// Session rule ids: a site's pinned policy from 100; a tab's backend allow
+// rules from 10000 (one per canister, below 50000); a tab's "open anyway"
+// from 50000 for its policy and from 60000 for its calls.
+const BACKEND_RULE_BASE = 10_000, ALLOW_BASE = 50_000, TAB_CALLS_BASE = 60_000;
+// The IC's API on every host that serves it: canister calls, subnet reads
+// and the status endpoint, under /api/vN/. Not a canister's own /api/
+// routes on the gateway (ic-git's JSON API, whatever a repo is named).
+const API_HOSTS = '^https://([a-z0-9-]+\\.)*(icp-api\\.io|icp0\\.io|ic0\\.app)/api/v[0-9]+/(canister/|subnet/|status)';
+const SITE_DOMAIN = CANISTER + '.raw.icp0.io';
 
 const twoRpcs = {
   async request({ method, params = [] }) {
@@ -88,6 +107,33 @@ async function unpin(ruleId) {
   await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
 }
 
+// A tab's allow rules for backends: exactly the canisters the site it
+// shows may call, one rule each, scoped to the tab. Replaced whenever the
+// tab is given a verified site (the same site again included: the list
+// may have changed), dropped when the tab shows anything else or closes.
+// Only on icp-api.io, the host pages are expected to use: a call through
+// another IC API host stays blocked, as in Firefox.
+const ruleFor = id => '^https://icp-api\\.io/api/v[0-9]+/canister/' + escape(id) + '/';
+const tabRules = (tabId, repo, ids) => exclusive(async () => {
+  const { backends = {} } = await chrome.storage.session.get('backends');
+  const removeRuleIds = (backends[tabId] || { ruleIds: [] }).ruleIds;
+  const used = new Set(Object.values(backends).flatMap(b => b.ruleIds));
+  let next = BACKEND_RULE_BASE;
+  const addRules = ids.map(id => {
+    while (used.has(next) || removeRuleIds.includes(next)) next++;
+    used.add(next);
+    return {
+      id: next, priority: PINNED_PRIORITY,
+      action: { type: 'allow' },
+      condition: { regexFilter: ruleFor(id), initiatorDomains: [SITE_DOMAIN], resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
+    };
+  });
+  if (ids.length) backends[tabId] = { repo, ruleIds: addRules.map(r => r.id) };
+  else delete backends[tabId];
+  await chrome.storage.session.set({ backends });
+  if (removeRuleIds.length || addRules.length) await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules });
+});
+
 // --- verification ---
 const inFlight = new Map();
 // Updates to the stored sites run one at a time: two repos finishing together
@@ -100,11 +146,25 @@ const exclusive = fn => {
 };
 
 // Full check: registry record, served bytes, object walk, reference scan,
-// and the policy to pin. Concurrent callers for one repo share one run.
+// the policy to pin, and the backends the page may call. Concurrent
+// callers for one repo share one run.
 function verifySite(repo) {
   if (inFlight.has(repo)) return inFlight.get(repo);
   const run = (async () => {
-    const r = await Verifier.verify({ repo, provider: twoRpcs, providerOnly: true, providerName: 'two RPCs' });
+    const opts = { repo, provider: twoRpcs, providerOnly: true, providerName: 'two RPCs' };
+    const r = await Verifier.verify(opts);
+    // The backends only matter for a page that will run: a page that failed
+    // runs nothing, and its stop page should say why it failed, not what
+    // its backend is.
+    if (r.verified) {
+      const be = await Verifier.checkBackends(repo, opts).catch(e => ({ ok: false, warning: '', backends: [], allowed: [],
+        check: { id: 'G', ok: false, label: 'the canisters the page may call are approved or system canisters', detail: e.message || String(e) } }));
+      r.checks.push(be.check);
+      r.verified = be.ok;
+      r.backends = be.backends;
+      r.allowedBackends = be.allowed;
+      r.warning = be.warning;
+    }
     return exclusive(() => record(repo, r));
   })();
   inFlight.set(repo, run);
@@ -120,6 +180,7 @@ async function record(repo, r) {
     repo, ruleId, checkedAt: Date.now(),
     commit: r.record && r.record.commit, bundleHash: r.record && r.record.bundleHash,
     checks: r.checks, via: r.via, policyError: r.policyError || null,
+    backends: r.backends || [], allowedBackends: r.allowedBackends || [], warning: r.warning || '',
   };
   if (r.verified && r.policy) {
     const was = sites[repo];
@@ -161,8 +222,12 @@ async function allowed(tabId, repo) {
 }
 
 function badge(tabId, state, site) {
+  // A verified page with a warning on its backends (ungoverned, or a stale
+  // certificate): shown, and said in the core's words.
+  if (state === 'verified' && site && site.warning) state = 'warned';
   const look = {
-    verified: ['OK', '#1a7f37', 'verified at commit ' + (site && site.commit || '').slice(0, 12)],
+    verified: ['OK', '#1a7f37', 'verified at commit ' + (site && site.commit || '').slice(0, 12) + '; its backends are approved or system canisters'],
+    warned: ['OK', '#b35c00', 'verified at commit ' + (site && site.commit || '').slice(0, 12) + ', but ' + (site && site.warning || '')],
     checking: ['...', '#6b6b6b', 'checking against its registry record'],
     failed: ['!', '#b3261e', 'NOT verified -- its scripts are blocked'],
     unpinnable: ['!', '#b3261e', 'verified, but its scripts cannot be pinned -- they are blocked'],
@@ -181,7 +246,7 @@ const tell = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg).catch(() => {})
 // then check and tell the tab to reload if anything changes.
 async function visit(tabId, href, navStart) {
   const repo = siteOf(href);
-  if (repo === null) { badge(tabId, 'uncovered'); return { status: 'uncovered' }; }
+  if (repo === null) { badge(tabId, 'uncovered'); await tabRules(tabId, null, []); return { status: 'uncovered' }; }
   if (await allowed(tabId, repo)) {
     // "Open anyway": the bytes as served now, unchecked, as the user chose.
     badge(tabId, 'allowed', { repo });
@@ -202,10 +267,15 @@ async function visit(tabId, href, navStart) {
   // verifies, reloads the tab, which then gets the new answer.
   if (known && known.status === 'verified' && known.pinnedAt <= navStart && known.text) {
     badge(tabId, 'verified', known);
+    // This tab's calls: the site's judged backends, before the page runs.
+    await tabRules(tabId, repo, known.allowedBackends || []);
     const fresh = Date.now() - known.checkedAt < REFRESH_MINUTES * 60_000;
-    (fresh ? recheck(known) : verifySite(repo)).then(site => {
+    (fresh ? recheck(known) : verifySite(repo)).then(async site => {
       if (site.status !== 'verified' || site.policy !== known.policy || site.bundleHash !== known.bundleHash) {
         tell(tabId, { type: 'result', status: site.status, reload: true, site: summary(site) });
+      } else {
+        if (site.warning !== known.warning) badge(tabId, 'verified', site);
+        if (JSON.stringify(site.allowedBackends) !== JSON.stringify(known.allowedBackends)) await tabRules(tabId, repo, site.allowedBackends || []);
       }
     }, failSoft);
     return { status: 'verified', text: known.text, site: summary(known) };
@@ -217,8 +287,11 @@ async function visit(tabId, href, navStart) {
   // policy is the static one, which would refuse the verified scripts
   // too), or stop.
   badge(tabId, 'checking', { repo });
-  verifySite(repo).then(site => {
+  await tabRules(tabId, null, []);
+  verifySite(repo).then(async site => {
     const reload = site.status === 'verified';
+    // The tab's rules before the reload: its first call is already allowed.
+    if (reload) await tabRules(tabId, repo, site.allowedBackends || []);
     badge(tabId, reload ? 'checking' : site.status, site);
     tell(tabId, { type: 'result', status: site.status, reload, site: summary(site) });
   }, failSoft);
@@ -229,6 +302,7 @@ async function visit(tabId, href, navStart) {
 const summary = site => ({
   repo: site.repo, commit: site.commit || null, checks: site.checks || [],
   via: site.via || null, policyError: site.policyError || null,
+  backends: site.backends || [], warning: site.warning || '',
 });
 
 // "Open anyway": run this tab's copy of the site without the pinned
@@ -239,27 +313,36 @@ const summary = site => ({
 const allow = (tabId, repo) => exclusive(async () => {
   const { allowed = {} } = await chrome.storage.session.get('allowed');
   const key = allowedKey(tabId, repo);
-  const id = allowed[key] || Math.max(50_000, ...Object.values(allowed)) + 1;
+  const id = allowed[key] || Math.max(ALLOW_BASE, ...Object.values(allowed)) + 1;
   allowed[key] = id;
   await chrome.storage.session.set({ allowed });
+  // Its calls too: a page run unverified is run as it is, backends included.
+  const calls = id - ALLOW_BASE + TAB_CALLS_BASE;
   await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [id],
+    removeRuleIds: [id, calls],
     addRules: [{
       id, priority: ALLOW_PRIORITY,
       action: { type: 'modifyHeaders', responseHeaders: [{ header: 'Content-Security-Policy', operation: 'remove' }] },
       condition: { ...entryCondition(repo), tabIds: [tabId] },
+    }, {
+      id: calls, priority: ALLOW_PRIORITY,
+      action: { type: 'allow' },
+      condition: { regexFilter: API_HOSTS, initiatorDomains: [SITE_DOMAIN], resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
     }],
   });
 });
 
-chrome.tabs.onRemoved.addListener(tabId => exclusive(async () => {
-  const { allowed = {} } = await chrome.storage.session.get('allowed');
-  const gone = Object.keys(allowed).filter(k => k.startsWith(tabId + ':'));
-  if (!gone.length) return;
-  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: gone.map(k => allowed[k]) });
-  for (const k of gone) delete allowed[k];
-  await chrome.storage.session.set({ allowed });
-}));
+chrome.tabs.onRemoved.addListener(tabId => {
+  tabRules(tabId, null, []);
+  return exclusive(async () => {
+    const { allowed = {} } = await chrome.storage.session.get('allowed');
+    const gone = Object.keys(allowed).filter(k => k.startsWith(tabId + ':'));
+    if (!gone.length) return;
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: gone.flatMap(k => [allowed[k], allowed[k] - ALLOW_BASE + TAB_CALLS_BASE]) });
+    for (const k of gone) delete allowed[k];
+    await chrome.storage.session.set({ allowed });
+  });
+});
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = sender.tab && sender.tab.id;
