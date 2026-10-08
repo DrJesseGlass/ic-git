@@ -741,7 +741,11 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
             let before = st.clone();
             let note = match crate::provenance::app_record(repo, &commit_oid, &st.wasm_sha256) {
                 Ok(rec) => match rec.publish().await {
-                    Ok(reg) => format!("; app record {}", reg.tx_hash),
+                    // Broadcast, not mined: the record exists once the
+                    // chain includes the transaction (evm_receipt shows
+                    // that), and only then does the backend check's read
+                    // of the registry see it.
+                    Ok(reg) => format!("; app record tx {}", reg.tx_hash),
                     Err(e) => {
                         crate::tenancy::refund_action(payer, e.refundable(pricing.evm_action));
                         format!("; app record failed: {}", e.message)

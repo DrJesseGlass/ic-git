@@ -338,7 +338,14 @@ canister's certified module hash (docs/CERTIFIED.md) can thus check it is
 an approved commit's build without asking ic-git. The record follows what
 runs: a rollback after an objection installs the earlier commit and
 records that. On a network with no registry configured the deploy says
-nothing of it.
+nothing of it. The deploy status carries the transaction hash at
+broadcast (`app record tx 0x...`); the record exists once the chain
+includes the transaction, which `evm_receipt` shows and the backend check
+(docs/EXTENSION.md) reads. A first record creates storage, which the
+chain prices far above an overwrite, so registry writes carry a 1M gas
+limit. Unused gas is refunded on chain to the canister's EOA (the
+`evm_action` charge is unchanged either way), but the EOA must hold the
+whole limit times the fee cap when it sends.
 
 `/api/<repo>/info` reports `governed`. ic-vote's poll canister is the first
 intended user (docs/GOVERNANCE.md, section 7).
