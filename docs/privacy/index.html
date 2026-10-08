@@ -22,7 +22,7 @@
 <body>
 <main>
 <h1>Privacy policy: ic-git verifier</h1>
-<p class="muted">Browser extension for Chrome and Firefox. Effective 2026-10-03.</p>
+<p class="muted">Browser extension for Chrome and Firefox. Effective 2026-10-08 (version 0.2.0).</p>
 
 <p>The ic-git verifier checks pages served by the ic-git canister
 (<code>umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io</code>) against their public
@@ -37,7 +37,12 @@ requests name the site being checked (for example <code>ic-vote</code>):</p>
     query endpoint <code>icp-api.io</code>;</li>
   <li>the site's record in the registry contract on Ethereum Sepolia, from two
     public RPC endpoints, <code>ethereum-sepolia-rpc.publicnode.com</code> and
-    <code>sepolia.gateway.tenderly.co</code>.</li>
+    <code>sepolia.gateway.tenderly.co</code>;</li>
+  <li>for the canisters the site's page may call (the ic-git canister, the
+    site's own backend canister, and the Internet Computer's ledgers): each
+    one's certified code hash and controllers, from <code>icp-api.io</code>,
+    and the backend's approved-build record, from the same two RPC
+    endpoints.</li>
 </ul>
 <p>So the operators of those endpoints (the Internet Computer's public API
 gateway and the two RPC providers) see which ic-git site is being checked and
@@ -50,11 +55,15 @@ activity.</p>
 <p>No page content, nothing you type, and no identifier. Nothing at all is sent
 to the extension's developer, who runs no server, analytics or accounts. The
 extension does not read or send anything from other sites, forms, wallets or
-cookies, and no data is sold or shared for any other purpose.</p>
+cookies, and no data is sold or shared for any other purpose. To stop an
+ic-git page from calling a canister that is not approved, the extension looks
+at the address of each call the page makes to the Internet Computer -- which
+canister it names -- and nothing else of the call; that address is not sent
+anywhere.</p>
 
 <h2>What is kept</h2>
 <p>For the browser session only: which ic-git sites verified, their records,
-and the checked page, so that a verified page loads without another check.
+the checked page, and which canisters each may call, so that a verified page loads without another check.
 Nothing is kept after the browser closes.</p>
 
 <h2>Source</h2>

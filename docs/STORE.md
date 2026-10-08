@@ -28,7 +28,8 @@ The same text serves both stores.
 **Name:** ic-git verifier
 
 **Summary (short description):** Checks ic-git sites against their
-on-chain record before they run, and runs only the verified page.
+on-chain record before they run, runs only the verified page, and lets it
+call only approved canisters.
 
 **Description:**
 
@@ -42,10 +43,19 @@ on-chain record before they run, and runs only the verified page.
 > stopped and you are told which check failed. If it is, only the
 > verified page's own scripts are allowed to run.
 >
+> It also checks what the page talks to. Before the page may call a
+> canister, the extension reads that canister's code hash and controllers
+> from the Internet Computer's signed state certificate, verified against
+> the network's public key. A backend that only ic-git controls, running
+> the build its voters approved and recorded on chain, is allowed; so are
+> the Internet Computer's own ledgers. A backend whose owner can change it
+> without a vote is allowed with a warning; a call to any other canister
+> is blocked, and the extension says which canister and why.
+>
 > It reads public records only: the page itself, the ic-git canister's
 > public queries, and the registry through two public Ethereum RPC
 > endpoints that must agree. To look a site's record up it has to name
-> the site, so the operators of those endpoints -- the Internet Computer's
+> the site (and, for the backend check, the canisters it calls), so the operators of those endpoints -- the Internet Computer's
 > public API gateway and the two RPC providers -- see which ic-git site
 > is being checked and from which network address, when you open it and
 > every ten minutes after while the browser stays open. That is all it
@@ -79,6 +89,14 @@ not match.
 - Host permissions `ethereum-sepolia-rpc.publicnode.com` and
   `sepolia.gateway.tenderly.co`: two public RPC endpoints, read together,
   for the on-chain record.
+
+**Host permissions (Firefox, new in 0.2.0):** `icp0.io`, `*.icp0.io`,
+`ic0.app`, `*.ic0.app`, so the extension can see and cancel a verified
+page's calls to the Internet Computer through those gateways when they
+name a canister that is not approved. It reads only the request's address
+(which canister), never its body, and acts only on requests made by
+ic-git pages. Chrome needs no new permission: its block rule is
+declarative and limited to requests from the ic-git canister's pages.
 
 **Remote code (Chrome):** No. All code is in the package; the extension
 runs none it fetches.

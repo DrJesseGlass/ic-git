@@ -16,7 +16,11 @@ example `ic-vote`):
   query endpoint `icp-api.io`;
 - the site's record in the registry contract on Ethereum Sepolia, from
   two public RPC endpoints, `ethereum-sepolia-rpc.publicnode.com` and
-  `sepolia.gateway.tenderly.co`.
+  `sepolia.gateway.tenderly.co`;
+- for the canisters the site's page may call (the ic-git canister, the
+  site's own backend canister, and the Internet Computer's ledgers):
+  each one's certified code hash and controllers, from `icp-api.io`, and
+  the backend's approved-build record, from the same two RPC endpoints.
 
 So the operators of those endpoints -- the Internet Computer's public
 API gateway and the two RPC providers -- see which ic-git site is being
@@ -28,10 +32,15 @@ manifest declares browsing activity.
 **What does not.** No page content, nothing you type, and no
 identifier; nothing at all to the extension's developer, who runs no
 server, analytics or accounts. The extension does not read or send
-anything from other sites, forms, wallets or cookies.
+anything from other sites, forms, wallets or cookies. To stop an ic-git
+page from calling a canister that is not approved, it looks at the
+address of each call the page makes to the Internet Computer -- which
+canister it names -- and nothing else of the call; that address is not
+sent anywhere.
 
 **What is kept.** For the browser session only: which ic-git sites
-verified, their records, and the checked page (so a verified page loads
+verified, their records, the checked page, and which canisters each may
+call (so a verified page loads
 without another check). Nothing is kept after the browser closes.
 
 **Source.** The extension's code is public at
