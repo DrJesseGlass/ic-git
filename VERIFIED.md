@@ -20,6 +20,39 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-10-03 | `dcb4aa7` | `v0.3.2` | `1efa766581c2ed9d83025f5008b7cd32c3fb86887c5f0b3c4ca74139eac90f92` (gz) | MATCH, 2026-10-03 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37075637669](https://github.com/DrJesseGlass/ic-git/actions/runs/37075637669), identical hash |
 | 2026-10-06 | `e48ebdb` | `v0.3.3` | `2bfd212775e572b82ff35997309f2753a273cff114035bc015d14d0841ddcec3` (gz) | MATCH, 2026-10-06 | deployer (pinned container, macOS arm64 host under emulation, built twice); GitHub Actions amd64 runner, [run 37478919057](https://github.com/DrJesseGlass/ic-git/actions/runs/37478919057), identical hash |
 | 2026-10-07 | `db8f2bd` | `v0.3.4` | `e25610892fe279e4355d47c16cc1e03cd27732dad8187565e2eb1c36de5b9bad` (gz) | MATCH, 2026-10-07 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37653678100](https://github.com/DrJesseGlass/ic-git/actions/runs/37653678100), identical hash |
+| 2026-10-08 | `a23ee31` | `v0.3.5` | `30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a` (gz) | MATCH, 2026-10-08 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37803652956](https://github.com/DrJesseGlass/ic-git/actions/runs/37803652956), identical hash |
+
+## v0.3.5 -- 2026-10-08
+
+Registry writes carry a 1M gas limit (#72). ic-vote's poll canister
+(`gjob4-qqaaa-aaaab-ag4mq-cai`) became the first governed app canister on
+2026-10-08, and the first governed deploy's `ic-vote#app` record failed
+on chain: the transaction (Sepolia nonce 20, `0xd68214fa...16a2`) used
+its whole 150k gas limit and reverted. `eth_estimateGas` against the live
+contract explained it -- the same `set` costs 57k when the key exists
+(the `ic-git#site` republish of v0.3.4) and 354k when it does not, since
+Sepolia now prices a fresh storage slot far above the classic 22.1k. Every
+first record for a repo would have failed the same way while republishes
+passed. The limit is now a named constant with the measurements beside
+it; unused gas is refunded, so the limit only sets what the canister's
+EOA must hold at the time of the send. The deploy status reads `app
+record tx 0x...`, since it reports the broadcast, not inclusion. Nothing
+else changed.
+
+Gated before the deploy by `tools/e2e-local.sh`: 120 checks on the branch
+commit `a5b5a92`. The merge commit `a23ee31` differs from it only in
+comments and a documentation paragraph, which still moves the module hash
+(panic-location strings carry line numbers), so the tag was rebuilt and
+is what the row records. After the upgrade all five published site records
+still verified with `tools/verify.mjs`, and the core's certified reader
+certified the new module hash and the controller from the IC's state
+certificate. The console was not moved: `/site/ic-git/` still serves and
+verifies at `db8f2bd`, whose page is unchanged by this release.
+
+Same recipe and base image digest as v0.3.4. The raw wasm inside the
+gzip hashes to `0002b3ab...ad01`. Two hosts agreed byte for byte: the
+deployer's arm64 machine running the amd64 image under emulation, and a
+GitHub Actions x86_64 runner.
 
 ## v0.3.4 -- 2026-10-07
 
