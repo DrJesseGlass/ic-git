@@ -350,12 +350,10 @@ fn describe(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         "deploy_now" => {
             let (repo,): (String,) = args(arg, m)?;
             format!(
-                "Deploy \"{repo}\" now, without a push, from the tip of its deploy branch, or \
-                 from its newest approved commit if it requires votes. Every deploy leg the \
-                 repository has configured runs: a wasm leg installs in the configured install \
-                 mode, and an EVM leg broadcasts a NEW contract creation transaction on the \
-                 configured chain even if this commit was already deployed there. The fee for \
-                 each leg is charged to your ic-git balance."
+                "Deploy \"{repo}\" now, without a push: its newest approved commit, or its \
+                 deploy-branch tip if it needs no votes. Each configured leg runs and is charged \
+                 to your ic-git balance; an EVM leg deploys a NEW contract even if one is \
+                 already on chain."
             )
         }
         "set_site" => {
@@ -544,7 +542,7 @@ mod tests {
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
             ("set_deploy_mode", encode_args(("ic-vote", "upgrade")).unwrap(), &["keeps its state"]),
-            ("deploy_now", encode_args(("ic-vote",)).unwrap(), &["now, without a push", "NEW contract creation", "already deployed", "fee for each leg"]),
+            ("deploy_now", encode_args(("ic-vote",)).unwrap(), &["now, without a push", "newest approved commit", "NEW contract", "charged to your ic-git balance"]),
             ("set_site", encode_args(("ic-vote", "site")).unwrap(), &["site/", "/site/ic-vote/"]),
             ("set_site", encode_args(("ic-vote", "")).unwrap(), &["repository root"]),
             ("evm_registry_publish_site", encode_args(("ic-vote",)).unwrap(), &["provenance record", "EVM action fee"]),
