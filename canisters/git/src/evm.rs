@@ -1348,15 +1348,18 @@ pub async fn deploy_bytecode(
 const REGISTRY_KEY: &str = "evm:registry";
 
 /// Gas limit of a registry `set`. The cost depends on whether the key exists:
-/// an overwrite rewrites two slots, a first publish creates them, and on
-/// Sepolia today (2026-10-08) a fresh slot is priced far above the classic
-/// 22.1k -- measured with eth_estimateGas against the live contract, the same
-/// calldata costs 57k to overwrite `ic-git#site` and 354k to create
-/// `ic-vote#app`. The old limit of 150k burned itself out on the first
-/// governed deploy's record (tx 0xd68214fa..., nonce 20). Unused gas is
-/// refunded, so this only sets what the EOA must hold up front at the time
-/// of the send (1M gas at 1 gwei is 0.001 ETH); the margin over the measured
-/// creation cost is for the next repricing.
+/// an overwrite rewrites two slots, a first publish creates everything the
+/// contract keeps per key, which costs far more than the classic 22.1k per
+/// fresh slot suggests -- measured with eth_estimateGas against the live
+/// Sepolia contract (2026-10-08), the same calldata costs 57k to overwrite
+/// `ic-git#site` and 354k to create `ic-vote#app`. The old limit of 150k
+/// burned itself out on the first governed deploy's record (tx
+/// 0xd68214fa..., nonce 20). Unused gas is refunded on chain, so the limit
+/// only sets what the EOA must hold at the time of the send: gas_limit times
+/// the max fee, which `fees` sets to twice the base fee plus the tip (at a
+/// 20 gwei base that is about 0.04 ETH per write, where 150k held 0.006).
+/// The margin over the measured creation cost is for longer keys and the
+/// next repricing.
 const REGISTRY_SET_GAS: u64 = 1_000_000;
 
 pub fn set_registry(address: String) -> Result<(), String> {

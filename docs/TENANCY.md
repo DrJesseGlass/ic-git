@@ -343,7 +343,9 @@ broadcast (`app record tx 0x...`); the record exists once the chain
 includes the transaction, which `evm_receipt` shows and the backend check
 (docs/EXTENSION.md) reads. A first record creates storage, which the
 chain prices far above an overwrite, so registry writes carry a 1M gas
-limit; unused gas is refunded.
+limit. Unused gas is refunded on chain to the canister's EOA (the
+`evm_action` charge is unchanged either way), but the EOA must hold the
+whole limit times the fee cap when it sends.
 
 `/api/<repo>/info` reports `governed`. ic-vote's poll canister is the first
 intended user (docs/GOVERNANCE.md, section 7).
