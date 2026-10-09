@@ -387,6 +387,43 @@
         "note": "upgrade from v0.3.3, after tools/e2e-local.sh passed 120/120 on this commit including an upgrade from v0.3.3 over state it wrote. The canister crate changed in #69: governed app canisters (docs/GOVERNANCE.md section 2, docs/TENANCY.md). govern_app_canister(repo) makes this canister the app canister's only controller, owner only and one-way; the policy locks with it -- set_required_votes, voter changes, transfer_repo, set_wasm_deploy and set_deploy_mode refuse, required votes never 0 -- and propose_policy_change casts a ballot on the change itself under the commit rule, applied when reached. Every install into a governed app canister publishes <repo>#app (commit, module sha256) to the registry. /api/<repo>/info reports governed; /api/<repo>/proposals lists pending changes. Metadata written by earlier releases reads with governed = false and no proposals. Every published site (ic-git, ic-vote, ic-git-loader, ic-git-extension, ic-git-extension-firefox) still verifies after the upgrade"
       },
       "wasm_sha256": "cae6fc7353e14074e53f8a38bb8007e76ba853bd197ce44a29760d36cd1748f5"
+    },
+    {
+      "commit": "a23ee3157b7837eaa205cdc9f7f5dbadd243b1ce",
+      "tag": "v0.3.5",
+      "module_hash": "30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, linux/amd64 image under emulation",
+          "date": "2026-10-08"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/37803652956",
+          "date": "2026-10-08",
+          "check": "identical hash (30e76748...6d6a gz, 0002b3ab...ad01 raw); the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-10-08",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh (live module hash) against the reproducible build's module sha256; also Verifier.readCanisterState (core/verifier.js) certified the same hash and controller from the IC's state certificate",
+        "note": "upgrade from v0.3.4, after tools/e2e-local.sh passed 120/120 on the branch commit (a5b5a92, same code; the merge commit differs only in comments and docs, which moves panic-location strings and so the hash). The canister crate changed in #72: registry writes carry a 1M gas limit instead of 150k. The first governed deploy's ic-vote#app record (Sepolia nonce 20, tx 0xd68214fa...16a2) had reverted out of gas: creating a key costs 354k on Sepolia today where an overwrite costs 57k, so every first record for a repo would have failed while republishes passed. Unused gas is refunded; the deploy status now reads 'app record tx 0x...' since it reports the broadcast. No other behaviour changed. Every published site (ic-git, ic-vote, ic-git-loader, ic-git-extension, ic-git-extension-firefox) still verifies after the upgrade"
+      },
+      "wasm_sha256": "0002b3ab299cb43fda1ea54ed309b4ed542f9e8cc983f17cb0d2496d987cad01"
     }
   ]
 }
