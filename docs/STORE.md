@@ -28,8 +28,8 @@ The same text serves both stores.
 **Name:** ic-git verifier
 
 **Summary (short description):** Checks ic-git sites against their
-on-chain record before they run, runs only the verified page, and lets it
-call only approved canisters.
+on-chain record, runs only the verified page, and lets it call only
+approved canisters.
 
 **Description:**
 
@@ -48,17 +48,24 @@ call only approved canisters.
 > from the Internet Computer's signed state certificate, verified against
 > the network's public key. A backend that only ic-git controls, running
 > the build its voters approved and recorded on chain, is allowed; so are
-> the Internet Computer's own ledgers. A backend whose owner can change it
-> without a vote is allowed with a warning; a call to any other canister
-> is blocked, and the extension says which canister and why.
+> the Internet Computer's own system canisters (its ledgers and the
+> cycles minting canister), and a canister nobody controls, whose code can
+> never change. A backend whose owner can change it without a vote is
+> allowed with a warning. A backend ic-git controls that runs no approved
+> build, or a canister whose state cannot be certified, is blocked; so, in
+> Chrome, is any canister not judged with the site (Firefox judges one the
+> first time the page calls it). The extension says which canister and
+> why.
 >
 > It reads public records only: the page itself, the ic-git canister's
 > public queries, and the registry through two public Ethereum RPC
 > endpoints that must agree. To look a site's record up it has to name
-> the site (and, for the backend check, the canisters it calls), so the operators of those endpoints -- the Internet Computer's
-> public API gateway and the two RPC providers -- see which ic-git site
-> is being checked and from which network address, when you open it and
-> every ten minutes after while the browser stays open. That is all it
+> the site (and, for the backend check, the canisters it calls), so the
+> operators of those endpoints -- the Internet Computer's public API
+> gateway and the two RPC providers -- see which ic-git site is being
+> checked and from which network address, when you open it and every ten
+> minutes after while the browser stays open (and, in Firefox, when the
+> page first calls a canister not yet checked). That is all it
 > sends: no page content, nothing you type, no identifier, and nothing to
 > the extension's authors, who run no server and collect nothing.
 >
@@ -69,26 +76,31 @@ call only approved canisters.
 **Category:** Developer Tools (Chrome) / Privacy & Security (Firefox).
 
 **Single purpose (Chrome):** Verify pages served from the ic-git canister
-against their on-chain record before they run, and block pages that do
-not match.
+against their on-chain record before they run, block pages that do not
+match, and let a verified page call only the canisters judged for it.
 
 **Permission justifications (Chrome):**
 
 - `declarativeNetRequest`: to set a Content-Security-Policy on pages of
   the ic-git canister -- no scripts until a page verifies, then only that
   page's own scripts -- and to send `/site/<repo>` to `/site/<repo>/`, the
-  address its record covers.
-- `storage`: to remember, for the browser session, which sites verified
-  and with which policy, so a verified page needs no second check.
+  address its record covers; and to block calls from those pages to the
+  Internet Computer's API except, per tab, to the canisters judged for
+  the site the tab shows.
+- `storage`: to remember, for the browser session, which sites verified,
+  with which policy, and which canisters each may call, so a verified page
+  needs no second check.
 - `alarms`: to re-check verified sites every ten minutes, so a new record
   takes effect without waiting for a visit.
 - Host permission `umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io`: the ic-git
   canister whose pages are verified.
 - Host permission `icp-api.io`: the Internet Computer's public query
-  endpoint, to read the canister's git objects for the commit check.
+  endpoint, to read the canister's git objects for the commit check, and
+  the certified code hash and controllers of each canister a verified
+  page may call.
 - Host permissions `ethereum-sepolia-rpc.publicnode.com` and
   `sepolia.gateway.tenderly.co`: two public RPC endpoints, read together,
-  for the on-chain record.
+  for the on-chain record (the site's, and its backend's approved build).
 
 **Host permissions (Firefox, new in 0.2.0):** `icp0.io`, `*.icp0.io`,
 `ic0.app`, `*.ic0.app`, so the extension can see and cancel a verified
@@ -116,9 +128,10 @@ privacy policy page
 **Firefox data collection:** the manifest declares browsing activity as
 required (`data_collection_permissions: { required: ["browsingActivity"] }`),
 for the same lookups: Mozilla counts any data sent outside the browser,
-and the name of the site being checked goes to `icp-api.io` and the two
-RPC endpoints. Firefox shows this at install. Nothing else is sent, so no
-other category is declared.
+and the name of the site being checked, and the ids of the canisters its
+page may call, go to `icp-api.io` and the two RPC endpoints. Firefox
+shows this at install. Nothing else is sent, so no other category is
+declared.
 
 **Firefox source code:** not needed -- nothing is minified or built.
 

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ic-git verifier",
   "version": "0.2.0",
-  "description": "Checks ic-git sites against their on-chain record, shows only the checked page running only its verified scripts, and lets it call only approved canisters.",
+  "description": "Checks ic-git sites against their on-chain record, runs only their verified scripts, and lets them call only approved canisters.",
   "permissions": [
     "declarativeNetRequest",
     "storage",
