@@ -364,11 +364,11 @@ Then add a row to Releases.
 The newest row per package is the record on chain. 0.1.0 was published
 but never submitted to a store; 0.1.1 superseded it, and was submitted
 to both stores on 2026-10-01. Users pass the Chrome store id to `--id`.
-The packages in git are 0.2.0 -- the tightened check E in their shared
-scanner (0.1.2, never published on its own), the certified reader, and
-the backend check -- and are not yet published. Firefox's 0.2.0 asks for
-host permissions on `icp0.io` and `ic0.app` too, to cancel a page's calls
-through those hosts.
+0.2.0 -- the tightened check E in the shared scanner (0.1.2, never
+published on its own), the certified reader, and the backend check --
+was published on 2026-10-09 and submitted to both stores. Firefox's
+0.2.0 asks for host permissions on `icp0.io` and `ic0.app` too, to cancel
+a page's calls through those hosts.
 
 | Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx | Chrome store id |
 |---|---|---|---|---|---|---|
@@ -376,14 +376,13 @@ through those hosts.
 | 2026-10-01 | Firefox (`ic-git-extension-firefox`) | 0.1.0 | `0e80cf60a1e6530bd2565260f98c809f67551f53` | `6df0039686c702bff3207feaed50acfdedf257ef0016797a1805a8acb06d77f7` | [`0x4ddb7587...593a`](https://sepolia.etherscan.io/tx/0x4ddb7587547dd46fdcdc18e99138ffbaed945c73c4617d90dc9f9ece5a92593a) (Sepolia 11822495) | n/a |
 | 2026-10-01 | Chrome (`ic-git-extension`) | 0.1.1 | `848be9dd48c1db879884076f0e71f8ae1d52e010` | `70696452d02ef89721051b78e73d385e1c557436c65670f659dc57c8475d0cef` | [`0x757dd912...7d1b`](https://sepolia.etherscan.io/tx/0x757dd912d7a416ffbbdd4c84abadd7c0f88db547d3f01183bc11051cd5cc7d1b) (Sepolia 11824283) | `fdcegfanhmpdnbcalfjdlboebhknkhco` |
 | 2026-10-01 | Firefox (`ic-git-extension-firefox`) | 0.1.1 | `848be9dd48c1db879884076f0e71f8ae1d52e010` | `44aa3e1d6b860c20be70dc57a91d197290c07efb5cb4c076378fba9bd1323174` | [`0x44169d53...7209`](https://sepolia.etherscan.io/tx/0x44169d53f85a8dcb5ca064f0557ec9feac3ac171f7a2ad366896dd0ade6c7209) (Sepolia 11824285) | n/a |
+| 2026-10-09 | Chrome (`ic-git-extension`) | 0.2.0 | `3850d185eb713c96106ead6bbdc49ec9be3f1b23` | `883446f310ef7b732c86f0eab5f6c20af7d694772e5d8329dbf62901ec52be8c` | [`0x0b5cc068...2780`](https://sepolia.etherscan.io/tx/0x0b5cc068d0dcb547eddcc06cac1bac8933da5beb07068307946393009e4c2780) (Sepolia 11878294) | `fdcegfanhmpdnbcalfjdlboebhknkhco` |
+| 2026-10-09 | Firefox (`ic-git-extension-firefox`) | 0.2.0 | `3850d185eb713c96106ead6bbdc49ec9be3f1b23` | `fd899007641fc1ee13733bf4f08d2f1cc60c809eaeae6cdf80a459a2539636f7` | [`0x9d61795d...3174`](https://sepolia.etherscan.io/tx/0x9d61795de41de61cfaa7e0151a6950eb57492650b1fb81e28f1ebf6526683174) (Sepolia 11878302) | n/a |
 
 ## Next
 
-- Release the tightened check E: the canister (the next canister release)
-  and the extensions (0.1.2, below) -- the 0.1.2 records published and
-  submitted once the stores have approved 0.1.1.
-- Check the first store-installed copy of each package with `--digest`
-  before users are told to rely on it (docs/STORE.md).
+- Check the first store-installed copy of each package (0.2.0) with
+  `--digest` before users are told to rely on it (docs/STORE.md).
 - The extension hashing its own files and showing whether they match the
   record: catches an unpublished update, not a tampered extension, which
   would lie about itself.
