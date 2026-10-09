@@ -123,6 +123,16 @@ if [ "$use_docker" = 1 ]; then
   else
     echo "artifact            : $out"
   fi
+  # The governor, built in the same container run (Dockerfile.build).
+  gov_wasm=$(echo "$hashes" | awk '$2=="governor.wasm"{print $1}')
+  gov_gz=$(echo "$hashes" | awk '$2=="governor.wasm.gz"{print $1}')
+  if [ -n "$gov_gz" ]; then
+    gov_out="target/reproducible/governor-${commit:0:7}.wasm.gz"
+    export_wasm ic-git-build "$gov_out" "$gov_gz" governor.wasm.gz
+    echo "governor raw sha256 : $gov_wasm"
+    echo "governor sha256     : $gov_gz"
+    echo "governor artifact   : $gov_out"
+  fi
   # The resolved base-image digest belongs in the attested BuildDescriptor
   # (docs/ATTESTATION.md): the Dockerfile pins a tag by default, and a tag can
   # move. Print what was actually used so verified.json can record it.

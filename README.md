@@ -42,6 +42,9 @@ canisters/git/          the git canister (Rust)
   src/lib.rs            HTTP routing + candid admin API
   src/site.rs           GET /site/<repo>/<path>: serve a committed static bundle
   src/api.rs            GET /api/...: read-only JSON for the repo browser
+canisters/governor/     the governor: ic-git's only controller once handed
+                        over; changes its code only by K-of-N vote
+                        (docs/GOVERNOR.md; tools/governor.sh drives it)
 browser/index.html      the repo browser -- one self-contained page, served by
                         ic-git from its own repo (see "Repo browser")
 tools/seed-repo.sh      upload a local repo via the admin API (pre-m3 push)

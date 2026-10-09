@@ -6,6 +6,11 @@
       "package": "git_canister",
       "candid": "canisters/git/git.did"
     },
+    "governor": {
+      "type": "custom",
+      "wasm": "target/wasm32-unknown-unknown/release/governor_canister.wasm",
+      "candid": "canisters/governor/governor.did"
+    },
     "www": {
       "type": "assets",
       "source": ["site"]

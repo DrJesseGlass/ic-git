@@ -1,0 +1,116 @@
+type Ballot = record {
+  decision : Decision;
+  at_ns : nat64;
+  approver : principal;
+  reason : opt text;
+};
+// What a proposal would do.
+type Change = variant {
+  // Replace the approvers and the threshold.
+  Policy : record { threshold : nat32; approvers : vec principal };
+  // Install the module whose sha256 is `module_sha256` (hex) into the
+  // target in upgrade mode, with `arg`. `commit` is the ic-git commit
+  // (40 hex digits) it is built from.
+  Upgrade : record { arg : blob; module_sha256 : text; commit : text };
+  // Make `successor` the target's only controller.
+  Handover : record { successor : principal };
+};
+type Count = record {
+  reached : bool;
+  required : nat32;
+  objections : nat32;
+  approvals : nat32;
+};
+// Which way an approver voted.
+type Decision = variant {
+  // Counts toward the threshold.
+  Approve;
+  // Does not, and counts against nothing: "no", or an approval
+  // withdrawn. A rejection is recorded rather than dropped so a tally
+  // can tell "voted no" from "has not voted", and so that replacing it
+  // later with an approval needs a newer ballot.
+  Reject;
+  // Counts against: a subject with an objection needs one more approval
+  // to be reached. That is no veto while the policy has an approver to
+  // spare, K at most N - 2; above that nobody is left to outweigh it,
+  // and it holds the subject until withdrawn. It must say why, in
+  // [`Approval::reason`].
+  Object;
+};
+type Info = record {
+  threshold : nat32;
+  // Set once a Handover has executed; the governor is inert after it.
+  handed_over_to : opt principal;
+  version : text;
+  target : principal;
+  approvers : vec principal;
+};
+type InitArgs = record {
+  threshold : nat32;
+  // The canister this governor controls: ic-git (umobs on mainnet).
+  target : principal;
+  approvers : vec principal;
+};
+type LogEntry = record {
+  id : nat64;
+  at_ns : nat64;
+  ballots : vec Ballot;
+  proposer : principal;
+  change : Change;
+  // "executed: ...", or "withdrawn".
+  outcome : text;
+};
+type ProposalView = record {
+  id : nat64;
+  // Why the last attempt to execute it failed, if one did.
+  last_error : opt text;
+  at_ns : nat64;
+  ballots : vec Ballot;
+  // Upgrade only: bytes staged so far, their sha256, and whether that is
+  // the proposal's module (ballots are taken only then).
+  staged_bytes : nat64;
+  count : Count;
+  staged_sha256 : text;
+  proposer : principal;
+  change : Change;
+  ready : bool;
+};
+type Result = variant { Ok : text; Err : text };
+type Result_1 = variant { Ok : nat64; Err : text };
+type Result_2 = variant { Ok : StageStatus; Err : text };
+type Result_3 = variant { Ok : VoteOutcome; Err : text };
+type Result_4 = variant { Ok; Err : text };
+type StageStatus = record {
+  staged_bytes : nat64;
+  staged_sha256 : text;
+  ready : bool;
+};
+type VoteOutcome = record {
+  count : Count;
+  // Present when this ballot brought the proposal to K: what executing
+  // it did, or why it failed (it can then be retried with `execute`).
+  executed : opt Result;
+};
+service : (InitArgs) -> {
+  // Retry a proposal that reached K but failed to execute (or reached it by
+  // a policy change). Approvers only.
+  execute : (nat64) -> (Result);
+  info : () -> (Info) query;
+  // Every executed or withdrawn proposal, oldest first, with its ballots.
+  log : () -> (vec LogEntry) query;
+  proposals : () -> (vec ProposalView) query;
+  // Open a proposal. Approvers only. Ballots are separate (`vote`); an
+  // upgrade's module must be staged (`stage`) before any are taken.
+  propose : (Change) -> (Result_1);
+  // Write a chunk of an upgrade proposal's module at `offset`, which must be
+  // the bytes staged so far (`staged_bytes`). Resending a chunk already
+  // held is harmless. Approvers only; nothing extends a module whose staged
+  // bytes already hash to the proposal's module_sha256.
+  stage : (nat64, nat64, blob) -> (Result_2);
+  // Approve, reject or object (with a reason). A later ballot replaces the
+  // caller's earlier one. The ballot that brings the proposal to K executes
+  // it in the same call.
+  vote : (nat64, Decision, opt text) -> (Result_3);
+  // Drop an open proposal. Its proposer only.
+  withdraw : (nat64) -> (Result_4);
+}

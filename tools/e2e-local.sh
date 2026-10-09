@@ -32,7 +32,10 @@
 # behind its tip, checking the state carries over unchanged and each rule
 # still holds; from v0.2.x, an old-format token and a tip-serving site,
 # checking each migration lands -- and in both, membership, votes and a
-# name that only maps to a label; the console's query-backed reads
+# name that only maps to a label; the governor's whole life against a
+# second ic-git (docs/GOVERNOR.md: made immutable, an upgrade staged and
+# voted, the policy grown, an objection, a withdrawal, the handover); the
+# console's query-backed reads
 # through the page's own code, and the /api reads.
 #
 # Not covered: wallet writes (OISY signs mainnet only), the EVM leg (no EVM
@@ -100,8 +103,9 @@ call() {
 ok_text() { sed -n 's/.*Ok = "\([^"]*\)".*/\1/p'; }
 
 section "build"
-(cd "$ROOT" && cargo build -q --target wasm32-unknown-unknown --release -p git_canister)
+(cd "$ROOT" && cargo build -q --target wasm32-unknown-unknown --release -p git_canister -p governor_canister)
 GIT_WASM=$ROOT/target/wasm32-unknown-unknown/release/git_canister.wasm
+GOV_WASM=$ROOT/target/wasm32-unknown-unknown/release/governor_canister.wasm
 NAMES_WASM=
 if [ -d "$NAMES_REPO/canisters/names" ]; then
   (cd "$NAMES_REPO" && cargo build -q --target wasm32-unknown-unknown --release -p name_canister)
@@ -130,7 +134,9 @@ cat > "$WORK/dfx.json" <<EOF
   "version": 1,
   "canisters": {
     "git": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] },
-    "base": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] }$NAMES_ENTRY
+    "base": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] },
+    "ruled": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] },
+    "governor": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] }$NAMES_ENTRY
   },
   "networks": { "local": { "bind": "127.0.0.1:$PORT", "type": "ephemeral" } }
 }
@@ -519,6 +525,107 @@ if [ -n "$BASE_WASM" ]; then
   expect "membership kept" "$INFO" "$T"
   expect "required votes kept" "$INFO" 'required_votes = 1'
 fi
+
+section "governor"
+# docs/GOVERNANCE.md, section 5, rehearsed on a second ic-git: the governor
+# becomes its only controller and has none itself; an upgrade is a proposal
+# whose module is staged in chunks and voted on by hash; the policy grows
+# by vote; an objection holds an upgrade until outweighed or withdrawn; and
+# a handover gives the target away, after which the governor is inert.
+(cd "$WORK" && dfx canister create ruled --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
+(cd "$WORK" && dfx canister install ruled --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
+R=$(cd "$WORK" && dfx canister id ruled)
+call "$OP" ruled create_repo '("kept")' >/dev/null
+(cd "$WORK" && dfx canister create governor --identity "$OP" --no-wallet --with-cycles 20000000000000 >/dev/null 2>&1)
+OPP=$(dfx identity get-principal --identity "$OP")
+(cd "$WORK" && dfx canister install governor --identity "$OP" --wasm "$GOV_WASM" \
+  --argument "(record { target = principal \"$R\"; approvers = vec { principal \"$OPP\" }; threshold = 1 : nat32 })" >/dev/null 2>&1)
+GOV=$(cd "$WORK" && dfx canister id governor)
+gov() { local who=$1; shift; call "$who" governor "$@"; }
+expect "governor installed, 1 of 1" "$(flat "$(gov "$OP" info --query)")" "threshold = 1 : nat32.*target = principal \"$R\""
+# Immutable: the governor drops its last controller. Then the target goes to it alone.
+(cd "$WORK" && dfx canister update-settings governor --remove-controller "$OPP" --yes --identity "$OP" >/dev/null 2>&1)
+expect "the governor has no controllers" "$(flat "$(cd "$WORK" && dfx canister info "$GOV" --identity "$OP" 2>&1)")" "Controllers: *Module"
+# A different module each time: dfx skips an install of the module already
+# there without asking the IC, which would prove nothing.
+expect "  ...so nobody can upgrade it" "$(cd "$WORK" && dfx canister install governor --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" 2>&1 || true)" 'controller'
+(cd "$WORK" && dfx canister update-settings ruled --set-controller "$GOV" --yes --identity "$OP" >/dev/null 2>&1)
+expect "the target is controlled by the governor alone" "$(flat "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)")" "Controllers: $GOV *Module"
+expect "  ...so its old controller cannot upgrade it" "$(cd "$WORK" && dfx canister install ruled --mode upgrade --yes --identity "$OP" --wasm "$GOV_WASM" 2>&1 || true)" 'controller'
+expect "only a controller may publish the target's record" "$(call "$OP" ruled registry_publish_canister "(\"$(printf 'a%.0s' $(seq 40))\", \"$(printf 'b%.0s' $(seq 64))\")")" 'only a controller'
+
+# Stage MODULE for proposal ID in 512 KiB chunks, as blob arguments in files,
+# each at its offset; a call that fails is retried (a resent chunk is a no-op).
+stage() {
+  local who=$1 id=$2 file=$3 part last= off=0 try
+  rm -rf "$WORK/chunks"; mkdir "$WORK/chunks"
+  split -b 524288 "$file" "$WORK/chunks/c."
+  for part in "$WORK/chunks"/c.*; do
+    printf '(%s : nat64, %s : nat64, blob "%s")' "$id" "$off" "$(od -An -v -tx1 "$part" | tr -d ' \n' | sed 's/../\\&/g')" >"$part.arg"
+    for try in 1 2 3; do
+      last=$(gov "$who" stage --argument-file "$part.arg")
+      printf '%s' "$last" | grep -q 'Ok = record' && break
+    done
+    off=$((off + $(wc -c <"$part")))
+  done
+  printf '%s' "$last"
+}
+sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+GZ=$WORK/git.wasm.gz
+gzip -9 -n -c "$GIT_WASM" >"$GZ"
+GZ_SHA=$(sha "$GZ")
+RAW_SHA=$(sha "$GIT_WASM")
+COMMIT=$(git -C "$ROOT" rev-parse HEAD)
+upgrade_to() { printf '(variant { Upgrade = record { commit = "%s"; module_sha256 = "%s"; arg = blob "" } })' "$COMMIT" "$1"; }
+id_of() { sed -n 's/.*Ok = \([0-9_]*\) : nat64.*/\1/p' | tr -d _; }
+expect "a non-approver cannot propose" "$(gov "$TEN" propose "$(upgrade_to "$GZ_SHA")")" 'only an approver'
+U1=$(gov "$OP" propose "$(upgrade_to "$GZ_SHA")" | id_of)
+expect "an upgrade is proposed" "$U1" '^[0-9]+$'
+expect "no ballot before the module is staged" "$(gov "$OP" vote "($U1 : nat64, variant { Approve }, null)")" 'stage the whole module'
+expect "a non-approver cannot stage" "$(gov "$TEN" stage "($U1 : nat64, 0 : nat64, blob \"\\00\")")" 'only an approver'
+expect "a chunk at the wrong offset is refused" "$(gov "$OP" stage "($U1 : nat64, 7 : nat64, blob \"\\00\")")" 'expected offset 0'
+expect "the module is staged in chunks, hash matching" "$(flat "$(stage "$OP" "$U1" "$GZ")")" "ready = true.*staged_sha256 = \"$GZ_SHA\"|staged_sha256 = \"$GZ_SHA\".*ready = true"
+OUT=$(flat "$(gov "$OP" vote "($U1 : nat64, variant { Approve }, null)")")
+expect "1 of 1 approves: executed in the same call" "$OUT" "reached = true.*Ok = \"upgraded $R to $GZ_SHA"
+expect "  ...the target asked the new code to publish its record (no registry here)" "$OUT" 'record not published'
+expect "  ...the IC reports the voted module" "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)" "Module hash: 0x$GZ_SHA"
+expect "  ...and the target's state survived" "$(call "$OP" ruled get_repo_info '("kept")' --query)" 'opt record'
+expect "  ...and it is logged with its ballot" "$(flat "$(gov "$OP" log --query)")" "id = $U1 : nat64.*outcome = \"executed: upgraded"
+
+# The policy grows by vote: 1 of 1 adds two approvers and raises K to 2.
+P1=$(dfx identity get-principal --identity "$V1")
+P2=$(dfx identity get-principal --identity "$V2")
+PO=$(gov "$OP" propose "(variant { Policy = record { approvers = vec { principal \"$OPP\"; principal \"$P1\"; principal \"$P2\" }; threshold = 2 : nat32 } })" | id_of)
+expect "K = 0 is refused when proposed" "$(gov "$OP" propose "(variant { Policy = record { approvers = vec { principal \"$OPP\" }; threshold = 0 : nat32 } })")" 'at least 1'
+expect "policy change executed by the one approver" "$(flat "$(gov "$OP" vote "($PO : nat64, variant { Approve }, null)")")" 'policy is now 2 of 3'
+expect "  ...in effect" "$(flat "$(gov "$OP" info --query)")" 'threshold = 2 : nat32'
+
+# Under 2 of 3 an upgrade (back to the raw module) waits, and an objection holds it.
+U2=$(gov "$V1" propose "$(upgrade_to "$RAW_SHA")" | id_of)
+stage "$V1" "$U2" "$GIT_WASM" >/dev/null
+expect "one approval of two: held" "$(flat "$(gov "$OP" vote "($U2 : nat64, variant { Approve }, null)")")" 'reached = false'
+expect "an objection needs a reason" "$(gov "$V2" vote "($U2 : nat64, variant { Object }, null)")" 'reason'
+expect "an objection with a reason is counted" "$(flat "$(gov "$V2" vote "($U2 : nat64, variant { Object }, opt \"rebuild did not match yet\")")")" 'objections = 1'
+expect "  ...and a second approval does not outweigh it (2 - 1 < 2)" "$(flat "$(gov "$V1" vote "($U2 : nat64, variant { Approve }, null)")")" 'reached = false'
+expect "  ...the proposal lists the objection's reason" "$(gov "$OP" proposals --query)" 'rebuild did not match yet'
+expect "  ...and the module is unchanged" "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)" "Module hash: 0x$GZ_SHA"
+expect "the objector approves instead: 3 approvals, executed" "$(flat "$(gov "$V2" vote "($U2 : nat64, variant { Approve }, null)")")" "Ok = \"upgraded $R to $RAW_SHA"
+expect "  ...the IC reports it" "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)" "Module hash: 0x$RAW_SHA"
+
+# A withdrawn proposal is logged and gone.
+W=$(gov "$V1" propose "(variant { Handover = record { successor = principal \"$P1\" } })" | id_of)
+expect "only the proposer withdraws" "$(gov "$OP" withdraw "($W : nat64)")" 'only the proposer'
+gov "$V1" withdraw "($W : nat64)" >/dev/null
+expect "  ...withdrawn and logged" "$(flat "$(gov "$OP" log --query)")" "id = $W : nat64.*outcome = \"withdrawn\""
+
+# The handover: the target to a successor (here the operator), 2 of 3.
+H=$(gov "$OP" propose "(variant { Handover = record { successor = principal \"$OPP\" } })" | id_of)
+gov "$OP" vote "($H : nat64, variant { Approve }, null)" >/dev/null
+expect "handover executed at the second approval" "$(flat "$(gov "$V2" vote "($H : nat64, variant { Approve }, null)")")" "is now controlled by $OPP alone"
+expect "  ...the target's only controller is the successor" "$(flat "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)")" "Controllers: $OPP *Module"
+expect "  ...the governor says so" "$(flat "$(gov "$OP" info --query)")" "handed_over_to = opt principal \"$OPP\""
+expect "  ...and refuses anything further" "$(gov "$OP" propose "$(upgrade_to "$GZ_SHA")")" 'inert'
+expect "the successor can upgrade the target again" "$( (cd "$WORK" && dfx canister install ruled --mode upgrade --yes --identity "$OP" --wasm "$GZ" 2>&1) || true)" 'Upgraded|Installed|Module hash'
 
 section "console reads"
 for p in pricing e2e-app/info "account/$T" e2e-app/deploys; do

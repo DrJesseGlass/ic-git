@@ -28,6 +28,12 @@ const SITE_KEY_SUFFIX: &str = "#site";
 /// install on a governed repo, so what the chain says the backend runs is
 /// an approved commit's build, by a key nobody but this canister can write.
 const APP_KEY_SUFFIX: &str = "#app";
+/// Key of this canister's own record: the ic-git commit it was built from
+/// and the sha256 of the module installed into it, the hash the IC
+/// certifies for it. Published after each upgrade by the controller that
+/// made it -- the governor (docs/GOVERNANCE.md, section 5) -- so a verifier
+/// can check ic-git itself the way it checks a governed backend.
+const CANISTER_KEY: &str = "ic-git#canister";
 
 /// A resolved provenance record: the registry key, the commit being attested,
 /// and the artifact hash bound to it.
@@ -89,6 +95,27 @@ pub fn app_record(repo: &str, commit_oid: &Oid, wasm_sha256_hex: &str) -> Result
     Ok(Record {
         key: format!("{repo}{APP_KEY_SUFFIX}"),
         commit: commit20(commit_oid)?,
+        bundle,
+    })
+}
+
+/// This canister's own record, from the values its controller states: the
+/// commit as 40 hex digits and the installed module's sha256 as 64. The
+/// canister cannot read its own module hash, so it takes the controller's
+/// word; a wrong one only makes the record disagree with the hash the IC
+/// certifies, which every reader of the record checks.
+pub fn canister_record(commit_hex: &str, module_sha256_hex: &str) -> Result<Record, String> {
+    let commit: [u8; 20] = hex::decode(commit_hex)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or("commit must be 40 hex digits")?;
+    let bundle: [u8; 32] = hex::decode(module_sha256_hex)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or("module hash must be 64 hex digits")?;
+    Ok(Record {
+        key: CANISTER_KEY.to_string(),
+        commit,
         bundle,
     })
 }
@@ -267,6 +294,19 @@ mod tests {
         assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
         assert!(app_record("apprepo", &commit_oid, "abcd").is_err(), "a short hash is refused");
         assert!(app_record("apprepo", &commit_oid, "").is_err(), "no hash is refused");
+    }
+
+    #[test]
+    fn canister_record_takes_full_hex_values() {
+        let commit = "a23ee3157b7837eaa205cdc9f7f5dbadd243b1ce";
+        let hash = "30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a";
+        let rec = canister_record(commit, hash).expect("record");
+        assert_eq!(rec.key, "ic-git#canister");
+        assert_eq!(hex::encode(rec.commit), commit);
+        assert_eq!(hex::encode(rec.bundle), hash);
+        assert!(canister_record(&commit[..39], hash).is_err(), "a short commit");
+        assert!(canister_record(commit, &hash[..62]).is_err(), "a short hash");
+        assert!(canister_record("zz", hash).is_err(), "not hex");
     }
 
     /// A deploy record's key is the bare repo name and its bundle is the

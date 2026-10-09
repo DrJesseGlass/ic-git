@@ -120,6 +120,13 @@ replica first -- proposal, vote, objection, upgrade, successor handover --
 and the governor's own build is reproducible and recorded before it gets
 control. Afterwards the extensions also check umobs' certified controllers.
 
+Built: `canisters/governor`, with Upgrade, Policy and Handover proposals,
+no emergency path, and the operator's key as the first 1 of 1 approver;
+ic-git publishes `ic-git#canister` when the governor asks after an
+upgrade. docs/GOVERNOR.md has the rules, the approver's checklist, the
+rehearsal (`tools/e2e-local.sh`, section "governor") and the staged
+mainnet rollout, whose last step is the only irreversible one.
+
 ## 6. Notifications
 
 - **Activity feeds (first):** each repo, and the governor, serve an Atom
@@ -152,6 +159,8 @@ need to look.
    loader (docs/EXTENSION.md, "What the page talks to").
 5. Activity feeds.
 6. The governor: build, rehearse locally, record, then the mainnet handover.
+   Built and rehearsed (docs/GOVERNOR.md); the mainnet steps follow its
+   release.
 7. Push notifications (Dmail), once confirmed.
 
 ## Open questions
@@ -165,6 +174,8 @@ need to look.
 - The wallet path (OISY sending a page's call from its own window): out
   of the extensions' sight; documented, not shimmed (docs/EXTENSION.md).
 - How a governed backend's emergency is handled without an escape hatch
-  (expedited proposals with a lower K and a short delay, or none).
+  (expedited proposals with a lower K and a short delay, or none). For
+  the governor: none for now (docs/GOVERNOR.md); revisit with more
+  approvers.
 - Whether objections should also extend a waiting period before a passing
   commit deploys, giving others time to look.

@@ -537,6 +537,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "governor_canister"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "hex",
+ "ic-cdk",
+ "ic-multisig",
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

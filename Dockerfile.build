@@ -71,7 +71,12 @@ RUN cargo fetch --locked --target wasm32-unknown-unknown \
     && sha256sum -c /tmp/Cargo.lock.sha256 \
     && cp .dfx/ic/canisters/git/git.wasm git_canister.wasm \
     && gzip -9 -n -c git_canister.wasm > git_canister.wasm.gz \
-    && sha256sum git_canister.wasm git_canister.wasm.gz | tee git_canister.wasm.sha256
+    && sha256sum git_canister.wasm git_canister.wasm.gz | tee git_canister.wasm.sha256 \
+    && cargo build --locked --release --target wasm32-unknown-unknown -p governor_canister \
+    && sha256sum -c /tmp/Cargo.lock.sha256 \
+    && cp target/wasm32-unknown-unknown/release/governor_canister.wasm governor.wasm \
+    && gzip -9 -n -c governor.wasm > governor.wasm.gz \
+    && sha256sum governor.wasm governor.wasm.gz | tee governor.wasm.sha256
 
 # The installed artifact is the GZIPPED module: the IC accepts gzip-compressed
 # wasm and reports the module hash of the compressed bytes, and the module is
@@ -79,6 +84,11 @@ RUN cargo fetch --locked --target wasm32-unknown-unknown \
 # 3x. `gzip -n` omits the timestamp and name, and the gzip binary is the
 # base image's, so the .gz is as reproducible as the .wasm. Both hashes are
 # printed; the on-chain hash matches the .gz line.
+#
+# The governor (canisters/governor, docs/GOVERNANCE.md section 5) is built in
+# the same run, after ic-git's hashes are taken, with plain cargo: it carries
+# no candid metadata (callers pass canisters/governor/governor.did), and its
+# build cannot touch ic-git's bytes, which are already copied out and hashed.
 #
 # Declared AFTER the build so it can never invalidate the build layer or reach
 # the wasm: it only records WHICH tree produced the hash above. .git is not in
@@ -88,4 +98,4 @@ RUN cargo fetch --locked --target wasm32-unknown-unknown \
 ARG SOURCE_COMMIT=unknown
 LABEL org.opencontainers.image.revision=${SOURCE_COMMIT}
 
-CMD ["cat", "/build/git_canister.wasm.sha256"]
+CMD ["cat", "/build/git_canister.wasm.sha256", "/build/governor.wasm.sha256"]
