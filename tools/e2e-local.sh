@@ -581,7 +581,7 @@ id_of() { sed -n 's/.*Ok = \([0-9_]*\) : nat64.*/\1/p' | tr -d _; }
 expect "a non-approver cannot propose" "$(gov "$TEN" propose "$(upgrade_to "$GZ_SHA")")" 'only an approver'
 U1=$(gov "$OP" propose "$(upgrade_to "$GZ_SHA")" | id_of)
 expect "an upgrade is proposed" "$U1" '^[0-9]+$'
-expect "no ballot before the module is staged" "$(gov "$OP" vote "($U1 : nat64, variant { Approve }, null)")" 'stage the whole module'
+expect "no approval before the module is staged" "$(gov "$OP" vote "($U1 : nat64, variant { Approve }, null)")" 'stage the whole module'
 expect "a non-approver cannot stage" "$(gov "$TEN" stage "($U1 : nat64, 0 : nat64, blob \"\\00\")")" 'only an approver'
 expect "a chunk at the wrong offset is refused" "$(gov "$OP" stage "($U1 : nat64, 7 : nat64, blob \"\\00\")")" 'expected offset 0'
 expect "the module is staged in chunks, hash matching" "$(flat "$(stage "$OP" "$U1" "$GZ")")" "ready = true.*staged_sha256 = \"$GZ_SHA\"|staged_sha256 = \"$GZ_SHA\".*ready = true"
@@ -590,7 +590,7 @@ expect "1 of 1 approves: executed in the same call" "$OUT" "reached = true.*Ok =
 expect "  ...the target asked the new code to publish its record (no registry here)" "$OUT" 'record not published'
 expect "  ...the IC reports the voted module" "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)" "Module hash: 0x$GZ_SHA"
 expect "  ...and the target's state survived" "$(call "$OP" ruled get_repo_info '("kept")' --query)" 'opt record'
-expect "  ...and it is logged with its ballot" "$(flat "$(gov "$OP" log --query)")" "id = $U1 : nat64.*outcome = \"executed: upgraded"
+expect "  ...and it is logged with its ballot" "$(flat "$(gov "$OP" log '(0 : nat64, 100 : nat32)' --query)")" "id = $U1 : nat64.*outcome = \"executed: upgraded"
 
 # The policy grows by vote: 1 of 1 adds two approvers and raises K to 2.
 P1=$(dfx identity get-principal --identity "$V1")
@@ -616,7 +616,15 @@ expect "  ...the IC reports it" "$(cd "$WORK" && dfx canister info "$R" --identi
 W=$(gov "$V1" propose "(variant { Handover = record { successor = principal \"$P1\" } })" | id_of)
 expect "only the proposer withdraws" "$(gov "$OP" withdraw "($W : nat64)")" 'only the proposer'
 gov "$V1" withdraw "($W : nat64)" >/dev/null
-expect "  ...withdrawn and logged" "$(flat "$(gov "$OP" log --query)")" "id = $W : nat64.*outcome = \"withdrawn\""
+expect "  ...withdrawn and logged" "$(flat "$(gov "$OP" log '(0 : nat64, 100 : nat32)' --query)")" "id = $W : nat64.*outcome = \"withdrawn\""
+# One the approvers turn down (2 of 3: two against) any approver can withdraw.
+D=$(gov "$V1" propose "$(upgrade_to "$(printf '0%.0s' $(seq 64))")" | id_of)
+gov "$OP" vote "($D : nat64, variant { Reject }, null)" >/dev/null
+expect "one rejection of three: only the proposer can still withdraw" "$(gov "$OP" withdraw "($D : nat64)")" 'not turned down'
+gov "$V2" vote "($D : nat64, variant { Object }, opt \"no such build\")" >/dev/null
+gov "$OP" withdraw "($D : nat64)" >/dev/null
+expect "  ...two against: another approver withdraws it" "$(flat "$(gov "$OP" log '(0 : nat64, 100 : nat32)' --query)")" "id = $D : nat64.*outcome = \"withdrawn\""
+expect "a handover to the governor itself is refused" "$(gov "$OP" propose "(variant { Handover = record { successor = principal \"$GOV\" } })")" 'this governor'
 
 # The handover: the target to a successor (here the operator), 2 of 3.
 H=$(gov "$OP" propose "(variant { Handover = record { successor = principal \"$OPP\" } })" | id_of)

@@ -60,6 +60,14 @@ type LogEntry = record {
   // "executed: ...", or "withdrawn".
   outcome : text;
 };
+type LogPage = record {
+  // How many entries the log holds.
+  total : nat64;
+  // The position to ask for next, if there are more.
+  next : opt nat64;
+  // Entries from the requested position on, oldest first.
+  entries : vec LogEntry;
+};
 type ProposalView = record {
   id : nat64;
   // Why the last attempt to execute it failed, if one did.
@@ -67,7 +75,7 @@ type ProposalView = record {
   at_ns : nat64;
   ballots : vec Ballot;
   // Upgrade only: bytes staged so far, their sha256, and whether that is
-  // the proposal's module (ballots are taken only then).
+  // the proposal's module (approvals are taken only then).
   staged_bytes : nat64;
   count : Count;
   staged_sha256 : text;
@@ -96,11 +104,13 @@ service : (InitArgs) -> {
   // a policy change). Approvers only.
   execute : (nat64) -> (Result);
   info : () -> (Info) query;
-  // Every executed or withdrawn proposal, oldest first, with its ballots.
-  log : () -> (vec LogEntry) query;
+  // Executed and withdrawn proposals with their ballots, oldest first, from
+  // position `from`: at most `max` (and at most 100) per call; `next` is
+  // where the following page starts.
+  log : (nat64, nat32) -> (LogPage) query;
   proposals : () -> (vec ProposalView) query;
   // Open a proposal. Approvers only. Ballots are separate (`vote`); an
-  // upgrade's module must be staged (`stage`) before any are taken.
+  // upgrade's module must be staged (`stage`) before it can be approved.
   propose : (Change) -> (Result_1);
   // Write a chunk of an upgrade proposal's module at `offset`, which must be
   // the bytes staged so far (`staged_bytes`). Resending a chunk already
@@ -111,6 +121,7 @@ service : (InitArgs) -> {
   // caller's earlier one. The ballot that brings the proposal to K executes
   // it in the same call.
   vote : (nat64, Decision, opt text) -> (Result_3);
-  // Drop an open proposal. Its proposer only.
+  // Drop an open proposal: its proposer, or any approver once the approvers
+  // have turned it down (more reject or object than N - K).
   withdraw : (nat64) -> (Result_4);
 }

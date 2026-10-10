@@ -16,26 +16,33 @@ Three kinds of proposal (`governor.did`):
 - **Upgrade**: install a module into ic-git in upgrade mode. The proposal
   names the module's sha256, the ic-git commit it is built from, and the
   install argument (ic-git's is empty). An approver then stages the
-  module's bytes in chunks; ballots are taken only once the staged bytes
-  hash to the named sha256, so nobody votes on a module the governor does
-  not hold. After installing, the governor asks the new code to publish
+  module's bytes in chunks; approvals are taken only once the staged
+  bytes hash to the named sha256, so nobody approves a module the governor
+  does not hold (rejections and objections need no module). After installing, the governor asks the new code to publish
   `ic-git#canister` (commit, module sha256) to the registry, so the chain
   says what ic-git runs, as `<repo>#app` does for a governed backend.
 - **Policy**: replace the approvers (1 to 16) and the threshold K (1 to N).
 - **Handover**: make another principal ic-git's only controller -- a
-  successor governor, or whoever the approvers choose. After it the
-  governor is inert.
+  successor governor, or whoever the approvers choose, but never ic-git
+  or the governor itself. After it the governor is inert.
 
 Ballots follow docs/GOVERNANCE.md, section 1: approve, reject, or object
 with a reason; a later ballot replaces an earlier one; a proposal passes
 when approvals less objections reach K. The ballot that reaches K
 executes the proposal in the same call. If execution fails (an install
 rejected, say), the proposal stays open with the error and any approver
-can retry it with `execute`. A ballot is bound to the governor, ic-git,
+can retry it with `execute`. An execution that never finishes holds its
+proposal for at most a day; after that it can be executed again or
+withdrawn. After an upgrade the governor waits at most five minutes for
+the new code to publish its record; no reply is logged, not fatal. A ballot is bound to the governor, ic-git,
 the proposal's id and everything the change would do, so it cannot be
 replayed onto another change. At most four proposals are open at once;
-the proposer can withdraw one. `info`, `proposals` and `log` (every
-executed or withdrawn proposal with its ballots) are public queries.
+the proposer can withdraw one, and so can any approver once the
+approvers have turned it down (more of them reject or object than N - K,
+so the rest cannot reach K alone), so no one approver can hold the
+slots. `info`, `proposals` and `log` (every executed or withdrawn
+proposal with its ballots, 100 at a time from a position) are public
+queries.
 
 The governor has no controllers. Its code and rules can never change;
 the way past them is a Handover, voted under them. It holds its own
@@ -77,7 +84,9 @@ made immutable (its own upgrade refused), the target handed to it alone
 executed by one approval, the IC's module hash and the target's state
 checked after; the policy grown to 2 of 3 by vote; an upgrade held by an
 objection (and not outweighed by a second approval) until the objector
-approves instead; a withdrawal; and a handover to a successor, after
+approves instead; a withdrawal, and one by another approver after the
+approvers turned it down; a handover to the governor itself refused;
+and a handover to a successor, after
 which the governor refuses everything and the successor can upgrade.
 
 ## Putting it in place (mainnet)
@@ -110,7 +119,8 @@ passphrase-encrypted). Steps 1 to 4 can all be undone; step 5 cannot.
 4. **Trial, with the operator still a controller**: add the governor as a
    second controller of ic-git, then run one real upgrade through it --
    the module ic-git already runs -- with `tools/governor.sh
-   propose-upgrade` and `vote <id> approve`. This proves the whole path
+   propose-upgrade <module> <commit>` (the commit it was built from,
+   in full) and `vote <id> approve`. This proves the whole path
    on mainnet (staging, the chunked install, `ic-git#canister` on chain)
    while the operator can still repair anything.
    ```sh

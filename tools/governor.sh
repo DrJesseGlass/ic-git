@@ -2,14 +2,16 @@
 # Drive the governor (docs/GOVERNOR.md) from an approver's terminal.
 #
 #   tools/governor.sh status                       policy, open proposals, log
-#   tools/governor.sh propose-upgrade <module.gz> [commit]
-#                                                  propose installing the module
+#   tools/governor.sh propose-upgrade <module.gz> <commit>
+#                                                  propose installing the module,
+#                                                  built from <commit> (40 hex),
 #                                                  into ic-git and stage it; prints
 #                                                  the proposal id
 #   tools/governor.sh vote <id> approve|reject     cast or replace your ballot
 #   tools/governor.sh vote <id> object "<reason>"
 #   tools/governor.sh execute <id>                 retry a reached proposal
-#   tools/governor.sh withdraw <id>                drop your own proposal
+#   tools/governor.sh withdraw <id>                drop your own proposal, or
+#                                                  one the approvers turned down
 #
 # Policy and handover proposals are rarer and are made with dfx directly
 # (docs/GOVERNOR.md has the commands).
@@ -32,18 +34,31 @@ gov() { dfx canister --network "$NETWORK" --identity "$APPROVER" call "$GOVERNOR
 query() { dfx canister --network "$NETWORK" --identity anonymous call "$GOVERNOR" --candid "$DID" --query "$@"; }
 
 cmd=${1:-}
-[ -n "$cmd" ] || { sed -n '2,22p' "$0"; exit 2; }
+[ -n "$cmd" ] || { sed -n '2,25p' "$0"; exit 2; }
 shift
 case "$cmd" in
   status)
     query info
     query proposals
-    query log
+    # The log is paged; walk it from the start.
+    from=0
+    while [ -n "$from" ]; do
+      out=$(query log "($from : nat64, 100 : nat32)")
+      printf '%s\n' "$out"
+      from=$(printf '%s' "$out" | tr '\n' ' ' | sed -n 's/.*next = opt (\{0,1\}\([0-9_]*\) : nat64.*/\1/p' | tr -d _)
+    done
     ;;
   propose-upgrade)
     module=${1:?module file (.wasm.gz from tools/reproducible-build.sh --docker)}
-    commit=${2:-$(git rev-parse HEAD)}
+    # The commit the module was built from, never the checkout's HEAD: the
+    # proposal, and after it ic-git#canister, binds the two together.
+    commit=${2:?the commit the module was built from (40 hex digits)}
     [ ${#commit} -eq 40 ] || { echo "commit must be the full 40-digit hash" >&2; exit 2; }
+    # tools/reproducible-build.sh names its artifacts after the commit's first 7 digits.
+    built=$(basename "$module" | sed -n 's/.*-\([0-9a-f]\{7\}\)\.wasm\(\.gz\)\{0,1\}$/\1/p')
+    if [ -n "$built" ] && [ "${commit:0:7}" != "$built" ]; then
+      echo "$module was built from $built..., not $commit" >&2; exit 2
+    fi
     sha=$(shasum -a 256 "$module" | cut -d' ' -f1)
     echo "proposing: commit $commit, module $sha ($(wc -c <"$module" | tr -d ' ') bytes)"
     out=$(gov propose "(variant { Upgrade = record { commit = \"$commit\"; module_sha256 = \"$sha\"; arg = blob \"\" } })")
