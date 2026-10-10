@@ -21,6 +21,31 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-10-06 | `e48ebdb` | `v0.3.3` | `2bfd212775e572b82ff35997309f2753a273cff114035bc015d14d0841ddcec3` (gz) | MATCH, 2026-10-06 | deployer (pinned container, macOS arm64 host under emulation, built twice); GitHub Actions amd64 runner, [run 37478919057](https://github.com/DrJesseGlass/ic-git/actions/runs/37478919057), identical hash |
 | 2026-10-07 | `db8f2bd` | `v0.3.4` | `e25610892fe279e4355d47c16cc1e03cd27732dad8187565e2eb1c36de5b9bad` (gz) | MATCH, 2026-10-07 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37653678100](https://github.com/DrJesseGlass/ic-git/actions/runs/37653678100), identical hash |
 | 2026-10-08 | `a23ee31` | `v0.3.5` | `30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a` (gz) | MATCH, 2026-10-08 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37803652956](https://github.com/DrJesseGlass/ic-git/actions/runs/37803652956), identical hash |
+| 2026-10-10 | `018bf4d` | `v0.3.6` | `eb61f0e10be0b93c1f4162cf040c6dcc69ed1248ac940fc35b89c008ec9762a2` (gz) | MATCH, 2026-10-10 | deployer (pinned container, macOS arm64 host under emulation, at the branch head, same ic-git crate); GitHub Actions amd64 runner, [run 38019976528](https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528), identical hash |
+
+## v0.3.6 -- 2026-10-10
+
+`registry_publish_canister` (#77), and the shorter `deploy_now` consent
+message (#73). The new endpoint publishes `ic-git#canister` -- the commit
+ic-git was built from and the sha256 of its installed module -- and only
+a controller can call it. It is the governor's (`canisters/governor`,
+docs/GOVERNOR.md): after each upgrade it installs, the governor asks the
+new code to record itself on chain, as `<repo>#app` records a governed
+backend. The governor was released in the same tag, built by the same
+recipe (its own hash on the CI run below), and is not yet deployed; this
+release was installed by the operator, still the canister's controller.
+
+Gated before the deploy by `tools/e2e-local.sh`: 155 checks on `589cba0`,
+the branch head, whose ic-git crate is the tag's (review changed only the
+governor, its tools and docs), including the governor's whole life
+against a second ic-git. After the upgrade all five published site
+records still verified with `tools/verify.mjs`, and the core's certified
+reader certified the new module hash and the controller.
+
+Same recipe and base image digest as v0.3.5. The raw wasm inside the
+gzip hashes to `14459d2b...8907`. The deployer's build was made at
+`589cba0` before the merge; CI built the tag on a GitHub Actions x86_64
+runner and agreed byte for byte.
 
 ## v0.3.5 -- 2026-10-08
 
