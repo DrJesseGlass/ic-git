@@ -1274,6 +1274,22 @@ async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, Strin
     publish_charged(&repo, &record).await
 }
 
+/// Publish `ic-git#canister`: the commit this canister was built from and
+/// the sha256 of its installed module. A controller only -- the governor
+/// calls it right after it installs an upgrade (docs/GOVERNANCE.md,
+/// section 5). Paid by the canister, as no repo is being served.
+#[ic_cdk::update]
+async fn registry_publish_canister(
+    commit: String,
+    module_sha256: String,
+) -> Result<evm::TxOutcome, String> {
+    if !ic_cdk::api::is_controller(&caller()) {
+        return Err("only a controller of this canister can publish its record".to_string());
+    }
+    let record = provenance::canister_record(&commit, &module_sha256)?;
+    record.publish().await.map_err(|e| e.message)
+}
+
 /// Charge the repo for a registry publish, and give back what a failed one
 /// did not use: all of it when it failed before any outcall, the price less
 /// the outcalls it made when no provider can hold the transaction (a read,

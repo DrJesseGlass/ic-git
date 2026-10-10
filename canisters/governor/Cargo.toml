@@ -1,0 +1,18 @@
+[package]
+name = "governor_canister"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# The same K-of-N rule ic-git's voters use (docs/GOVERNANCE.md, section 1).
+ic-multisig = { version = "0.2", features = ["candid"] }
+
+# Keep these at the versions the git canister uses.
+ic-cdk = "0.20"
+candid = "0.10"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
