@@ -36,30 +36,35 @@ gov() { dfx canister --network "$NETWORK" --identity "$APPROVER" call "$GOVERNOR
 query() { dfx canister --network "$NETWORK" --identity anonymous call "$GOVERNOR" --candid "$DID" --query "$@"; }
 
 # Stage MODULE for proposal ID in 1 MiB chunks, each at its offset. A chunk
-# the governor already holds is accepted and changes nothing, so a failed
-# call is simply retried, and a whole run can be repeated to finish one that
-# was interrupted. Only stdout is captured: dfx asks for an encrypted
-# identity's passphrase on the terminal, and refuses when stderr is not one.
+# the governor already holds is accepted and changes nothing, so a call
+# whose outcome is unknown (dfx failed) is simply retried, and a whole run
+# can be repeated to finish one that was interrupted. A refusal the governor
+# answered with is final, so it is reported once and not retried. Only
+# stdout is captured: dfx asks for an encrypted identity's passphrase on the
+# terminal, and refuses when stderr is not one.
 stage_module() {
   local id=$1 module=$2 work part off=0 try out
   work=$(mktemp -d)
+  trap "rm -rf '$work'" EXIT
   split -b 1048576 "$module" "$work/c."
   for part in "$work"/c.*; do
     printf '(%s : nat64, %s : nat64, blob "%s")' "$id" "$off" "$(od -An -v -tx1 "$part" | tr -d ' \n' | sed 's/../\\&/g')" >"$part.arg"
     for try in 1 2 3; do
-      out=$(gov stage --argument-file "$part.arg") && printf '%s' "$out" | grep -q 'Ok = record' && break
-      echo "stage at offset $off failed (try $try): $out" >&2
-      [ "$try" -lt 3 ] || { rm -rf "$work"; exit 1; }
+      if out=$(gov stage --argument-file "$part.arg"); then
+        printf '%s' "$out" | grep -q 'Ok = record' && break
+        echo "stage at offset $off refused: $out" >&2; exit 1
+      fi
+      echo "stage at offset $off failed (try $try)" >&2
+      [ "$try" -lt 3 ] || exit 1
     done
     printf '%s\n' "$out"
     off=$((off + $(wc -c <"$part")))
   done
-  rm -rf "$work"
   echo "proposal $id is staged; vote with: tools/governor.sh vote $id approve"
 }
 
 cmd=${1:-}
-[ -n "$cmd" ] || { sed -n '2,27p' "$0"; exit 2; }
+[ -n "$cmd" ] || { sed -n '2,/^set -/{/^#/p;}' "$0"; exit 2; }
 shift
 case "$cmd" in
   status)
