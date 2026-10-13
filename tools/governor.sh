@@ -35,15 +35,22 @@ GOVERNOR=${GOVERNOR:-$(sed -n '/"governor"/,/}/s/.*"ic": *"\([^"]*\)".*/\1/p' ca
 gov() { dfx canister --network "$NETWORK" --identity "$APPROVER" call "$GOVERNOR" --candid "$DID" "$@"; }
 query() { dfx canister --network "$NETWORK" --identity anonymous call "$GOVERNOR" --candid "$DID" --query "$@"; }
 
-# Stage MODULE for proposal ID in 1 MiB chunks, each at its offset. A chunk
-# the governor already holds is accepted and changes nothing, so a call
-# whose outcome is unknown (dfx failed) is simply retried, and a whole run
-# can be repeated to finish one that was interrupted. A refusal the governor
+# Stage MODULE for proposal ID in 1 MiB chunks, each at its offset. The
+# governor appends what it is sent and cannot take it back, so the file is
+# checked against the proposal's module_sha256 before any byte goes out: the
+# wrong file would leave the proposal unusable until withdrawn. A chunk the
+# governor already holds is accepted and changes nothing, so a call whose
+# outcome is unknown (dfx failed) is simply retried, and a whole run can be
+# repeated to finish one that was interrupted. A refusal the governor
 # answered with is final, so it is reported once and not retried. Only
 # stdout is captured: dfx asks for an encrypted identity's passphrase on the
 # terminal, and refuses when stderr is not one.
 stage_module() {
-  local id=$1 module=$2 work part off=0 try out
+  local id=$1 module=$2 expected sha work part off=0 try out
+  expected=$(query proposals --output json | jq -r --arg id "$id" '.[] | select(.id == $id) | .change.Upgrade.module_sha256 // empty')
+  [ -n "$expected" ] || { echo "no open upgrade proposal $id" >&2; exit 1; }
+  sha=$(shasum -a 256 "$module" | cut -d' ' -f1)
+  [ "$sha" = "$expected" ] || { echo "$module hashes to $sha; proposal $id expects $expected" >&2; exit 1; }
   work=$(mktemp -d)
   trap "rm -rf '$work'" EXIT
   split -b 1048576 "$module" "$work/c."
@@ -60,6 +67,7 @@ stage_module() {
     printf '%s\n' "$out"
     off=$((off + $(wc -c <"$part")))
   done
+  printf '%s' "$out" | grep -q 'ready = true' || { echo "proposal $id is not ready after staging: $out" >&2; exit 1; }
   echo "proposal $id is staged; vote with: tools/governor.sh vote $id approve"
 }
 
