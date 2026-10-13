@@ -7,6 +7,8 @@
 #                                                  built from <commit> (40 hex),
 #                                                  into ic-git and stage it; prints
 #                                                  the proposal id
+#   tools/governor.sh stage <id> <module.gz>       (re)stage an upgrade's module,
+#                                                  e.g. after an interrupted run
 #   tools/governor.sh vote <id> approve|reject     cast or replace your ballot
 #   tools/governor.sh vote <id> object "<reason>"
 #   tools/governor.sh execute <id>                 retry a reached proposal
@@ -33,8 +35,44 @@ GOVERNOR=${GOVERNOR:-$(sed -n '/"governor"/,/}/s/.*"ic": *"\([^"]*\)".*/\1/p' ca
 gov() { dfx canister --network "$NETWORK" --identity "$APPROVER" call "$GOVERNOR" --candid "$DID" "$@"; }
 query() { dfx canister --network "$NETWORK" --identity anonymous call "$GOVERNOR" --candid "$DID" --query "$@"; }
 
+# Stage MODULE for proposal ID in 1 MiB chunks, each at its offset. The
+# governor appends what it is sent and cannot take it back, so the file is
+# checked against the proposal's module_sha256 before any byte goes out: the
+# wrong file would leave the proposal unusable until withdrawn. A chunk the
+# governor already holds is accepted and changes nothing, so a call whose
+# outcome is unknown (dfx failed) is simply retried, and a whole run can be
+# repeated to finish one that was interrupted. A refusal the governor
+# answered with is final, so it is reported once and not retried. Only
+# stdout is captured: dfx asks for an encrypted identity's passphrase on the
+# terminal, and refuses when stderr is not one.
+stage_module() {
+  local id=$1 module=$2 expected sha work part off=0 try out
+  expected=$(query proposals --output json | jq -r --arg id "$id" '.[] | select(.id == $id) | .change.Upgrade.module_sha256 // empty')
+  [ -n "$expected" ] || { echo "no open upgrade proposal $id" >&2; exit 1; }
+  sha=$(shasum -a 256 "$module" | cut -d' ' -f1)
+  [ "$sha" = "$expected" ] || { echo "$module hashes to $sha; proposal $id expects $expected" >&2; exit 1; }
+  work=$(mktemp -d)
+  trap "rm -rf '$work'" EXIT
+  split -b 1048576 "$module" "$work/c."
+  for part in "$work"/c.*; do
+    printf '(%s : nat64, %s : nat64, blob "%s")' "$id" "$off" "$(od -An -v -tx1 "$part" | tr -d ' \n' | sed 's/../\\&/g')" >"$part.arg"
+    for try in 1 2 3; do
+      if out=$(gov stage --argument-file "$part.arg"); then
+        printf '%s' "$out" | grep -q 'Ok = record' && break
+        echo "stage at offset $off refused: $out" >&2; exit 1
+      fi
+      echo "stage at offset $off failed (try $try)" >&2
+      [ "$try" -lt 3 ] || exit 1
+    done
+    printf '%s\n' "$out"
+    off=$((off + $(wc -c <"$part")))
+  done
+  printf '%s' "$out" | grep -q 'ready = true' || { echo "proposal $id is not ready after staging: $out" >&2; exit 1; }
+  echo "proposal $id is staged; vote with: tools/governor.sh vote $id approve"
+}
+
 cmd=${1:-}
-[ -n "$cmd" ] || { sed -n '2,25p' "$0"; exit 2; }
+[ -n "$cmd" ] || { sed -n '2,/^set -/{/^#/p;}' "$0"; exit 2; }
 shift
 case "$cmd" in
   status)
@@ -64,24 +102,10 @@ case "$cmd" in
     out=$(gov propose "(variant { Upgrade = record { commit = \"$commit\"; module_sha256 = \"$sha\"; arg = blob \"\" } })")
     id=$(printf '%s' "$out" | sed -n 's/.*Ok = \([0-9_]*\) : nat64.*/\1/p' | tr -d _)
     [ -n "$id" ] || { echo "$out" >&2; exit 1; }
-    echo "proposal $id; staging"
-    work=$(mktemp -d)
-    trap 'rm -rf "$work"' EXIT
-    split -b 1048576 "$module" "$work/c."
-    off=0
-    for part in "$work"/c.*; do
-      printf '(%s : nat64, %s : nat64, blob "%s")' "$id" "$off" "$(od -An -v -tx1 "$part" | tr -d ' \n' | sed 's/../\\&/g')" >"$part.arg"
-      # A resent chunk is a no-op, so a failed call is simply retried.
-      for try in 1 2 3; do
-        out=$(gov stage --argument-file "$part.arg" 2>&1) && printf '%s' "$out" | grep -q 'Ok = record' && break
-        echo "stage at offset $off failed (try $try): $out" >&2
-        [ "$try" -lt 3 ] || exit 1
-      done
-      printf '%s\n' "$out"
-      off=$((off + $(wc -c <"$part")))
-    done
-    echo "proposal $id is staged; vote with: tools/governor.sh vote $id approve"
+    echo "proposal $id; staging (if this stops, finish with: tools/governor.sh stage $id $module)"
+    stage_module "$id" "$module"
     ;;
+  stage) stage_module "${1:?proposal id}" "${2:?module file}" ;;
   vote)
     id=${1:?proposal id}
     case "${2:-}" in
