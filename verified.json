@@ -424,6 +424,44 @@
         "note": "upgrade from v0.3.4, after tools/e2e-local.sh passed 120/120 on the branch commit (a5b5a92, same code; the merge commit differs only in comments and docs, which moves panic-location strings and so the hash). The canister crate changed in #72: registry writes carry a 1M gas limit instead of 150k. The first governed deploy's ic-vote#app record (Sepolia nonce 20, tx 0xd68214fa...16a2) had reverted out of gas: creating a key costs 354k on Sepolia today where an overwrite costs 57k, so every first record for a repo would have failed while republishes passed. Unused gas is refunded; the deploy status now reads 'app record tx 0x...' since it reports the broadcast. No other behaviour changed. Every published site (ic-git, ic-vote, ic-git-loader, ic-git-extension, ic-git-extension-firefox) still verifies after the upgrade"
       },
       "wasm_sha256": "0002b3ab299cb43fda1ea54ed309b4ed542f9e8cc983f17cb0d2496d987cad01"
+    },
+    {
+      "commit": "018bf4d5b2749492ecac0b94a5752a047f844767",
+      "tag": "v0.3.6",
+      "module_hash": "eb61f0e10be0b93c1f4162cf040c6dcc69ed1248ac940fc35b89c008ec9762a2",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, linux/amd64 image under emulation",
+          "date": "2026-10-09",
+          "check": "built at 589cba0, the branch head; the merge commit changed only the governor crate, tools and docs, and CI at the tag gave the same ic-git hash"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528",
+          "date": "2026-10-10",
+          "check": "identical hash (eb61f0e1...62a2 gz, 14459d2b...8907 raw); the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-10-10",
+        "on_chain_match": "match",
+        "checked_by": "tools/check-module-hash.sh (live module hash) against the reproducible build's module sha256; also Verifier.readCanisterState (core/verifier.js) certified the same hash and the controller from the IC's state certificate",
+        "note": "upgrade from v0.3.5, after tools/e2e-local.sh passed 155/155 on 589cba0, whose ic-git crate is the tag's. The canister crate changed in #77 by one endpoint: registry_publish_canister(commit, module_sha256), callable only by a controller, publishes ic-git#canister to the registry -- what the governor (canisters/governor, docs/GOVERNOR.md) calls after each upgrade it installs. The release also carries the shorter deploy_now consent message (#73). The governor is built and recorded by the same recipe but is not yet deployed; the controller is still the operator. Every published site (ic-git, ic-vote, ic-git-loader, ic-git-extension, ic-git-extension-firefox) still verifies after the upgrade"
+      },
+      "wasm_sha256": "14459d2b80616ed99cbc76cd00078a6ebecb399436984ff80ae42a107b718907"
     }
   ]
 }
