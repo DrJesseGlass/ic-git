@@ -5,7 +5,8 @@ Human-readable companion to `verified.json` (the machine-readable record that
 any row yourself: REPRODUCIBLE_BUILD.md. What a row does and does not prove:
 the "Residual assumptions" and "Trusting trust" sections of the same file.
 
-Canister: `umobs-yiaaa-aaaab-agyrq-cai`
+Canister: `umobs-yiaaa-aaaab-agyrq-cai`. Controller since 2026-10-14: the
+governor `7kkwl-baaaa-aaaab-ag6rq-cai` alone (below, "The governor").
 
 | Date | Commit | Tag | Module hash (sha256 of the wasm) | On-chain match | Independent rebuilds |
 |---|---|---|---|---|---|
@@ -22,6 +23,46 @@ Canister: `umobs-yiaaa-aaaab-agyrq-cai`
 | 2026-10-07 | `db8f2bd` | `v0.3.4` | `e25610892fe279e4355d47c16cc1e03cd27732dad8187565e2eb1c36de5b9bad` (gz) | MATCH, 2026-10-07 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37653678100](https://github.com/DrJesseGlass/ic-git/actions/runs/37653678100), identical hash |
 | 2026-10-08 | `a23ee31` | `v0.3.5` | `30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a` (gz) | MATCH, 2026-10-08 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37803652956](https://github.com/DrJesseGlass/ic-git/actions/runs/37803652956), identical hash |
 | 2026-10-10 | `018bf4d` | `v0.3.6` | `eb61f0e10be0b93c1f4162cf040c6dcc69ed1248ac940fc35b89c008ec9762a2` (gz) | MATCH, 2026-10-10 | deployer (pinned container, macOS arm64 host under emulation, at the branch head, same ic-git crate); GitHub Actions amd64 runner, [run 38019976528](https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528), identical hash |
+
+## The governor -- 2026-10-11 to 14
+
+ic-git's code now changes only by a vote. The governor
+(`canisters/governor`, docs/GOVERNOR.md) is ic-git's only controller and
+has none of its own: canister `7kkwl-baaaa-aaaab-ag6rq-cai`, module
+`a71ff65df07a3d3b79e383f7bf8b7bf912fd0bac5135936ed2c4cd90b68a641f` (gz;
+raw `afaf8511...8190`), built from `v0.3.6` (`018bf4d`) in the same
+container run as ic-git, on the deployer's machine and on CI
+([run 38019976528](https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528)),
+byte for byte. With no controllers that module is its code for good;
+`verified.json` holds it under `governor`.
+
+The rollout followed docs/GOVERNOR.md, each step checked against the
+IC's certified state with the core's own reader:
+
+1. 2026-10-11: created on ic-git's subnet and installed with ic-git as
+   its target and the operator's key (`3kq6u...wqe`) as its one approver;
+   the certified module hash matched the build.
+2. Its only controller removed; certified controllers `[]`.
+3. Added as a second controller of ic-git, and one real upgrade run
+   through it while the operator could still repair anything: proposal 1
+   installed the module ic-git already ran (`eb61f0e1...62a2`), staged in
+   two chunks and approved, and the new code published `ic-git#canister`
+   (commit `018bf4d`, that module hash; Sepolia tx `0x55b2cbf0...b8ed`,
+   block 11893685), which the registry reads back.
+4. 2026-10-14: proposal 2 made the policy 1 of 2, adding a backup
+   approver (`s72nn...6ae`, an encrypted dfx identity kept offline) so
+   that losing one key cannot freeze ic-git; the backup proved itself by
+   proposing and withdrawing a no-op (proposal 3).
+5. The handover: the operator's key set ic-git's controllers to the
+   governor alone, its last act as a controller. Certified afterwards:
+   ic-git `[7kkwl...]`, the governor `[]`. The module hash watch still
+   reads MATCH, and every published site record still verifies.
+
+From here a release is a governor proposal (`tools/governor.sh
+propose-upgrade`, then `vote`), each recorded in the governor's public
+log and, on execution, as `ic-git#canister` on chain. The operator role
+inside ic-git (registry address, EVM and Solana settings, pricing) is
+unchanged: those are calls the code allows, not changes to it.
 
 ## v0.3.6 -- 2026-10-10
 

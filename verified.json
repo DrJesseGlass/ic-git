@@ -1,6 +1,66 @@
 {
   "canister": "umobs-yiaaa-aaaab-agyrq-cai",
   "note": "Machine-readable record of reproduced module hashes (REPRODUCIBLE_BUILD.md, 'The record'). Newest entry last; tools/check-module-hash.sh compares the live canister against the last entry. Human narrative in VERIFIED.md.",
+  "governor": {
+    "id": "7kkwl-baaaa-aaaab-ag6rq-cai",
+    "role": "ic-git's only controller since 2026-10-14 (docs/GOVERNOR.md); it has no controllers itself, so this module is its code for good",
+    "tag": "v0.3.6",
+    "commit": "018bf4d5b2749492ecac0b94a5752a047f844767",
+    "module_hash": "a71ff65df07a3d3b79e383f7bf8b7bf912fd0bac5135936ed2c4cd90b68a641f",
+    "wasm_sha256": "afaf8511e54a8425487e71ae3d9c6492147e342a4b359bb490b45e11d60c8190",
+    "recipe": "Dockerfile.build, the same container run as ic-git v0.3.6 (governor.wasm.gz, gzip -9 -n)",
+    "builders": [
+      {
+        "who": "deployer (DrJesseGlass)",
+        "lineage": "pinned-container",
+        "host": "macOS arm64, linux/amd64 image under emulation",
+        "date": "2026-10-10"
+      },
+      {
+        "who": "GitHub Actions (independent runner)",
+        "lineage": "pinned-container",
+        "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528",
+        "date": "2026-10-10",
+        "check": "identical hash"
+      }
+    ],
+    "init": {
+      "target": "umobs-yiaaa-aaaab-agyrq-cai",
+      "approvers": [
+        "3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe"
+      ],
+      "threshold": 1
+    },
+    "history": [
+      {
+        "date": "2026-10-11",
+        "what": "created on umobs' subnet and installed; certified module hash matched the build"
+      },
+      {
+        "date": "2026-10-11",
+        "what": "its only controller removed; certified controllers []"
+      },
+      {
+        "date": "2026-10-11",
+        "what": "added as a second controller of umobs; proposal 1 upgraded umobs to the module it ran (eb61f0e1...62a2, commit 018bf4d) through the governor and published ic-git#canister (Sepolia tx 0x55b2cbf07b2a19b36298a044f1458105a218a63b7bff9344925be2785fa5b8ed, block 11893685)"
+      },
+      {
+        "date": "2026-10-14",
+        "what": "proposal 2: policy 1 of 2, adding the backup approver s72nn-dfy5r-qz2h5-x3fcc-zfdzo-jbpon-dt27i-nqchx-ey2nc-6iupn-6ae (an encrypted dfx identity kept offline); proposal 3, the backup's test, withdrawn"
+      },
+      {
+        "date": "2026-10-14",
+        "what": "handover: umobs controllers set to [7kkwl-baaaa-aaaab-ag6rq-cai] by the operator's key, its last act as a controller; certified controllers of umobs [governor], of the governor []"
+      }
+    ],
+    "policy": {
+      "approvers": [
+        "3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe",
+        "s72nn-dfy5r-qz2h5-x3fcc-zfdzo-jbpon-dt27i-nqchx-ey2nc-6iupn-6ae"
+      ],
+      "threshold": 1
+    }
+  },
   "verified": [
     {
       "commit": "80bcb4ad957667fad91d0ece6b15c46060f28d54",

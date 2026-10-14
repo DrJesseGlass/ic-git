@@ -159,8 +159,9 @@ need to look.
    loader (docs/EXTENSION.md, "What the page talks to").
 5. Activity feeds.
 6. The governor: build, rehearse locally, record, then the mainnet handover.
-   Built and rehearsed (docs/GOVERNOR.md); the mainnet steps follow its
-   release.
+   Done: the governor `7kkwl-baaaa-aaaab-ag6rq-cai` has controlled ic-git
+   alone since 2026-10-14 (VERIFIED.md, "The governor"). Next: the
+   extensions judge ic-git by the governor rule (section 4).
 7. Push notifications (Dmail), once confirmed.
 
 ## Open questions

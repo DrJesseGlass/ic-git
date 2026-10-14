@@ -91,6 +91,11 @@ which the governor refuses everything and the successor can upgrade.
 
 ## Putting it in place (mainnet)
 
+Done 2026-10-11 to 14: the governor is `7kkwl-baaaa-aaaab-ag6rq-cai`,
+ic-git's only controller, with two approvers at 1 of 2 (the operator's
+key and an offline backup). VERIFIED.md, "The governor", has the record.
+The steps, for a successor or a rehearsal:
+
 Each step is the operator's, from a terminal (the controller identity is
 passphrase-encrypted). Steps 1 to 4 can all be undone; step 5 cannot.
 
