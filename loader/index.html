@@ -4268,10 +4268,17 @@ const Verifier = (() => {
     // the IC's word, only about an earlier moment.
     freshMs: 5 * 60_000,
     now: null, // Date.now() unless a test says otherwise
+    // ic-git's governor (docs/GOVERNOR.md): its only controller since
+    // 2026-10-14, a canister with no controllers whose module is pinned
+    // here as recorded in verified.json. Pinned rather than "any canister
+    // nobody controls": an immutable controller is only as good as the
+    // code it runs. A successor governor (a Handover vote) needs a new pin.
+    governor: { id: '7kkwl-baaaa-aaaab-ag6rq-cai', module: 'a71ff65df07a3d3b79e383f7bf8b7bf912fd0bac5135936ed2c4cd90b68a641f' },
   };
   const GET_SELECTOR = '693ec85e'; // keccak256("get(string)")[..4], as in tools/verify.mjs
   const SITE_SUFFIX = '#site'; // provenance.rs::SITE_KEY_SUFFIX
   const APP_SUFFIX = '#app'; // provenance.rs::APP_KEY_SUFFIX: (commit, sha256 of the installed module)
+  const CANISTER_KEY = 'ic-git#canister'; // provenance.rs::CANISTER_KEY: what ic-git itself runs
   // The NNS root canister: the one controller of the system canisters a page
   // may call (the ledgers, the cycles minting canister).
   const NNS_ROOT = 'r7inp-6aaaa-aaaaa-aaabq-cai';
@@ -4985,13 +4992,21 @@ function unverifiableSubresource(servedPath, body) {
   //   system      controllers are exactly the NNS root: a ledger, the CMC.
   //   approved    controllers are exactly ic-git, and the certified module
   //               hash is the repo's <repo>#app record: a governed backend
-  //               running an approved commit's build.
+  //               running an approved commit's build. Or ic-git itself,
+  //               controlled by exactly the pinned governor, which has no
+  //               controllers and runs the pinned module, with ic-git's
+  //               certified module hash the ic-git#canister record.
+  //   governed    ic-git under its governor as above, but running a module
+  //               the record does not name yet (the record follows each
+  //               upgrade by a block or two, and a failed publish leaves
+  //               it behind). Allowed, warned: the change was still voted.
   //   blocked     controllers are exactly ic-git but no record approves the
   //               module it runs -- the one case a verified page must not
   //               reach, since governance promised otherwise.
   //   immutable   nobody holds it: its code can never change. Allowed.
-  //   ungoverned  anyone else holds it (an owner, ic-git among others, ic-git
-  //               itself today): its code is not tampered, but its holder
+  //   ungoverned  anyone else holds it (an owner, ic-git among others; or
+  //               ic-git under a governor that is not the pinned one, or
+  //               not immutable): its code is not tampered, but its holder
   //               can change it without a vote. Allowed, and said.
   //   unreadable  no certified answer: the certificate failed, or the record
   //               could not be read. Not allowed: a backend nobody can vouch
@@ -5020,6 +5035,8 @@ function unverifiableSubresource(servedPath, body) {
       } else {
         Object.assign(b, { kind: 'blocked', detail: 'governed by ic-git, but runs module ' + (st.moduleHash || 'none').slice(0, 16) + '... where the record approves ' + rec.bundleHash.slice(0, 16) + '... (commit ' + rec.commit.slice(0, 12) + ')' });
       }
+    } else if (canisterId === o.canister && ctl.length === 1 && o.governor && ctl[0] === o.governor.id) {
+      Object.assign(b, await judgeGoverned(o, st));
     } else if (ctl.length === 0) {
       Object.assign(b, { kind: 'immutable', ok: true, detail: 'controlled by nobody: its code can never change' });
     } else {
@@ -5028,6 +5045,34 @@ function unverifiableSubresource(servedPath, body) {
     }
     if (b.ok && st.stale) { b.warn = true; b.detail += '; the certificate is stale (' + Math.round(((o.now ?? Date.now()) - st.time) / 60_000) + ' min old)'; }
     return b;
+  }
+
+  // ic-git under its governor: approved when the governor is the one
+  // recorded (no controllers, the pinned module) and ic-git runs what
+  // ic-git#canister names. ic-git is never blocked here -- every page is
+  // served by it -- so each shortfall is a warning that says what fell
+  // short. The governor's own state is certified like any other.
+  async function judgeGoverned(o, st) {
+    const g = o.governor, gid = g.id.slice(0, 5) + '...';
+    let gs;
+    try { gs = await readCanisterState(g.id, o); } catch (e) { gs = { certified: false, checks: [{ ok: false, detail: e.message }] }; }
+    const ungoverned = why => ({ kind: 'ungoverned', ok: true, warn: true, detail: 'controlled by its governor ' + gid + ', but ' + why + ': its code may change without a vote' });
+    if (!gs.certified) {
+      const bad = gs.checks.find(c => !c.ok);
+      return ungoverned('the governor\'s state could not be certified (' + (bad ? bad.detail || bad.label : 'unknown') + ')');
+    }
+    if (gs.controllers.length) return ungoverned('the governor is itself controlled by ' + gs.controllers.map(c => c.slice(0, 5) + '...').join(', '));
+    if (gs.moduleHash !== g.module) return ungoverned('the governor runs module ' + (gs.moduleHash || 'none').slice(0, 16) + '..., not the recorded ' + g.module.slice(0, 16) + '...');
+    const voted = 'governed by its governor ' + gid + ' (no controllers; code changes only by its approvers\' vote)';
+    let rec;
+    try { rec = decodeGet((await readRecord(o, CANISTER_KEY)).ret); } catch (e) {
+      return { kind: 'governed', ok: true, warn: true, detail: voted + '; its ' + CANISTER_KEY + ' record could not be read: ' + e.message };
+    }
+    if (rec.present && st.moduleHash === rec.bundleHash) {
+      return { kind: 'approved', ok: true, warn: gs.stale, detail: voted + '; runs the recorded build of commit ' + rec.commit.slice(0, 12) + (gs.stale ? '; the governor\'s certificate is stale' : '') };
+    }
+    return { kind: 'governed', ok: true, warn: true, detail: voted + '; but runs module ' + (st.moduleHash || 'none').slice(0, 16) + '...'
+      + (rec.present ? ', where ' + CANISTER_KEY + ' records ' + rec.bundleHash.slice(0, 16) + '... (commit ' + rec.commit.slice(0, 12) + ')' : ', and the registry holds no ' + CANISTER_KEY + ' record') };
   }
 
   // The canisters a verified page of `repo` may call, judged one by one:
@@ -5061,7 +5106,9 @@ function unverifiableSubresource(servedPath, body) {
     const backends = await Promise.all(ids.map(id => judge(o, repo, id).catch(e => ({ canister: id, kind: 'unreadable', ok: false, warn: false, detail: e.message || String(e) }))));
     const ok = backends.every(b => b.ok);
     const ungoverned = backends.filter(b => b.kind === 'ungoverned');
+    const behind = backends.filter(b => b.kind === 'governed');
     const warning = ungoverned.length ? 'its backend is not governed: the site owner can change it without approval (' + ungoverned.map(b => b.canister.slice(0, 5)).join(', ') + ')'
+      : behind.length ? 'a governed backend runs a module its record does not name yet (' + behind.map(b => b.canister.slice(0, 5)).join(', ') + ')'
       : backends.some(b => b.warn) ? 'a backend\'s certificate is stale' : '';
     return {
       repo, backends, note, ok, warning,
