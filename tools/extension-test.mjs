@@ -209,12 +209,14 @@ const report = (name, ok, got) => {
     s = await b.state();
     report('ic-vote (stylesheet inlined in ic-vote #9) verifies and runs under its pinned policy, badge OK',
       !s.overlay && /YELLOW/.test(s.text) && s.badge === 'OK', s);
-    // The backend check (docs/GOVERNANCE.md, section 4). ic-vote's poll
-    // canister and ic-git itself are ungoverned today, so the badge is OK
-    // in amber, and the page's calls reach them and the system canisters;
-    // a canister nobody judged, or any IC API host but icp-api.io, is
-    // blocked before the request leaves.
-    report('an ungoverned backend: the badge is OK in amber (warned)', s.badge === 'OK' && s.color === '179,92,0', s);
+    // The backend check (docs/GOVERNANCE.md, section 4). Since 2026-10-14
+    // every canister ic-vote's page may call is judged clean -- its poll
+    // canister governed by ic-git, ic-git under its governor, the system
+    // canisters -- so the badge is OK in green, not amber, and the page's
+    // calls reach them; a canister nobody judged, or any IC API host but
+    // icp-api.io, is blocked before the request leaves. (The amber case is
+    // covered offline by tools/certified-test.mjs.)
+    report('every backend governed or system: the badge is OK in green', s.badge === 'OK' && s.color === '26,127,55', s);
     const calls = {
       ledger: await b.call('https://icp-api.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
       poll: await b.call('https://icp-api.io/api/v2/canister/gjob4-qqaaa-aaaab-ag4mq-cai/query'),

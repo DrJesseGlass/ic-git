@@ -53,15 +53,27 @@ controllers, never ic-git's. For each canister:
 - **approved** -- its one controller is ic-git and its certified module
   hash is the repo's `<repo>#app` record, read from the registry through
   the same two RPCs that must agree: a governed backend running a build
-  the voters approved. Allowed.
+  the voters approved. Allowed. Or ic-git itself: its one controller is
+  the governor pinned in the core (`7kkwl-...`, docs/GOVERNOR.md), whose
+  certified state shows no controllers and the module `verified.json`
+  records for it, and ic-git's certified module hash is the
+  `ic-git#canister` record. ic-git's code then changes only by its
+  approvers' vote, and the chain says which build it runs.
+- **governed** -- ic-git under that governor, but running a module the
+  `ic-git#canister` record does not name (yet: the record follows an
+  upgrade by a block or two, and a failed publish leaves it behind until
+  the next). Allowed, warned: the change was still voted. ic-git is never
+  blocked -- every page is served by it -- so each way its governor
+  could fall short is a warning that says which.
 - **blocked** -- its one controller is ic-git, but no record approves the
   module it runs, or there is no record. The one case a verified page
   must not reach, since governance promised otherwise: the site fails
   check G and the stop page names the canister and the two hashes.
 - **immutable** -- nobody holds it: its code can never change. Allowed.
-- **ungoverned** -- anyone else holds it (an owner, ic-git among others,
-  ic-git itself until the governor of docs/GOVERNANCE.md section 5). Its
-  code is not tampered, but its holder can change it without a vote.
+- **ungoverned** -- anyone else holds it (an owner, ic-git among others;
+  ic-git under a governor other than the pinned one, or one that has
+  controllers or runs another module). Its code is not tampered, but its
+  holder can change it without a vote.
   Allowed, and said: the badge stays OK but turns amber, and its hover
   text says the site's owner can change its backend without approval.
   A stale certificate (over five minutes) on an allowed backend turns the
@@ -368,7 +380,9 @@ to both stores on 2026-10-01. Users pass the Chrome store id to `--id`.
 published on its own), the certified reader, and the backend check --
 was published on 2026-10-09 and submitted to both stores. Firefox's
 0.2.0 asks for host permissions on `icp0.io` and `ic0.app` too, to cancel
-a page's calls through those hosts.
+a page's calls through those hosts. The packages in git are 0.2.1, not
+yet published: ic-git itself judged by the governor rule ("approved"
+since the handover of 2026-10-14, where 0.2.0 still says "ungoverned").
 
 | Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx | Chrome store id |
 |---|---|---|---|---|---|---|
@@ -386,11 +400,9 @@ a page's calls through those hosts.
 - The extension hashing its own files and showing whether they match the
   record: catches an unpublished update, not a tampered extension, which
   would lie about itself.
-- ic-git's own canister under the backend check: today it is
-  "ungoverned" (its controller is the operator), which every site's badge
-  says in amber. The governor (docs/GOVERNANCE.md, section 5) makes it
-  "approved": controllers exactly the governor, module hash the recorded
-  one; the governor's id is then written into the packages.
+- A successor governor (a Handover vote, docs/GOVERNOR.md) needs a new
+  pin in the core and a package release; until then the old pin judges
+  ic-git "ungoverned", which is the safe direction.
 - The K-of-N attestations (docs/ATTESTATION.md) behind the same stop page.
 - Safari (no `filterResponseData`; CSP injection unexamined), other
   hosting, and pages outside `/site/`.

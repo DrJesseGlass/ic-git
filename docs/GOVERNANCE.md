@@ -95,6 +95,13 @@ and why. A site whose backend is ungoverned is not stopped (its code is not
 tampered) but is marked: "this site's owner can change its backend without
 approval".
 
+ic-git itself is judged by its governor (section 5): approved when its
+only controller is the governor pinned in the core, that governor has no
+controllers and runs its recorded module, and ic-git's certified module
+hash is the `ic-git#canister` record; warned, never blocked, when any of
+that falls short. `tools/check-module-hash.sh` watches the same: ic-git's
+module, its controllers, and the governor's module and controllers.
+
 ## 5. The governor: ic-git under its own rules
 
 The live ic-git canister (`umobs`) must stay where it is (its threshold
@@ -160,8 +167,8 @@ need to look.
 5. Activity feeds.
 6. The governor: build, rehearse locally, record, then the mainnet handover.
    Done: the governor `7kkwl-baaaa-aaaab-ag6rq-cai` has controlled ic-git
-   alone since 2026-10-14 (VERIFIED.md, "The governor"). Next: the
-   extensions judge ic-git by the governor rule (section 4).
+   alone since 2026-10-14 (VERIFIED.md, "The governor"); the core judges
+   ic-git by it (section 4; extensions 0.2.1, unpublished).
 7. Push notifications (Dmail), once confirmed.
 
 ## Open questions

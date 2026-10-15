@@ -15,7 +15,11 @@
 //     warned; one under ic-git alone is approved only when its certified
 //     module hash is the <repo>#app record's, blocked otherwise or with no
 //     record, and unreadable when its certificate fails -- and only the
-//     approved and system and ungoverned ones are allowed;
+//     approved and system and ungoverned ones are allowed; and ic-git under
+//     its governor (tools/vectors/read_state_governed.json, captured after
+//     the handover) is approved only when the governor is the pinned one --
+//     no controllers, the pinned module -- and ic-git runs what
+//     ic-git#canister records, warned (never blocked) otherwise;
 //   - with --live: umobs and the ICP ledger verify against mainnet now, and
 //     the pinned root key is the one /api/v2/status reports.
 //
@@ -31,6 +35,7 @@ const bls = read('../core/bls12-381.js'), core = read('../core/verifier.js');
 const load = withBls => new Function((withBls ? bls + '\n' : '') + core + '\nreturn Verifier;')();
 const Verifier = load(true);
 const vectors = JSON.parse(read('./vectors/read_state.json'));
+const governed = JSON.parse(read('./vectors/read_state_governed.json'));
 
 const te = new TextEncoder(), td = new TextDecoder();
 const unhex = h => Uint8Array.from(h.match(/../g), x => parseInt(x, 16));
@@ -291,6 +296,55 @@ for (const id of [UMOBS, LEDGER]) {
   pass('the default list is ic-git, the system canisters and the app canister /info names, with the note saying what was not read');
 }
 
+// --- ic-git under its governor (docs/GOVERNOR.md)
+{
+  const GOV = '7kkwl-baaaa-aaaab-ag6rq-cai';
+  const umobs = governed[UMOBS], gov = governed[GOV];
+  assert.deepEqual(umobs.controllers, [GOV]); assert.deepEqual(gov.controllers, []);
+  const fetchFor = tamper => async (url) => {
+    const id = /canister\/([a-z0-9-]+)\/read_state/.exec(url);
+    const v = id && governed[id[1]];
+    if (!v) return { ok: false, status: 404 };
+    let bytes = unhex(v.reply_hex);
+    if (tamper === id[1]) { bytes = Uint8Array.from(bytes); bytes[bytes.length - 20] ^= 1; }
+    return { ok: true, status: 200, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
+  };
+  const word = h => h.padEnd(64, '0');
+  const registry = rec => ({ request: async ({ method }) => method === 'eth_chainId' ? '0xaa36a7'
+    : rec ? '0x' + word('018bf4d5b2749492ecac0b94a5752a047f844767') + rec + (1_700_000_000).toString(16).padStart(64, '0') : '0x' + '0'.repeat(192) });
+  const base = { now: Math.max(umobs.time, gov.time) + 1000, providerOnly: true, providerName: 'stub', canisters: [UMOBS] };
+  const judge = extra => Verifier.checkBackends('r', { ...base, fetch: fetchFor(), provider: registry(umobs.moduleHash), ...extra }).then(r => [r, r.backends[0]]);
+
+  let [r, b] = await judge({});
+  assert.equal(b.kind, 'approved'); assert.ok(r.ok && !r.warn); assert.equal(r.warning, '');
+  assert.match(b.detail, /governed by its governor 7kkwl.*recorded build of commit 018bf4d5b274/);
+  pass('ic-git under the pinned, immutable governor, running what ic-git#canister records: approved');
+
+  [r, b] = await judge({ provider: registry('11'.repeat(32)) });
+  assert.equal(b.kind, 'governed'); assert.ok(r.ok && r.warn); assert.match(b.detail, /runs module eb61f0e1.*records 11111111/);
+  assert.match(r.warning, /record does not name yet \(umobs\)/);
+  [r, b] = await judge({ provider: registry(null) });
+  assert.equal(b.kind, 'governed'); assert.match(b.detail, /holds no ic-git#canister record/);
+  [r, b] = await judge({ provider: { request: async () => { throw new Error('rpc down'); } } });
+  assert.equal(b.kind, 'governed'); assert.ok(r.ok); assert.match(b.detail, /record could not be read/);
+  pass('...with the record behind, absent or unreadable: governed, allowed and warned, never blocked');
+
+  [r, b] = await judge({ governor: { id: GOV, module: '00'.repeat(32) } });
+  assert.equal(b.kind, 'ungoverned'); assert.ok(r.ok && r.warn); assert.match(b.detail, /governor runs module a71ff65d.*not the recorded 00000000/);
+  [r, b] = await judge({ fetch: fetchFor(GOV) });
+  assert.equal(b.kind, 'ungoverned'); assert.match(b.detail, /governor's state could not be certified/);
+  [r, b] = await judge({ governor: { id: 'aaaaa-aa', module: gov.moduleHash } });
+  assert.equal(b.kind, 'ungoverned'); assert.match(b.detail, /not governed: controlled by 7kkwl/);
+  pass('...a governor running another module, one whose state cannot be certified, or one that is not the pinned id: ungoverned');
+
+  // The pin is the recorded governor: the one in verified.json.
+  const rec = JSON.parse(read('../verified.json')).governor;
+  const pin = Verifier.DEFAULTS.governor;
+  assert.deepEqual([pin.id, pin.module], [rec.id, rec.module_hash]);
+  assert.equal(gov.moduleHash, pin.module);
+  pass('the pinned governor is verified.json\'s, and the captured governor runs it');
+}
+
 if (process.argv.includes('--live')) {
   for (const id of [UMOBS, LEDGER]) {
     const r = await Verifier.readCanisterState(id);
@@ -305,7 +359,8 @@ if (process.argv.includes('--live')) {
   const be = await Verifier.checkBackends('ic-vote');
   assert.ok(be.ok, JSON.stringify(be.backends));
   assert.equal(be.backends.filter(b => b.kind === 'system').length, 3);
-  assert.ok(be.backends.every(b => ['system', 'approved', 'ungoverned'].includes(b.kind)));
+  assert.ok(be.backends.every(b => ['system', 'approved', 'governed', 'ungoverned'].includes(b.kind)));
+  assert.match(be.backends.find(b => b.canister === UMOBS).kind, /^(approved|governed)$/, 'ic-git is under its governor');
   pass('live: ic-vote\'s backends judge as ' + be.backends.map(b => b.kind).join(', '));
 }
 
