@@ -70,6 +70,7 @@ expect() { if printf '%s' "$2" | grep -qE -- "$3"; then pass "$1"; else fail "$1
 # refuse NAME TEXT PATTERN: pass if TEXT does not contain PATTERN.
 refuse() { if printf '%s' "$2" | grep -qE -- "$3"; then fail "$1" "$2"; else pass "$1"; fi; }
 section() { printf '\n== %s\n' "$1"; }
+flat() { printf '%s' "$1" | tr '\n' ' '; }
 
 cleanup() {
   if [ "$KEEP" = 1 ]; then
@@ -346,6 +347,14 @@ for _ in $(seq 1 30); do
 done
 expect "  ...and the app" "$(printf '%s' "$STATUS" | tr '\n' ' ')" "ok = true.*commit = \"$A1\""
 expect "  ...two objections on record" "$(curl -s "http://$HOST/api/e2e-app/votes/$A2")" '"objections":2'
+FEED=$(curl -s -D "$WORK/feed.h" "http://$HOST/feed/e2e-app")
+expect "the repo's feed is Atom" "$(cat "$WORK/feed.h")" 'application/atom\+xml'
+expect "  ...with the push awaiting votes" "$(flat "$FEED")" "<category term=\"awaiting\"/>.*$A2 on refs/heads/main needs"
+expect "  ...the objection with its reason" "$(flat "$FEED")" 'object commit.*Reason: regressed in production'
+expect "  ...the threshold reached" "$FEED" '<category term="reached"/>'
+expect "  ...and the deploy" "$(flat "$FEED")" "deployed to.*<category term=\"deployed\"/>"
+expect "  ...newest first: the rollback deploy" "$(printf '%s' "$FEED" | grep -n '<category' | head -1)" 'deployed'
+expect "a feed for a repo that does not exist is a 404" "$(curl -s -o /dev/null -w '%{http_code}' "http://$HOST/feed/no-such-repo")" '^404$'
 # Withdrawing both (a rejection weighs nothing) approves it again.
 call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Reject }, null)" >/dev/null
 call "$V2" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Reject }, null)" >/dev/null
@@ -362,7 +371,6 @@ section "governed backend"
 # docs/GOVERNANCE.md, section 2. Governing hands the app canister to ic-git
 # alone and locks the policy: the owner's direct changes to it are refused,
 # and every such change is a ballot under the current K of N.
-flat() { printf '%s' "$1" | tr '\n' ' '; }
 INFO=$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)
 expect "before: the owner and ic-git control the app canister" "$(flat "$INFO")" "Controllers:.*$T"
 expect "a voter cannot govern" "$(call "$V1" git govern_app_canister '("e2e-app")')" 'only the owner'
@@ -551,6 +559,11 @@ expect "the governor has no controllers" "$(flat "$(cd "$WORK" && dfx canister i
 expect "  ...so nobody can upgrade it" "$(cd "$WORK" && dfx canister install governor --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" 2>&1 || true)" 'controller'
 (cd "$WORK" && dfx canister update-settings ruled --set-controller "$GOV" --yes --identity "$OP" >/dev/null 2>&1)
 expect "the target is controlled by the governor alone" "$(flat "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)")" "Controllers: $GOV *Module"
+# The target mirrors the governor into its own feed (docs/GOVERNOR.md,
+# "Following it"): only a controller qualifies.
+expect "a non-controller is not the governor" "$(call "$OP" ruled feed_set_governor "(opt principal \"$T\")")" 'does not control'
+expect "the governor is" "$(call "$OP" ruled feed_set_governor "(opt principal \"$GOV\")")" 'Ok'
+expect "  ...and a tenant cannot set it" "$(call "$TEN" ruled feed_set_governor "(opt principal \"$GOV\")")" 'is not an operator'
 expect "  ...so its old controller cannot upgrade it" "$(cd "$WORK" && dfx canister install ruled --mode upgrade --yes --identity "$OP" --wasm "$GOV_WASM" 2>&1 || true)" 'controller'
 expect "only a controller may publish the target's record" "$(call "$OP" ruled registry_publish_canister "(\"$(printf 'a%.0s' $(seq 40))\", \"$(printf 'b%.0s' $(seq 64))\")")" 'only a controller'
 
@@ -608,8 +621,23 @@ expect "an objection needs a reason" "$(gov "$V2" vote "($U2 : nat64, variant { 
 expect "an objection with a reason is counted" "$(flat "$(gov "$V2" vote "($U2 : nat64, variant { Object }, opt \"rebuild did not match yet\")")")" 'objections = 1'
 expect "  ...and a second approval does not outweigh it (2 - 1 < 2)" "$(flat "$(gov "$V1" vote "($U2 : nat64, variant { Approve }, null)")")" 'reached = false'
 expect "  ...the proposal lists the objection's reason" "$(gov "$OP" proposals --query)" 'rebuild did not match yet'
+# A poll now, while the objection stands: a ballot replaced before the
+# next poll is never seen, since the governor keeps only the latest.
+expect "a poll reports the governor's history so far" "$(call "$OP" ruled feed_poll_governor)" 'Ok = [0-9_]+ : nat64'
+GFEED=$(curl -s "http://$R.raw.localhost:$PORT/feed")
+expect "  ...as ic-git's own feed" "$(flat "$GFEED")" '<title>ic-git</title>'
+expect "  ...with the first upgrade executed" "$(flat "$GFEED")" "proposal $U1 executed"
+expect "  ...the policy change" "$(flat "$GFEED")" 'policy 2 of 3'
+expect "  ...the objection with its reason" "$(flat "$GFEED")" 'object proposal.*Reason: rebuild did not match yet'
 expect "  ...and the module is unchanged" "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)" "Module hash: 0x$GZ_SHA"
 expect "the objector approves instead: 3 approvals, executed" "$(flat "$(gov "$V2" vote "($U2 : nat64, variant { Approve }, null)")")" "Ok = \"upgraded $R to $RAW_SHA"
+
+# The next poll adds only what changed since: the approval that replaced
+# the objection, and the execution.
+expect "the next poll adds the approval and the execution" "$(call "$OP" ruled feed_poll_governor)" 'Ok = 2 : nat64'
+GFEED=$(curl -s "http://$R.raw.localhost:$PORT/feed")
+expect "  ...so the feed has the second upgrade executed" "$(flat "$GFEED")" "proposal $U2 executed"
+expect "  ...and nothing twice" "$(call "$OP" ruled feed_poll_governor)" 'Ok = 0 : nat64'
 expect "  ...the IC reports it" "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)" "Module hash: 0x$RAW_SHA"
 
 # A withdrawn proposal is logged and gone.

@@ -390,6 +390,11 @@ service : {
   names_set_config : (text, text) -> (Result);
   names_clear_config : () -> ();
   names_get_config : () -> (opt NamesConfig) query;
+  // activity feeds (docs/GOVERNANCE.md, section 6): GET /feed/<repo> and
+  // GET /feed are Atom; the governor is mirrored into /feed on a timer
+  feed_set_governor : (opt principal) -> (Result);
+  feed_governor : () -> (opt principal) query;
+  feed_poll_governor : () -> (ResultNat64);
   evm_address : () -> (ResultText);
   evm_send : (text, text) -> (ResultTxOutcome);
   evm_deploy : (text, nat64) -> (ResultTxOutcome);

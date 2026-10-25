@@ -14,7 +14,7 @@ guarantee behind ic-git's own code, so the aim is one unbroken chain:
 | Backends run approved code | certified module hash vs the on-chain deploy record (section 3) | design |
 | Only ic-git can change a backend | governed app canisters (section 2) | design |
 | Only a vote can change ic-git | the governor (section 5) | design |
-| Nobody is surprised | activity feeds, then push (section 6) | design |
+| Nobody is surprised | activity feeds, then push (section 6) | feeds done; push design |
 
 ## 1. Votes
 
@@ -140,6 +140,12 @@ mainnet rollout, whose last step is the only irreversible one.
   feed: commit awaiting votes, ballot cast (with its reason), threshold
   reached, deployed, record published. Any feed reader subscribes, or a
   feed-to-email service; nothing is stored about the reader.
+  Built: `GET /feed/<repo>` on the canister, and `GET /feed` for ic-git
+  itself, which carries the governor's proposals, ballots and outcomes
+  and the `ic-git#canister` record (docs/TENANCY.md, "Feeds"). The
+  governor has no controllers and so cannot serve its own feed; ic-git
+  polls its public `proposals` and `log` queries every five minutes and
+  mirrors them (docs/GOVERNOR.md, "Following it").
 - **Push (later, opt-in):** Dmail is the candidate -- a Dmail notification
   channel per repo that voters and users subscribe to with their wallet.
   Sending uses Dmail's REST API with a developer key, through a
@@ -164,7 +170,7 @@ need to look.
 4. The extensions' backend check (section 4), on 2 and 3. Built:
    `checkBackends` in the core, enforced by both extensions, shown by the
    loader (docs/EXTENSION.md, "What the page talks to").
-5. Activity feeds.
+5. Activity feeds. Done: `/feed/<repo>` and `/feed` (section 6).
 6. The governor: build, rehearse locally, record, then the mainnet handover.
    Done: the governor `7kkwl-baaaa-aaaab-ag6rq-cai` has controlled ic-git
    alone since 2026-10-14 (VERIFIED.md, "The governor"); the core judges

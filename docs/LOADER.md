@@ -138,7 +138,11 @@ On https://sepolia.etherscan.io/address/0xa1362DAda583c56a395D305a8C7A458E0B62A2
 | Source | `ProvenanceRegistry.sol` |
 
 These are the settings in `compile.js` and `registry.metadata.json` in that
-repo. Verification changes nothing on chain; it only lets the explorer
+repo. The code on chain differs from `registry.deployed.hex` in 38 bytes
+and nowhere else: the `owner` immutable, which the constructor fills in
+at deployment, so the verifier's full match is expected (checked
+2026-10-23 against `eth_getCode`; the metadata hashes are identical).
+Verification changes nothing on chain; it only lets the explorer
 show the source and call `get` for the user.
 
 ## What a user does (once, about two minutes)
