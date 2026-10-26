@@ -271,6 +271,35 @@ came with the crate's 0.2.0; ballots recorded before it read as having no
 reason, which is what they had. A signed flavor of the same record type is
 what the module-hash attestations will use.
 
+## Feeds
+
+Every repo has an Atom feed at `GET /feed/<repo>` on the canister's raw
+domain, and ic-git itself has one at `GET /feed`
+(docs/GOVERNANCE.md, section 6). Any feed reader subscribes, or a
+feed-to-email service; the canister stores nothing about who reads it.
+
+A repo's feed carries, newest first:
+
+- a push to the deploy branch of a votes-gated repo whose tip nobody has
+  approved yet (`awaiting`), with the count it needs;
+- every ballot on a commit (`ballot`), with who cast it, the decision,
+  the reason when there is one, and the count it left behind, and the
+  moment a commit reaches the threshold (`reached`);
+- every ballot on a policy change (`policy`), and the change taking
+  effect;
+- a deploy's outcome, wasm or EVM (`deployed`, `deploy-failed`), with the
+  target and the module hash;
+- a registry record broadcast for the repo (`published`): `<repo>`,
+  `<repo>#site` or `<repo>#app`, with the transaction hash. Broadcast,
+  not mined: `evm_receipt` says when the chain has it.
+
+The kind is each entry's `<category>`; the actor, when there is one, its
+`<author>`. ic-git's own feed carries the governor's proposals, ballots
+and outcomes (docs/GOVERNOR.md, "Following it") and the `ic-git#canister`
+record. Each feed keeps its newest 200 events; the records themselves are
+elsewhere (`get_deploy_history`, the registry, the governor's `log`), so
+a feed tells you to look, it is not what you check.
+
 ## App canisters
 
 An app deployed to the IC should burn its own owner's cycles, not ic-git's.

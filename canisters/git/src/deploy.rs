@@ -267,7 +267,7 @@ pub fn get_history(repo: &str) -> Vec<DeployRecord> {
 /// Append the binding for this deploy to the provenance log.
 pub(crate) fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
     let mut log = get_history(repo);
-    log.push(DeployRecord {
+    let rec = DeployRecord {
         commit: st.commit.clone(),
         target: cfg.target.clone(),
         source_path: cfg.source_path.clone(),
@@ -276,7 +276,9 @@ pub(crate) fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
         ok: st.ok,
         message: st.message.clone(),
         at_ns: crate::tenancy::now_ns(),
-    });
+    };
+    crate::feed::deployed(repo, &rec);
+    log.push(rec);
     if log.len() > MAX_LOG {
         let drop = log.len() - MAX_LOG;
         log.drain(0..drop);
@@ -642,6 +644,7 @@ async fn run_evm(
         }
     }
     store::meta_set_json(&evm_status_key(repo), &st);
+    crate::feed::evm_deployed(repo, &commit, st.ok, &st.message);
     (st, unused)
 }
 

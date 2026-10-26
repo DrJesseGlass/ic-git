@@ -556,6 +556,19 @@ pub enum PolicyChange {
 }
 
 impl PolicyChange {
+    /// The change in a sentence fragment, for the feed. The wallet's consent
+    /// message (consent.rs) has its own, shortened for a signer's screen.
+    pub fn describe(&self) -> String {
+        match self {
+            PolicyChange::RequiredVotes { k } => format!("require {k} vote{} per commit", if *k == 1 { "" } else { "s" }),
+            PolicyChange::AddVoter { principal } => format!("add {principal} as a voter"),
+            PolicyChange::RemoveVoter { principal } => format!("remove voter {principal}"),
+            PolicyChange::Transfer { new_owner } => format!("transfer the repo to {new_owner}"),
+            PolicyChange::WasmDeploy { target, source_path } => format!("deploy {source_path} to canister {target}"),
+            PolicyChange::DeployMode { mode } => format!("set the install mode to {mode}"),
+        }
+    }
+
     fn subject(&self) -> Subject {
         let canonical = serde_json::to_vec(self).expect("a PolicyChange serializes");
         Subject::of_bytes("policy", &canonical)

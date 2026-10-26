@@ -62,6 +62,25 @@ the registry address, seeding, pricing. Those are calls the code allows,
 not changes to it, and every one is visible in the code the governor
 installed; putting them under a vote is later work.
 
+## Following it
+
+The governor has no controllers, so it can never learn to serve a feed.
+ic-git serves one for it: `GET /feed` on ic-git's raw domain
+(`https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/feed`) is an Atom
+feed of every proposal opened, every ballot with its reason, each
+threshold reached, each execution or withdrawal, and the
+`ic-git#canister` record ic-git publishes after an upgrade. ic-git reads
+the governor's public `proposals` and `log` queries every five minutes
+and reports what changed since it last looked. A ballot replaced before
+the next poll is never seen (the governor keeps each approver's latest),
+so the feed shows the ballots that stood at each poll, not every ballot
+ever cast. `feed_poll_governor`
+(operator) polls now instead of at the next poll, and
+`feed_set_governor` (operator) names the governor, which must be a
+controller of ic-git -- the feed says who governs it, so it cannot be
+pointed at a canister that does not. Approvers subscribe to it the way
+they would to any feed; an objection shows up there with its reason.
+
 ## Checking a proposal (approvers)
 
 Before approving an Upgrade:
@@ -138,6 +157,11 @@ passphrase-encrypted). Steps 1 to 4 can all be undone; step 5 cannot.
    ic-git's certified controllers are then exactly the governor. From
    here every change to ic-git's code is a governor proposal, and the
    only way to change the governor is a Handover it votes for.
+6. **Point ic-git's feed at it**, so approvers hear about proposals and
+   ballots ("Following it"):
+   ```sh
+   dfx canister --network https://icp-api.io --identity icgit-admin-encrypt call umobs-yiaaa-aaaab-agyrq-cai feed_set_governor '(opt principal "<governor>")'
+   ```
 
 Afterwards the extensions can judge ic-git itself: controllers == the
 governor, the governor's controllers empty, and the module hash ==

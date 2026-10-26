@@ -10,6 +10,7 @@ mod compile;
 mod consent;
 mod deploy;
 mod evm;
+mod feed;
 mod fleet;
 mod icp;
 mod interp;
@@ -47,6 +48,7 @@ fn init() {
     store::init_schema_version();
     tenancy::arm_rent_timer();
     arm_push_cert_seed();
+    feed::arm_governor_timer();
 }
 
 #[ic_cdk::pre_upgrade]
@@ -66,6 +68,7 @@ fn post_upgrade() {
     tokens::migrate();
     arm_push_cert_seed();
     store::index_repo_labels();
+    feed::arm_governor_timer();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -80,6 +83,8 @@ enum Route {
     Site { repo: String, path: String },
     /// GET /api/...: read-only JSON for the repo browser (see api.rs).
     Api { url: String },
+    /// GET /feed (ic-git itself) or /feed/<repo>: Atom (see feed.rs).
+    Feed { repo: Option<String> },
     Index,
     NotFound,
 }
@@ -94,6 +99,15 @@ fn route(req: &HttpRequest) -> Route {
             Route::Api { url: req.url.clone() }
         } else {
             Route::NotFound
+        };
+    }
+    if path == "/feed" || path.starts_with("/feed/") {
+        if req.method != "GET" {
+            return Route::NotFound;
+        }
+        let repo = path["/feed".len()..].trim_matches('/');
+        return Route::Feed {
+            repo: (!repo.is_empty()).then(|| repo.to_string()),
         };
     }
     if let Some(rest) = path.strip_prefix("/site/") {
@@ -206,12 +220,20 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
         Route::Site { repo, path } => site::serve(&repo, &path),
         Route::Api { url } => api::handle(&url),
+        Route::Feed { repo } => {
+            let host = req
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+                .map(|(_, v)| v.as_str());
+            feed::serve(repo.as_deref(), host)
+        }
         Route::Index => {
             let repos = store::list_repos().join("\n");
             git_response(
                 200,
                 "text/plain",
-                format!("ic-git\n\nrepos:\n{repos}\n").into_bytes(),
+                format!("ic-git\n\nrepos:\n{repos}\n\nfeeds (Atom): /feed/<repo>, and /feed for ic-git itself\n").into_bytes(),
             )
         }
         Route::NotFound => git_response(404, "text/plain", b"not found\n".to_vec()),
@@ -297,7 +319,10 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             if let Err(e) = tenancy::charge_push(&repo, req.body.len()) {
                 return git_response(200, RESULT, receive::refuse(&request, &e));
             }
+            let tip_before = store::head_target(&repo).and_then(|b| store::get_ref(&repo, &b));
             let outcome = receive::handle(&repo, request, &req.body);
+            // A votes-gated repo tells its feed about a tip nobody approved.
+            feed::after_push(&repo, tip_before);
             // m4: if the push moved the deploy branch and a deploy is
             // configured, enqueue a job and return immediately. The compile +
             // validate + install_code runs from a timer, off the push path
@@ -679,7 +704,9 @@ fn cast_ballot(
     decision: tenancy::Vote,
     reason: Option<String>,
 ) -> Result<BallotTally, String> {
-    let t = tenancy::cast_ballot(&repo, &caller(), &commit, decision, reason)?;
+    let was_reached = tenancy::tally(&repo, &commit).is_some_and(|t| t.reached);
+    let t = tenancy::cast_ballot(&repo, &caller(), &commit, decision, reason.clone())?;
+    feed::ballot(&repo, &caller(), &commit, decision, reason.as_deref(), &t, was_reached);
     follow_approvals(&repo, true);
     Ok(BallotTally {
         approvals: t.approvals,
@@ -693,7 +720,10 @@ fn cast_ballot(
 /// objections. Returns (approvals, required).
 #[ic_cdk::update]
 fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
+    let was_reached = tenancy::tally(&repo, &commit).is_some_and(|t| t.reached);
     let t = tenancy::vote(&repo, &caller(), &commit, approve)?;
+    let decision = if approve { tenancy::Vote::Approve } else { tenancy::Vote::Reject };
+    feed::ballot(&repo, &caller(), &commit, decision, None, &t, was_reached);
     follow_approvals(&repo, true);
     Ok((t.approvals, t.required))
 }
@@ -795,7 +825,9 @@ fn propose_policy_change(
     decision: tenancy::Vote,
     reason: Option<String>,
 ) -> Result<BallotTally, String> {
-    let (t, apply) = tenancy::propose_policy_change(&repo, &caller(), change, decision, reason)?;
+    let described = change.describe();
+    let (t, apply) = tenancy::propose_policy_change(&repo, &caller(), change, decision, reason.clone())?;
+    feed::policy_ballot(&repo, &caller(), &described, decision, reason.as_deref(), &t);
     // The deploy config lives in deploy.rs; tenancy decided, this applies.
     match apply {
         Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => deploy::set_config(&repo, target, source_path)?,
@@ -1175,6 +1207,35 @@ fn names_clear_config() {
 #[ic_cdk::query]
 fn names_get_config() -> Option<names::NamesConfig> {
     names::get_config()
+}
+
+// --- Activity feeds (docs/GOVERNANCE.md, section 6; feed.rs) ------------------
+
+/// Mirror the governor's proposals, ballots and outcomes into this
+/// canister's own feed (`GET /feed`), polled every few minutes. The
+/// governor must control this canister: the feed says who governs ic-git,
+/// so it cannot be pointed at a canister that does not. `None` stops it.
+#[ic_cdk::update(guard = "is_admin")]
+fn feed_set_governor(governor: Option<candid::Principal>) -> Result<(), String> {
+    if let Some(p) = &governor {
+        if !ic_cdk::api::is_controller(p) {
+            return Err(format!("{p} does not control this canister, so it is not its governor"));
+        }
+    }
+    feed::set_governor(governor);
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn feed_governor() -> Option<candid::Principal> {
+    feed::governor()
+}
+
+/// Ask the governor what changed now rather than at the next poll. Returns
+/// how many events that added to the feed.
+#[ic_cdk::update(guard = "is_admin")]
+async fn feed_poll_governor() -> Result<u64, String> {
+    feed::poll_governor().await
 }
 
 /// The canister's own EOA (EIP-55). Derived from the threshold ECDSA public

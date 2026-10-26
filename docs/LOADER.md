@@ -114,18 +114,20 @@ check A (served commit == registry commit) then fails until the record is
 republished. Between steps 2 and 4 of a release, the served file and the
 record disagree; a user who downloads in that window sees a mismatch.
 
-## Verifying the registry contract on Etherscan (once)
+## Verifying the registry contract on Etherscan (done 2026-10-26)
 
 A user's easiest check is Etherscan's "Read Contract" tab, which appears
-only once the contract's source is verified there. It is not yet. The
-source is in the canister's `registry` repo:
+only once the contract's source is verified there. It is: Etherscan
+reported a matching bytecode and ABI on 2026-10-26, from the source in
+the canister's `registry` repo. For the record, or for a successor
+contract, this is how:
 
 ```sh
 git clone https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/registry.git   # commit f3cd339
 ```
 
 On https://sepolia.etherscan.io/address/0xa1362DAda583c56a395D305a8C7A458E0B62A209#code,
-"Verify and Publish" with:
+"Verify and Publish" (no account needed) with:
 
 | Field | Value |
 |---|---|
@@ -138,7 +140,11 @@ On https://sepolia.etherscan.io/address/0xa1362DAda583c56a395D305a8C7A458E0B62A2
 | Source | `ProvenanceRegistry.sol` |
 
 These are the settings in `compile.js` and `registry.metadata.json` in that
-repo. Verification changes nothing on chain; it only lets the explorer
+repo. The code on chain differs from `registry.deployed.hex` in 38 bytes
+and nowhere else: the `owner` immutable, which the constructor fills in
+at deployment, which the verifier accounts for (checked 2026-10-23
+against `eth_getCode`; the metadata hashes are identical).
+Verification changes nothing on chain; it only lets the explorer
 show the source and call `get` for the user.
 
 ## What a user does (once, about two minutes)

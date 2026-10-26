@@ -33,7 +33,7 @@ const APP_KEY_SUFFIX: &str = "#app";
 /// certifies for it. Published after each upgrade by the controller that
 /// made it -- the governor (docs/GOVERNANCE.md, section 5) -- so a verifier
 /// can check ic-git itself the way it checks a governed backend.
-const CANISTER_KEY: &str = "ic-git#canister";
+pub(crate) const CANISTER_KEY: &str = "ic-git#canister";
 
 /// A resolved provenance record: the registry key, the commit being attested,
 /// and the artifact hash bound to it.
@@ -47,7 +47,9 @@ impl Record {
     /// The module's single exit point to the signing side. The error says
     /// whether the broadcast was attempted, which decides a refund.
     pub async fn publish(&self) -> Result<TxOutcome, evm::SendError> {
-        evm::registry_publish_record(&self.key, &self.commit, &self.bundle).await
+        let out = evm::registry_publish_record(&self.key, &self.commit, &self.bundle).await?;
+        crate::feed::published(&self.key, &hex::encode(self.commit), &out.tx_hash);
+        Ok(out)
     }
 }
 
