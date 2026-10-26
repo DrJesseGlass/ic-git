@@ -166,8 +166,12 @@ fn decision_text(decision: Vote) -> &'static str {
     }
 }
 
+/// `reason` as the ballot stores it (`tenancy::ballot_reason`): trimmed,
+/// and an empty one is none. The feed takes the caller's text, so without
+/// this a reason padded with whitespace -- accepted, since the 1 KB bound
+/// is on the trimmed text -- would grow the feed past what a ballot holds.
 fn with_reason(text: String, reason: Option<&str>) -> String {
-    match reason {
+    match reason.map(str::trim).filter(|r| !r.is_empty()) {
         Some(r) => format!("{text}. Reason: {r}"),
         None => text,
     }
@@ -391,6 +395,13 @@ const MIRROR_KEY: &str = "feed:governor:mirror";
 /// What of the governor the feed has already reported.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 struct Mirror {
+    /// Bumped by every `set_governor` that resets the mirror, so a poll
+    /// that was awaiting the old governor's answers when it happened can
+    /// tell, and drops them rather than reconciling them into the new
+    /// mirror (wrong events, and a cursor moved past history the new
+    /// governor has not reported).
+    #[serde(default)]
+    generation: u64,
     /// The governor's log position consumed so far.
     cursor: u64,
     /// Open proposals: their ballots (approver, time) and standing seen.
@@ -417,9 +428,14 @@ pub fn set_governor(governor: Option<Principal>) {
         None => store::meta_set_json(GOVERNOR_KEY, &Option::<String>::None),
     }
     if before != governor {
-        store::meta_set_json(MIRROR_KEY, &Mirror::default());
+        let generation = mirror().generation + 1;
+        store::meta_set_json(MIRROR_KEY, &Mirror { generation, ..Mirror::default() });
     }
     arm_governor_timer();
+}
+
+fn mirror() -> Mirror {
+    store::meta_get_json(MIRROR_KEY).unwrap_or_default()
 }
 
 /// The events a fresh look at the governor adds, and the mirror moved past
@@ -543,7 +559,8 @@ pub async fn poll_governor() -> Result<u64, String> {
 
 /// Ask the governor what changed and report it. Returns how many events
 /// that added. One poll at a time: a second one while the first awaits
-/// would report the same changes twice.
+/// would report the same changes twice. A poll whose governor was changed
+/// while it awaited reports nothing: its answers are the old governor's.
 #[cfg(not(test))]
 pub async fn poll_governor() -> Result<u64, String> {
     use ic_cdk::call::Call;
@@ -558,7 +575,8 @@ pub async fn poll_governor() -> Result<u64, String> {
             .candid::<Vec<GovProposal>>()
             .map_err(|e| format!("governor proposals undecodable: {e}"))?;
         let mut pages = Vec::new();
-        let mut from = store::meta_get_json::<Mirror>(MIRROR_KEY).unwrap_or_default().cursor;
+        let start = mirror();
+        let mut from = start.cursor;
         for _ in 0..GOVERNOR_LOG_PAGES {
             let page = Call::bounded_wait(gov, "log")
                 .with_args(&(from, 100u32))
@@ -574,8 +592,12 @@ pub async fn poll_governor() -> Result<u64, String> {
                 _ => break,
             }
         }
-        // Read the mirror after the awaits: a set_governor meanwhile reset it.
-        let mut m = store::meta_get_json::<Mirror>(MIRROR_KEY).unwrap_or_default();
+        // Read the mirror after the awaits: a set_governor meanwhile reset
+        // it, and these answers are then the old governor's.
+        let mut m = mirror();
+        if m.generation != start.generation {
+            return Err("the governor changed during the poll; its answers are discarded".to_string());
+        }
         let new = reconcile(&mut m, &open, &pages);
         let n = append(&Feed::Canister, new);
         store::meta_set_json(MIRROR_KEY, &m);
@@ -818,6 +840,32 @@ mod tests {
         assert_eq!(m.cursor, 2);
         assert!(m.open.is_empty());
         assert!(new[3].detail.contains("hand ic-git over to"));
+    }
+
+    /// A padded reason is recorded trimmed, as the ballot holds it, and a
+    /// blank one as none.
+    #[test]
+    fn reasons_are_trimmed_in_the_feed() {
+        assert_eq!(with_reason("x".into(), Some(&format!("  {}  \n", "padded"))), "x. Reason: padded");
+        assert_eq!(with_reason("x".into(), Some("   ")), "x");
+        assert_eq!(with_reason("x".into(), None), "x");
+    }
+
+    /// Naming a different governor resets the mirror and bumps its
+    /// generation, which a poll in flight checks; the same governor again
+    /// keeps it.
+    #[test]
+    fn set_governor_resets_the_mirror_once_per_change() {
+        store::meta_set_json(MIRROR_KEY, &Mirror { generation: 3, cursor: 9, open: BTreeMap::new() });
+        set_governor(Some(p(1)));
+        assert_eq!(governor(), Some(p(1)));
+        assert_eq!(mirror(), Mirror { generation: 4, cursor: 0, open: BTreeMap::new() });
+        store::meta_set_json(MIRROR_KEY, &Mirror { generation: 4, cursor: 2, open: BTreeMap::new() });
+        set_governor(Some(p(1)));
+        assert_eq!(mirror().cursor, 2, "the same governor keeps the mirror");
+        set_governor(None);
+        assert_eq!(governor(), None);
+        assert_eq!(mirror().generation, 5);
     }
 
     /// The canister's own feed takes the canister record; a repo's record
