@@ -522,6 +522,36 @@
         "note": "upgrade from v0.3.5, after tools/e2e-local.sh passed 155/155 on 589cba0, whose ic-git crate is the tag's. The canister crate changed in #77 by one endpoint: registry_publish_canister(commit, module_sha256), callable only by a controller, publishes ic-git#canister to the registry -- what the governor (canisters/governor, docs/GOVERNOR.md) calls after each upgrade it installs. The release also carries the shorter deploy_now consent message (#73). The governor is built and recorded by the same recipe but is not yet deployed; the controller is still the operator. Every published site (ic-git, ic-vote, ic-git-loader, ic-git-extension, ic-git-extension-firefox) still verifies after the upgrade"
       },
       "wasm_sha256": "14459d2b80616ed99cbc76cd00078a6ebecb399436984ff80ae42a107b718907"
+    },
+    {
+      "commit": "73ffa5bf813be4b76489b183541fd2ca23a4aa86",
+      "tag": "v0.3.7",
+      "module_hash": "72e21a4867f671ca6ee1ab3ab6f31f0694e2a75270aa11faf317a1e6c9dbea95",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64, linux/amd64 image under emulation",
+          "date": "2026-10-26",
+          "check": "built at 73ffa5b, the merge of #83; the same run rebuilt the governor to a71ff65d...641f, the module the live governor runs"
+        }
+      ],
+      "deployed": {
+        "date": "2026-10-27",
+        "on_chain_match": "match",
+        "checked_by": "dfx canister info against the reproducible build's module sha256: Module hash 0x72e21a48...ea95, Controllers 7kkwl-baaaa-aaaab-ag6rq-cai",
+        "note": "the first release installed by vote: governor proposal 4, staged in two chunks and approved by 1 of 2, executed in the same call. The new code published ic-git#canister (commit 73ffa5b, this module hash) in Sepolia tx 0x2df9df0e4b8910ea06bec641068c441dcce39b2f7b9168c350ab64f57a48b029, block 12001546, status success. The canister crate changed in #83: activity feeds, GET /feed/<repo> and GET /feed as Atom, and feed_set_governor / feed_governor / feed_poll_governor. Gated by tools/e2e-local.sh 176/176 on 0a5171a, the branch head. After the upgrade feed_set_governor named the governor and the first poll mirrored 11 events, proposals 1 to 4 with their ballots and outcomes"
+      },
+      "wasm_sha256": "3be18da062cb7b40a51e3107aa3091c7ecca77576d3feb4b95f7b5b55ea2d238"
     }
   ]
 }

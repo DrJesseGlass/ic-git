@@ -23,6 +23,7 @@ governor `7kkwl-baaaa-aaaab-ag6rq-cai` alone (below, "The governor").
 | 2026-10-07 | `db8f2bd` | `v0.3.4` | `e25610892fe279e4355d47c16cc1e03cd27732dad8187565e2eb1c36de5b9bad` (gz) | MATCH, 2026-10-07 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37653678100](https://github.com/DrJesseGlass/ic-git/actions/runs/37653678100), identical hash |
 | 2026-10-08 | `a23ee31` | `v0.3.5` | `30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a` (gz) | MATCH, 2026-10-08 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37803652956](https://github.com/DrJesseGlass/ic-git/actions/runs/37803652956), identical hash |
 | 2026-10-10 | `018bf4d` | `v0.3.6` | `eb61f0e10be0b93c1f4162cf040c6dcc69ed1248ac940fc35b89c008ec9762a2` (gz) | MATCH, 2026-10-10 | deployer (pinned container, macOS arm64 host under emulation, at the branch head, same ic-git crate); GitHub Actions amd64 runner, [run 38019976528](https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528), identical hash |
+| 2026-10-27 | `73ffa5b` | `v0.3.7` | `72e21a4867f671ca6ee1ab3ab6f31f0694e2a75270aa11faf317a1e6c9dbea95` (gz) | MATCH, 2026-10-27 | deployer (pinned container, macOS arm64 host under emulation); installed by governor proposal 4 |
 
 ## The governor -- 2026-10-11 to 14
 
@@ -63,6 +64,33 @@ propose-upgrade`, then `vote`), each recorded in the governor's public
 log and, on execution, as `ic-git#canister` on chain. The operator role
 inside ic-git (registry address, EVM and Solana settings, pricing) is
 unchanged: those are calls the code allows, not changes to it.
+
+## v0.3.7 -- 2026-10-27
+
+Activity feeds (#83), and the first release installed by a vote rather
+than by a controller's key. `GET /feed/<repo>` and `GET /feed` serve
+Atom (docs/TENANCY.md, "Feeds"; docs/GOVERNOR.md, "Following it"):
+pushes awaiting votes, ballots with their reasons, thresholds reached,
+policy ballots, deploys and registry records; `/feed` mirrors the
+governor, which has no controllers and so cannot serve one itself.
+
+The release path was the one docs/GOVERNOR.md describes. The pinned
+container built `73ffa5b`, the merge of #83, to
+`72e21a48...ea95` (gz; raw `3be18da0...d238`); the same run rebuilt the
+governor to the module it runs, `a71ff65d...641f`. `tools/governor.sh
+propose-upgrade` opened proposal 4 and staged the module in two chunks
+until it hashed to the proposal's; one approval reached 1 of 2 and
+executed it in the same call. The new code published `ic-git#canister`
+(commit `73ffa5b`, this module hash) in Sepolia tx `0x2df9df0e...b029`,
+block 12001546. Afterwards the IC reported module hash `72e21a48...ea95`
+and the governor as the only controller.
+
+Then `feed_set_governor` named the governor and the first poll mirrored
+11 events into `/feed`: proposals 1 to 4 with their ballots and outcomes.
+
+Gated before the deploy by `tools/e2e-local.sh`: 176 checks on
+`0a5171a`, the branch head, whose canister crate is the merge's. Same
+recipe and base image digest as v0.3.6.
 
 ## v0.3.6 -- 2026-10-10
 
