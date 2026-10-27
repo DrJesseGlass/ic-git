@@ -543,6 +543,14 @@
           "host": "macOS arm64, linux/amd64 image under emulation",
           "date": "2026-10-26",
           "check": "built at 73ffa5b, the merge of #83; the same run rebuilt the governor to a71ff65d...641f, the module the live governor runs"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/40427156571",
+          "date": "2026-10-27",
+          "check": "identical hash (72e21a48...ea95 gz, 3be18da0...d238 raw), and the governor's a71ff65d...641f; the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
         }
       ],
       "deployed": {
