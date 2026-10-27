@@ -140,8 +140,24 @@ attestation record, the contract, and the extension do not change. This is the
 
 ## Contract interface
 
-One contract per chain holds both record types. Reference implementation
-(Solidity, sha256/keccak per the convention above):
+**Deployed today (Sepolia only):** `ProvenanceRegistry`, at
+`0xa1362DAda583c56a395D305a8C7A458E0B62A209`. Its source is
+`ProvenanceRegistry.sol` in the `registry` repo on the mainnet ic-git
+canister (`git clone https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/registry.git`,
+commit `f3cd339`), built by that repo's `compile.js` (solc 0.8.28+commit.7893614a,
+optimizer on, 200 runs, EVM cancun). It has `set`/`get` and nothing else:
+no `attest`, no `agrees`, and its event is `Updated`, not `SitePublished`.
+`owner` is `msg.sender` at deploy, the canister's EOA
+(`0x6ad88e005f96b18e8b1c76a9da85fa8efa2c848a`), so the constructor takes no
+arguments. The on-chain runtime code equals that build's
+`registry.deployed.hex` except for the two immutable `owner` slots, metadata
+hash included, so the source and settings are exactly the ones deployed.
+
+The contract below is the **target** for the per-chain CREATE2 registry
+(next section), not what is deployed: it keeps `set`/`get` (and so the
+`0x693ec85e` selector) and adds third-party attestation. One contract per
+chain holds both record types (Solidity, sha256/keccak per the convention
+above):
 
     // SPDX-License-Identifier: MIT
     pragma solidity ^0.8.28;

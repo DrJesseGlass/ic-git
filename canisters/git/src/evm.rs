@@ -1339,9 +1339,12 @@ pub async fn deploy_bytecode(
     out
 }
 
-// --- provenance registry (repo -> commit, bundleHash; see registry repo) -----
-// The registry is a canister-owned contract (ProvenanceRegistry.sol, deployed
-// through the E2 push path). Publishing binds a repo name to its deploy-branch
+// --- provenance registry (repo -> commit, bundleHash) -------------------------
+// The registry is a canister-owned contract: ProvenanceRegistry.sol in the
+// `registry` repo on this canister (commit f3cd339; compile.js there pins
+// solc 0.8.28, optimizer 200 runs), deployed through the E2 push path to
+// Sepolia 0xa1362DAda583c56a395D305a8C7A458E0B62A209. Its runtime code is
+// that build with `owner` (msg.sender at deploy) filled in. Publishing binds a repo name to its deploy-branch
 // tip commit and artifact hash, on the chain wallets already watch. Writable
 // only by the canister's EOA, so an entry is the canister's own attestation.
 
