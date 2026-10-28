@@ -44,7 +44,10 @@ pub fn prove(commit: &Oid, path: &str) -> Result<(Vec<u8>, Vec<Vec<u8>>), String
         let (ty, body) = store::get_object_parsed(&Oid::try_from(next.as_slice()).unwrap())
             .ok_or("tree object missing")?;
         if ty != ObjectType::Tree {
-            return Err(format!("'{}' is not a directory", components[..i].join("/")));
+            return Err(match i {
+                0 => "the commit's tree is not a tree object".to_string(),
+                _ => format!("'{}' is not a directory", components[..i].join("/")),
+            });
         }
         let entry = lookup(&body, name)?;
         proof.push(canonical(ObjectType::Tree, &body));
@@ -434,12 +437,15 @@ mod tests {
         let mut h = sha1_checked::Sha1::new();
         sha1_checked::Digest::update(&mut h, &shambles[..]);
         assert!(digest(h).unwrap_err().contains("collision"));
-        // The same bytes inside a git object header are hashed with
-        // detection too; plain data is not flagged.
+        // Ordinary data is not flagged.
         assert!(git_id("blob", b"plain").is_ok());
-        assert_eq!(
-            hex::encode(git_id("blob", b"").unwrap()),
-            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
-        );
+    }
+
+    /// The ids git itself gives the empty blob and the empty tree, so the
+    /// checker's hashing is held to git's and not only to this store's.
+    #[test]
+    fn ids_agree_with_git() {
+        assert_eq!(hex::encode(git_id("blob", b"").unwrap()), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+        assert_eq!(hex::encode(git_id("tree", b"").unwrap()), "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
     }
 }
