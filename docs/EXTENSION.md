@@ -400,6 +400,16 @@ backends are all governed or system gets a green badge.
 
 - Check the first store-installed copy of each package (0.2.1) with
   `--digest` before users are told to rely on it (docs/STORE.md).
+  Chrome: done 2026-10-27. 0.2.1 installed from the Chrome Web Store
+  (id `fdcegfanhmpdnbcalfjdlboebhknkhco`) digests to `ad388dea...f5dc`,
+  the record's `bundleHash`, so the store changed nothing the tool's
+  rules do not account for; `tools/verify.mjs ic-git-extension /
+  --record site` reads the same hash from the registry and VERIFIED.
+  Firefox: not yet checked. Mozilla approved and signed 0.2.1 on
+  2026-10-21, minutes after it was submitted, and addons.mozilla.org does
+  not list `verifier@ic-git.dev` publicly: it is distributed unlisted
+  (docs/STORE.md, "listed or unlisted"), so the copy to check is the
+  signed `.xpi` from the developer hub, installed into Firefox.
 - The extension hashing its own files and showing whether they match the
   record: catches an unpublished update, not a tampered extension, which
   would lie about itself.
