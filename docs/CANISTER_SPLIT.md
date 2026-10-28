@@ -1,6 +1,7 @@
 # Canister split: separating the key-holder from the parser
 
-Status: **decided; phase 1 DONE.** This document records why ic-git
+Status: **decided; phase 1 DONE; section 6 decided 2026-10-28 (proof-carrying
+jobs, votes on the authority); phase 2 planned.** This document records why ic-git
 should be more than one canister, the one constraint that dictates which piece
 moves, the module partition, and the order of operations.
 
@@ -84,40 +85,56 @@ it should be made before the multi-chain work in docs/ATTESTATION.md.
 
 ## 3. The partition
 
-Two canisters, plus an optional third. Not eight -- splitting further buys
+Two canisters, plus a third for builds. Not eight -- splitting further buys
 latency and partial-failure states for no trust gain. **Cut where the trust
-boundary is, not where the module boundary is.**
+boundary is, not where the module boundary is.** Redrawn 2026-10-28 after
+the decisions in section 6: the canister that stays is the authority, not
+only a signer.
 
-### signer (stays at `umobs-yiaaa-aaaab-agyrq-cai`)
+### authority (stays at `umobs-yiaaa-aaaab-agyrq-cai`)
 
-`evm.rs`, `sol.rs`, `rpc_common.rs`, plus the chain half of `deploy.rs`.
+`evm.rs`, `sol.rs`, `rpc_common.rs`, `kv.rs`; the deploy queue and both
+deploy legs of `deploy.rs` (install, CREATE, records); `apps.rs`;
+`tenancy.rs` (owners, members, policy, ballots, accounts, the governed
+lock); `icp.rs` and `ledger.rs` (deposits); `names.rs`; the publishing half
+of `provenance.rs`; `feed.rs`; `consent.rs` for the calls that land here;
+and a new proof verifier (section 4).
 
-Holds: the threshold keys, chain configs, the registry address, the deploy
-provenance log, the deploy queue.
+Holds: the threshold keys, chain configs, the registry address, control of
+every app canister (and sole control of governed ones), the governor
+relationship, the accounts, the ballots and policies, the deploy queue and
+provenance logs, the name-service listing.
 
-Properties: small, stable, no untrusted parsing, rarely re-attested. This is
-the artifact the K reviewers actually care about.
+Properties: no hostile parsing beyond the bounded proof check; changes
+rarely; governed by the existing governor. About half of today's canister
+source -- larger than the signer first planned here, and the price of
+keeping the vote check where installs happen.
 
 ### git (new canister)
 
-`store.rs`, `object.rs`, `pack.rs`, `receive.rs`, `smart_http.rs`, `site.rs`,
-plus the repo-metadata half of `deploy.rs`.
+`store.rs`, `object.rs`, `pack.rs`, `receive.rs`, `smart_http.rs`,
+`site.rs`, `api.rs` (its git half), `tokens.rs`, `signed_push.rs`, the
+resolving half of `provenance.rs`, and a new job builder (section 4).
 
-Holds: objects, refs, repos, per-repo deploy config, site config.
+Holds: objects, refs, repos, deploy and site config, push tokens and keys,
+and mirrors the authority keeps current: each repo's writers and, for a
+gated repo, the commit it serves.
 
-Properties: large, hostile input, changes often, **holds no keys**.
+Properties: large, hostile input, changes often, **holds no keys and
+controls nothing**. A second instance of the governor module governs it.
+For a repo with no votes required it decides what deploys (the tip); for
+any other repo it can only propose, and the authority checks.
 
-### compiler (optional third)
+### compiler (third)
 
 `compile.rs`, `lang.rs`, `fleet.rs`, `interp.rs`.
 
-Already nearly separate -- `fleet.rs` treats any git-canister instance as a
-worker. Compilation is a pure function of its input, which makes it both the
-easiest thing in the system to attest and the natural place to apply K-of-N
-adversarial verification (ROADMAP.md, "Fault tolerance for the fan-out").
-
-Deferring this one is fine; it carries no keys and no hostile input, so it is
-the least urgent cut.
+Builds `.wat` and `.lang` sources for repos that are not governed; a
+governed repo deploys committed `.wasm` only, so nothing the compiler
+produces reaches a governed backend. Compilation is a pure function of its
+input, which makes it the natural place for K-of-N adversarial
+verification (ROADMAP.md, "Fault tolerance for the fan-out"). It holds no
+keys, so it is the least urgent cut.
 
 ## 4. The interface, and why it is the real prize
 
@@ -131,30 +148,42 @@ Before phase 1, `evm.rs` reached back into git state in exactly two places
     evm::registry_publish_site(repo)
         -> site::resolve_entry(repo, "")                // reads the object store
 
-and `deploy::attempt_evm` resolves a blob before calling `evm::deploy_bytecode`.
-(`evm_artifact_hex` is spelled `evm_artifact_bytecode` today; the call graph
-above is how it stood before phase 1.)
+Phase 1 turned those into one call that takes scalars. Section 6 adds what
+that alone did not give: the authority no longer has to believe the bytes.
+**The git canister resolves and proves; the authority verifies, decides and
+acts.**
 
-The split inverts the direction of these calls. **The git canister resolves;
-the signer canister signs.** The signer's input becomes a small, typed,
-fully-validated message rather than a view into a git object store:
+    // git -> authority
+    submit_job(repo, commit: blob(20), artifacts: vec Artifact)   // staged in chunks
+    notify(repo, event)                    // e.g. a push awaiting votes, for the feed
+    charge_push(repo, bytes: nat64)
 
-    // git canister -> signer canister
-    publish_record(record_key: text, commit: blob(20), bundle_hash: blob(32))
-    deploy_bytecode(repo: text, commit: text, bytecode: blob, gas_limit: nat64)
+    Artifact = record { path: text; blob: blob; proof: vec blob }
+      // proof: the raw commit object, then each tree object on the path
 
-That is the security win, stated precisely: **the signer's input surface
-shrinks from "the git object store" to three scalars and a byte array.** No
-pack parsing, no tree walking, no delta resolution anywhere near the keys. A
-reviewer auditing the signer no longer has to reason about git at all.
+    // authority -> git
+    set_writers(repo, vec principal)
+    set_served(repo, opt blob(20))         // a gated repo's approved commit
 
-Authorization: the signer accepts these calls only from the git canister's
-principal, via the existing `auth` allowlist.
+The authority checks a proof by recomputing each object's id (SHA-1 with
+collision detection over `"<type> <len>\0" + body`), the first against the
+job's commit, reading the commit's `tree` line and in each tree only the
+entry for the next path component, and requiring the last entry to be a
+regular file whose id is the blob's. No packs, no deltas, no zlib, no
+walk beyond one path. Then it checks the commit against its own ballots,
+charges the account, and installs, deploys and publishes from the verified
+bytes alone.
+
+Authorization: the authority accepts these calls only from the git
+canister's principal, and the git canister only the mirrors from the
+authority's.
 
 Failure modes the queue must now handle (they do not exist today):
-- signer canister unreachable or stopped -- retry, do not lose the job;
-- call succeeds but response is lost -- the existing same-commit dedupe on the
-  provenance log already covers this, and is the reason it was built.
+- authority unreachable or stopped -- the git canister retries the job and
+  does not lose it;
+- the call succeeds but the response is lost -- the authority dedupes jobs
+  by (repo, commit), as the provenance log already dedupes deploys;
+- a job whose proof fails -- refused and logged; the repo's status says why.
 
 ## 5. Order of operations
 
@@ -192,9 +221,32 @@ resulting open design question.
 and deploy-record hash semantics); `cargo check --target wasm32-unknown-unknown`
 is clean.
 
-**Phase 2 -- split the crate.** Workspace gains `canisters/signer` and
-`canisters/git`, sharing a `types` crate for the wire structs. Both still
-deploy as today; only the build layout changes.
+**Phase 2 -- proofs and the crate layout, still one canister.** Each step
+ships as an ordinary release through the governor, and none changes which
+canister does what:
+
+1. **The proof.** One module builds a proof (the git side: resolve a path in
+   a commit, collecting the raw objects) and one checks it (the authority
+   side: the bounded walk of section 4). Adversarial tests: a wrong blob, a
+   tree entry swapped, a mode that is not a regular file, a submodule, a
+   path that leaves the tree, a truncated object; and a fuzz run as
+   `tools/walk-fuzz.mjs` does for check E.
+2. **Jobs carry proofs.** `enqueue` resolves the artifacts and stores a job
+   with bytes and proof; `drain_one` verifies and deploys from the verified
+   bytes, and the queue never reads the object store again. Job payloads go
+   in their own stable map, not the JSON meta bucket, since a module can be
+   megabytes. This also settles the TOCTOU note below: a config edit cannot
+   change a queued job.
+3. **Governed repos deploy `.wasm` only.** `set_wasm_deploy`, a `WasmDeploy`
+   policy change, and `govern_app_canister` refuse a `.wat` or `.lang`
+   source on a governed repo. On mainnet the only governed repo, ic-vote,
+   deploys `app.wasm`, so nothing live changes.
+4. **The crate split.** Workspace crates `types` (wire structs, record keys,
+   the proof format and its checker), `authority`, `git` and `compiler`,
+   still linked into one canister. The two deferred items below land here.
+5. **The mirrors.** Site serving and push authorization read the served
+   commit and the writers through the interfaces they will have across the
+   boundary, so phase 3 swaps a function call for a message.
 
 **The deploy leg's hex seam -- DONE, ahead of the crate boundary.** Phase 1 had
 established the *publish* half of section 4 but not the *deploy* half:
@@ -225,7 +277,7 @@ worth doing:
 - **Record-key construction.** `SITE_KEY_SUFFIX` is defined in
   `provenance.rs`, hardcoded in `tools/verify.mjs`, and documented in
   docs/ATTESTATION.md as a registry-contract convention. Put the suffix and a
-  `site_record_key(repo)` in the shared `types` crate so signer, git, and the
+  `site_record_key(repo)` in the shared `types` crate so authority, git, and the
   verifier derive it from one definition.
 
 The efficiency item that rode along with the hex seam is also done: `run_evm`
@@ -236,59 +288,159 @@ and `publish_commit` takes it as a parameter. Negligible in cycles either way
 against a threshold signature plus RPC outcalls -- the point is that a value
 which *must* match is no longer derived twice from mutable state.
 
-**Phase 3 -- cut the boundary.** git canister calls signer over the interface
-in section 4. Deploy the new git canister; keep `umobs-...` as signer, upgraded
-in place. Migrate objects/refs by re-push or a bulk copy (`tools/seed-repo.sh`
-already does bulk import).
+**Phase 3 -- cut the boundary.** Create the git canister on umobs' subnet
+and install it from a reproducible build; install a second instance of the
+governor module with the git canister as its target and the same
+approvers, and hand the git canister to it. The git canister calls the
+authority over section 4's interface; umobs is upgraded in place to the
+authority build. Migrate objects and refs by re-push or bulk copy
+(`tools/seed-repo.sh` does bulk import). The compiler canister follows when
+an ungoverned repo needs `.wat` or `.lang` builds again. Before the cut:
+the extensions' expected list gains the git canister, `tools/verify.mjs`
+learns the two canisters apart, and docs/ATTESTATION.md's full-stack
+closure gets its two-canister paragraph (section 7).
 
-**Phase 4 -- re-attest.** The signer's module hash changes exactly once at
-phase 3 and then goes quiet. That is the point of the whole exercise.
+**Phase 4 -- re-attest.** The authority's module hash changes at phase 3
+and then goes quiet. That is the point of the whole exercise.
 
 Phase 1 is the only phase that should proceed without a fresh look at
 mainnet state, because it is the only one that cannot affect it.
 
-## 6. Open design question: the auto-publish path crosses the boundary
+## 6. Decided: what the authority may trust from the git canister
 
-**This is the one thing in the plan that does not yet work, and it must be
-settled before phase 3.**
+**Restated and decided 2026-10-28: option D, with the four decisions in
+6.5. Sections 3, 4 and 5 are redrawn to match.**
 
-Section 3 puts the deploy queue (`run_evm`, `attempt_evm`, `drain_one`) on the
-**signer**. Section 4 says the split inverts the git/chain call direction: the
-git canister resolves, the signer signs. Those two are in conflict, because the
-deploy queue reads git state at drain time:
+### 6.1 What changed since this question was first written
 
-    attempt_evm  (signer)  ->  deploy::evm_artifact_bytecode  (git: object store)
+When this section was first written the deploy queue's only cross-boundary
+read was the EVM artifact, and the question was where to resolve it. Since
+then the queue, and the canister that runs it, took on more:
 
-The hex-seam work above narrowed this to one call. The auto-publish that
-follows a successful deploy used to be a second crossing --
-`run_evm -> provenance::publish_commit -> the object store` -- but
-`publish_commit` now takes the bundle hash `attempt_evm` already computed, so
-it reads nothing. The artifact resolve is what is left.
+- **The vote gate.** A votes-gated repo's commit deploys only once its
+  ballots reach the threshold (`tenancy::approved`, checked at drain time).
+  Ballots, voters and the threshold live in tenancy state.
+- **Governed app canisters.** ic-git (umobs) is the *only* controller of a
+  governed repo's app canister, and the wasm leg's `install_code` into it
+  needs that control. Controllership is bound to the principal exactly as
+  the threshold keys are (section 2): it moves only by an `update_settings`
+  that umobs itself makes, on every app canister.
+- **The governor.** Its `target` is set at install, its code can never
+  change, and it is umobs. A new canister is outside its reach.
+- **Money and records.** The queue charges the repo's account before it
+  runs, publishes `<repo>#app` after a governed install, and announces to
+  ic-name-service, which lists umobs as the deployer.
 
-Neither obvious repair is free:
+So umobs holds more authority than the keys: control of every governed
+backend, the governor relationship, the accounts, and the name-service
+listing. Section 2's conclusion stands and gets stronger: **umobs stays the
+canister that acts** (call it the authority), and the git server moves.
 
-- **Move the queue to the git canister.** Contradicts section 3, and it puts
-  the retry/timer machinery on the side with the hostile input -- but it keeps
-  every call pointing git -> signer, which is the property section 4 exists to
-  protect. The signer stays a pure "sign what you are handed" service.
-- **Let the signer call back into git.** Contradicts section 4, reintroduces
-  the dependency this whole phase removed, and makes the attested signer's
-  behavior depend on a second canister's responses.
-- **Push the resolution to the enqueue side.** The git canister resolves the
-  deploy artifact when it enqueues and hands the signer a job containing
-  bytecode plus `(record_key, commit, bundle)`. The signer then deploys and
-  publishes without ever reading git. This preserves both sections at the cost
-  of a fatter queue entry.
+### 6.2 The real question
 
-The third is the current preference: it is the only one that leaves the
-signer's input surface as section 4 specifies -- scalars and byte arrays, no
-git. The hex-seam work is most of it already: `attempt_evm` now produces
-exactly `(bytecode, bundle)` from one resolve and hands both onward, so the
-remaining move is to do that resolve at enqueue time rather than at drain time.
-That changes what a mid-flight config edit means (it can no longer affect an
-already-queued job -- arguably a fix, see the TOCTOU note in section 5).
+GOVERNANCE.md's chain says only an approved vote can change a governed
+backend. Today that holds because one canister parses the push, counts the
+ballots and installs. After the split, the authority installs what the git
+canister tells it to. If it believes the git canister about *what bytes a
+commit contains* or *whether a commit is approved*, then a compromised git
+canister -- the one fed hostile pack bytes -- can install anything into any
+governed backend. The split would move the parser away from the keys and
+hand it the keys' authority anyway.
 
-Until this is decided, phase 3 is blocked regardless of how phase 2 goes.
+So the question is not only which way the calls point. It is: **what may
+the authority take on the git canister's word?**
+
+### 6.3 Options
+
+**A. The queue on the git canister.** Every call points git -> authority,
+but the git canister would then decide what installs, and it cannot hold
+the app canisters' control or the governor's oversight. Rejected.
+
+**B. The authority reads git at drain time, trusting the replies.** This
+was the earlier option 2. The authority's behavior then depends on a
+second canister's unverified answers. Rejected.
+
+**C. The git canister resolves at enqueue and hands over the bytes.** This
+was the earlier preference: the authority's input is scalars and byte
+arrays, and the call direction holds. But the bytes, and the claim that
+the commit is approved, are still the git canister's word. It fixes the
+dependency's direction, not its trust. Insufficient now that backends are
+governed.
+
+**D. Proof-carrying jobs, with the votes on the authority (recommended).**
+
+- **Bytes come with their proof.** For each artifact the git canister
+  sends the commit oid, the path, the blob, and the raw commit and tree
+  objects on the path to it. The authority recomputes each object id
+  (SHA-1 over `"<type> <len>\0" + body`), reads the commit's `tree` line
+  and, in each tree, the one entry for the next path component. That is a
+  bounded, delta-free, zlib-free parse of a handful of small objects --
+  nothing like pack ingestion. A blob that is not exactly what commit C
+  holds at path P is refused.
+- **Votes live where installs happen.** Ballots, voters, the threshold,
+  the policy lock and the accounts move to (stay on) the authority, so it
+  checks approval from its own state. `cast_ballot` keeps going to umobs,
+  so wallets and the consent messages (ICRC-21) do not change for voters.
+- **The direction holds.** The git canister pushes a job when an approved
+  commit moves or an ungated repo's branch moves; the authority verifies,
+  checks its own ballots, charges, installs or deploys, and publishes.
+  Resolving at enqueue also means a mid-flight config edit cannot change
+  a queued job.
+
+What a compromised git canister can then do: withhold or delay deploys,
+and serve wrong bytes on `/site/` -- which the extensions catch, because
+the authority signs a site record only for bytes proven to be in an
+approved commit. What it cannot do: install unapproved code into a
+governed backend, or make the registry attest bytes a commit does not
+contain.
+
+The cost: the authority is larger than the signer section 3 first planned. It keeps
+tenancy, accounts, app-canister management and the deploy queue, about
+half of today's 14,700 lines of canister source, against section 1.1's
+hope of something tiny. It still parses nothing hostile beyond the bounded proof check,
+which is section 1.2's point.
+
+### 6.4 What D brings with it
+
+1. **Builds.** A `.wasm` artifact is proven bytes and installs as is. A
+   `.wat` or `.lang` source must be compiled, and compiling on the
+   authority would put a parser of pushed text beside the keys. Proposal:
+   governed repos deploy committed `.wasm` only, so voters approve the
+   exact module and `#app` records its hash; `.wat` and `.lang` builds move
+   to the compiler canister (section 3's optional third) and serve
+   ungoverned repos.
+2. **Repos with no votes required trust the git canister.** For them the
+   tip deploys on push, and only the git canister knows the tip. That is
+   no weaker than today, where one canister does both, and such repos make
+   no governance claim. The docs should say so.
+3. **Size.** Proofs carry whole artifacts, and an app module can exceed
+   the 2 MiB inter-canister message limit. Jobs are staged in chunks, as
+   the governor stages upgrade modules.
+4. **Governing the git canister.** The governor cannot take a second
+   target. A second instance of the same reproducible governor module,
+   with the git canister as its target and the same approvers, governs
+   it.
+5. **SHA-1.** The proofs rest on git's SHA-1 object ids -- the same ids
+   voters already approve. The authority's check should use SHA-1 with
+   collision detection, as git itself does.
+6. **Serving and pushes.** The authority tells the git canister which
+   commit each gated repo serves. Push authorization, writer roles and
+   push tokens stay git-side; a push's storage charge becomes one call to
+   the authority, which holds the accounts.
+7. **The extensions.** The git canister becomes one of the backends a
+   page on ic-git talks to, so the expected list (EXTENSION.md, "What the
+   page talks to") gains it.
+
+### 6.5 Decisions (taken 2026-10-28)
+
+1. D over C: proof-carrying jobs, with ballots, policy and accounts on the
+   authority.
+2. Governed repos deploy committed `.wasm` only; `.wat` and `.lang` builds
+   go to the compiler canister. On mainnet this changes nothing: the one
+   governed repo, ic-vote, deploys `app.wasm`.
+3. A second instance of the governor module governs the git canister.
+4. Repos with no votes required keep trusting the git canister for what
+   deploys, and the docs say so (TENANCY.md, when the split ships).
 
 ## 7. What this does not change
 
