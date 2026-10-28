@@ -225,12 +225,17 @@ is clean.
 ships as an ordinary release through the governor, and none changes which
 canister does what:
 
-1. **The proof.** One module builds a proof (the git side: resolve a path in
-   a commit, collecting the raw objects) and one checks it (the authority
-   side: the bounded walk of section 4). Adversarial tests: a wrong blob, a
-   tree entry swapped, a mode that is not a regular file, a submodule, a
-   path that leaves the tree, a truncated object; and a fuzz run as
-   `tools/walk-fuzz.mjs` does for check E.
+1. **The proof.** DONE: `gitproof.rs`. `prove` is the git side (resolve a
+   path in a commit, collecting the raw objects); `check` is the authority
+   side, a pure function doing the bounded walk of section 4 with
+   `sha1-checked`, and refusing a detected collision. Tests cover a wrong
+   blob, another commit, a swapped or altered object, too few or too many
+   objects, symlinks, submodules and trees as the last entry, a file walked
+   through as a directory, a name listed twice, paths that are not plain,
+   headers that do not match their bodies, malformed commits and truncated
+   trees, the SHA-mbles collision, and a 20,000-round mutation fuzz in
+   which every altered input is refused. Not yet called: step 2 wires it
+   into the deploy queue.
 2. **Jobs carry proofs.** `enqueue` resolves the artifacts and stores a job
    with bytes and proof; `drain_one` verifies and deploys from the verified
    bytes, and the queue never reads the object store again. Job payloads go
