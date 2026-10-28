@@ -153,9 +153,16 @@ fn object<'a>(raw: &'a [u8], kind: &str, id: &[u8; 20]) -> Result<&'a [u8], Stri
     Ok(body)
 }
 
-/// A commit's tree: its first line, `tree <40 lowercase hex>`.
+/// A commit's tree: its first line, `tree <40 lowercase hex>`, and the
+/// only `tree` line in its header. `object::commit_refs`, which browsing and
+/// the deploy resolver use, takes the *last* one, so a commit naming two
+/// would have two readings; the proof certifies neither.
 fn tree_of(commit: &[u8]) -> Result<[u8; 20], String> {
-    let line = commit.split(|&b| b == b'\n').next().unwrap_or_default();
+    let mut header = commit.split(|&b| b == b'\n').take_while(|l| !l.is_empty());
+    let line = header.next().unwrap_or_default();
+    if header.any(|l| l.starts_with(b"tree ")) {
+        return Err("a commit names more than one tree".into());
+    }
     let hex = line.strip_prefix(b"tree ").ok_or("a commit does not start with its tree")?;
     if hex.len() != 40 || !hex.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {
         return Err("a commit's tree id is malformed".into());
@@ -380,6 +387,35 @@ mod tests {
         assert!(tree_of(b"parent 0123456789abcdef0123456789abcdef01234567\n").is_err());
         assert!(tree_of(b"tree 0123\n").is_err());
         assert!(tree_of(b"").is_err());
+        // A second tree line anywhere in the header is refused; the same
+        // words in the message are not a header.
+        let a = "0123456789abcdef0123456789abcdef01234567";
+        let b = "89abcdef0123456789abcdef0123456789abcdef";
+        let two = format!("tree {a}\nparent {b}\ntree {b}\nauthor a <a@a> 0 +0000\n\nmsg\n");
+        assert!(tree_of(two.as_bytes()).unwrap_err().contains("more than one tree"));
+        let in_message = format!("tree {a}\nauthor a <a@a> 0 +0000\n\ntree {b}\n");
+        assert!(tree_of(in_message.as_bytes()).is_ok());
+    }
+
+    /// The commit Codex described on #89: a header naming tree A, then tree
+    /// B. object::commit_refs reads B; the proof must not certify A.
+    #[test]
+    fn a_commit_with_two_trees_cannot_be_proved() {
+        let a_blob = store::put_object(ObjectType::Blob, b"from A");
+        let b_blob = store::put_object(ObjectType::Blob, b"from B");
+        let (a, _) = tree(&[("100644", "f", &a_blob)]);
+        let (b, _) = tree(&[("100644", "f", &b_blob)]);
+        let body = format!(
+            "tree {}\ntree {}\nauthor a <a@a> 0 +0000\n\nmsg\n",
+            store::oid_hex(&a),
+            store::oid_hex(&b)
+        );
+        let c = store::put_object(ObjectType::Commit, body.as_bytes());
+        assert_eq!(crate::object::commit_refs(body.as_bytes()).unwrap().tree, b);
+        assert!(prove(&c, "f").unwrap_err().contains("more than one tree"));
+        let (_, a_body) = store::get_object_parsed(&a).unwrap();
+        let proof = vec![canonical(ObjectType::Commit, body.as_bytes()), canonical(ObjectType::Tree, &a_body)];
+        assert!(check(&id(&c), "f", b"from A", &proof).unwrap_err().contains("more than one tree"));
     }
 
     #[test]
