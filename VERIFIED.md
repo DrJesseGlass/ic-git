@@ -23,7 +23,7 @@ governor `7kkwl-baaaa-aaaab-ag6rq-cai` alone (below, "The governor").
 | 2026-10-07 | `db8f2bd` | `v0.3.4` | `e25610892fe279e4355d47c16cc1e03cd27732dad8187565e2eb1c36de5b9bad` (gz) | MATCH, 2026-10-07 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37653678100](https://github.com/DrJesseGlass/ic-git/actions/runs/37653678100), identical hash |
 | 2026-10-08 | `a23ee31` | `v0.3.5` | `30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a` (gz) | MATCH, 2026-10-08 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37803652956](https://github.com/DrJesseGlass/ic-git/actions/runs/37803652956), identical hash |
 | 2026-10-10 | `018bf4d` | `v0.3.6` | `eb61f0e10be0b93c1f4162cf040c6dcc69ed1248ac940fc35b89c008ec9762a2` (gz) | MATCH, 2026-10-10 | deployer (pinned container, macOS arm64 host under emulation, at the branch head, same ic-git crate); GitHub Actions amd64 runner, [run 38019976528](https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528), identical hash |
-| 2026-10-27 | `73ffa5b` | `v0.3.7` | `72e21a4867f671ca6ee1ab3ab6f31f0694e2a75270aa11faf317a1e6c9dbea95` (gz) | MATCH, 2026-10-27 | deployer (pinned container, macOS arm64 host under emulation); installed by governor proposal 4 |
+| 2026-10-27 | `73ffa5b` | `v0.3.7` | `72e21a4867f671ca6ee1ab3ab6f31f0694e2a75270aa11faf317a1e6c9dbea95` (gz) | MATCH, 2026-10-27 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 40427156571](https://github.com/DrJesseGlass/ic-git/actions/runs/40427156571), identical hash; installed by governor proposal 4 |
 
 ## The governor -- 2026-10-11 to 14
 
@@ -90,7 +90,10 @@ Then `feed_set_governor` named the governor and the first poll mirrored
 
 Gated before the deploy by `tools/e2e-local.sh`: 176 checks on
 `0a5171a`, the branch head, whose canister crate is the merge's. Same
-recipe and base image digest as v0.3.6.
+recipe and base image digest as v0.3.6. CI built the tag on a GitHub
+Actions x86_64 runner
+([run 40427156571](https://github.com/DrJesseGlass/ic-git/actions/runs/40427156571))
+and agreed byte for byte, for ic-git and for the governor.
 
 ## v0.3.6 -- 2026-10-10
 
