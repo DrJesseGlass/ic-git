@@ -405,10 +405,11 @@ backends are all governed or system gets a green badge.
   the record's `bundleHash`, so the store changed nothing the tool's
   rules do not account for; `tools/verify.mjs ic-git-extension /
   --record site` reads the same hash from the registry and VERIFIED.
-  Firefox: not yet checked. On 2026-10-27 addons.mozilla.org did not
-  list `verifier@ic-git.dev` publicly, which it also does for a listed
-  version still in review and for an unlisted (self-distributed) one;
-  the check runs on the first copy installed from whichever it is.
+  Firefox: not yet checked. Mozilla approved and signed 0.2.1 on
+  2026-10-21, minutes after it was submitted, and addons.mozilla.org does
+  not list `verifier@ic-git.dev` publicly: it is distributed unlisted
+  (docs/STORE.md, "listed or unlisted"), so the copy to check is the
+  signed `.xpi` from the developer hub, installed into Firefox.
 - The extension hashing its own files and showing whether they match the
   record: catches an unpublished update, not a tampered extension, which
   would lie about itself.
