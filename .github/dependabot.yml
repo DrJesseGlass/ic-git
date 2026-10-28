@@ -1,0 +1,69 @@
+# Dependabot: security updates for every advisory against a dependency in
+# the repo (GitHub's advisory database includes RustSec), and routine
+# version updates on the schedules below. Each update is a pull request,
+# tested by ci.yml; none reaches the canister until a release is built
+# (REPRODUCIBLE_BUILD.md) and voted in by the governor (docs/GOVERNOR.md).
+# A Cargo.lock change changes the module hash, so it is released and
+# recorded like any other change.
+version: 2
+updates:
+  # The canister workspace: canisters/git and canisters/governor share the
+  # root Cargo.lock, the input to the attested module hash.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      # Patch and minor bumps arrive as one pull request a week rather than
+      # one per crate; a major bump, or a security update, comes on its own.
+      cargo-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Kept at the versions ic-dev-kit-rs uses (canisters/git/Cargo.toml):
+      # at 0.x a minor bump is a breaking one, so only patches come on
+      # their own. ic-dev-kit-rs and ic-multisig are this project's own
+      # crates and move by hand with their releases.
+      - dependency-name: ic-cdk
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: ic-cdk-timers
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: candid
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: ic-stable-structures
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: ic-dev-kit-rs
+      - dependency-name: ic-multisig
+
+  # The demo app: its own workspace and lock, outside the attested module.
+  - package-ecosystem: cargo
+    directory: /demo/hello
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: deps(demo)
+    groups:
+      demo:
+        patterns: ["*"]
+
+  # The workflows' actions: the reproducible build and the module hash
+  # watch run on them.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+# Not covered, deliberately: Dockerfile.build's base image and dfx, and
+# rust-toolchain.toml. They are part of the build recipe, so changing them
+# changes the module hash for every release after; they are bumped by hand
+# together (REPRODUCIBLE_BUILD.md, "What is pinned").

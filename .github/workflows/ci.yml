@@ -1,0 +1,27 @@
+# Tests every pull request, Dependabot's included: the canister crates'
+# unit tests and the wasm build. The reproducible build and its hash are
+# reproducible-build.yml's job, at release time; this only says the change
+# compiles and passes. The local end-to-end pass (tools/e2e-local.sh) is
+# run by hand before a release.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the channel and the wasm target; rustup on
+      # the runner installs them on first use.
+      - name: Unit tests
+        run: cargo test -q -p git_canister -p governor_canister
+      - name: Wasm build
+        run: cargo build -q --target wasm32-unknown-unknown --release -p git_canister -p governor_canister
