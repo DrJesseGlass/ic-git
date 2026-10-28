@@ -1,6 +1,6 @@
 # Canister split: separating the key-holder from the parser
 
-Status: **decided; phase 1 DONE.** This document records why ic-git
+Status: **decided; phase 1 DONE; section 6 restated 2026-10-28 and awaiting a decision.** This document records why ic-git
 should be more than one canister, the one constraint that dictates which piece
 moves, the module partition, and the order of operations.
 
@@ -247,48 +247,142 @@ phase 3 and then goes quiet. That is the point of the whole exercise.
 Phase 1 is the only phase that should proceed without a fresh look at
 mainnet state, because it is the only one that cannot affect it.
 
-## 6. Open design question: the auto-publish path crosses the boundary
+## 6. Open design question: what the signer may trust from the git canister
 
-**This is the one thing in the plan that does not yet work, and it must be
-settled before phase 3.**
+**Restated 2026-10-28; awaiting a decision. Phase 3 is blocked on it.**
 
-Section 3 puts the deploy queue (`run_evm`, `attempt_evm`, `drain_one`) on the
-**signer**. Section 4 says the split inverts the git/chain call direction: the
-git canister resolves, the signer signs. Those two are in conflict, because the
-deploy queue reads git state at drain time:
+### 6.1 What changed since this question was first written
 
-    attempt_evm  (signer)  ->  deploy::evm_artifact_bytecode  (git: object store)
+When this section was first written the deploy queue's only cross-boundary
+read was the EVM artifact, and the question was where to resolve it. Since
+then the queue, and the canister that runs it, took on more:
 
-The hex-seam work above narrowed this to one call. The auto-publish that
-follows a successful deploy used to be a second crossing --
-`run_evm -> provenance::publish_commit -> the object store` -- but
-`publish_commit` now takes the bundle hash `attempt_evm` already computed, so
-it reads nothing. The artifact resolve is what is left.
+- **The vote gate.** A votes-gated repo's commit deploys only once its
+  ballots reach the threshold (`tenancy::approved`, checked at drain time).
+  Ballots, voters and the threshold live in tenancy state.
+- **Governed app canisters.** ic-git (umobs) is the *only* controller of a
+  governed repo's app canister, and the wasm leg's `install_code` into it
+  needs that control. Controllership is bound to the principal exactly as
+  the threshold keys are (section 2): it moves only by an `update_settings`
+  that umobs itself makes, on every app canister.
+- **The governor.** Its `target` is set at install, its code can never
+  change, and it is umobs. A new canister is outside its reach.
+- **Money and records.** The queue charges the repo's account before it
+  runs, publishes `<repo>#app` after a governed install, and announces to
+  ic-name-service, which lists umobs as the deployer.
 
-Neither obvious repair is free:
+So umobs holds more authority than the keys: control of every governed
+backend, the governor relationship, the accounts, and the name-service
+listing. Section 2's conclusion stands and gets stronger: **umobs stays the
+canister that acts** (call it the authority), and the git server moves.
 
-- **Move the queue to the git canister.** Contradicts section 3, and it puts
-  the retry/timer machinery on the side with the hostile input -- but it keeps
-  every call pointing git -> signer, which is the property section 4 exists to
-  protect. The signer stays a pure "sign what you are handed" service.
-- **Let the signer call back into git.** Contradicts section 4, reintroduces
-  the dependency this whole phase removed, and makes the attested signer's
-  behavior depend on a second canister's responses.
-- **Push the resolution to the enqueue side.** The git canister resolves the
-  deploy artifact when it enqueues and hands the signer a job containing
-  bytecode plus `(record_key, commit, bundle)`. The signer then deploys and
-  publishes without ever reading git. This preserves both sections at the cost
-  of a fatter queue entry.
+### 6.2 The real question
 
-The third is the current preference: it is the only one that leaves the
-signer's input surface as section 4 specifies -- scalars and byte arrays, no
-git. The hex-seam work is most of it already: `attempt_evm` now produces
-exactly `(bytecode, bundle)` from one resolve and hands both onward, so the
-remaining move is to do that resolve at enqueue time rather than at drain time.
-That changes what a mid-flight config edit means (it can no longer affect an
-already-queued job -- arguably a fix, see the TOCTOU note in section 5).
+GOVERNANCE.md's chain says only an approved vote can change a governed
+backend. Today that holds because one canister parses the push, counts the
+ballots and installs. After the split, the authority installs what the git
+canister tells it to. If it believes the git canister about *what bytes a
+commit contains* or *whether a commit is approved*, then a compromised git
+canister -- the one fed hostile pack bytes -- can install anything into any
+governed backend. The split would move the parser away from the keys and
+hand it the keys' authority anyway.
 
-Until this is decided, phase 3 is blocked regardless of how phase 2 goes.
+So the question is not only which way the calls point. It is: **what may
+the authority take on the git canister's word?**
+
+### 6.3 Options
+
+**A. The queue on the git canister.** Every call points git -> authority,
+but the git canister would then decide what installs, and it cannot hold
+the app canisters' control or the governor's oversight. Rejected.
+
+**B. The authority reads git at drain time, trusting the replies.** This
+was the earlier option 2. The authority's behavior then depends on a
+second canister's unverified answers. Rejected.
+
+**C. The git canister resolves at enqueue and hands over the bytes.** This
+was the earlier preference: the authority's input is scalars and byte
+arrays, and the call direction holds. But the bytes, and the claim that
+the commit is approved, are still the git canister's word. It fixes the
+dependency's direction, not its trust. Insufficient now that backends are
+governed.
+
+**D. Proof-carrying jobs, with the votes on the authority (recommended).**
+
+- **Bytes come with their proof.** For each artifact the git canister
+  sends the commit oid, the path, the blob, and the raw commit and tree
+  objects on the path to it. The authority recomputes each object id
+  (SHA-1 over `"<type> <len>\0" + body`), reads the commit's `tree` line
+  and, in each tree, the one entry for the next path component. That is a
+  bounded, delta-free, zlib-free parse of a handful of small objects --
+  nothing like pack ingestion. A blob that is not exactly what commit C
+  holds at path P is refused.
+- **Votes live where installs happen.** Ballots, voters, the threshold,
+  the policy lock and the accounts move to (stay on) the authority, so it
+  checks approval from its own state. `cast_ballot` keeps going to umobs,
+  so wallets and the consent messages (ICRC-21) do not change for voters.
+- **The direction holds.** The git canister pushes a job when an approved
+  commit moves or an ungated repo's branch moves; the authority verifies,
+  checks its own ballots, charges, installs or deploys, and publishes.
+  Resolving at enqueue also means a mid-flight config edit cannot change
+  a queued job.
+
+What a compromised git canister can then do: withhold or delay deploys,
+and serve wrong bytes on `/site/` -- which the extensions catch, because
+the authority signs a site record only for bytes proven to be in an
+approved commit. What it cannot do: install unapproved code into a
+governed backend, or make the registry attest bytes a commit does not
+contain.
+
+The cost: the authority is larger than section 3's signer. It keeps
+tenancy, accounts, app-canister management and the deploy queue, about
+half of today's 14,700 lines of canister source, against section 1.1's
+hope of something tiny. It still parses nothing hostile beyond the bounded proof check,
+which is section 1.2's point.
+
+### 6.4 What D brings with it
+
+1. **Builds.** A `.wasm` artifact is proven bytes and installs as is. A
+   `.wat` or `.lang` source must be compiled, and compiling on the
+   authority would put a parser of pushed text beside the keys. Proposal:
+   governed repos deploy committed `.wasm` only, so voters approve the
+   exact module and `#app` records its hash; `.wat` and `.lang` builds move
+   to the compiler canister (section 3's optional third) and serve
+   ungoverned repos.
+2. **Repos with no votes required trust the git canister.** For them the
+   tip deploys on push, and only the git canister knows the tip. That is
+   no weaker than today, where one canister does both, and such repos make
+   no governance claim. The docs should say so.
+3. **Size.** Proofs carry whole artifacts, and an app module can exceed
+   the 2 MiB inter-canister message limit. Jobs are staged in chunks, as
+   the governor stages upgrade modules.
+4. **Governing the git canister.** The governor cannot take a second
+   target. A second instance of the same reproducible governor module,
+   with the git canister as its target and the same approvers, governs
+   it.
+5. **SHA-1.** The proofs rest on git's SHA-1 object ids -- the same ids
+   voters already approve. The authority's check should use SHA-1 with
+   collision detection, as git itself does.
+6. **Serving and pushes.** The authority tells the git canister which
+   commit each gated repo serves. Push authorization, writer roles and
+   push tokens stay git-side; a push's storage charge becomes one call to
+   the authority, which holds the accounts.
+7. **The extensions.** The git canister becomes one of the backends a
+   page on ic-git talks to, so the expected list (EXTENSION.md, "What the
+   page talks to") gains it.
+
+### 6.5 Decisions needed
+
+1. D over C: proof-carrying jobs, with ballots and accounts on the
+   authority.
+2. Governed repos deploy committed `.wasm` only; `.wat` and `.lang` builds
+   go to the compiler canister.
+3. A second governor instance for the git canister.
+4. Repos with no votes required keep trusting the git canister, and the
+   docs say so.
+
+With those settled, section 3's partition is redrawn to match and phase 2
+can be planned against it.
 
 ## 7. What this does not change
 
