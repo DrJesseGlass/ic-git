@@ -20,8 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # rust-toolchain.toml pins the channel and the wasm target; rustup on
-      # the runner installs them on first use.
+      # the runner installs them on first use. --locked on both steps: the
+      # committed Cargo.lock is what the release build checks (Dockerfile.build,
+      # cargo fetch --locked), so a change that would rewrite it fails here
+      # rather than passing on a dependency graph nobody committed
+      # (REPRODUCIBLE_BUILD.md, "The lockfile pin needs a real --locked").
       - name: Unit tests
-        run: cargo test -q -p git_canister -p governor_canister
+        run: cargo test --locked -q -p git_canister -p governor_canister
       - name: Wasm build
-        run: cargo build -q --target wasm32-unknown-unknown --release -p git_canister -p governor_canister
+        run: cargo build --locked -q --target wasm32-unknown-unknown --release -p git_canister -p governor_canister
