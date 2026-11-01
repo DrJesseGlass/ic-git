@@ -170,6 +170,10 @@ pub fn deploy_job_has(key: &str) -> bool {
     DEPLOY_JOBS.with(|j| j.borrow().contains_key(&key.to_string()))
 }
 
+pub fn deploy_job_keys() -> Vec<String> {
+    DEPLOY_JOBS.with(|j| j.borrow().keys().collect())
+}
+
 // --- tenancy maps (JSON values; tenancy.rs owns the schemas) -----------------
 
 pub fn account_get<T: serde::de::DeserializeOwned>(principal: &str) -> Option<T> {

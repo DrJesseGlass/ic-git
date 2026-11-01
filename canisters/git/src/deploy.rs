@@ -407,9 +407,18 @@ pub fn enqueue(repo: &str, commit: Oid) {
 
 /// Re-arm the drain timer if jobs are pending. Called from post_upgrade, since
 /// timers do not survive upgrades. A job queued by a release before jobs
-/// carried their artifacts is resolved here, from the configs as they stand.
+/// carried their artifacts is resolved here, from the configs as they stand;
+/// a payload whose job is gone -- drained by such a release after a rollback
+/// -- is dropped, or nothing would ever free it.
 pub fn resume_pending() {
     let jobs = queue_load();
+    let queued: std::collections::BTreeSet<String> =
+        jobs.iter().map(|j| job_key(&j.repo, &j.commit)).collect();
+    for key in store::deploy_job_keys() {
+        if !queued.contains(&key) {
+            store::deploy_job_take(&key);
+        }
+    }
     for j in &jobs {
         if let Ok(commit) = store::parse_oid(&j.commit) {
             if !store::deploy_job_has(&job_key(&j.repo, &j.commit)) {
@@ -459,7 +468,8 @@ async fn drain_one() {
             Some(payload) => {
                 run(&job.repo, commit, payload, false).await;
             }
-            // Only a payload that no longer decodes; enqueue writes both.
+            // enqueue writes the payload with the job, so this is one that
+            // no longer decodes.
             None => put_status(
                 &job.repo,
                 &DeployStatus {
@@ -1069,6 +1079,15 @@ mod tests {
         set_config("proven", "aaaaa-aa".into(), "missing.wasm".into()).unwrap();
         let (_, missing) = resolve("proven", &commit).wasm.unwrap();
         assert!(missing.err().unwrap().starts_with("resolve missing.wasm: "));
+    }
+
+    /// A payload whose job was drained without it (a rollback to a release
+    /// that does not know the map) is freed on the next upgrade.
+    #[test]
+    fn an_upgrade_frees_payloads_no_job_names() {
+        store::deploy_job_put(&job_key("gone", &"ab".repeat(20)), vec![1, 2, 3]);
+        resume_pending();
+        assert!(store::deploy_job_keys().is_empty());
     }
 
     fn resolve_one(commit: &Oid, path: &str) -> Artifact {
