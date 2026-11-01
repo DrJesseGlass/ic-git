@@ -26,6 +26,11 @@ serde_json = "1"
 futures = "0.3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 sha1 = "0.10"
+# The deploy-job proof check (gitproof.rs, docs/CANISTER_SPLIT.md section 4):
+# SHA-1 with collision detection, as git itself uses, so a crafted colliding
+# object cannot pass for one the voters approved. No default features: the
+# check needs neither std nor OIDs.
+sha1-checked = { version = "0.10", default-features = false }
 sha2 = "0.10"
 hex = { version = "0.4", features = ["serde"] }
 base64 = "0.22"

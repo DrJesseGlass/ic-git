@@ -12,6 +12,9 @@ mod deploy;
 mod evm;
 mod feed;
 mod fleet;
+// Used by the deploy queue from phase 2, step 2 (docs/CANISTER_SPLIT.md).
+#[allow(dead_code)]
+mod gitproof;
 mod icp;
 mod interp;
 mod kv;
