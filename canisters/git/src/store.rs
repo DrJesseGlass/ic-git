@@ -89,6 +89,7 @@ const MEM_ACCOUNTS: MemoryId = MemoryId::new(5);
 const MEM_REPO_META: MemoryId = MemoryId::new(6);
 const MEM_VOTES: MemoryId = MemoryId::new(7);
 const MEM_TOKEN_INDEX: MemoryId = MemoryId::new(8);
+const MEM_DEPLOY_JOBS: MemoryId = MemoryId::new(9);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -145,6 +146,28 @@ thread_local! {
     static TOKEN_INDEX: RefCell<StableBTreeMap<String, (), Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_TOKEN_INDEX))),
     );
+
+    /// A queued deploy job's payload: the bytes it deploys and their proofs
+    /// (deploy.rs owns the key and the encoding). Not in META, because a
+    /// payload can hold a whole module.
+    static DEPLOY_JOBS: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DEPLOY_JOBS))),
+    );
+}
+
+// --- deploy job payloads -----------------------------------------------------
+
+pub fn deploy_job_put(key: &str, payload: Vec<u8>) {
+    DEPLOY_JOBS.with(|j| j.borrow_mut().insert(key.to_string(), payload));
+}
+
+/// Remove a job's payload and return it.
+pub fn deploy_job_take(key: &str) -> Option<Vec<u8>> {
+    DEPLOY_JOBS.with(|j| j.borrow_mut().remove(&key.to_string()))
+}
+
+pub fn deploy_job_has(key: &str) -> bool {
+    DEPLOY_JOBS.with(|j| j.borrow().contains_key(&key.to_string()))
 }
 
 // --- tenancy maps (JSON values; tenancy.rs owns the schemas) -----------------

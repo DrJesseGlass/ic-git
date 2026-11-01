@@ -9,7 +9,7 @@
 //! timer-driven queue, off the push path.
 
 use crate::store::{self, Oid};
-use crate::{compile, evm, object};
+use crate::{compile, evm, gitproof, object};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -299,6 +299,81 @@ struct DeployJob {
     commit: String,
 }
 
+/// One leg's artifact as a job carries it: the bytes at the leg's source
+/// path, and the proof (gitproof.rs) that they are what the job's commit
+/// holds there.
+#[derive(CandidType, Deserialize)]
+struct Artifact {
+    blob: Vec<u8>,
+    proof: Vec<Vec<u8>>,
+}
+
+/// What a job deploys, fixed when it is queued: each configured leg's config
+/// as it stood then, with its artifact or why it could not be resolved (a
+/// missing file, say -- recorded at drain time like any failed deploy).
+/// Running a job reads neither the configs nor the object store, so a
+/// config edit or a push after queueing cannot change what it deploys.
+/// Lives in its own stable map (`store::deploy_job_*`), not the queue.
+#[derive(CandidType, Deserialize)]
+struct Job {
+    wasm: Option<(DeployConfig, Result<Artifact, String>)>,
+    evm: Option<(EvmDeployConfig, Result<Artifact, String>)>,
+}
+
+/// The git side of a job: snapshot the repo's deploy configs and prove each
+/// leg's artifact out of `commit`.
+fn resolve(repo: &str, commit: &Oid) -> Job {
+    let artifact = |path: &str| {
+        gitproof::prove(commit, &plain(path))
+            .map(|(blob, proof)| Artifact { blob, proof })
+            .map_err(|e| format!("resolve {path}: {e}"))
+    };
+    Job {
+        wasm: get_config(repo).map(|c| {
+            let a = artifact(&c.source_path);
+            (c, a)
+        }),
+        evm: get_evm_config(repo).map(|c| {
+            let a = artifact(&c.source_path);
+            (c, a)
+        }),
+    }
+}
+
+/// A source path without empty components, which the tree walk always
+/// skipped (`/app.wasm` named `app.wasm`) and a proof's path does not allow.
+fn plain(path: &str) -> String {
+    path.split('/').filter(|c| !c.is_empty()).collect::<Vec<_>>().join("/")
+}
+
+impl Artifact {
+    /// The authority side: the blob, once its proof shows it is what `commit`
+    /// holds at `path`. Reads nothing but its arguments.
+    fn verified(self, commit: &Oid, path: &str) -> Result<Vec<u8>, String> {
+        gitproof::check(&gitproof::commit20(commit)?, &plain(path), &self.blob, &self.proof)
+            .map_err(|e| format!("proof of {path} refused: {e}"))?;
+        Ok(self.blob)
+    }
+}
+
+/// Where a queued job's payload is stored. A commit is 40 hex digits, so the
+/// key cannot be read two ways whatever the repo is called.
+fn job_key(repo: &str, commit_hex: &str) -> String {
+    format!("{commit_hex}:{repo}")
+}
+
+fn job_save(repo: &str, commit: &Oid, job: &Job) {
+    // Encoding a struct of blobs, strings and integers cannot fail.
+    if let Ok(bytes) = candid::encode_one(job) {
+        store::deploy_job_put(&job_key(repo, &store::oid_hex(commit)), bytes);
+    }
+}
+
+fn job_take(repo: &str, commit_hex: &str) -> Option<Job> {
+    store::deploy_job_take(&job_key(repo, commit_hex))
+        .and_then(|bytes| candid::decode_one(&bytes).ok())
+}
+
 fn queue_load() -> Vec<DeployJob> {
     store::meta_get_json(QUEUE_KEY).unwrap_or_default()
 }
@@ -312,17 +387,18 @@ pub fn queue_len() -> usize {
     queue_load().len()
 }
 
-/// Append a deploy job and arm the drain timer. Returns immediately. A job
-/// for the same (repo, commit) already waiting is not queued again -- this
-/// covers only the still-queued window; run_evm's provenance-log check is
-/// what dedupes a commit that already deployed.
+/// Resolve a deploy job, queue it, and arm the drain timer. Returns without
+/// deploying. A job for the same (repo, commit) already waiting is not queued
+/// again -- this covers only the still-queued window; run_evm's
+/// provenance-log check is what dedupes a commit that already deployed.
 pub fn enqueue(repo: &str, commit: Oid) {
     let mut jobs = queue_load();
-    let commit = store::oid_hex(&commit);
-    if !jobs.iter().any(|j| j.repo == repo && j.commit == commit) {
+    let hex = store::oid_hex(&commit);
+    if !jobs.iter().any(|j| j.repo == repo && j.commit == hex) {
+        job_save(repo, &commit, &resolve(repo, &commit));
         jobs.push(DeployJob {
             repo: repo.to_string(),
-            commit,
+            commit: hex,
         });
         queue_save(&jobs);
     }
@@ -330,9 +406,18 @@ pub fn enqueue(repo: &str, commit: Oid) {
 }
 
 /// Re-arm the drain timer if jobs are pending. Called from post_upgrade, since
-/// timers do not survive upgrades.
+/// timers do not survive upgrades. A job queued by a release before jobs
+/// carried their artifacts is resolved here, from the configs as they stand.
 pub fn resume_pending() {
-    if !queue_load().is_empty() {
+    let jobs = queue_load();
+    for j in &jobs {
+        if let Ok(commit) = store::parse_oid(&j.commit) {
+            if !store::deploy_job_has(&job_key(&j.repo, &j.commit)) {
+                job_save(&j.repo, &commit, &resolve(&j.repo, &commit));
+            }
+        }
+    }
+    if !jobs.is_empty() {
         arm_timer();
     }
 }
@@ -367,9 +452,25 @@ async fn drain_one() {
     }
     let job = jobs.remove(0);
     queue_save(&jobs);
+    let payload = job_take(&job.repo, &job.commit);
 
     if let Ok(commit) = store::parse_oid(&job.commit) {
-        run(&job.repo, commit, false).await;
+        match payload {
+            Some(payload) => {
+                run(&job.repo, commit, payload, false).await;
+            }
+            // Only a payload that no longer decodes; enqueue writes both.
+            None => put_status(
+                &job.repo,
+                &DeployStatus {
+                    commit: job.commit,
+                    ok: false,
+                    message: "the queued job could not be read; deploy_now retries".into(),
+                    wasm_len: 0,
+                    wasm_sha256: String::new(),
+                },
+            ),
+        }
     }
     DRAINING.with(|f| f.set(false));
     // Re-read the queue rather than trusting the pre-run snapshot: a push
@@ -399,12 +500,17 @@ pub fn decode_bytecode_hex(text: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// The creation bytecode of an EVM artifact at `path` within a commit's tree.
-/// The one resolution path shared by the deploy leg and the registry
-/// publisher, so both end up hashing the same bytes.
+/// The creation bytecode of an EVM artifact at `path` within a commit's tree,
+/// for the registry publisher's operator path. The deploy leg decodes the
+/// proven blob with `bytecode_of` instead; both hash the same bytes.
 pub fn evm_artifact_bytecode(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
     let bytes =
         object::blob_at_path(commit_oid, path).map_err(|e| format!("resolve {path}: {e}"))?;
+    bytecode_of(path, bytes)
+}
+
+/// The creation bytecode in an EVM artifact's committed bytes.
+fn bytecode_of(path: &str, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8"))?;
     decode_bytecode_hex(&text)
 }
@@ -521,12 +627,12 @@ async fn install(
 async fn attempt(
     cfg: &DeployConfig,
     commit_oid: &Oid,
+    artifact: Result<Artifact, String>,
     st: &mut DeployStatus,
 ) -> Result<String, String> {
     let target =
         Principal::from_text(&cfg.target).map_err(|e| format!("bad target principal: {e}"))?;
-    let src_bytes = object::blob_at_path(commit_oid, &cfg.source_path)
-        .map_err(|e| format!("resolve {}: {e}", cfg.source_path))?;
+    let src_bytes = artifact?.verified(commit_oid, &cfg.source_path)?;
     let wasm = SourceKind::from_path(&cfg.source_path)
         .and_then(|kind| kind.build(&cfg.source_path, src_bytes))
         .map_err(|e| format!("build {}: {e}", cfg.source_path))?;
@@ -539,7 +645,7 @@ async fn attempt(
     Ok(format!("{label} to {}", cfg.target))
 }
 
-/// The fallible steps of an EVM deploy: resolve and decode the committed hex
+/// The fallible steps of an EVM deploy: verify and decode the job's hex
 /// artifact, then hand the bytes to evm::deploy_bytecode, which signs a CREATE
 /// with the commit oid threaded into the provenance record.
 ///
@@ -550,12 +656,15 @@ async fn attempt_evm(
     repo: &str,
     cfg: &EvmDeployConfig,
     commit_oid: &Oid,
+    artifact: Result<Artifact, String>,
 ) -> Result<(crate::evm::TxOutcome, [u8; 32]), evm::SendError> {
     // Chain-side preconditions first: an unconfigured canister or an unpayable
-    // gas limit should say so without first walking the tree and decoding.
+    // gas limit should say so before anything about the artifact.
     evm::require_deploy_target(cfg.gas_limit).map_err(evm::SendError::before)?;
-    let bytecode =
-        evm_artifact_bytecode(commit_oid, &cfg.source_path).map_err(evm::SendError::before)?;
+    let bytecode = artifact
+        .and_then(|a| a.verified(commit_oid, &cfg.source_path))
+        .and_then(|bytes| bytecode_of(&cfg.source_path, bytes))
+        .map_err(evm::SendError::before)?;
     let bundle: [u8; 32] = sha2::Sha256::digest(&bytecode).into();
     let out = evm::deploy_bytecode(
         repo.to_string(),
@@ -580,6 +689,7 @@ async fn run_evm(
     repo: &str,
     cfg: &EvmDeployConfig,
     commit_oid: &Oid,
+    artifact: Result<Artifact, String>,
     force: bool,
     price: u64,
 ) -> (EvmDeployStatus, u64) {
@@ -616,7 +726,7 @@ async fn run_evm(
     }
     let mut unused = 0;
     store::meta_set_json(&evm_status_key(repo), &st);
-    match attempt_evm(repo, cfg, commit_oid).await {
+    match attempt_evm(repo, cfg, commit_oid, artifact).await {
         Ok((out, bundle)) => {
             st.ok = true;
             st.contract_address = out.contract_address.unwrap_or_default();
@@ -625,9 +735,7 @@ async fn run_evm(
             if evm::get_registry().is_some() {
                 // Publish the hash of the bytes this deploy actually sent, not
                 // a fresh resolve: re-reading the repo would both redo the tree
-                // walk and let a config edit landing during the awaits above
-                // have the registry attest a different artifact than the one
-                // just deployed.
+                // walk and read the object store this leg never touches.
                 match crate::provenance::publish_commit(repo, commit_oid, bundle).await {
                     Ok(reg) => {
                         st.message = format!("{}; registry publish {}", st.message, reg.tx_hash)
@@ -654,13 +762,14 @@ pub fn any_config(repo: &str) -> bool {
     get_config(repo).is_some() || get_evm_config(repo).is_some()
 }
 
-/// Run every configured deploy leg for this commit -- wasm-to-canister,
-/// EVM CREATE, or both. Each leg persists its own status and provenance;
+/// Run every deploy leg `job` carries for this commit -- wasm-to-canister,
+/// EVM CREATE, or both -- from its verified artifacts alone. Each leg
+/// persists its own status and provenance;
 /// the returned DeployStatus carries the wasm leg's summary plus the EVM
 /// leg's outcome folded into the message. Never traps. `force` redeploys a
 /// commit the EVM provenance log already shows accepted (deploy_now);
 /// the push path passes false and dedupes.
-pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
+async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus {
     let mut st = DeployStatus {
         commit: store::oid_hex(&commit_oid),
         ok: false,
@@ -668,8 +777,8 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         wasm_len: 0,
         wasm_sha256: String::new(),
     };
-    let wasm_cfg = get_config(repo);
-    let evm_cfg = get_evm_config(repo);
+    let (wasm_cfg, wasm_artifact) = job.wasm.unzip();
+    let (evm_cfg, evm_artifact) = job.evm.unzip();
     if wasm_cfg.is_none() && evm_cfg.is_none() {
         // Nothing to record against: the logs are keyed to a config's source.
         st.message = "no deploy config for repo".into();
@@ -711,9 +820,9 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         },
     );
 
-    match &wasm_cfg {
-        Some(cfg) => {
-            match attempt(cfg, &commit_oid, &mut st).await {
+    match (&wasm_cfg, wasm_artifact) {
+        (Some(cfg), Some(artifact)) => {
+            match attempt(cfg, &commit_oid, artifact, &mut st).await {
                 Ok(message) => {
                     st.ok = true;
                     st.message = message;
@@ -724,7 +833,7 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
             record(repo, cfg, &st);
         }
         // EVM-only repo: the wasm leg vacuously succeeds.
-        None => st.ok = true,
+        _ => st.ok = true,
     }
     // Whether the wasm leg installed, before the EVM leg folds its outcome
     // into `st.ok`: the announce is about what the canister runs, which the
@@ -768,8 +877,9 @@ pub async fn run(repo: &str, commit_oid: Oid, force: bool) -> DeployStatus {
         }
     }
 
-    if let Some(cfg) = evm_cfg {
-        let (evm_st, unused) = run_evm(repo, &cfg, &commit_oid, force, pricing.evm_action).await;
+    if let (Some(cfg), Some(artifact)) = (evm_cfg, evm_artifact) {
+        let (evm_st, unused) =
+            run_evm(repo, &cfg, &commit_oid, artifact, force, pricing.evm_action).await;
         crate::tenancy::refund_action(payer, unused);
         let leg = if evm_st.ok {
             format!("evm: {} ({})", evm_st.contract_address, evm_st.tx_hash)
@@ -874,7 +984,9 @@ pub fn release_commit(repo: &str) -> Result<Oid, String> {
 /// provenance log -- the explicit-redeploy escape hatch, and the retry for a
 /// failed deploy of an approved commit below an unapproved tip.
 pub async fn run_current(repo: &str) -> Result<DeployStatus, String> {
-    Ok(run(repo, release_commit(repo)?, true).await)
+    let commit = release_commit(repo)?;
+    let job = resolve(repo, &commit);
+    Ok(run(repo, commit, job, true).await)
 }
 
 /// Is the app already running `commit`? The wasm leg is when the latest
@@ -900,6 +1012,77 @@ pub fn in_flight(repo: &str, commit_hex: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::ObjectType;
+
+    /// A commit whose root tree holds `files` (plain names only).
+    fn commit_of(files: &[(&str, &[u8])]) -> Oid {
+        let mut root = Vec::new();
+        let mut files = files.to_vec();
+        files.sort_by_key(|(name, _)| *name);
+        for (name, bytes) in files {
+            root.extend_from_slice(format!("100644 {name}\0").as_bytes());
+            root.extend_from_slice(store::put_object(ObjectType::Blob, bytes).as_slice());
+        }
+        let tree = store::put_object(ObjectType::Tree, &root);
+        let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&tree));
+        store::put_object(ObjectType::Commit, commit.as_bytes())
+    }
+
+    /// A queued job keeps the config and bytes it was queued with: editing
+    /// the config afterwards changes nothing it deploys, and a module of
+    /// megabytes survives the trip through its stable map.
+    #[test]
+    fn a_job_is_fixed_when_queued() {
+        store::create_repo("fixed").unwrap();
+        let module = vec![7u8; 3 << 20];
+        let commit = commit_of(&[("app.wasm", &module), ("other.wasm", b"other")]);
+        set_config("fixed", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        job_save("fixed", &commit, &resolve("fixed", &commit));
+        set_config("fixed", "aaaaa-aa".into(), "other.wasm".into()).unwrap();
+
+        let hex = store::oid_hex(&commit);
+        let job = job_take("fixed", &hex).expect("the job decodes");
+        assert!(job.evm.is_none());
+        let (cfg, artifact) = job.wasm.unwrap();
+        assert_eq!(cfg.source_path, "app.wasm");
+        assert_eq!(artifact.unwrap().verified(&commit, &cfg.source_path).unwrap(), module);
+        assert!(job_take("fixed", &hex).is_none(), "taking a job removes it");
+    }
+
+    /// The drain deploys only bytes whose proof checks against the job's
+    /// commit and path; what could not be resolved is carried as the reason.
+    #[test]
+    fn a_job_deploys_only_proven_bytes() {
+        store::create_repo("proven").unwrap();
+        let commit = commit_of(&[("app.wasm", b"good"), ("c.hex", b"0x6001")]);
+        let other = commit_of(&[("app.wasm", b"evil")]);
+        let a = || resolve_one(&commit, "app.wasm");
+
+        let mut swapped = a();
+        swapped.blob = b"evil".to_vec();
+        let refused = swapped.verified(&commit, "app.wasm").unwrap_err();
+        assert!(refused.starts_with("proof of app.wasm refused"), "{refused}");
+        assert!(a().verified(&other, "app.wasm").is_err(), "another commit");
+        assert!(a().verified(&commit, "c.hex").is_err(), "another path");
+        assert_eq!(a().verified(&commit, "/app.wasm").unwrap(), b"good");
+
+        set_config("proven", "aaaaa-aa".into(), "missing.wasm".into()).unwrap();
+        let (_, missing) = resolve("proven", &commit).wasm.unwrap();
+        assert!(missing.err().unwrap().starts_with("resolve missing.wasm: "));
+    }
+
+    fn resolve_one(commit: &Oid, path: &str) -> Artifact {
+        let (blob, proof) = gitproof::prove(commit, path).unwrap();
+        Artifact { blob, proof }
+    }
+
+    /// The tree walk always skipped empty components, so a configured
+    /// `/app.wasm` keeps naming `app.wasm`.
+    #[test]
+    fn plain_drops_empty_components() {
+        assert_eq!(plain("/build//app.wasm"), "build/app.wasm");
+        assert_eq!(plain("app.wasm"), "app.wasm");
+    }
 
     fn status(commit: &str, ok: bool, message: &str) -> DeployStatus {
         DeployStatus {
