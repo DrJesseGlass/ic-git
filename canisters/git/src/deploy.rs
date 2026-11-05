@@ -774,11 +774,10 @@ pub fn any_config(repo: &str) -> bool {
 
 /// Run every deploy leg `job` carries for this commit -- wasm-to-canister,
 /// EVM CREATE, or both -- from its verified artifacts alone. Each leg
-/// persists its own status and provenance;
-/// the returned DeployStatus carries the wasm leg's summary plus the EVM
-/// leg's outcome folded into the message. Never traps. `force` redeploys a
-/// commit the EVM provenance log already shows accepted (deploy_now);
-/// the push path passes false and dedupes.
+/// persists its own status and provenance; the returned DeployStatus carries
+/// the wasm leg's summary plus the EVM leg's outcome folded into the message.
+/// Never traps. `force` redeploys a commit the EVM provenance log already
+/// shows accepted (deploy_now); the push path passes false and dedupes.
 async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus {
     let mut st = DeployStatus {
         commit: store::oid_hex(&commit_oid),
