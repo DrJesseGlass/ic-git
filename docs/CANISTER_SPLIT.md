@@ -252,7 +252,8 @@ canister does what:
    refuse a `.wat` or `.lang` source on a governed repo -- governing waits
    until the config names a `.wasm` -- and the drain checks it again as a
    job runs, since a job queued before governing carries the config of
-   that time. On mainnet the only governed repo, ic-vote, deploys
+   that time, and once more just before `install_code`, since the repo can
+   be governed while the job awaits the target's status. On mainnet the only governed repo, ic-vote, deploys
    `app.wasm`, so nothing live changes.
 4. **The crate split.** Workspace crates `types` (wire structs, record keys,
    the proof format and its checker), `authority`, `git` and `compiler`,

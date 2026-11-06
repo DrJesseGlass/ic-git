@@ -615,12 +615,18 @@ async fn target_has_module(target: Principal) -> Result<bool, String> {
 /// Install `wasm` into `target`. An empty target always gets a plain install;
 /// a target that already has a module gets `mode` (Upgrade preserves stable
 /// memory, Reinstall discards it). Returns the mode label actually used.
+///
+/// `allowed` runs after the last await and before `install_code` goes out,
+/// with nothing in between: what it checks cannot change between its
+/// answer and the install.
 async fn install(
     target: Principal,
     wasm: Vec<u8>,
     mode: DeployMode,
+    allowed: impl Fn() -> Result<(), String>,
 ) -> Result<&'static str, String> {
-    let (install_mode, label) = if !target_has_module(target).await? {
+    let fail = |e: String| format!("install_code failed: {e}");
+    let (install_mode, label) = if !target_has_module(target).await.map_err(fail)? {
         (CanisterInstallMode::Install, "install")
     } else {
         match mode {
@@ -634,6 +640,7 @@ async fn install(
         wasm_module: wasm,
         arg: vec![],
     };
+    allowed()?;
     // Unbounded wait on purpose: the reply (or reject) is definite, so the
     // deploy log never records an install whose outcome is unknown. The
     // names announce relies on that (see `run`).
@@ -642,7 +649,8 @@ async fn install(
         "install_code",
         (arg,),
     )
-    .await?;
+    .await
+    .map_err(fail)?;
     Ok(label)
 }
 
@@ -650,8 +658,8 @@ async fn install(
 /// it. Fills in `st`'s wasm summary as soon as the build succeeds, so failed
 /// installs still record what was built. Returns the success message.
 async fn attempt(
+    repo: &str,
     cfg: &DeployConfig,
-    governed: bool,
     commit_oid: &Oid,
     artifact: Result<Artifact, String>,
     st: &mut DeployStatus,
@@ -659,8 +667,11 @@ async fn attempt(
     let target =
         Principal::from_text(&cfg.target).map_err(|e| format!("bad target principal: {e}"))?;
     // Checked as the job runs, not only when configured: a job queued
-    // before the repo was governed carries the config of that time.
-    let kind = SourceKind::for_repo(governed, &cfg.source_path)?;
+    // before the repo was governed carries the config of that time. And
+    // again just before install_code, since the repo can be governed while
+    // this job awaits the target's status.
+    let kind_now = || SourceKind::for_repo(crate::tenancy::is_governed(repo), &cfg.source_path);
+    let kind = kind_now()?;
     let src_bytes = artifact?.verified(commit_oid, &cfg.source_path)?;
     let wasm = kind
         .build(&cfg.source_path, src_bytes)
@@ -668,9 +679,7 @@ async fn attempt(
     let info = compile::info_of(&wasm);
     st.wasm_len = info.wasm_len;
     st.wasm_sha256 = info.sha256_hex;
-    let label = install(target, wasm, cfg.mode)
-        .await
-        .map_err(|e| format!("install_code failed: {e}"))?;
+    let label = install(target, wasm, cfg.mode, || kind_now().map(|_| ())).await?;
     Ok(format!("{label} to {}", cfg.target))
 }
 
@@ -850,7 +859,7 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
 
     match (&wasm_cfg, wasm_artifact) {
         (Some(cfg), Some(artifact)) => {
-            match attempt(cfg, crate::tenancy::is_governed(repo), &commit_oid, artifact, &mut st).await {
+            match attempt(repo, cfg, &commit_oid, artifact, &mut st).await {
                 Ok(message) => {
                     st.ok = true;
                     st.message = message;
