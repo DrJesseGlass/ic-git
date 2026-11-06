@@ -238,8 +238,72 @@ pub fn meta(repo: &str) -> Option<RepoMeta> {
     store::repo_meta_get(repo)
 }
 
+/// Save a repo's metadata, and bring the git side's mirrors up to date when
+/// the change touches what they reflect.
 fn save_meta(repo: &str, m: &RepoMeta) {
+    let prev = meta(repo);
     store::repo_meta_set(repo, m);
+    if prev.as_ref().map(mirrored) != Some(mirrored(m)) {
+        sync_mirrors_with(repo, m);
+    }
+}
+
+// --- the git side's mirrors (mirror.rs) -----------------------------------------
+
+/// Who may push, as the git side checks it: the owner and the writers.
+fn push_policy(m: &RepoMeta) -> crate::mirror::PushPolicy {
+    crate::mirror::PushPolicy {
+        writers: m
+            .owner
+            .iter()
+            .copied()
+            .chain(m.members.iter().filter(|x| x.role == Role::Writer).map(|x| x.principal))
+            .collect(),
+        require_signed_push: m.require_signed_push,
+    }
+}
+
+/// What in a repo's metadata the mirrors depend on: the push policy, and
+/// the threshold and approvers that decide which commits are approved.
+fn mirrored(m: &RepoMeta) -> (crate::mirror::PushPolicy, u32, Vec<Principal>) {
+    let voters = m.members.iter().filter(|x| x.role == Role::Voter).map(|x| x.principal);
+    (push_policy(m), m.required_votes, m.owner.iter().copied().chain(voters).collect())
+}
+
+/// The repo's commits that reach its threshold, by ballot key; `None` when
+/// it requires no votes. Every commit with a ballot is counted, so this is
+/// as current as the ballots and the policy.
+fn approved_keys(repo: &str, m: &RepoMeta) -> Option<Vec<String>> {
+    if m.required_votes == 0 {
+        return None;
+    }
+    let pol = policy(m);
+    let commits = store::vote_subject_keys(repo, "commit:");
+    Some(
+        commits
+            .into_iter()
+            .filter(|key| {
+                let hash = key
+                    .strip_prefix("commit:")
+                    .and_then(|h| hex::decode(h).ok())
+                    .and_then(|h| <[u8; 32]>::try_from(h).ok());
+                hash.is_some_and(|h| count_subject(repo, &pol, &Subject::new("commit", h)).reached)
+            })
+            .collect(),
+    )
+}
+
+fn sync_mirrors_with(repo: &str, m: &RepoMeta) {
+    crate::mirror::set_push_policy(repo, push_policy(m));
+    crate::mirror::set_approved(repo, approved_keys(repo, m));
+}
+
+/// Bring every repo's mirrors up to date. For post_upgrade: a release
+/// before the mirrors existed left them empty.
+pub fn sync_all_mirrors() {
+    for (repo, m) in store::repo_meta_all::<RepoMeta>() {
+        sync_mirrors_with(&repo, &m);
+    }
 }
 
 /// Metadata for any existing repo: legacy repos get an ownerless record.
@@ -356,16 +420,6 @@ pub fn can_admin(repo: &str, p: &Principal, operator: bool) -> Result<RepoMeta, 
         Ok(m)
     } else {
         Err(format!("{p} does not own repo {repo}"))
-    }
-}
-
-/// Owner, writer, or operator: may push and manage tokens.
-pub fn can_write(repo: &str, p: &Principal, operator: bool) -> Result<RepoMeta, String> {
-    let m = meta_or_legacy(repo)?;
-    if operator || is_owner(&m, p) || has_role(&m, p, Role::Writer) {
-        Ok(m)
-    } else {
-        Err(format!("{p} may not write to repo {repo}"))
     }
 }
 
@@ -934,9 +988,12 @@ fn count(repo: &str, pol: &Policy, oid: &store::Oid) -> Tally {
     // checked on the way in (the caller was authenticated by the IC; there
     // is no signature to verify). The crate is told so, rather than asked
     // to re-verify a list that has nothing to verify.
-    let subj = subject(oid);
-    let ballots = Ballots::assume_checked(&subj, VoteStore { repo }.load(&subj));
-    ic_multisig::tally_checked(pol, &subj, &ballots)
+    count_subject(repo, pol, &subject(oid))
+}
+
+fn count_subject(repo: &str, pol: &Policy, subj: &Subject) -> Tally {
+    let ballots = Ballots::assume_checked(subj, VoteStore { repo }.load(subj));
+    ic_multisig::tally_checked(pol, subj, &ballots)
 }
 
 /// A count as ic-git reports it: the same answer as `approved`. With no
@@ -987,9 +1044,11 @@ pub fn cast_ballot(
     }
     let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
     approval.reason = ballot_reason(decision, reason)?;
-    ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
+    let t = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
         .map(|t| ungated(t, &m))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    crate::mirror::set_approved(repo, approved_keys(repo, &m));
+    Ok(t)
 }
 
 /// The original two-way ballot, kept for clients that predate objections.
@@ -1012,21 +1071,6 @@ pub fn approved(repo: &str, commit_hex: &str) -> bool {
     }
     let Ok(oid) = store::parse_oid(commit_hex) else { return false };
     reached(repo, &policy(&m), &oid)
-}
-
-/// The first of `commits` that `approved` would accept, judged against one
-/// load of the repo's policy -- for a caller weighing many candidates (the
-/// site's first-parent walk). With no votes required that is the first one.
-pub fn first_approved(
-    repo: &str,
-    mut commits: impl Iterator<Item = store::Oid>,
-) -> Option<store::Oid> {
-    let m = match meta(repo) {
-        Some(m) if m.required_votes > 0 => m,
-        _ => return commits.next(),
-    };
-    let pol = policy(&m);
-    commits.find(|oid| reached(repo, &pol, oid))
 }
 
 fn reached(repo: &str, pol: &Policy, oid: &store::Oid) -> bool {
@@ -1193,11 +1237,6 @@ pub fn set_require_signed_push(repo: &str, who: &Principal, operator: bool, on: 
     Ok(())
 }
 
-/// Does the repo refuse pushes with tokens that are not key-bound?
-pub fn requires_signed_push(repo: &str) -> bool {
-    meta(repo).is_some_and(|m| m.require_signed_push)
-}
-
 pub fn set_app_canister(repo: &str, canister: Principal) -> Result<(), String> {
     let mut m = meta_or_legacy(repo)?;
     m.app_canister = Some(canister);
@@ -1250,18 +1289,18 @@ mod tests {
         credit(&alice, 10_000_000_000);
         create_repo("t-roles", &alice, false).unwrap();
         // Strangers can do nothing.
-        assert!(can_write("t-roles", &bob, false).is_err());
+        assert!(crate::mirror::may_write("t-roles", &bob, false).is_err());
         assert!(can_admin("t-roles", &bob, false).is_err());
         assert!(can_vote("t-roles", &bob).is_err());
         // Only the owner (or an operator) adds members.
         assert!(add_member("t-roles", &bob, false, carol, Role::Writer).is_err());
         add_member("t-roles", &alice, false, bob, Role::Writer).unwrap();
         add_member("t-roles", &alice, false, carol, Role::Voter).unwrap();
-        assert!(can_write("t-roles", &bob, false).is_ok());
+        assert!(crate::mirror::may_write("t-roles", &bob, false).is_ok());
         assert!(can_admin("t-roles", &bob, false).is_err());
         assert!(can_vote("t-roles", &bob).is_err());
         assert!(can_vote("t-roles", &carol).is_ok());
-        assert!(can_write("t-roles", &carol, false).is_err());
+        assert!(crate::mirror::may_write("t-roles", &carol, false).is_err());
         // An operator can act on anyone's repo.
         assert!(can_admin("t-roles", &dave, true).is_ok());
         // Re-adding changes the role rather than duplicating.
@@ -1343,8 +1382,8 @@ mod tests {
         assert!(repo_info("t-legacy").unwrap().exempt);
         // Anyone may push to a legacy repo only as an operator; tokens still
         // gate the HTTP path.
-        assert!(can_write("t-legacy", &p(31), false).is_err());
-        assert!(can_write("t-legacy", &p(31), true).is_ok());
+        assert!(crate::mirror::may_write("t-legacy", &p(31), false).is_err());
+        assert!(crate::mirror::may_write("t-legacy", &p(31), true).is_ok());
         // A repo without metadata costs no rent.
         let (charged, _) = charge_rent_all();
         assert!(!store::repo_meta_all::<RepoMeta>().iter().any(|(n, _)| n == "t-legacy"));
@@ -1392,13 +1431,13 @@ mod tests {
         credit(&alice, 10_000_000_000);
         create_repo("t-signed", &alice, false).unwrap();
         add_member("t-signed", &alice, false, w, Role::Writer).unwrap();
-        assert!(!requires_signed_push("t-signed"));
+        assert!(!crate::mirror::requires_signed_push("t-signed"));
         assert!(set_require_signed_push("t-signed", &w, false, true).is_err());
         set_require_signed_push("t-signed", &alice, false, true).unwrap();
-        assert!(requires_signed_push("t-signed"));
+        assert!(crate::mirror::requires_signed_push("t-signed"));
         assert!(repo_info("t-signed").unwrap().require_signed_push);
         set_require_signed_push("t-signed", &alice, false, false).unwrap();
-        assert!(!requires_signed_push("t-signed"));
+        assert!(!crate::mirror::requires_signed_push("t-signed"));
     }
 
     #[test]
@@ -1504,6 +1543,51 @@ mod tests {
             votes("t-obj", &commit).iter().find(|b| b.principal == v2).unwrap().reason.as_deref(),
             Some("reviewed")
         );
+    }
+
+    /// The git side's mirrors (mirror.rs) follow every change the authority
+    /// makes -- members, threshold, ballots, the signed-push flag -- and an
+    /// upgrade from a release without them fills them in.
+    #[test]
+    fn the_mirrors_follow_the_authority() {
+        use crate::mirror;
+        let (alice, v1, w) = (p(91), p(92), p(93));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-mirror", &alice, false).unwrap();
+        let c = store::put_object(store::ObjectType::Blob, b"mirrored");
+        let hex = store::oid_hex(&c);
+        assert_eq!(mirror::commit_key(c.as_slice()), subject(&c).key(), "both sides name a commit alike");
+
+        assert!(mirror::approved("t-mirror").is_none(), "no votes required: the tip is served");
+        add_member("t-mirror", &alice, false, v1, Role::Voter).unwrap();
+        add_member("t-mirror", &alice, false, w, Role::Writer).unwrap();
+        assert!(mirror::may_write("t-mirror", &alice, false).is_ok());
+        assert!(mirror::may_write("t-mirror", &w, false).is_ok());
+        assert!(mirror::may_write("t-mirror", &v1, false).is_err(), "voters do not push");
+
+        set_required_votes("t-mirror", &alice, false, 1).unwrap();
+        assert!(!mirror::approved("t-mirror").unwrap().contains(&c));
+        vote("t-mirror", &alice, &hex, true).unwrap();
+        assert!(mirror::approved("t-mirror").unwrap().contains(&c));
+        set_required_votes("t-mirror", &alice, false, 2).unwrap();
+        assert!(!mirror::approved("t-mirror").unwrap().contains(&c), "a raised threshold");
+        vote("t-mirror", &v1, &hex, true).unwrap();
+        assert!(mirror::approved("t-mirror").unwrap().contains(&c));
+        cast_ballot("t-mirror", &v1, &hex, Vote::Object, Some("no".into())).unwrap();
+        assert!(!mirror::approved("t-mirror").unwrap().contains(&c), "an objection");
+
+        assert!(!mirror::requires_signed_push("t-mirror"));
+        set_require_signed_push("t-mirror", &alice, false, true).unwrap();
+        assert!(mirror::requires_signed_push("t-mirror"));
+
+        // A release before the mirrors left them empty.
+        mirror::set_push_policy("t-mirror", mirror::PushPolicy::default());
+        mirror::set_approved("t-mirror", None);
+        assert!(mirror::may_write("t-mirror", &w, false).is_err());
+        sync_all_mirrors();
+        assert!(mirror::may_write("t-mirror", &w, false).is_ok());
+        assert!(mirror::requires_signed_push("t-mirror"));
+        assert!(mirror::approved("t-mirror").is_some());
     }
 
     /// A governed repo deploys committed .wasm only: governing waits for a

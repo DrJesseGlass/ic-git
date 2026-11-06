@@ -211,6 +211,20 @@ pub fn votes_get<T: serde::de::DeserializeOwned>(repo: &str, subject_key: &str) 
         .and_then(|b| serde_json::from_slice(&b).ok())
 }
 
+/// The subject keys of a repo's stored ballots that start with `prefix`
+/// (`"commit:"`, say).
+pub fn vote_subject_keys(repo: &str, prefix: &str) -> Vec<String> {
+    let start = vote_key(repo, prefix);
+    let skip = vote_key(repo, "").len();
+    VOTES.with(|v| {
+        v.borrow()
+            .range(start.clone()..)
+            .take_while(|e| e.key().starts_with(&start))
+            .map(|e| e.key()[skip..].to_string())
+            .collect()
+    })
+}
+
 pub fn votes_set<T: serde::Serialize>(repo: &str, subject_key: &str, value: &T) {
     if let Ok(b) = serde_json::to_vec(value) {
         VOTES.with(|v| v.borrow_mut().insert(vote_key(repo, subject_key), b));

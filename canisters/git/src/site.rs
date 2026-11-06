@@ -853,14 +853,11 @@ fn served_key(repo: &str) -> String {
     format!("served:{repo}")
 }
 
-fn required_votes(repo: &str) -> u32 {
-    crate::tenancy::meta(repo).map_or(0, |m| m.required_votes)
-}
-
 /// Does the repo require votes, so that what it serves and deploys is the
-/// recorded approved commit rather than the tip?
+/// recorded approved commit rather than the tip? Read from the approvals
+/// mirror (mirror.rs), as everything here that depends on votes is.
 pub fn gated(repo: &str) -> bool {
-    required_votes(repo) > 0
+    crate::mirror::approved(repo).is_some()
 }
 
 fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
@@ -887,25 +884,23 @@ fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
 pub fn advance(repo: &str) -> Option<store::Oid> {
     let key = served_key(repo);
     let prev: Option<Served> = crate::kv::get_json(&key);
-    if required_votes(repo) == 0 {
+    let Some(approved) = crate::mirror::approved(repo) else {
         let prev = prev?;
         crate::kv::set_json(&key, &Option::<Served>::None);
         let tip = tip_of(repo).ok()?;
         return (prev.commit != Some(store::oid_hex(&tip))).then_some(tip);
-    }
+    };
     let prev = prev.unwrap_or_default();
-    let next = tip_of(repo)
-        .ok()
-        .and_then(|tip| {
-            let first_parents = std::iter::successors(Some(tip), |c| match store::get_object_parsed(c) {
-                Some((ObjectType::Commit, body)) => object::commit_refs(&body)
-                    .ok()
-                    .and_then(|r| r.parents.first().copied()),
-                _ => None,
-            })
-            .take(APPROVAL_WALK);
-            crate::tenancy::first_approved(repo, first_parents)
-        });
+    let next = tip_of(repo).ok().and_then(|tip| {
+        std::iter::successors(Some(tip), |c| match store::get_object_parsed(c) {
+            Some((ObjectType::Commit, body)) => object::commit_refs(&body)
+                .ok()
+                .and_then(|r| r.parents.first().copied()),
+            _ => None,
+        })
+        .take(APPROVAL_WALK)
+        .find(|c| approved.contains(c))
+    });
     let now = Served {
         commit: next.as_ref().map(store::oid_hex),
     };
@@ -914,9 +909,9 @@ pub fn advance(repo: &str) -> Option<store::Oid> {
     next.filter(|_| moved)
 }
 
-fn recorded_if_approved(repo: &str, served: &Served) -> Option<store::Oid> {
+fn recorded_if_approved(served: &Served, approved: &crate::mirror::Approved) -> Option<store::Oid> {
     let oid = store::parse_oid(served.commit.as_deref()?).ok()?;
-    crate::tenancy::first_approved(repo, std::iter::once(oid))
+    approved.contains(&oid).then_some(oid)
 }
 
 /// Record what every votes-gated repo serves. For post_upgrade: a repo that
@@ -924,8 +919,8 @@ fn recorded_if_approved(repo: &str, served: &Served) -> Option<store::Oid> {
 /// serve nothing until its next vote. Queues no deploys; the apps are left
 /// where they are.
 pub fn record_gated_repos() {
-    for (repo, m) in store::repo_meta_all::<crate::tenancy::RepoMeta>() {
-        if m.required_votes > 0 && crate::kv::get_json::<Served>(&served_key(&repo)).is_none() {
+    for repo in store::list_repos() {
+        if gated(&repo) && crate::kv::get_json::<Served>(&served_key(&repo)).is_none() {
             advance(&repo);
         }
     }
@@ -933,15 +928,16 @@ pub fn record_gated_repos() {
 
 /// The commit a site serves. With no votes required (the default, and every
 /// legacy repo) that is the deploy-branch tip. With votes required it is the
-/// commit `advance` last recorded, re-checked against the current ballots on
-/// every request so a withdrawn approval can never be served; an unapproved
-/// push is not served, and the last approved commit stays up.
+/// commit `advance` last recorded, re-checked on every request against the
+/// approvals mirror, which the authority updates with each ballot, so a
+/// withdrawn approval can never be served; an unapproved push is not
+/// served, and the last approved commit stays up.
 pub fn served_commit(repo: &str) -> Result<store::Oid, &'static str> {
-    if required_votes(repo) == 0 {
+    let Some(approved) = crate::mirror::approved(repo) else {
         return tip_of(repo);
-    }
+    };
     crate::kv::get_json::<Served>(&served_key(repo))
-        .and_then(|s| recorded_if_approved(repo, &s))
+        .and_then(|s| recorded_if_approved(&s, &approved))
         .ok_or("no approved commit on the site branch")
 }
 
