@@ -216,7 +216,7 @@ fn canonical(ty: ObjectType, body: &[u8]) -> Vec<u8> {
     out
 }
 
-fn commit20(oid: &Oid) -> Result<[u8; 20], String> {
+pub(crate) fn commit20(oid: &Oid) -> Result<[u8; 20], String> {
     oid.as_slice().try_into().map_err(|_| "bad oid length".to_string())
 }
 

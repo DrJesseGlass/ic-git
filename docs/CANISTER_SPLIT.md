@@ -234,14 +234,18 @@ canister does what:
    through as a directory, a name listed twice, paths that are not plain,
    headers that do not match their bodies, malformed commits and truncated
    trees, the SHA-mbles collision, and a 20,000-round mutation fuzz in
-   which every altered input is refused. Not yet called: step 2 wires it
-   into the deploy queue.
-2. **Jobs carry proofs.** `enqueue` resolves the artifacts and stores a job
-   with bytes and proof; `drain_one` verifies and deploys from the verified
-   bytes, and the queue never reads the object store again. Job payloads go
-   in their own stable map, not the JSON meta bucket, since a module can be
-   megabytes. This also settles the TOCTOU note below: a config edit cannot
-   change a queued job.
+   which every altered input is refused.
+2. **Jobs carry proofs.** DONE. `enqueue` snapshots the repo's deploy
+   configs and proves each leg's artifact out of the commit (`resolve`, the
+   git side); the payload goes in its own stable map (memory 9), not the
+   JSON meta bucket, since a module can be megabytes. `drain_one` takes it
+   and `run` deploys from bytes that `Artifact::verified` has checked
+   against the job's commit and the snapshot's path, reading neither the
+   configs nor the object store; a refused proof is the deploy's failure
+   message. `deploy_now` resolves and runs the same kind of job. A config
+   edit cannot change a queued job. A job queued by an older release is
+   resolved in `post_upgrade`, which also frees any payload whose job is
+   gone (drained by an older release after a rollback).
 3. **Governed repos deploy `.wasm` only.** `set_wasm_deploy`, a `WasmDeploy`
    policy change, and `govern_app_canister` refuse a `.wat` or `.lang`
    source on a governed repo. On mainnet the only governed repo, ic-vote,

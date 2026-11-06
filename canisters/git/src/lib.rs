@@ -12,8 +12,8 @@ mod deploy;
 mod evm;
 mod feed;
 mod fleet;
-// Used by the deploy queue from phase 2, step 2 (docs/CANISTER_SPLIT.md).
-#[allow(dead_code)]
+// Proofs that a blob is what a commit holds; queued deploy jobs carry them
+// (docs/CANISTER_SPLIT.md, phase 2).
 mod gitproof;
 mod icp;
 mod interp;
