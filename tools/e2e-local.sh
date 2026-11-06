@@ -374,6 +374,11 @@ section "governed backend"
 INFO=$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)
 expect "before: the owner and ic-git control the app canister" "$(flat "$INFO")" "Controllers:.*$T"
 expect "a voter cannot govern" "$(call "$V1" git govern_app_canister '("e2e-app")')" 'only the owner'
+# A governed repo deploys committed .wasm only (docs/CANISTER_SPLIT.md,
+# phase 2 step 3): nothing compiled here reaches a governed backend.
+expect "governing while the config compiles app.wat is refused" "$(call "$TEN" git govern_app_canister '("e2e-app")')" '.wasm only.*app.wat'
+expect "  ...the canister is untouched" "$(flat "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)")" "Controllers:.*$T"
+call "$TEN" git set_wasm_deploy '("e2e-app", "app", "app.wasm")' >/dev/null
 expect "the owner governs" "$(call "$TEN" git govern_app_canister '("e2e-app")')" "Ok = principal \"$APP\""
 INFO=$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)
 expect "after: ic-git is the only controller" "$(flat "$INFO")" "Controllers: $G *Module"
@@ -392,6 +397,7 @@ call "$TEN" git remove_member "(\"e2e-app\", principal \"$OPP\")" >/dev/null
 # Policy changes by vote. K is 1 of 3, so the proposer's approval applies.
 expect "required votes 1 -> 2 by vote: applied at once under K = 1" "$(flat "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 2 : nat32 } }, variant { Approve }, null)')")" 'reached = true'
 expect "  ...and in effect" "$(curl -s "http://$HOST/api/e2e-app/info")" '"required_votes":2'
+expect "a compiled source is refused before any ballot" "$(call "$TEN" git propose_policy_change "(\"e2e-app\", variant { WasmDeploy = record { target = \"$APP\"; source_path = \"app.wat\" } }, variant { Approve }, null)")" '.wasm only'
 expect "k = 0 is refused before any ballot" "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 0 : nat32 } }, variant { Approve }, null)')" 'at least one required vote'
 # Under K = 2 a change waits, is listed with its count, and an objection holds it.
 expect "lowering back to 1 waits for a second approval" "$(flat "$(call "$V1" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Approve }, null)')")" 'reached = false'
@@ -403,7 +409,10 @@ expect "  ...the reason is in the API" "$(curl -s "http://$HOST/api/e2e-app/prop
 expect "  ...and the owner's approval does not outweigh it (2 - 1 < 2)" "$(flat "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Approve }, null)')")" 'reached = false'
 expect "still 2 required" "$(curl -s "http://$HOST/api/e2e-app/info")" '"required_votes":2'
 # The governed canister still deploys approved commits, and only those.
-commit app.wat '(module (func (export "canister_query hello")) (func (export "canister_query hi")) (func (export "canister_query hey")))' app-v3
+# A committed module, (module (func (export "canister_query hey"))), as bytes.
+printf '\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00\x07\x16\x01\x12canister_query hey\x00\x00\x0a\x04\x01\x02\x00\x0b' >"$W/app.wasm"
+git -C "$W" add -A
+git -C "$W" commit -qm app-v3
 signed "$URL" >/dev/null || true
 A3=$(git -C "$W" rev-parse HEAD)
 call "$TEN" git cast_ballot "(\"e2e-app\", \"$A3\", variant { Approve }, null)" >/dev/null

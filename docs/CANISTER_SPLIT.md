@@ -246,10 +246,14 @@ canister does what:
    edit cannot change a queued job. A job queued by an older release is
    resolved in `post_upgrade`, which also frees any payload whose job is
    gone (drained by an older release after a rollback).
-3. **Governed repos deploy `.wasm` only.** `set_wasm_deploy`, a `WasmDeploy`
-   policy change, and `govern_app_canister` refuse a `.wat` or `.lang`
-   source on a governed repo. On mainnet the only governed repo, ic-vote,
-   deploys `app.wasm`, so nothing live changes.
+3. **Governed repos deploy `.wasm` only.** DONE. One rule,
+   `SourceKind::for_repo`: `set_config` (behind `set_wasm_deploy` and an
+   applied `WasmDeploy`), a `WasmDeploy` proposal, and `govern_app_canister`
+   refuse a `.wat` or `.lang` source on a governed repo -- governing waits
+   until the config names a `.wasm` -- and the drain checks it again as a
+   job runs, since a job queued before governing carries the config of
+   that time. On mainnet the only governed repo, ic-vote, deploys
+   `app.wasm`, so nothing live changes.
 4. **The crate split.** Workspace crates `types` (wire structs, record keys,
    the proof format and its checker), `authority`, `git` and `compiler`,
    still linked into one canister. The two deferred items below land here.

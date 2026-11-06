@@ -317,7 +317,13 @@ ic-git becomes the app canister's only controller and the owner is
 removed, so from then on its code changes only by an approved commit's
 deploy. Owner only; refused without an app canister, with required votes
 at 0 (a governed repo whose pushes deploy unapproved would lock in
-nothing), or when already governed. The repo is marked governed before
+nothing), while the deploy config builds a `.wat` or `.lang` source, or
+when already governed. A governed repo deploys committed `.wasm` only, so
+the voters approve the exact module and `<repo>#app` records its hash;
+nothing compiled here reaches a governed backend. A `WasmDeploy` change
+naming a compiled source is refused before any ballot, and the deploy
+queue refuses one as it runs, for a job queued before the repo was
+governed. The repo is marked governed before
 the controller call goes out, so the policy is locked while it is in
 flight (the mark comes off only if the call fails). One-way: nothing but
 an approved commit can give control back, and that is the point and the
@@ -344,7 +350,8 @@ themselves sole approver, and push anything:
   ballots and all. Each approver holds at most 8 pending changes that
   way, so one voter can fill no one else's slots. A change nobody could
   apply (`k` of 0 or above the approvers, an unknown mode, an install
-  mode with no deploy config, removing a non-voter) is refused before any
+  mode with no deploy config, a source that is not `.wasm`, removing a
+  non-voter) is refused before any
   ballot; a pending change the policy has since moved under is dropped,
   ballots and all, at the next ballot on it. A repo requiring no votes
   refuses every proposal: under `k` of 0 any ballot would be reached at
