@@ -13,7 +13,7 @@
 //! (`stranded_deposits`). The candid below is hand-mirrored from the cycles
 //! ledger's interface, the same way evm.rs mirrors the EVM RPC canister.
 
-use crate::{store, tenancy};
+use crate::tenancy;
 use candid::{CandidType, Nat, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -26,13 +26,13 @@ const LEDGER_KEY: &str = "tenancy:cycles_ledger";
 const STRANDED_KEY: &str = "tenancy:stranded";
 
 pub fn ledger_id() -> Principal {
-    store::meta_get_json::<String>(LEDGER_KEY)
+    crate::kv::get_json::<String>(LEDGER_KEY)
         .and_then(|t| Principal::from_text(t).ok())
         .unwrap_or_else(|| Principal::from_text(CYCLES_LEDGER).unwrap())
 }
 
 pub fn set_ledger_id(p: Principal) {
-    store::meta_set_json(LEDGER_KEY, &p.to_text());
+    crate::kv::set_json(LEDGER_KEY, &p.to_text());
 }
 
 #[derive(CandidType, Deserialize, Clone)]
@@ -114,13 +114,13 @@ pub struct Stranded {
 }
 
 pub fn stranded() -> Vec<Stranded> {
-    store::meta_get_json(STRANDED_KEY).unwrap_or_default()
+    crate::kv::get_json(STRANDED_KEY).unwrap_or_default()
 }
 
 fn record_stranded(s: Stranded) {
     let mut all = stranded();
     all.push(s);
-    store::meta_set_json(STRANDED_KEY, &all);
+    crate::kv::set_json(STRANDED_KEY, &all);
 }
 
 /// Pull `amount` cycles the caller approved on the cycles ledger into their

@@ -90,7 +90,7 @@ fn load(feed: &Feed) -> Log {
     // A feed that no longer decodes starts over: it is a notification
     // surface, and a stuck one would hide every later event, which is worse
     // than losing the old ones (the records they pointed at are elsewhere).
-    store::meta_get_json(&feed.key()).unwrap_or_default()
+    crate::kv::get_json(&feed.key()).unwrap_or_default()
 }
 
 pub fn events(feed: &Feed) -> Vec<Event> {
@@ -128,7 +128,7 @@ fn append(feed: &Feed, new: Vec<New>) -> u64 {
         let drop = log.events.len() - MAX_EVENTS;
         log.events.drain(0..drop);
     }
-    store::meta_set_json(&feed.key(), &log);
+    crate::kv::set_json(&feed.key(), &log);
     n
 }
 
@@ -416,7 +416,7 @@ struct Seen {
 }
 
 pub fn governor() -> Option<Principal> {
-    store::meta_get_json::<String>(GOVERNOR_KEY).and_then(|s| Principal::from_text(s).ok())
+    crate::kv::get_json::<String>(GOVERNOR_KEY).and_then(|s| Principal::from_text(s).ok())
 }
 
 /// Point the feed at the governor, or at nothing. The mirror starts over
@@ -424,18 +424,18 @@ pub fn governor() -> Option<Principal> {
 pub fn set_governor(governor: Option<Principal>) {
     let before = self::governor();
     match governor {
-        Some(p) => store::meta_set_json(GOVERNOR_KEY, &p.to_text()),
-        None => store::meta_set_json(GOVERNOR_KEY, &Option::<String>::None),
+        Some(p) => crate::kv::set_json(GOVERNOR_KEY, &p.to_text()),
+        None => crate::kv::set_json(GOVERNOR_KEY, &Option::<String>::None),
     }
     if before != governor {
         let generation = mirror().generation + 1;
-        store::meta_set_json(MIRROR_KEY, &Mirror { generation, ..Mirror::default() });
+        crate::kv::set_json(MIRROR_KEY, &Mirror { generation, ..Mirror::default() });
     }
     arm_governor_timer();
 }
 
 fn mirror() -> Mirror {
-    store::meta_get_json(MIRROR_KEY).unwrap_or_default()
+    crate::kv::get_json(MIRROR_KEY).unwrap_or_default()
 }
 
 /// The events a fresh look at the governor adds, and the mirror moved past
@@ -600,7 +600,7 @@ pub async fn poll_governor() -> Result<u64, String> {
         }
         let new = reconcile(&mut m, &open, &pages);
         let n = append(&Feed::Canister, new);
-        store::meta_set_json(MIRROR_KEY, &m);
+        crate::kv::set_json(MIRROR_KEY, &m);
         Ok(n)
     }
     .await;
@@ -856,11 +856,11 @@ mod tests {
     /// keeps it.
     #[test]
     fn set_governor_resets_the_mirror_once_per_change() {
-        store::meta_set_json(MIRROR_KEY, &Mirror { generation: 3, cursor: 9, open: BTreeMap::new() });
+        crate::kv::set_json(MIRROR_KEY, &Mirror { generation: 3, cursor: 9, open: BTreeMap::new() });
         set_governor(Some(p(1)));
         assert_eq!(governor(), Some(p(1)));
         assert_eq!(mirror(), Mirror { generation: 4, cursor: 0, open: BTreeMap::new() });
-        store::meta_set_json(MIRROR_KEY, &Mirror { generation: 4, cursor: 2, open: BTreeMap::new() });
+        crate::kv::set_json(MIRROR_KEY, &Mirror { generation: 4, cursor: 2, open: BTreeMap::new() });
         set_governor(Some(p(1)));
         assert_eq!(mirror().cursor, 2, "the same governor keeps the mirror");
         set_governor(None);

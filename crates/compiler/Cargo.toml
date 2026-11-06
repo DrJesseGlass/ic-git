@@ -1,0 +1,26 @@
+[package]
+name = "ic-git-compiler"
+version = "0.1.0"
+edition = "2021"
+description = "Builds .wat and .lang sources to wasm for ungoverned repos (docs/CANISTER_SPLIT.md, section 3). Pure: bytes in, wasm out."
+
+[dependencies]
+# Keep candid pinned to the version ic-dev-kit-rs uses (see canisters/git).
+candid = "0.10"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+hex = { version = "0.4", features = ["serde"] }
+
+# Track B, rung R0 (see ROADMAP.md): on-chain WAT -> wasm assembler plus a
+# validation pass. Both pure Rust, no filesystem/threads, target
+# wasm32-unknown-unknown. wasmparser is already in-tree via wat/wast.
+wat = "1"
+wasmparser = "0.253"
+# Track B, rung R1: emit wasm directly from our own compiler (no LLVM).
+wasm-encoder = "0.253"
+# Track B, rung R6: interpret a wasm32-wasip1 module (eventually rustc.wasm)
+# held as data in stable memory. Pure Rust, builds to wasm32-unknown-unknown.
+wasmi = "1"
+
+[dev-dependencies]
+serde_json = "1"

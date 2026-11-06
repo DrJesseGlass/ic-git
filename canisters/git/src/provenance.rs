@@ -13,27 +13,10 @@ use crate::site;
 use crate::store::Oid;
 use sha2::Digest;
 
-/// Suffix that namespaces a served-site record away from the same repo's
-/// deploy-artifact record. The registry stores one slot per key string, and
-/// this canister has two writers with incompatible bundleHash semantics
-/// (decoded contract bytecode vs. served site bytes), so a repo that both
-/// deploys a contract and serves a site would otherwise have one record
-/// silently clobber the other on the next push. See docs/ATTESTATION.md,
-/// "The two record types". `tools/verify.mjs` hardcodes the same suffix.
-const SITE_KEY_SUFFIX: &str = "#site";
-/// Suffix of a governed repo's backend record: the commit the deploy queue
-/// installed into the app canister and the sha256 of the module it
-/// installed, which is the module hash the IC certifies for that canister
-/// (docs/GOVERNANCE.md, section 3). Published by the queue after every
-/// install on a governed repo, so what the chain says the backend runs is
-/// an approved commit's build, by a key nobody but this canister can write.
-const APP_KEY_SUFFIX: &str = "#app";
-/// Key of this canister's own record: the ic-git commit it was built from
-/// and the sha256 of the module installed into it, the hash the IC
-/// certifies for it. Published after each upgrade by the controller that
-/// made it -- the governor (docs/GOVERNANCE.md, section 5) -- so a verifier
-/// can check ic-git itself the way it checks a governed backend.
-pub(crate) const CANISTER_KEY: &str = "ic-git#canister";
+// Record keys come from the shared types crate, the one definition the
+// verifiers' copies are tested against.
+pub(crate) use ic_git_types::keys::CANISTER_KEY;
+use ic_git_types::keys::{app_record_key, artifact_record_key, site_record_key};
 
 /// A resolved provenance record: the registry key, the commit being attested,
 /// and the artifact hash bound to it.
@@ -82,7 +65,7 @@ fn commit20(oid: &Oid) -> Result<[u8; 20], String> {
 /// window for a mid-deploy config edit to redirect the attestation.
 fn deploy_record(repo: &str, commit_oid: &Oid, bundle: [u8; 32]) -> Result<Record, String> {
     Ok(Record {
-        key: repo.to_string(),
+        key: artifact_record_key(repo),
         commit: commit20(commit_oid)?,
         bundle,
     })
@@ -95,7 +78,7 @@ pub fn app_record(repo: &str, commit_oid: &Oid, wasm_sha256_hex: &str) -> Result
     let bytes = hex::decode(wasm_sha256_hex).map_err(|e| format!("bad module hash: {e}"))?;
     let bundle: [u8; 32] = bytes.try_into().map_err(|_| "module hash is not 32 bytes".to_string())?;
     Ok(Record {
-        key: format!("{repo}{APP_KEY_SUFFIX}"),
+        key: app_record_key(repo),
         commit: commit20(commit_oid)?,
         bundle,
     })
@@ -162,7 +145,7 @@ fn site_record(repo: &str) -> Result<Record, String> {
         ));
     }
     Ok(Record {
-        key: format!("{repo}{SITE_KEY_SUFFIX}"),
+        key: site_record_key(repo),
         commit: commit20(&commit)?,
         bundle: sha2::Sha256::digest(&body).into(),
     })

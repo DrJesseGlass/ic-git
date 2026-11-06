@@ -522,19 +522,16 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-timers",
  "ic-dev-kit-rs",
+ "ic-git-compiler",
+ "ic-git-types",
  "ic-multisig",
  "ic-stable-structures",
  "k256",
  "serde",
  "serde_json",
  "sha1",
- "sha1-checked",
  "sha2",
  "sha3",
- "wasm-encoder",
- "wasmi",
- "wasmparser 0.253.0",
- "wat",
 ]
 
 [[package]]
@@ -678,6 +675,31 @@ dependencies = [
  "serde",
  "strum",
  "strum_macros",
+]
+
+[[package]]
+name = "ic-git-compiler"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "wasm-encoder",
+ "wasmi",
+ "wasmparser 0.253.0",
+ "wat",
+]
+
+[[package]]
+name = "ic-git-types"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "hex",
+ "serde",
+ "sha1-checked",
 ]
 
 [[package]]

@@ -66,16 +66,16 @@ pub fn set_config(canister: String, handle: String) -> Result<(), String> {
         return Err(format!("{canister} is not a canister that can run ic-name-service"));
     }
     check_segment("handle", &handle)?;
-    store::meta_set_json(CONFIG_KEY, &Some(NamesConfig { canister, handle }));
+    crate::kv::set_json(CONFIG_KEY, &Some(NamesConfig { canister, handle }));
     Ok(())
 }
 
 pub fn clear_config() {
-    store::meta_set_json(CONFIG_KEY, &Option::<NamesConfig>::None);
+    crate::kv::set_json(CONFIG_KEY, &Option::<NamesConfig>::None);
 }
 
 pub fn get_config() -> Option<NamesConfig> {
-    store::meta_get_json::<Option<NamesConfig>>(CONFIG_KEY).flatten()
+    crate::kv::get_json::<Option<NamesConfig>>(CONFIG_KEY).flatten()
 }
 
 /// Announce a successful deploy to the name service `cfg` names. Returns

@@ -40,7 +40,6 @@
 //!
 //! Only ssh-ed25519 keys are accepted.
 
-use crate::store;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use base64::Engine as _;
 use sha2::{Digest, Sha256, Sha512};
@@ -262,7 +261,7 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
 }
 
 fn seed() -> Option<Vec<u8>> {
-    store::meta_get_json::<String>(SEED_KEY).and_then(|h| hex::decode(h).ok())
+    crate::kv::get_json::<String>(SEED_KEY).and_then(|h| hex::decode(h).ok())
 }
 
 pub fn has_seed() -> bool {
@@ -272,7 +271,7 @@ pub fn has_seed() -> bool {
 /// Store the nonce seed, once. `bytes` come from raw_rand.
 pub fn set_seed_once(bytes: &[u8]) {
     if !has_seed() && bytes.len() >= 32 {
-        store::meta_set_json(SEED_KEY, &hex::encode(&bytes[..32]));
+        crate::kv::set_json(SEED_KEY, &hex::encode(&bytes[..32]));
     }
 }
 

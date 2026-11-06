@@ -1,0 +1,15 @@
+[package]
+name = "ic-git-types"
+version = "0.1.0"
+edition = "2021"
+description = "What both sides of ic-git's canister boundary agree on (docs/CANISTER_SPLIT.md, section 4): the proof format and its checker, the wire structs, the registry record keys."
+
+[dependencies]
+# Keep candid pinned to the version ic-dev-kit-rs uses (see canisters/git).
+candid = "0.10"
+serde = { version = "1", features = ["derive"] }
+hex = "0.4"
+# SHA-1 with collision detection, as git itself uses, so a crafted colliding
+# object cannot pass for one the voters approved. No default features: the
+# check needs neither std nor OIDs.
+sha1-checked = { version = "0.10", default-features = false }
