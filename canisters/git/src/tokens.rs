@@ -400,7 +400,7 @@ pub fn purge_expired() {
 
 /// Has `migrate` run on this canister?
 fn migrated() -> bool {
-    store::meta_get_json::<bool>(MIGRATED_KEY) == Some(true)
+    crate::kv::get_json::<bool>(MIGRATED_KEY) == Some(true)
 }
 
 /// For post_upgrade: give every token minted before expiry existed
@@ -432,7 +432,7 @@ pub fn migrate() {
             Entry::Unreadable => {}
         }
     }
-    store::meta_set_json(MIGRATED_KEY, &true);
+    crate::kv::set_json(MIGRATED_KEY, &true);
 }
 
 #[cfg(test)]

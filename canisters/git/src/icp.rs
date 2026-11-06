@@ -40,7 +40,7 @@
 //! same way ledger.rs mirrors the cycles ledger.
 
 use crate::ledger::{Account, TransferFromArgs, TransferFromError};
-use crate::{store, tenancy};
+use crate::tenancy;
 use candid::{CandidType, Nat, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -71,13 +71,13 @@ struct Ids {
 /// (ICP ledger, CMC).
 pub fn ids() -> (Principal, Principal) {
     let parse = |t: &str| Principal::from_text(t).ok();
-    store::meta_get_json::<Ids>(IDS_KEY)
+    crate::kv::get_json::<Ids>(IDS_KEY)
         .and_then(|i| Some((parse(&i.ledger)?, parse(&i.cmc)?)))
         .unwrap_or_else(|| (Principal::from_text(ICP_LEDGER).unwrap(), Principal::from_text(CMC).unwrap()))
 }
 
 pub fn set_ids(ledger: Principal, cmc: Principal) {
-    store::meta_set_json(
+    crate::kv::set_json(
         IDS_KEY,
         &Ids {
             ledger: ledger.to_text(),
@@ -164,15 +164,15 @@ const LAST_ID_KEY: &str = "tenancy:icp_last_id";
 const CREDITED_KEEP: usize = 200;
 
 pub fn pending() -> Vec<PendingIcpDeposit> {
-    store::meta_get_json(PENDING_KEY).unwrap_or_default()
+    crate::kv::get_json(PENDING_KEY).unwrap_or_default()
 }
 
 pub fn failed() -> Vec<FailedIcpDeposit> {
-    store::meta_get_json(FAILED_KEY).unwrap_or_default()
+    crate::kv::get_json(FAILED_KEY).unwrap_or_default()
 }
 
 fn save_pending(all: &[PendingIcpDeposit]) {
-    store::meta_set_json(PENDING_KEY, &all);
+    crate::kv::set_json(PENDING_KEY, &all);
 }
 
 /// A fresh id: the current time in ns, bumped past the last one issued, so
@@ -180,9 +180,9 @@ fn save_pending(all: &[PendingIcpDeposit]) {
 /// second for a replay of the first). The bump is nanoseconds, well inside
 /// the ledger's allowance for a time slightly in the future.
 fn next_id() -> u64 {
-    let last = store::meta_get_json::<u64>(LAST_ID_KEY).unwrap_or(0);
+    let last = crate::kv::get_json::<u64>(LAST_ID_KEY).unwrap_or(0);
     let id = tenancy::now_ns().max(last.saturating_add(1));
-    store::meta_set_json(LAST_ID_KEY, &id);
+    crate::kv::set_json(LAST_ID_KEY, &id);
     id
 }
 
@@ -216,17 +216,17 @@ fn take_pending(id: u64) -> Option<PendingIcpDeposit> {
 }
 
 fn record_credit(id: u64, who: Principal) {
-    let mut all: Vec<Credited> = store::meta_get_json(CREDITED_KEY).unwrap_or_default();
+    let mut all: Vec<Credited> = crate::kv::get_json(CREDITED_KEY).unwrap_or_default();
     all.push(Credited { id, who });
     if all.len() > CREDITED_KEEP {
         let drop = all.len() - CREDITED_KEEP;
         all.drain(0..drop);
     }
-    store::meta_set_json(CREDITED_KEY, &all);
+    crate::kv::set_json(CREDITED_KEY, &all);
 }
 
 fn credited_to(id: u64) -> Option<Principal> {
-    store::meta_get_json::<Vec<Credited>>(CREDITED_KEY)
+    crate::kv::get_json::<Vec<Credited>>(CREDITED_KEY)
         .unwrap_or_default()
         .into_iter()
         .find(|c| c.id == id)
@@ -247,7 +247,7 @@ fn fail(id: u64, error: &str) {
             ledger: p.ledger,
             cmc: p.cmc,
         });
-        store::meta_set_json(FAILED_KEY, &all);
+        crate::kv::set_json(FAILED_KEY, &all);
     }
 }
 

@@ -5,8 +5,9 @@
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
 mod api;
+// The compiler crate's modules, under the names this crate has always used.
+use ic_git_compiler::{compile, interp, lang};
 mod apps;
-mod compile;
 mod consent;
 mod deploy;
 mod evm;
@@ -16,9 +17,7 @@ mod fleet;
 // (docs/CANISTER_SPLIT.md, phase 2).
 mod gitproof;
 mod icp;
-mod interp;
 mod kv;
-mod lang;
 mod ledger;
 mod names;
 mod object;
@@ -56,13 +55,13 @@ fn init() {
 
 #[ic_cdk::pre_upgrade]
 fn pre_upgrade() {
-    store::save_auth_snapshot(auth::save_to_bytes());
+    kv::save_auth_snapshot(auth::save_to_bytes());
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     store::check_schema_version();
-    auth::init_from_saved(store::load_auth_snapshot());
+    auth::init_from_saved(kv::load_auth_snapshot());
     // Timers do not survive upgrades; re-arm the drain timer if the queue
     // (which does survive, in stable memory) still holds pending deploys.
     deploy::resume_pending();

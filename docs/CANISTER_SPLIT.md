@@ -253,11 +253,24 @@ canister does what:
    until the config names a `.wasm` -- and the drain checks it again as a
    job runs, since a job queued before governing carries the config of
    that time, and once more just before `install_code`, since the repo can
-   be governed while the job awaits the target's status. On mainnet the only governed repo, ic-vote, deploys
-   `app.wasm`, so nothing live changes.
+   be governed while the job awaits the target's status. On mainnet the
+   only governed repo, ic-vote, deploys `app.wasm`, so nothing live
+   changes.
 4. **The crate split.** Workspace crates `types` (wire structs, record keys,
    the proof format and its checker), `authority`, `git` and `compiler`,
    still linked into one canister. The two deferred items below land here.
+   First half DONE: `crates/types` (`ic-git-types`: `proof`, the checker,
+   `Artifact` and `plain`; `keys`, the record keys, with a test holding
+   `tools/verify.mjs` and `core/verifier.js` to them) and
+   `crates/compiler` (`ic-git-compiler`: `compile`, `lang`, `interp`), both
+   pure and linked into the canister crate; and both deferred items. The
+   prover (`gitproof::prove`) stays with the object store. Second half
+   open: `authority` and `git` cannot be crates yet, because the modules
+   still call across the line in both directions -- `site`, `smart_http`,
+   `tokens` and `api` read `tenancy` for writers and approvals, `tenancy`
+   reads `deploy`'s config, and `deploy`, `provenance`, `evm` and `feed`
+   call one another. Those calls are what step 5 puts behind interfaces,
+   so step 5 comes before the second half.
 5. **The mirrors.** Site serving and push authorization read the served
    commit and the writers through the interfaces they will have across the
    boundary, so phase 3 swaps a function call for a message.
@@ -281,18 +294,22 @@ decoding sat on both sides of the future boundary. Now:
   *before* walking the tree, instead of resolving and decoding an artifact for
   a canister that turns out to have no EVM config.
 
-Two items remain deferred to phase 2, because each needs a crate boundary to be
-worth doing:
+Two items were deferred to phase 2, because each needed a crate boundary to be
+worth doing. Both DONE in step 4:
 
-- **META ownership.** `kv.rs` currently forwards to `store::meta_*_json`, and
-  `deploy`/`site`/`fleet` still call `store::` directly -- one bucket, two
-  names. Move the `META` map and its JSON codec out of `store.rs` into `kv.rs`
-  and point every caller at it, so `store.rs` is objects/refs/repos only.
-- **Record-key construction.** `SITE_KEY_SUFFIX` is defined in
-  `provenance.rs`, hardcoded in `tools/verify.mjs`, and documented in
-  docs/ATTESTATION.md as a registry-contract convention. Put the suffix and a
-  `site_record_key(repo)` in the shared `types` crate so authority, git, and the
-  verifier derive it from one definition.
+- **META ownership.** `kv.rs` used to forward to `store::meta_*_json` while
+  `deploy`/`site`/`fleet` called `store::` directly -- one bucket, two names.
+  `kv.rs` now owns the `META` map (same memory id, so nothing migrates), its
+  JSON codec, the auth snapshot and the raw bytes the schema marker uses;
+  `store.rs` keeps only the memory layout and hands kv its memory. Every
+  caller goes through `kv`.
+- **Record-key construction.** `SITE_KEY_SUFFIX` was defined in
+  `provenance.rs` and hardcoded in `tools/verify.mjs`. The suffixes,
+  `CANISTER_KEY` and `site_record_key` / `app_record_key` /
+  `artifact_record_key` now live in `ic_git_types::keys`, which
+  `provenance.rs` uses; the JavaScript verifiers cannot import them, so a
+  test in that crate reads `tools/verify.mjs` and `core/verifier.js` and
+  fails if their copies differ.
 
 The efficiency item that rode along with the hex seam is also done: `run_evm`
 used to call `provenance::publish_commit`, which re-read, re-inflated,

@@ -64,11 +64,11 @@ const PRICING_KEY: &str = "tenancy:pricing";
 const YEAR_NS: u128 = 365 * 24 * 3600 * 1_000_000_000;
 
 pub fn pricing() -> Pricing {
-    store::meta_get_json(PRICING_KEY).unwrap_or_default()
+    crate::kv::get_json(PRICING_KEY).unwrap_or_default()
 }
 
 pub fn set_pricing(p: Pricing) {
-    store::meta_set_json(PRICING_KEY, &p);
+    crate::kv::set_json(PRICING_KEY, &p);
 }
 
 /// Settle rent every hour. Timers do not survive upgrades, so init and

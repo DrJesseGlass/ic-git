@@ -10,6 +10,7 @@
 
 use crate::store::{self, Oid};
 use crate::{compile, evm, gitproof, object};
+use ic_git_types::proof::{plain, Artifact};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
@@ -158,7 +159,7 @@ pub struct EvmDeployStatus {
     pub tx_hash: String,
 }
 
-// META keys for this module's persisted state (JSON via store::meta_*_json).
+// META keys for this module's persisted state (JSON via kv::set_json).
 fn config_key(repo: &str) -> String {
     format!("deploy:{repo}")
 }
@@ -194,7 +195,7 @@ pub fn set_config(repo: &str, target: String, source_path: String) -> Result<(),
         source_path,
         mode,
     };
-    store::meta_set_json(&config_key(repo), &cfg);
+    crate::kv::set_json(&config_key(repo), &cfg);
     Ok(())
 }
 
@@ -203,12 +204,12 @@ pub fn set_config(repo: &str, target: String, source_path: String) -> Result<(),
 pub fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
     let mut cfg = get_config(repo).ok_or("no deploy config for repo")?;
     cfg.mode = mode;
-    store::meta_set_json(&config_key(repo), &cfg);
+    crate::kv::set_json(&config_key(repo), &cfg);
     Ok(())
 }
 
 pub fn get_config(repo: &str) -> Option<DeployConfig> {
-    store::meta_get_json(&config_key(repo))
+    crate::kv::get_json(&config_key(repo))
 }
 
 /// Set (or replace) a repo's EVM deploy config. Requires the global EVM
@@ -225,7 +226,7 @@ pub fn set_evm_config(repo: &str, source_path: String, gas_limit: u64) -> Result
     // deploy leg and with the evm_deploy endpoint, so a config accepted here
     // cannot be rejected at drain time for a reason this check missed.
     evm::require_deploy_target(gas_limit)?;
-    store::meta_set_json(
+    crate::kv::set_json(
         &evm_config_key(repo),
         &EvmDeployConfig {
             source_path,
@@ -236,19 +237,19 @@ pub fn set_evm_config(repo: &str, source_path: String, gas_limit: u64) -> Result
 }
 
 pub fn get_evm_config(repo: &str) -> Option<EvmDeployConfig> {
-    store::meta_get_json(&evm_config_key(repo))
+    crate::kv::get_json(&evm_config_key(repo))
 }
 
 pub fn get_evm_status(repo: &str) -> Option<EvmDeployStatus> {
-    store::meta_get_json(&evm_status_key(repo))
+    crate::kv::get_json(&evm_status_key(repo))
 }
 
 pub fn get_status(repo: &str) -> Option<DeployStatus> {
-    store::meta_get_json(&status_key(repo))
+    crate::kv::get_json(&status_key(repo))
 }
 
 fn put_status(repo: &str, st: &DeployStatus) {
-    store::meta_set_json(&status_key(repo), st);
+    crate::kv::set_json(&status_key(repo), st);
 }
 
 /// One entry in a repo's append-only deploy provenance log: the binding of an
@@ -276,7 +277,7 @@ pub struct DeployRecord {
 const MAX_LOG: usize = 200;
 
 pub fn get_history(repo: &str) -> Vec<DeployRecord> {
-    store::meta_get_json(&log_key(repo)).unwrap_or_default()
+    crate::kv::get_json(&log_key(repo)).unwrap_or_default()
 }
 
 /// Append the binding for this deploy to the provenance log.
@@ -298,7 +299,7 @@ pub(crate) fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
         let drop = log.len() - MAX_LOG;
         log.drain(0..drop);
     }
-    store::meta_set_json(&log_key(repo), &log);
+    crate::kv::set_json(&log_key(repo), &log);
 }
 
 // --- deploy queue (timer-driven; see ARCHITECTURE.md) ------------------------
@@ -312,15 +313,6 @@ struct DeployJob {
     repo: String,
     /// Commit that triggered the deploy, as a hex oid.
     commit: String,
-}
-
-/// One leg's artifact as a job carries it: the bytes at the leg's source
-/// path, and the proof (gitproof.rs) that they are what the job's commit
-/// holds there.
-#[derive(CandidType, Deserialize)]
-struct Artifact {
-    blob: Vec<u8>,
-    proof: Vec<Vec<u8>>,
 }
 
 /// What a job deploys, fixed when it is queued: each configured leg's config
@@ -355,22 +347,6 @@ fn resolve(repo: &str, commit: &Oid) -> Job {
     }
 }
 
-/// A source path without empty components, which the tree walk always
-/// skipped (`/app.wasm` named `app.wasm`) and a proof's path does not allow.
-fn plain(path: &str) -> String {
-    path.split('/').filter(|c| !c.is_empty()).collect::<Vec<_>>().join("/")
-}
-
-impl Artifact {
-    /// The authority side: the blob, once its proof shows it is what `commit`
-    /// holds at `path`. Reads nothing but its arguments.
-    fn verified(self, commit: &Oid, path: &str) -> Result<Vec<u8>, String> {
-        gitproof::check(&gitproof::commit20(commit)?, &plain(path), &self.blob, &self.proof)
-            .map_err(|e| format!("proof of {path} refused: {e}"))?;
-        Ok(self.blob)
-    }
-}
-
 /// Where a queued job's payload is stored. A commit is 40 hex digits, so the
 /// key cannot be read two ways whatever the repo is called.
 fn job_key(repo: &str, commit_hex: &str) -> String {
@@ -390,11 +366,11 @@ fn job_take(repo: &str, commit_hex: &str) -> Option<Job> {
 }
 
 fn queue_load() -> Vec<DeployJob> {
-    store::meta_get_json(QUEUE_KEY).unwrap_or_default()
+    crate::kv::get_json(QUEUE_KEY).unwrap_or_default()
 }
 
 fn queue_save(jobs: &[DeployJob]) {
-    store::meta_set_json(QUEUE_KEY, &jobs);
+    crate::kv::set_json(QUEUE_KEY, &jobs);
 }
 
 /// Number of jobs waiting in the queue.
@@ -672,7 +648,7 @@ async fn attempt(
     // this job awaits the target's status.
     let kind_now = || SourceKind::for_repo(crate::tenancy::is_governed(repo), &cfg.source_path);
     let kind = kind_now()?;
-    let src_bytes = artifact?.verified(commit_oid, &cfg.source_path)?;
+    let src_bytes = artifact?.verified(&gitproof::commit20(commit_oid)?, &cfg.source_path)?;
     let wasm = kind
         .build(&cfg.source_path, src_bytes)
         .map_err(|e| format!("build {}: {e}", cfg.source_path))?;
@@ -700,7 +676,7 @@ async fn attempt_evm(
     // gas limit should say so before anything about the artifact.
     evm::require_deploy_target(cfg.gas_limit).map_err(evm::SendError::before)?;
     let bytecode = artifact
-        .and_then(|a| a.verified(commit_oid, &cfg.source_path))
+        .and_then(|a| a.verified(&gitproof::commit20(commit_oid)?, &cfg.source_path))
         .and_then(|bytes| bytecode_of(&cfg.source_path, bytes))
         .map_err(evm::SendError::before)?;
     let bundle: [u8; 32] = sha2::Sha256::digest(&bytecode).into();
@@ -758,12 +734,12 @@ async fn run_evm(
                     st.contract_address, st.tx_hash
                 )
             };
-            store::meta_set_json(&evm_status_key(repo), &st);
+            crate::kv::set_json(&evm_status_key(repo), &st);
             return (st, price);
         }
     }
     let mut unused = 0;
-    store::meta_set_json(&evm_status_key(repo), &st);
+    crate::kv::set_json(&evm_status_key(repo), &st);
     match attempt_evm(repo, cfg, commit_oid, artifact).await {
         Ok((out, bundle)) => {
             st.ok = true;
@@ -789,7 +765,7 @@ async fn run_evm(
             st.message = e.message;
         }
     }
-    store::meta_set_json(&evm_status_key(repo), &st);
+    crate::kv::set_json(&evm_status_key(repo), &st);
     crate::feed::evm_deployed(repo, &commit, st.ok, &st.message);
     (st, unused)
 }
@@ -1082,7 +1058,7 @@ mod tests {
         assert!(job.evm.is_none());
         let (cfg, artifact) = job.wasm.unwrap();
         assert_eq!(cfg.source_path, "app.wasm");
-        assert_eq!(artifact.unwrap().verified(&commit, &cfg.source_path).unwrap(), module);
+        assert_eq!(artifact.unwrap().verified(&c20(&commit), &cfg.source_path).unwrap(), module);
         assert!(job_take("fixed", &hex).is_none(), "taking a job removes it");
     }
 
@@ -1097,11 +1073,11 @@ mod tests {
 
         let mut swapped = a();
         swapped.blob = b"evil".to_vec();
-        let refused = swapped.verified(&commit, "app.wasm").unwrap_err();
+        let refused = swapped.verified(&c20(&commit), "app.wasm").unwrap_err();
         assert!(refused.starts_with("proof of app.wasm refused"), "{refused}");
-        assert!(a().verified(&other, "app.wasm").is_err(), "another commit");
-        assert!(a().verified(&commit, "c.hex").is_err(), "another path");
-        assert_eq!(a().verified(&commit, "/app.wasm").unwrap(), b"good");
+        assert!(a().verified(&c20(&other), "app.wasm").is_err(), "another commit");
+        assert!(a().verified(&c20(&commit), "c.hex").is_err(), "another path");
+        assert_eq!(a().verified(&c20(&commit), "/app.wasm").unwrap(), b"good");
 
         set_config("proven", "aaaaa-aa".into(), "missing.wasm".into()).unwrap();
         let (_, missing) = resolve("proven", &commit).wasm.unwrap();
@@ -1115,6 +1091,10 @@ mod tests {
         store::deploy_job_put(&job_key("gone", &"ab".repeat(20)), vec![1, 2, 3]);
         resume_pending();
         assert!(store::deploy_job_keys().is_empty());
+    }
+
+    fn c20(commit: &Oid) -> [u8; 20] {
+        gitproof::commit20(commit).unwrap()
     }
 
     fn resolve_one(commit: &Oid, path: &str) -> Artifact {
@@ -1135,14 +1115,6 @@ mod tests {
             assert!(e.contains(".wasm only"), "{e}");
         }
         assert!(SourceKind::for_repo(true, "a.txt").unwrap_err().contains("must end in"));
-    }
-
-    /// The tree walk always skipped empty components, so a configured
-    /// `/app.wasm` keeps naming `app.wasm`.
-    #[test]
-    fn plain_drops_empty_components() {
-        assert_eq!(plain("/build//app.wasm"), "build/app.wasm");
-        assert_eq!(plain("app.wasm"), "app.wasm");
     }
 
     fn status(commit: &str, ok: bool, message: &str) -> DeployStatus {

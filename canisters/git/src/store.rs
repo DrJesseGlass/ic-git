@@ -9,7 +9,6 @@
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use ic_dev_kit_rs::storage;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::storable::Blob;
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap};
@@ -18,7 +17,7 @@ use sha2::Sha256;
 use std::cell::RefCell;
 use std::io::{Read, Write};
 
-type Memory = VirtualMemory<DefaultMemoryImpl>;
+pub(crate) type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 /// 20-byte SHA-1 object id.
 pub type Oid = Blob<20>;
@@ -112,11 +111,6 @@ thread_local! {
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_REPOS))),
     );
 
-    /// Small key/value bucket for canister-level state (auth snapshot, ...),
-    /// accessed through the dev kit's storage helpers.
-    static META: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_META))),
-    );
 
     /// hex(sha256(push token)) -> the token's record (tokens.rs owns the
     /// value format; a bare repo name before expiry existed).
@@ -379,7 +373,7 @@ fn label_key(label: &str) -> String {
 /// The repo holding a label, if any. Every repo created since labels
 /// existed holds its own; `index_repo_labels` gives the older ones theirs.
 pub fn label_holder(label: &str) -> Option<String> {
-    meta_get_json(&label_key(label))
+    crate::kv::get_json(&label_key(label))
 }
 
 /// Longest repo name, in bytes. Generous for a git repo name, and well
@@ -422,7 +416,7 @@ pub fn check_new_repo(name: &str) -> Result<String, String> {
 pub fn create_repo(name: &str) -> Result<(), String> {
     let label = check_new_repo(name)?;
     REPOS.with(|r| r.borrow_mut().insert(name.to_string(), "refs/heads/main".to_string()));
-    meta_set_json(&label_key(&label), &name);
+    crate::kv::set_json(&label_key(&label), &name);
     Ok(())
 }
 
@@ -432,17 +426,17 @@ pub fn create_repo(name: &str) -> Result<(), String> {
 /// label is not announced. Runs once, behind a marker.
 pub fn index_repo_labels() {
     const MARKER: &str = "labels:indexed";
-    if meta_get_json::<bool>(MARKER) == Some(true) {
+    if crate::kv::get_json::<bool>(MARKER) == Some(true) {
         return;
     }
     for name in list_repos() {
         if let Ok(label) = repo_label(&name) {
             if label_holder(&label).is_none() {
-                meta_set_json(&label_key(&label), &name);
+                crate::kv::set_json(&label_key(&label), &name);
             }
         }
     }
-    meta_set_json(MARKER, &true);
+    crate::kv::set_json(MARKER, &true);
 }
 
 pub fn repo_exists(name: &str) -> bool {
@@ -546,45 +540,12 @@ pub fn list_refs(repo: &str) -> Vec<(String, Oid)> {
     })
 }
 
-// --- canister-level state ----------------------------------------------------
+// --- the META map --------------------------------------------------------------
 
-pub fn save_auth_snapshot(bytes: Vec<u8>) {
-    META.with(|m| storage::save_bytes(m, "auth", bytes));
-}
-
-pub fn load_auth_snapshot() -> Option<Vec<u8>> {
-    META.with(|m| storage::load_bytes(m, "auth"))
-}
-
-// JSON-encoded values other modules (deploy, fleet) keep in the META bucket.
-// The caller owns the key, including its namespace prefix, which keeps these
-// out of the way of the auth/schema markers.
-
-/// Signing-side callers (`evm.rs`, `sol.rs`) go through `crate::kv` instead,
-/// which wraps this pair so their persistence has one swap point when the
-/// signer splits out. See docs/CANISTER_SPLIT.md.
-pub fn meta_set_json<T: serde::Serialize>(key: &str, value: &T) {
-    if let Ok(bytes) = serde_json::to_vec(value) {
-        META.with(|m| storage::save_bytes(m, key, bytes));
-    }
-}
-
-pub fn meta_get_json<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
-    META.with(|m| storage::load_bytes(m, key)).and_then(|b| serde_json::from_slice(&b).ok())
-}
-
-/// Like `meta_get_json`, but tells "absent" apart from "present and
-/// undecodable". `meta_get_json` collapses both to `None`, which is fine for a
-/// config that can fall back to a default and catastrophic for an append-only
-/// log: read-None, append, write-back silently replaces the whole history.
-/// Callers that would destroy data on a decode failure must use this.
-pub fn meta_try_get_json<T: serde::de::DeserializeOwned>(key: &str) -> Result<Option<T>, String> {
-    match META.with(|m| storage::load_bytes(m, key)) {
-        None => Ok(None),
-        Some(b) => serde_json::from_slice(&b)
-            .map(Some)
-            .map_err(|e| format!("stored value at {key} did not decode: {e}")),
-    }
+/// The memory behind the META map, which `kv.rs` owns: this module keeps
+/// the memory layout, kv keeps the bucket and its codec.
+pub(crate) fn meta_memory() -> Memory {
+    MEMORY_MANAGER.with(|m| m.borrow().get(MEM_META))
 }
 
 // --- schema version ----------------------------------------------------------
@@ -599,16 +560,14 @@ const SCHEMA_VERSION: u32 = 1;
 const SCHEMA_KEY: &str = "schema";
 
 pub fn init_schema_version() {
-    META.with(|m| storage::save_bytes(m, SCHEMA_KEY, SCHEMA_VERSION.to_le_bytes().to_vec()));
+    crate::kv::set_bytes(SCHEMA_KEY, SCHEMA_VERSION.to_le_bytes().to_vec());
 }
 
 /// Run in post_upgrade: refuse to serve stable data written under a different
 /// encoding - trapping here aborts the upgrade and leaves the old code
 /// running, instead of misreading objects mid-request later.
 pub fn check_schema_version() {
-    let stored = META
-        .with(|m| storage::load_bytes(m, SCHEMA_KEY))
-        .map(|b| u32::from_le_bytes(b.try_into().expect("schema marker is 4 bytes")));
+    let stored = crate::kv::get_bytes(SCHEMA_KEY).map(|b| u32::from_le_bytes(b.try_into().expect("schema marker is 4 bytes")));
     match stored {
         Some(v) if v == SCHEMA_VERSION => {}
         Some(v) => ic_cdk::trap(format!(

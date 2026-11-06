@@ -13,7 +13,6 @@
 //! with linking as the single join point.
 
 use crate::lang::link::{self, ModuleObject};
-use crate::store;
 use candid::Principal;
 use futures::future::join_all;
 use ic_dev_kit_rs::intercanister;
@@ -25,12 +24,12 @@ const WORKERS_KEY: &str = "compiler_workers";
 /// Register the worker pool (principals of canisters exposing `compile_module`).
 pub fn set_workers(workers: &[Principal]) {
     let texts: Vec<String> = workers.iter().map(|p| p.to_text()).collect();
-    store::meta_set_json(WORKERS_KEY, &texts);
+    crate::kv::set_json(WORKERS_KEY, &texts);
 }
 
 /// The registered worker pool.
 pub fn get_workers() -> Vec<Principal> {
-    store::meta_get_json::<Vec<String>>(WORKERS_KEY)
+    crate::kv::get_json::<Vec<String>>(WORKERS_KEY)
         .unwrap_or_default()
         .iter()
         .filter_map(|t| Principal::from_text(t).ok())

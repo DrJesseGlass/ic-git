@@ -39,12 +39,12 @@ pub fn set_config(repo: &str, root: String) -> Result<(), String> {
         return Err(format!("no such repo: {repo}"));
     }
     let root = root.trim_matches('/').to_string();
-    store::meta_set_json(&site_key(repo), &SiteConfig { root });
+    crate::kv::set_json(&site_key(repo), &SiteConfig { root });
     Ok(())
 }
 
 pub fn get_config(repo: &str) -> Option<SiteConfig> {
-    store::meta_get_json(&site_key(repo))
+    crate::kv::get_json(&site_key(repo))
 }
 
 /// Stay under the ~2 MiB ingress reply limit with headroom for headers.
@@ -886,10 +886,10 @@ fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
 /// never deployed it.
 pub fn advance(repo: &str) -> Option<store::Oid> {
     let key = served_key(repo);
-    let prev: Option<Served> = store::meta_get_json(&key);
+    let prev: Option<Served> = crate::kv::get_json(&key);
     if required_votes(repo) == 0 {
         let prev = prev?;
-        store::meta_set_json(&key, &Option::<Served>::None);
+        crate::kv::set_json(&key, &Option::<Served>::None);
         let tip = tip_of(repo).ok()?;
         return (prev.commit != Some(store::oid_hex(&tip))).then_some(tip);
     }
@@ -910,7 +910,7 @@ pub fn advance(repo: &str) -> Option<store::Oid> {
         commit: next.as_ref().map(store::oid_hex),
     };
     let moved = now.commit != prev.commit;
-    store::meta_set_json(&key, &Some(now));
+    crate::kv::set_json(&key, &Some(now));
     next.filter(|_| moved)
 }
 
@@ -925,7 +925,7 @@ fn recorded_if_approved(repo: &str, served: &Served) -> Option<store::Oid> {
 /// where they are.
 pub fn record_gated_repos() {
     for (repo, m) in store::repo_meta_all::<crate::tenancy::RepoMeta>() {
-        if m.required_votes > 0 && store::meta_get_json::<Served>(&served_key(&repo)).is_none() {
+        if m.required_votes > 0 && crate::kv::get_json::<Served>(&served_key(&repo)).is_none() {
             advance(&repo);
         }
     }
@@ -940,7 +940,7 @@ pub fn served_commit(repo: &str) -> Result<store::Oid, &'static str> {
     if required_votes(repo) == 0 {
         return tip_of(repo);
     }
-    store::meta_get_json::<Served>(&served_key(repo))
+    crate::kv::get_json::<Served>(&served_key(repo))
         .and_then(|s| recorded_if_approved(repo, &s))
         .ok_or("no approved commit on the site branch")
 }
