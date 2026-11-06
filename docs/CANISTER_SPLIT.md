@@ -161,9 +161,10 @@ acts.**
     Artifact = record { path: text; blob: blob; proof: vec blob }
       // proof: the raw commit object, then each tree object on the path
 
-    // authority -> git
-    set_writers(repo, vec principal)
-    set_served(repo, opt blob(20))         // a gated repo's approved commit
+    // authority -> git (the mirrors, mirror.rs)
+    set_push_policy(repo, PushPolicy)      // writers, require_signed_push
+    set_approved(repo, opt vec text)       // the commits reaching the threshold,
+                                           // by ballot key; null: no votes required
 
 The authority checks a proof by recomputing each object's id (SHA-1 with
 collision detection over `"<type> <len>\0" + body`), the first against the
@@ -177,6 +178,21 @@ bytes alone.
 Authorization: the authority accepts these calls only from the git
 canister's principal, and the git canister only the mirrors from the
 authority's.
+
+Why the approved set and not the served commit (an earlier draft had
+`set_served`): which approved commit a site serves is the newest one on
+the branch's first-parent history, and only the git canister has the
+history. Sending the authority up to `APPROVAL_WALK` commit ids on every
+push would be the price of deciding there. The approved set is what only
+the authority knows, it changes only on a ballot or a policy change --
+both of which happen at the authority -- and the git canister walks its
+own history against it. Commits are named by their ballot key
+(`ic_multisig::Subject::of_short_hash("commit", oid).key()`), because the
+ballot store is keyed by that hash and the authority cannot list commit
+ids from it; the git canister derives the same key for each commit it
+walks. The set is recounted from every commit with a ballot whenever it
+can change, which is fine at today's ballot counts and the place to look
+if a repo collects thousands of voted commits.
 
 Failure modes the queue must now handle (they do not exist today):
 - authority unreachable or stopped -- the git canister retries the job and
@@ -271,9 +287,22 @@ canister does what:
    reads `deploy`'s config, and `deploy`, `provenance`, `evm` and `feed`
    call one another. Those calls are what step 5 puts behind interfaces,
    so step 5 comes before the second half.
-5. **The mirrors.** Site serving and push authorization read the served
-   commit and the writers through the interfaces they will have across the
-   boundary, so phase 3 swaps a function call for a message.
+5. **The mirrors.** DONE. Site serving and push authorization read the
+   approved commits and the writers through the interfaces they will have
+   across the boundary, so phase 3 swaps a function call for a message.
+   `mirror.rs` is the git side's copy: a repo's push policy (owner and
+   writers, the signed-push flag) and its approved set, in META under
+   `mirror:`. `tenancy` writes them when a repo's metadata changes in a way
+   they reflect (`save_meta`) and after each commit ballot; `post_upgrade`
+   fills them for every repo. `site` (gated, `advance`, `served_commit`),
+   the push path, token minting and revoking read only the mirrors; the
+   token sweep after a membership change moved into the push-policy
+   mirror, so losing write access revokes a principal's tokens as the
+   change is saved. Operators are not mirrored: each canister keeps its
+   own. What the git side still reads of the authority directly --
+   `tenancy::now_ns` for the clock, `charge_push`, and `api.rs`'s
+   accounts, ballots and proposals -- is either section 4's interface
+   already or the authority's half of the API.
 
 **The deploy leg's hex seam -- DONE, ahead of the crate boundary.** Phase 1 had
 established the *publish* half of section 4 but not the *deploy* half:

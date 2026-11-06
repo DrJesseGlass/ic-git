@@ -18,6 +18,7 @@ mod fleet;
 mod gitproof;
 mod icp;
 mod kv;
+mod mirror;
 mod ledger;
 mod names;
 mod object;
@@ -66,8 +67,13 @@ fn post_upgrade() {
     // (which does survive, in stable memory) still holds pending deploys.
     deploy::resume_pending();
     tenancy::arm_rent_timer();
-    site::record_gated_repos();
     tokens::migrate();
+    // The git side's mirrors of the authority's decisions (mirror.rs): a
+    // release before them left them empty, and site serving and push
+    // authorization read nothing else. After the token migration, since
+    // filling the push policy sweeps tokens of non-writers.
+    tenancy::sync_all_mirrors();
+    site::record_gated_repos();
     arm_push_cert_seed();
     store::index_repo_labels();
     feed::arm_governor_timer();
@@ -175,7 +181,7 @@ fn push_grant(headers: &[(String, String)]) -> Option<tokens::Grant> {
     let creds = String::from_utf8(decoded).ok()?;
     // Username is ignored; the password slot carries the token.
     let token = creds.split_once(':').map(|(_, p)| p).unwrap_or(&creds);
-    tokens::authorize_if(token, |repo, minter| tenancy::can_write(repo, minter, is_operator(minter)).is_ok())
+    tokens::authorize_if(token, |repo, minter| mirror::may_write(repo, minter, is_operator(minter)).is_ok())
 }
 
 fn push_authorized(repo: &str, headers: &[(String, String)]) -> Option<tokens::Grant> {
@@ -312,7 +318,7 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             };
             // The clock the advertisement's nonce was issued by.
             let now_s = tenancy::now_ns() / 1_000_000_000;
-            let required = tenancy::requires_signed_push(&repo);
+            let required = mirror::requires_signed_push(&repo);
             if let Err(e) = signed_push::check(&repo, grant.key.as_deref(), parsed.cert.as_ref(), required, now_s) {
                 return git_response(200, RESULT, receive::refuse(&request, &e));
             }
@@ -443,7 +449,7 @@ fn list_authorized() -> Vec<candid::Principal> {
 /// `days` is a trailing opt, so a caller passing only the repo still works.
 #[ic_cdk::update]
 async fn create_push_token(repo: String, days: Option<u32>, key: Option<String>) -> Result<String, String> {
-    tenancy::can_write(&repo, &caller(), operator())?;
+    mirror::may_write(&repo, &caller(), operator())?;
     // Refuse a bad lifetime, a key that cannot be bound, or a repo at its
     // token cap, before paying for randomness; mint checks the cap again
     // after the await.
@@ -456,7 +462,7 @@ async fn create_push_token(repo: String, days: Option<u32>, key: Option<String>)
     )
     .await?;
     // Membership may have changed while raw_rand was in flight.
-    tenancy::can_write(&repo, &caller(), operator())?;
+    mirror::may_write(&repo, &caller(), operator())?;
     let token = hex::encode(&bytes[..16]);
     tokens::mint(&repo, &token, caller(), days, key.as_deref())?;
     Ok(token)
@@ -508,7 +514,7 @@ fn list_push_tokens(repo: String) -> Vec<tokens::PushTokenInfo> {
 #[ic_cdk::update]
 fn revoke_push_token(token: String) -> bool {
     match tokens::repo_of(&token) {
-        Some(repo) if tenancy::can_write(&repo, &caller(), operator()).is_ok() => tokens::revoke(&token),
+        Some(repo) if mirror::may_write(&repo, &caller(), operator()).is_ok() => tokens::revoke(&token),
         _ => false,
     }
 }
@@ -534,7 +540,7 @@ fn purge_dead_push_token(id: String) -> Result<(), String> {
 #[ic_cdk::update]
 fn revoke_push_token_id(id: String) -> Result<(), String> {
     let (key, repo) = tokens::find_id(&id)?;
-    tenancy::can_write(&repo, &caller(), operator())?;
+    mirror::may_write(&repo, &caller(), operator())?;
     tokens::revoke_key(&key);
     Ok(())
 }
@@ -638,9 +644,9 @@ fn get_repo_info(repo: String) -> Option<tenancy::RepoInfo> {
 fn add_member(repo: String, principal: candid::Principal, role: String) -> Result<Vec<tenancy::Member>, String> {
     let members = tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?)?;
     // A voter added back brings their earlier ballots back into the count.
+    // Re-adding a writer as a voter is a demotion, which revokes their push
+    // tokens (mirror::set_push_policy).
     follow_approvals(&repo, false);
-    // Re-adding a writer as a voter is a demotion.
-    revoke_tokens_of_non_writers(&repo);
     Ok(members)
 }
 
@@ -648,7 +654,6 @@ fn add_member(repo: String, principal: candid::Principal, role: String) -> Resul
 fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
     let members = tenancy::remove_member(&repo, &caller(), operator(), principal)?;
     follow_approvals(&repo, false);
-    revoke_tokens_of_non_writers(&repo);
     Ok(members)
 }
 
@@ -657,18 +662,10 @@ fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenan
 fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), String> {
     tenancy::transfer_repo(&repo, &caller(), operator(), new_owner)?;
     // The owner is an approver, so a new owner changes whose ballots count.
+    // The previous owner's push tokens go with the repo, unless they can
+    // still write as an operator (mirror::set_push_policy).
     follow_approvals(&repo, false);
-    // The previous owner's tokens go with the repo, unless they can still
-    // write (an operator).
-    revoke_tokens_of_non_writers(&repo);
     Ok(())
-}
-
-/// After a membership change: a push token lasts only as long as its
-/// minter may write, so revoke the repo's tokens minted by anyone who no
-/// longer can (see tokens::revoke_unless).
-fn revoke_tokens_of_non_writers(repo: &str) {
-    tokens::revoke_unless(repo, |p| tenancy::can_write(repo, p, is_operator(p)).is_ok());
 }
 
 /// Approvals a commit needs from voters before the deploy queue runs it, and
@@ -839,11 +836,9 @@ fn propose_policy_change(
     if t.reached {
         // A changed threshold or voter set can change which commit is the
         // newest approved one.
+        // (A writer re-added as a voter, or a transferred-away owner, loses
+        // their push tokens as the change is saved: mirror::set_push_policy.)
         follow_approvals(&repo, false);
-        // The same as after add_member, remove_member and transfer_repo: a
-        // writer re-added as a voter is demoted, and a transferred-away
-        // owner can no longer write, so their push tokens go.
-        revoke_tokens_of_non_writers(&repo);
     }
     Ok(BallotTally {
         approvals: t.approvals,

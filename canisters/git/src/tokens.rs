@@ -549,7 +549,8 @@ mod tests {
 
     /// Against the real write rule: removing a writer, demoting one to
     /// voter, and transferring the repo each revoke the tokens of whoever
-    /// lost write access, and only theirs.
+    /// lost write access, and only theirs -- as the change is saved, through
+    /// the push-policy mirror (mirror::set_push_policy), with no sweep.
     #[test]
     fn losing_write_access_revokes_your_tokens() {
         use crate::tenancy::{self, Role};
@@ -562,20 +563,19 @@ mod tests {
         mint("acl", "tok-owner", owner, None, None).unwrap();
         mint("acl", "tok-w1", w1, None, None).unwrap();
         mint("acl", "tok-w2", w2, None, None).unwrap();
-        let sweep = || revoke_unless("acl", |p| tenancy::can_write("acl", p, false).is_ok());
+        let sweep = || revoke_unless("acl", |p| crate::mirror::may_write("acl", p, false).is_ok());
 
         tenancy::remove_member("acl", &owner, false, w1).unwrap();
-        assert_eq!(sweep(), 1);
         assert_eq!(authorize("tok-w1"), None);
+        assert_eq!(authorize("tok-w2").as_deref(), Some("acl"));
 
         tenancy::add_member("acl", &owner, false, w2, Role::Voter).unwrap();
-        assert_eq!(sweep(), 1);
         assert_eq!(authorize("tok-w2"), None);
 
         assert_eq!(authorize("tok-owner").as_deref(), Some("acl"));
         tenancy::transfer_repo("acl", &owner, false, next).unwrap();
-        assert_eq!(sweep(), 1);
         assert_eq!(authorize("tok-owner"), None);
+        assert_eq!(sweep(), 0, "nothing was left for a sweep");
     }
 
     /// A repo holds at most MAX_LIVE_PER_REPO live tokens; revoking one or
