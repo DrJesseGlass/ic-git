@@ -76,6 +76,7 @@ pub struct DeployStatus {
 /// What builds the configured source, chosen by file extension. The single
 /// place the extension list lives: `set_config` validates by parsing it, `run`
 /// dispatches on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SourceKind {
     /// R0 assembler.
     Wat,
@@ -97,6 +98,20 @@ impl SourceKind {
         } else {
             Err("source_path must end in .wat, .lang, or .wasm".into())
         }
+    }
+
+    /// The source kind a repo may deploy from `path`. A governed repo deploys
+    /// committed `.wasm` only (docs/CANISTER_SPLIT.md, phase 2 step 3): the
+    /// voters approve the exact module, `<repo>#app` records its hash, and
+    /// nothing the compiler produces reaches a governed backend.
+    pub(crate) fn for_repo(governed: bool, path: &str) -> Result<Self, String> {
+        let kind = Self::from_path(path)?;
+        if governed && kind != Self::Wasm {
+            return Err(format!(
+                "a governed repo deploys committed .wasm only; {path} would be compiled here"
+            ));
+        }
+        Ok(kind)
     }
 
     /// Turn the committed source blob into deployable wasm. Either way the
@@ -172,7 +187,7 @@ pub fn set_config(repo: &str, target: String, source_path: String) -> Result<(),
         return Err(format!("no such repo: {repo}"));
     }
     Principal::from_text(&target).map_err(|e| format!("bad target principal: {e}"))?;
-    SourceKind::from_path(&source_path)?;
+    SourceKind::for_repo(crate::tenancy::is_governed(repo), &source_path)?;
     let mode = get_config(repo).map(|c| c.mode).unwrap_or_default();
     let cfg = DeployConfig {
         target,
@@ -600,12 +615,18 @@ async fn target_has_module(target: Principal) -> Result<bool, String> {
 /// Install `wasm` into `target`. An empty target always gets a plain install;
 /// a target that already has a module gets `mode` (Upgrade preserves stable
 /// memory, Reinstall discards it). Returns the mode label actually used.
+///
+/// `allowed` runs after the last await and before `install_code` goes out,
+/// with nothing in between: what it checks cannot change between its
+/// answer and the install.
 async fn install(
     target: Principal,
     wasm: Vec<u8>,
     mode: DeployMode,
+    allowed: impl Fn() -> Result<(), String>,
 ) -> Result<&'static str, String> {
-    let (install_mode, label) = if !target_has_module(target).await? {
+    let fail = |e: String| format!("install_code failed: {e}");
+    let (install_mode, label) = if !target_has_module(target).await.map_err(fail)? {
         (CanisterInstallMode::Install, "install")
     } else {
         match mode {
@@ -619,6 +640,7 @@ async fn install(
         wasm_module: wasm,
         arg: vec![],
     };
+    allowed()?;
     // Unbounded wait on purpose: the reply (or reject) is definite, so the
     // deploy log never records an install whose outcome is unknown. The
     // names announce relies on that (see `run`).
@@ -627,7 +649,8 @@ async fn install(
         "install_code",
         (arg,),
     )
-    .await?;
+    .await
+    .map_err(fail)?;
     Ok(label)
 }
 
@@ -635,6 +658,7 @@ async fn install(
 /// it. Fills in `st`'s wasm summary as soon as the build succeeds, so failed
 /// installs still record what was built. Returns the success message.
 async fn attempt(
+    repo: &str,
     cfg: &DeployConfig,
     commit_oid: &Oid,
     artifact: Result<Artifact, String>,
@@ -642,16 +666,20 @@ async fn attempt(
 ) -> Result<String, String> {
     let target =
         Principal::from_text(&cfg.target).map_err(|e| format!("bad target principal: {e}"))?;
+    // Checked as the job runs, not only when configured: a job queued
+    // before the repo was governed carries the config of that time. And
+    // again just before install_code, since the repo can be governed while
+    // this job awaits the target's status.
+    let kind_now = || SourceKind::for_repo(crate::tenancy::is_governed(repo), &cfg.source_path);
+    let kind = kind_now()?;
     let src_bytes = artifact?.verified(commit_oid, &cfg.source_path)?;
-    let wasm = SourceKind::from_path(&cfg.source_path)
-        .and_then(|kind| kind.build(&cfg.source_path, src_bytes))
+    let wasm = kind
+        .build(&cfg.source_path, src_bytes)
         .map_err(|e| format!("build {}: {e}", cfg.source_path))?;
     let info = compile::info_of(&wasm);
     st.wasm_len = info.wasm_len;
     st.wasm_sha256 = info.sha256_hex;
-    let label = install(target, wasm, cfg.mode)
-        .await
-        .map_err(|e| format!("install_code failed: {e}"))?;
+    let label = install(target, wasm, cfg.mode, || kind_now().map(|_| ())).await?;
     Ok(format!("{label} to {}", cfg.target))
 }
 
@@ -831,7 +859,7 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
 
     match (&wasm_cfg, wasm_artifact) {
         (Some(cfg), Some(artifact)) => {
-            match attempt(cfg, &commit_oid, artifact, &mut st).await {
+            match attempt(repo, cfg, &commit_oid, artifact, &mut st).await {
                 Ok(message) => {
                     st.ok = true;
                     st.message = message;
@@ -1092,6 +1120,21 @@ mod tests {
     fn resolve_one(commit: &Oid, path: &str) -> Artifact {
         let (blob, proof) = gitproof::prove(commit, path).unwrap();
         Artifact { blob, proof }
+    }
+
+    /// Only .wasm passes for a governed repo; an ungoverned one may still
+    /// compile .wat and .lang.
+    #[test]
+    fn governed_sources_are_wasm_only() {
+        for path in ["a.wat", "a.lang", "a.wasm"] {
+            assert!(SourceKind::for_repo(false, path).is_ok(), "{path}");
+        }
+        assert_eq!(SourceKind::for_repo(true, "a.wasm"), Ok(SourceKind::Wasm));
+        for path in ["a.wat", "a.lang"] {
+            let e = SourceKind::for_repo(true, path).unwrap_err();
+            assert!(e.contains(".wasm only"), "{e}");
+        }
+        assert!(SourceKind::for_repo(true, "a.txt").unwrap_err().contains("must end in"));
     }
 
     /// The tree walk always skipped empty components, so a configured

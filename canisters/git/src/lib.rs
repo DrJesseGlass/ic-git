@@ -1069,8 +1069,9 @@ async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeRepo
 // --- deploy-on-push (first slice of m4; see ARCHITECTURE.md / ROADMAP.md) ----
 
 /// Configure compile-and-deploy for a repo: on push to the deploy branch, the
-/// source at `source_path` (.wat or .lang) is compiled and installed into
-/// `target`. The git canister must be a controller of `target`. Install mode
+/// source at `source_path` (.wat or .lang, compiled here, or a committed
+/// .wasm, validated) is installed into `target`. A governed repo deploys
+/// .wasm only. The git canister must be a controller of `target`. Install mode
 /// defaults to upgrade; change it with set_deploy_mode.
 #[ic_cdk::update]
 fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {

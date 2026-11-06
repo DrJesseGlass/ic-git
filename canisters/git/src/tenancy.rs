@@ -599,7 +599,7 @@ impl PolicyChange {
             PolicyChange::Transfer { new_owner } => transfer_in(m, *new_owner),
             PolicyChange::WasmDeploy { target, source_path } => {
                 Principal::from_text(target).map_err(|e| format!("bad target principal: {e}"))?;
-                crate::deploy::SourceKind::from_path(source_path).map(|_| ())
+                crate::deploy::SourceKind::for_repo(m.governed, source_path).map(|_| ())
             }
             PolicyChange::DeployMode { mode } => {
                 crate::deploy::DeployMode::parse(mode)?;
@@ -659,6 +659,10 @@ pub fn mark_governed(repo: &str, who: &Principal) -> Result<Principal, String> {
         .ok_or_else(|| format!("repo {repo} has no app canister; call create_app_canister"))?;
     if m.required_votes == 0 {
         return Err("set required votes to 1 or more first: a governed repo deploys only approved commits".into());
+    }
+    if let Some(cfg) = crate::deploy::get_config(repo) {
+        crate::deploy::SourceKind::for_repo(true, &cfg.source_path)
+            .map_err(|e| format!("{e}; point the deploy config at a committed .wasm first"))?;
     }
     m.governed = true;
     save_meta(repo, &m);
@@ -1168,6 +1172,11 @@ pub fn repo_info(repo: &str) -> Option<RepoInfo> {
     })
 }
 
+/// Whether the repo is governed (govern_app_canister).
+pub fn is_governed(repo: &str) -> bool {
+    meta(repo).is_some_and(|m| m.governed)
+}
+
 /// Whether an install into `target` is an install into the repo's governed
 /// app canister -- what the deploy queue records as `<repo>#app`. A governed
 /// repo whose deploy config points elsewhere installs nothing into the
@@ -1495,6 +1504,37 @@ mod tests {
             votes("t-obj", &commit).iter().find(|b| b.principal == v2).unwrap().reason.as_deref(),
             Some("reviewed")
         );
+    }
+
+    /// A governed repo deploys committed .wasm only: governing waits for a
+    /// .wasm config, and afterwards neither a policy change nor the config
+    /// setter (which a ballot applies through) accepts a compiled source.
+    #[test]
+    fn governed_repo_deploys_wasm_only() {
+        let (alice, app) = (p(81), p(82));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-wasm", &alice, false).unwrap();
+        set_app_canister("t-wasm", app).unwrap();
+        set_required_votes("t-wasm", &alice, false, 1).unwrap();
+        let target = app.to_text();
+
+        crate::deploy::set_config("t-wasm", target.clone(), "app.wat".into()).unwrap();
+        let e = mark_governed("t-wasm", &alice).unwrap_err();
+        assert!(e.contains(".wasm only") && e.contains("app.wat"), "{e}");
+        assert!(!meta("t-wasm").unwrap().governed);
+        crate::deploy::set_config("t-wasm", target.clone(), "app.wasm".into()).unwrap();
+        assert_eq!(mark_governed("t-wasm", &alice).unwrap(), app);
+
+        for path in ["app.wat", "src/app.lang"] {
+            let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: path.into() };
+            let e = propose_policy_change("t-wasm", &alice, change, Vote::Approve, None).unwrap_err();
+            assert!(e.contains(".wasm only"), "{e}");
+            assert!(crate::deploy::set_config("t-wasm", target.clone(), path.into()).is_err());
+        }
+        assert!(proposals("t-wasm").is_empty());
+        let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: "v2.wasm".into() };
+        let (t, apply) = propose_policy_change("t-wasm", &alice, change, Vote::Approve, None).unwrap();
+        assert!(t.reached && apply.is_some());
     }
 
     /// Governing locks the policy: the owner's mutators refuse what is now
