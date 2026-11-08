@@ -8,6 +8,8 @@ mod api;
 // The compiler crate's modules, under the names this crate has always used.
 use ic_git_compiler::{compile, interp, lang};
 mod apps;
+mod attest;
+mod clock;
 mod consent;
 mod deploy;
 mod evm;
@@ -17,7 +19,9 @@ mod fleet;
 // (docs/CANISTER_SPLIT.md, phase 2).
 mod gitproof;
 mod icp;
+mod jobs;
 mod kv;
+mod memory;
 mod mirror;
 mod ledger;
 mod names;
@@ -25,6 +29,7 @@ mod object;
 mod pack;
 mod provenance;
 mod receive;
+mod records;
 mod rpc_common;
 mod signed_push;
 mod site;
@@ -32,6 +37,7 @@ mod smart_http;
 mod sol;
 mod store;
 mod tenancy;
+mod to_git;
 mod tokens;
 
 use base64::Engine;
@@ -65,7 +71,7 @@ fn post_upgrade() {
     auth::init_from_saved(kv::load_auth_snapshot());
     // Timers do not survive upgrades; re-arm the drain timer if the queue
     // (which does survive, in stable memory) still holds pending deploys.
-    deploy::resume_pending();
+    deploy::resume_pending(jobs::resolve);
     tenancy::arm_rent_timer();
     tokens::migrate();
     // The git side's mirrors of the authority's decisions (mirror.rs): a
@@ -330,13 +336,17 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
             let tip_before = store::head_target(&repo).and_then(|b| store::get_ref(&repo, &b));
             let outcome = receive::handle(&repo, request, &req.body);
             // A votes-gated repo tells its feed about a tip nobody approved.
-            feed::after_push(&repo, tip_before);
+            if let Some(branch) = store::head_target(&repo) {
+                if let Some(tip) = store::get_ref(&repo, &branch) {
+                    feed::after_push(&repo, &branch, tip_before, tip);
+                }
+            }
             // m4: if the push moved the deploy branch and a deploy is
             // configured, enqueue a job and return immediately. The compile +
             // validate + install_code runs from a timer, off the push path
             // (see deploy::enqueue). Outcome is readable via get_deploy_status.
             if let Some(commit) = outcome.deploy_commit {
-                deploy::enqueue(&repo, commit);
+                submit_job(&repo, commit);
             }
             // A push never approves anything, but it moves the tip the
             // approval walk starts from (a force push can drop the served
@@ -746,9 +756,18 @@ fn follow_approvals(repo: &str, retry: bool) {
         None => return,
     };
     let hex = store::oid_hex(&commit);
-    if !deploy::is_live(repo, &hex) && !deploy::in_flight(repo, &hex) {
-        deploy::enqueue(repo, commit);
+    let (wasm, evm) = (jobs::get_config(repo).is_some(), jobs::get_evm_config(repo).is_some());
+    if !deploy::is_live(repo, &hex, wasm, evm) && !deploy::in_flight(repo, &hex) {
+        submit_job(repo, commit);
     }
+}
+
+/// The git side hands a commit's deploy to the authority (docs/CANISTER_SPLIT.md,
+/// section 4: submit_job). The job -- configs and proven artifacts -- is
+/// built from the git side's state, and only when the authority has not
+/// queued that commit already.
+fn submit_job(repo: &str, commit: store::Oid) {
+    deploy::enqueue(repo, commit, || jobs::resolve(repo, &commit));
 }
 
 #[ic_cdk::query]
@@ -829,8 +848,8 @@ fn propose_policy_change(
     feed::policy_ballot(&repo, &caller(), &described, decision, reason.as_deref(), &t);
     // The deploy config lives in deploy.rs; tenancy decided, this applies.
     match apply {
-        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => deploy::set_config(&repo, target, source_path)?,
-        Some(tenancy::PolicyChange::DeployMode { mode }) => deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)?,
+        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => jobs::set_config(&repo, target, source_path, tenancy::is_governed(&repo))?,
+        Some(tenancy::PolicyChange::DeployMode { mode }) => jobs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)?,
         _ => {}
     }
     if t.reached {
@@ -1080,7 +1099,7 @@ fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<
     } else {
         target
     };
-    deploy::set_config(&repo, target, source_path)
+    jobs::set_config(&repo, target, source_path, tenancy::is_governed(&repo))
 }
 
 /// Set a repo's install mode: "upgrade" (default; preserves target state) or
@@ -1089,7 +1108,7 @@ fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<
 fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
     let m = tenancy::can_admin(&repo, &caller(), operator())?;
     tenancy::locked(&m, "the install mode", Some("DeployMode"))?;
-    deploy::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
+    jobs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
 }
 
 /// Run the configured deploy now against the repo's release commit -- the
@@ -1100,12 +1119,13 @@ fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
 #[ic_cdk::update]
 async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
-    deploy::run_current(&repo).await
+    let commit = jobs::release_commit(&repo)?;
+    Ok(deploy::run_now(&repo, commit, jobs::resolve(&repo, &commit)).await)
 }
 
 #[ic_cdk::query]
 fn get_deploy_config(repo: String) -> Option<deploy::DeployConfig> {
-    deploy::get_config(&repo)
+    jobs::get_config(&repo)
 }
 
 #[ic_cdk::query]
@@ -1136,12 +1156,16 @@ fn deploy_queue_len() -> u64 {
 #[ic_cdk::update]
 fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(), String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
-    deploy::set_evm_config(&repo, source_path, gas_limit)
+    // One definition of "could this canister deploy at all", shared with the
+    // deploy leg and with the evm_deploy endpoint, so a config accepted here
+    // cannot be rejected at drain time for a reason this check missed.
+    evm::require_deploy_target(gas_limit)?;
+    jobs::set_evm_config(&repo, source_path, gas_limit)
 }
 
 #[ic_cdk::query]
 fn get_evm_deploy_config(repo: String) -> Option<deploy::EvmDeployConfig> {
-    deploy::get_evm_config(&repo)
+    jobs::get_evm_config(&repo)
 }
 
 #[ic_cdk::query]
@@ -1258,7 +1282,7 @@ async fn evm_send(to: String, value_wei: String) -> Result<evm::TxOutcome, Strin
 async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutcome, String> {
     // Hex in, bytes out: the signing side takes decoded bytecode, so this
     // endpoint decodes on the way in. The candid signature is unchanged.
-    let bytecode = deploy::decode_bytecode_hex(&bytecode_hex)?;
+    let bytecode = ic_git_types::deploy::decode_bytecode_hex(&bytecode_hex)?;
     Ok(evm::deploy_bytecode(String::new(), bytecode, gas_limit, String::new()).await?)
 }
 
@@ -1314,7 +1338,8 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
     // Resolve the record before charging: a publish that cannot happen costs
     // nothing.
-    let record = provenance::tip_record(&repo)?;
+    evm::require_publish_target()?;
+    let record = attest::tip_record(&repo)?;
     publish_charged(&repo, &record).await
 }
 
@@ -1329,7 +1354,8 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
 #[ic_cdk::update]
 async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
-    let record = provenance::served_site_record(&repo)?;
+    evm::require_publish_target()?;
+    let record = attest::site_record(&repo)?;
     publish_charged(&repo, &record).await
 }
 
@@ -1346,7 +1372,7 @@ async fn registry_publish_canister(
         return Err("only a controller of this canister can publish its record".to_string());
     }
     let record = provenance::canister_record(&commit, &module_sha256)?;
-    record.publish().await.map_err(|e| e.message)
+    provenance::publish(&record).await.map_err(|e| e.message)
 }
 
 /// Charge the repo for a registry publish, and give back what a failed one
@@ -1360,7 +1386,7 @@ async fn publish_charged(
 ) -> Result<evm::TxOutcome, String> {
     let cost = tenancy::pricing().evm_action;
     let payer = tenancy::charge_action(repo, cost, "registry publish")?;
-    record.publish().await.map_err(|e| {
+    provenance::publish(record).await.map_err(|e| {
         tenancy::refund_action(payer, e.refundable(cost));
         e.message
     })

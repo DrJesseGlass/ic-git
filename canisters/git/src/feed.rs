@@ -20,7 +20,7 @@ use ic_dev_kit_rs::http::HttpResponse;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::store;
+use ic_git_types::oid::{oid_hex, Oid};
 use crate::tenancy::{self, Vote};
 
 /// The most events kept per feed.
@@ -179,16 +179,15 @@ fn with_reason(text: String, reason: Option<&str>) -> String {
 
 // --- repo events ------------------------------------------------------------
 
-/// After a push: the deploy branch moved to a commit the repo's voters have
-/// not approved. Nothing for a repo that requires no votes, or a push that
-/// left the deploy branch where it was.
-pub fn after_push(repo: &str, tip_before: Option<store::Oid>) {
-    let Some(branch) = store::head_target(repo) else { return };
-    let Some(tip) = store::get_ref(repo, &branch) else { return };
+/// After a push (section 4's notify, from the git side): the deploy branch
+/// `branch` moved from `tip_before` to `tip`, a commit the repo's voters
+/// have not approved. Nothing for a repo that requires no votes, or a push
+/// that left the deploy branch where it was.
+pub fn after_push(repo: &str, branch: &str, tip_before: Option<Oid>, tip: Oid) {
     if tip_before.as_ref() == Some(&tip) {
         return;
     }
-    let hex = store::oid_hex(&tip);
+    let hex = oid_hex(&tip);
     let Some(t) = tenancy::tally(repo, &hex) else { return };
     if t.required == 0 || t.reached {
         return;
@@ -615,7 +614,7 @@ pub async fn poll_governor() -> Result<u64, String> {
 pub fn serve(repo: Option<&str>, host: Option<&str>) -> HttpResponse {
     let feed = match repo {
         None => Feed::Canister,
-        Some(r) if store::repo_exists(r) => Feed::Repo(r.to_string()),
+        Some(r) if crate::to_git::repo_exists(r) => Feed::Repo(r.to_string()),
         Some(_) => return crate::git_response(404, "text/plain", b"no such repo\n".to_vec()),
     };
     let canister = self_id();
@@ -714,6 +713,7 @@ pub fn rfc3339(ns: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store;
 
     fn p(n: u8) -> Principal {
         Principal::from_slice(&[n; 4])
@@ -895,8 +895,8 @@ mod tests {
         let commit = store::put_object(store::ObjectType::Commit, b"tree 0000000000000000000000000000000000000000\n\nfirst\n");
         let before = store::get_ref("feed-c", "refs/heads/main");
         store::set_ref("feed-c", "refs/heads/main", commit).unwrap();
-        after_push("feed-c", before.clone());
-        after_push("feed-c", Some(commit)); // the branch did not move
+        after_push("feed-c", "refs/heads/main", before, commit);
+        after_push("feed-c", "refs/heads/main", Some(commit), commit); // the branch did not move
         let ev = events(&Feed::Repo("feed-c".into()));
         assert_eq!(ev.len(), 1, "{ev:?}");
         assert_eq!(ev[0].kind, "awaiting");

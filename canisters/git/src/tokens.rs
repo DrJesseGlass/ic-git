@@ -34,7 +34,7 @@
 //! one by id without holding the token.
 
 use crate::store;
-use crate::tenancy::now_ns;
+use crate::clock::now_ns;
 use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 

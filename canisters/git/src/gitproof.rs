@@ -57,9 +57,7 @@ fn canonical(ty: ObjectType, body: &[u8]) -> Vec<u8> {
     ic_git_types::proof::canonical(ty.as_str(), body)
 }
 
-pub(crate) fn commit20(oid: &Oid) -> Result<[u8; 20], String> {
-    oid.as_slice().try_into().map_err(|_| "bad oid length".to_string())
-}
+pub(crate) use ic_git_types::oid::commit20;
 
 #[cfg(test)]
 mod tests {

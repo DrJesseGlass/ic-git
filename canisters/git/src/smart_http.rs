@@ -92,7 +92,7 @@ pub fn advertisement(repo: &str, service: Service, head_target: &str) -> Vec<u8>
     // Offer signed pushes (signed_push.rs): a client with push.gpgSign set
     // signs a certificate carrying this nonce.
     if service == Service::ReceivePack {
-        let now_s = crate::tenancy::now_ns() / 1_000_000_000;
+        let now_s = crate::clock::now_ns() / 1_000_000_000;
         if let Some(nonce) = crate::signed_push::nonce(repo, now_s) {
             caps.push_str(&format!(" push-cert={nonce}"));
         }

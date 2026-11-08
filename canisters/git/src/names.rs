@@ -19,16 +19,16 @@
 //! outcome unknown, and the note says so rather than "failed".
 //!
 //! ic-name-service names are lower kebab case only. The handle is checked
-//! against its segment rule (`store::check_segment`, a copy of
+//! against its segment rule (`ic_git_types::labels::check_segment`, a copy of
 //! ic-name-service's) when it is configured; a repo is announced under its label
-//! (`store::repo_label`: "My_App" -> "my-app"), which `create_repo` makes
+//! (`ic_git_types::labels::repo_label`: "My_App" -> "my-app"), which `create_repo` makes
 //! unique across repos, so two repos can never announce the same name. A
 //! repo from before labels existed that holds none is skipped with a note.
 //!
 //! Direction of dependency: nothing here depends on ic-name-service code;
 //! the argument record is a candid mirror of its `Announcement` type.
 
-use crate::store::{self, check_segment};
+use ic_git_types::labels::{check_segment, repo_label};
 use candid::{CandidType, Principal};
 use ic_cdk::call::{Call, CallFailed, RejectCode};
 use serde::{Deserialize, Serialize};
@@ -95,8 +95,8 @@ pub async fn announce(
         Ok(p) => p,
         Err(e) => return format!(" (announce skipped: bad target: {e})"),
     };
-    let label = match store::repo_label(repo) {
-        Ok(l) if store::label_holder(&l).as_deref() == Some(repo) => l,
+    let label = match repo_label(repo) {
+        Ok(l) if crate::to_git::label_holder(&l).as_deref() == Some(repo) => l,
         Ok(l) => return format!(" (announce skipped: label '{l}' is not held by this repo)"),
         Err(e) => return format!(" (announce skipped: {e})"),
     };
@@ -129,10 +129,10 @@ mod tests {
 
     #[test]
     fn segments_follow_the_name_service_rule() {
-        for ok in ["ic-git", "ic-vote", "a", "x1", &"a".repeat(store::MAX_LABEL)] {
+        for ok in ["ic-git", "ic-vote", "a", "x1", &"a".repeat(ic_git_types::labels::MAX_LABEL)] {
             assert!(check_segment("s", ok).is_ok(), "{ok}");
         }
-        for bad in ["", "My_App", "app.v2", "Upper", "-lead", "trail-", "a/b", &"a".repeat(store::MAX_LABEL + 1)] {
+        for bad in ["", "My_App", "app.v2", "Upper", "-lead", "trail-", "a/b", &"a".repeat(ic_git_types::labels::MAX_LABEL + 1)] {
             assert!(check_segment("s", bad).is_err(), "{bad}");
         }
     }

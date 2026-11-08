@@ -26,6 +26,16 @@ pub const APP_KEY_SUFFIX: &str = "#app";
 /// ic-git itself the way it checks a governed backend.
 pub const CANISTER_KEY: &str = "ic-git#canister";
 
+/// A registry record: the key, the commit it attests, and the artifact hash
+/// bound to it -- what the authority publishes
+/// (`evm::registry_publish_record`), however it was resolved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Record {
+    pub key: String,
+    pub commit: [u8; 20],
+    pub bundle: [u8; 32],
+}
+
 /// A repo's deploy-artifact record: its EVM contract's creation bytecode.
 pub fn artifact_record_key(repo: &str) -> String {
     repo.to_string()

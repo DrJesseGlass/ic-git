@@ -18,7 +18,7 @@
 //! Every function that needs the caller takes it as a parameter, and time
 //! goes through [`now_ns`], so all of this is unit-testable off-chain.
 
-use crate::store;
+use ic_git_types::oid::{parse_oid, Oid};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::auth;
 use serde::{Deserialize, Serialize};
@@ -85,27 +85,10 @@ pub fn arm_rent_timer() {}
 
 // --- time --------------------------------------------------------------------
 
-#[cfg(test)]
-thread_local! {
-    static TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(1_700_000_000_000_000_000) };
-}
 
-/// Nanoseconds since the epoch; settable in tests.
-pub fn now_ns() -> u64 {
-    #[cfg(test)]
-    {
-        TEST_NOW.with(|t| t.get())
-    }
-    #[cfg(not(test))]
-    {
-        ic_cdk::api::time()
-    }
-}
-
+pub use crate::clock::now_ns;
 #[cfg(test)]
-pub fn set_test_now(ns: u64) {
-    TEST_NOW.with(|t| t.set(ns));
-}
+pub use crate::clock::set_test_now;
 
 // --- accounts ----------------------------------------------------------------
 
@@ -120,11 +103,11 @@ pub struct Account {
 }
 
 fn account(p: &Principal) -> Account {
-    store::account_get(&p.to_text()).unwrap_or_default()
+    crate::records::account_get(&p.to_text()).unwrap_or_default()
 }
 
 fn save_account(p: &Principal, a: &Account) {
-    store::account_set(&p.to_text(), a);
+    crate::records::account_set(&p.to_text(), a);
 }
 
 pub fn get_account(p: &Principal) -> Account {
@@ -235,14 +218,14 @@ pub struct RepoMeta {
 }
 
 pub fn meta(repo: &str) -> Option<RepoMeta> {
-    store::repo_meta_get(repo)
+    crate::records::repo_meta_get(repo)
 }
 
 /// Save a repo's metadata, and bring the git side's mirrors up to date when
 /// the change touches what they reflect.
 fn save_meta(repo: &str, m: &RepoMeta) {
     let prev = meta(repo);
-    store::repo_meta_set(repo, m);
+    crate::records::repo_meta_set(repo, m);
     if prev.as_ref().map(mirrored) != Some(mirrored(m)) {
         sync_mirrors_with(repo, m);
     }
@@ -251,8 +234,8 @@ fn save_meta(repo: &str, m: &RepoMeta) {
 // --- the git side's mirrors (mirror.rs) -----------------------------------------
 
 /// Who may push, as the git side checks it: the owner and the writers.
-fn push_policy(m: &RepoMeta) -> crate::mirror::PushPolicy {
-    crate::mirror::PushPolicy {
+fn push_policy(m: &RepoMeta) -> crate::to_git::PushPolicy {
+    crate::to_git::PushPolicy {
         writers: m
             .owner
             .iter()
@@ -265,7 +248,7 @@ fn push_policy(m: &RepoMeta) -> crate::mirror::PushPolicy {
 
 /// What in a repo's metadata the mirrors depend on: the push policy, and
 /// the threshold and approvers that decide which commits are approved.
-fn mirrored(m: &RepoMeta) -> (crate::mirror::PushPolicy, u32, Vec<Principal>) {
+fn mirrored(m: &RepoMeta) -> (crate::to_git::PushPolicy, u32, Vec<Principal>) {
     let voters = m.members.iter().filter(|x| x.role == Role::Voter).map(|x| x.principal);
     (push_policy(m), m.required_votes, m.owner.iter().copied().chain(voters).collect())
 }
@@ -278,7 +261,7 @@ fn approved_keys(repo: &str, m: &RepoMeta) -> Option<Vec<String>> {
         return None;
     }
     let pol = policy(m);
-    let commits = store::vote_subject_keys(repo, "commit:");
+    let commits = crate::records::vote_subject_keys(repo, "commit:");
     Some(
         commits
             .into_iter()
@@ -294,14 +277,14 @@ fn approved_keys(repo: &str, m: &RepoMeta) -> Option<Vec<String>> {
 }
 
 fn sync_mirrors_with(repo: &str, m: &RepoMeta) {
-    crate::mirror::set_push_policy(repo, push_policy(m));
-    crate::mirror::set_approved(repo, approved_keys(repo, m));
+    crate::to_git::set_push_policy(repo, push_policy(m));
+    crate::to_git::set_approved(repo, approved_keys(repo, m));
 }
 
 /// Bring every repo's mirrors up to date. For post_upgrade: a release
 /// before the mirrors existed left them empty.
 pub fn sync_all_mirrors() {
-    for (repo, m) in store::repo_meta_all::<RepoMeta>() {
+    for (repo, m) in crate::records::repo_meta_all::<RepoMeta>() {
         sync_mirrors_with(&repo, &m);
     }
 }
@@ -311,7 +294,7 @@ fn meta_or_legacy(repo: &str) -> Result<RepoMeta, String> {
     if let Some(m) = meta(repo) {
         return Ok(m);
     }
-    if !store::repo_exists(repo) {
+    if !crate::to_git::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
     Ok(RepoMeta {
@@ -446,11 +429,11 @@ pub fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), St
     // Every refusal store::create_repo can make, before the fee is taken:
     // an update that returns Err keeps its state changes, so a debit
     // followed by a refused name would keep the fee.
-    store::check_new_repo(name)?;
+    crate::to_git::check_new_repo(name)?;
     if !operator {
         debit(who, pricing().create_repo, "create_repo")?;
     }
-    store::create_repo(name)?;
+    crate::to_git::create_repo(name)?;
     save_meta(
         name,
         &RepoMeta {
@@ -658,7 +641,7 @@ impl PolicyChange {
             PolicyChange::DeployMode { mode } => {
                 crate::deploy::DeployMode::parse(mode)?;
                 // set_mode has nothing to change the mode of without one.
-                if crate::deploy::get_config(repo).is_none() {
+                if crate::to_git::deploy_config(repo).is_none() {
                     return Err(format!("{repo} has no deploy config to set the install mode of; propose WasmDeploy first"));
                 }
                 Ok(())
@@ -714,7 +697,7 @@ pub fn mark_governed(repo: &str, who: &Principal) -> Result<Principal, String> {
     if m.required_votes == 0 {
         return Err("set required votes to 1 or more first: a governed repo deploys only approved commits".into());
     }
-    if let Some(cfg) = crate::deploy::get_config(repo) {
+    if let Some(cfg) = crate::to_git::deploy_config(repo) {
         crate::deploy::SourceKind::for_repo(true, &cfg.source_path)
             .map_err(|e| format!("{e}; point the deploy config at a committed .wasm first"))?;
     }
@@ -851,7 +834,7 @@ pub fn proposals(repo: &str) -> Vec<Proposal> {
 
 /// Repos a principal owns or is a member of.
 pub fn repos_of(p: &Principal) -> Vec<String> {
-    store::repo_meta_all::<RepoMeta>()
+    crate::records::repo_meta_all::<RepoMeta>()
         .into_iter()
         .filter(|(_, m)| is_owner(m, p) || m.members.iter().any(|x| &x.principal == p))
         .map(|(name, _)| name)
@@ -951,7 +934,7 @@ fn check_policy(m: &RepoMeta) -> Result<(), String> {
         .map_err(|e| format!("{e}; lower required_votes or add voters first"))
 }
 
-fn subject(oid: &store::Oid) -> Subject {
+fn subject(oid: &Oid) -> Subject {
     Subject::of_short_hash("commit", oid.as_slice())
 }
 
@@ -962,16 +945,16 @@ struct VoteStore<'a> {
 
 impl Store for VoteStore<'_> {
     fn load(&self, subject: &Subject) -> Vec<Approval> {
-        store::votes_get(self.repo, &subject.key()).unwrap_or_default()
+        crate::records::votes_get(self.repo, &subject.key()).unwrap_or_default()
     }
 
     fn save(&mut self, subject: &Subject, ballots: Vec<Approval>) {
-        store::votes_set(self.repo, &subject.key(), &ballots);
+        crate::records::votes_set(self.repo, &subject.key(), &ballots);
     }
 }
 
 pub fn votes(repo: &str, commit_hex: &str) -> Vec<Ballot> {
-    let Ok(oid) = store::parse_oid(commit_hex) else {
+    let Ok(oid) = parse_oid(commit_hex) else {
         return Vec::new();
     };
     let pol = meta(repo).map(|m| policy(&m));
@@ -983,7 +966,7 @@ pub fn votes(repo: &str, commit_hex: &str) -> Vec<Ballot> {
 }
 
 /// The count of a commit's stored ballots under `pol`.
-fn count(repo: &str, pol: &Policy, oid: &store::Oid) -> Tally {
+fn count(repo: &str, pol: &Policy, oid: &Oid) -> Tally {
     // These ballots came out of the store `record` wrote, and each was
     // checked on the way in (the caller was authenticated by the IC; there
     // is no signature to verify). The crate is told so, rather than asked
@@ -1010,7 +993,7 @@ fn ungated(mut t: Tally, m: &RepoMeta) -> Tally {
 /// tenancy metadata, or a commit id that does not parse.
 pub fn tally(repo: &str, commit_hex: &str) -> Option<Tally> {
     let m = meta(repo)?;
-    let oid = store::parse_oid(commit_hex).ok()?;
+    let oid = parse_oid(commit_hex).ok()?;
     Some(ungated(count(repo, &policy(&m), &oid), &m))
 }
 
@@ -1038,8 +1021,8 @@ pub fn cast_ballot(
     reason: Option<String>,
 ) -> Result<Tally, String> {
     let m = can_vote(repo, who)?;
-    let oid = store::parse_oid(commit_hex)?;
-    if !store::has_object(&oid) {
+    let oid = parse_oid(commit_hex)?;
+    if !crate::to_git::has_commit(&oid) {
         return Err(format!("no such commit in {repo}: {commit_hex}"));
     }
     let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
@@ -1047,7 +1030,7 @@ pub fn cast_ballot(
     let t = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
         .map(|t| ungated(t, &m))
         .map_err(|e| e.to_string())?;
-    crate::mirror::set_approved(repo, approved_keys(repo, &m));
+    crate::to_git::set_approved(repo, approved_keys(repo, &m));
     Ok(t)
 }
 
@@ -1069,11 +1052,11 @@ pub fn approved(repo: &str, commit_hex: &str) -> bool {
     if m.required_votes == 0 {
         return true;
     }
-    let Ok(oid) = store::parse_oid(commit_hex) else { return false };
+    let Ok(oid) = parse_oid(commit_hex) else { return false };
     reached(repo, &policy(&m), &oid)
 }
 
-fn reached(repo: &str, pol: &Policy, oid: &store::Oid) -> bool {
+fn reached(repo: &str, pol: &Policy, oid: &Oid) -> bool {
     count(repo, pol, oid).reached
 }
 
@@ -1150,7 +1133,7 @@ pub fn charge_rent_all() -> (u32, u64) {
     let now = now_ns();
     let mut charged = 0u32;
     let mut collected = 0u64;
-    for (name, mut m) in store::repo_meta_all::<RepoMeta>() {
+    for (name, mut m) in crate::records::repo_meta_all::<RepoMeta>() {
         if exempt(&m) {
             // Keep the rent clock running, so an owner who stops being an
             // operator pays from then on, not back to the repo's creation.
@@ -1247,6 +1230,7 @@ pub fn set_app_canister(repo: &str, canister: Principal) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store;
 
     fn p(n: u8) -> Principal {
         Principal::from_slice(&[n; 8])
@@ -1386,7 +1370,7 @@ mod tests {
         assert!(crate::mirror::may_write("t-legacy", &p(31), true).is_ok());
         // A repo without metadata costs no rent.
         let (charged, _) = charge_rent_all();
-        assert!(!store::repo_meta_all::<RepoMeta>().iter().any(|(n, _)| n == "t-legacy"));
+        assert!(!crate::records::repo_meta_all::<RepoMeta>().iter().any(|(n, _)| n == "t-legacy"));
         let _ = charged;
     }
 
@@ -1602,18 +1586,18 @@ mod tests {
         set_required_votes("t-wasm", &alice, false, 1).unwrap();
         let target = app.to_text();
 
-        crate::deploy::set_config("t-wasm", target.clone(), "app.wat".into()).unwrap();
+        crate::jobs::set_config("t-wasm", target.clone(), "app.wat".into(), is_governed("t-wasm")).unwrap();
         let e = mark_governed("t-wasm", &alice).unwrap_err();
         assert!(e.contains(".wasm only") && e.contains("app.wat"), "{e}");
         assert!(!meta("t-wasm").unwrap().governed);
-        crate::deploy::set_config("t-wasm", target.clone(), "app.wasm".into()).unwrap();
+        crate::jobs::set_config("t-wasm", target.clone(), "app.wasm".into(), is_governed("t-wasm")).unwrap();
         assert_eq!(mark_governed("t-wasm", &alice).unwrap(), app);
 
         for path in ["app.wat", "src/app.lang"] {
             let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: path.into() };
             let e = propose_policy_change("t-wasm", &alice, change, Vote::Approve, None).unwrap_err();
             assert!(e.contains(".wasm only"), "{e}");
-            assert!(crate::deploy::set_config("t-wasm", target.clone(), path.into()).is_err());
+            assert!(crate::jobs::set_config("t-wasm", target.clone(), path.into(), is_governed("t-wasm")).is_err());
         }
         assert!(proposals("t-wasm").is_empty());
         let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: "v2.wasm".into() };
@@ -1724,7 +1708,7 @@ mod tests {
         // not after the ballots are cleared.
         let e = propose_policy_change("t-gov", &v1, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap_err();
         assert!(e.contains("no deploy config"), "{e}");
-        crate::deploy::set_config("t-gov", app.to_text(), "app.wasm".into()).unwrap();
+        crate::jobs::set_config("t-gov", app.to_text(), "app.wasm".into(), is_governed("t-gov")).unwrap();
         let (t, apply) = propose_policy_change("t-gov", &v1, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap();
         assert!(!t.reached && apply.is_none());
         let (t, apply) = propose_policy_change("t-gov", &alice, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap();

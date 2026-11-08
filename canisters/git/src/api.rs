@@ -25,6 +25,7 @@
 //! itself, never a place from which markup executes.
 
 use crate::deploy;
+use crate::jobs;
 use crate::object;
 use crate::site;
 use crate::store::{self, ObjectType, Oid};
@@ -286,7 +287,7 @@ pub fn handle(url: &str) -> HttpResponse {
         ("deploys", None, None) => json(
             200,
             &DeployView {
-                config: deploy::get_config(&repo),
+                config: jobs::get_config(&repo),
                 status: deploy::get_status(&repo),
                 history: deploy::get_history(&repo),
             },
@@ -764,8 +765,8 @@ mod tests {
         assert_eq!(empty["history"].as_array().unwrap().len(), 0);
 
         let target = Principal::from_slice(&[9; 8]).to_text();
-        deploy::set_config("api-dep", target.clone(), "app.wasm".into()).unwrap();
-        let cfg = deploy::get_config("api-dep").unwrap();
+        jobs::set_config("api-dep", target.clone(), "app.wasm".into(), false).unwrap();
+        let cfg = jobs::get_config("api-dep").unwrap();
         // c1 was installed; c2 (the tip) was pushed later and failed.
         deploy::record("api-dep", &cfg, &deploy::DeployStatus {
             commit: store::oid_hex(&c1),

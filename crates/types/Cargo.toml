@@ -9,6 +9,8 @@ description = "What both sides of ic-git's canister boundary agree on (docs/CANI
 candid = "0.10"
 serde = { version = "1", features = ["derive"] }
 hex = "0.4"
+# Oid is the Blob<20> both sides key their stable maps by.
+ic-stable-structures = "0.7"
 # SHA-1 with collision detection, as git itself uses, so a crafted colliding
 # object cannot pass for one the voters approved. No default features: the
 # check needs neither std nor OIDs.

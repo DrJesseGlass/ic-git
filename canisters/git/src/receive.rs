@@ -13,7 +13,7 @@
 //! check the signature before the push is charged or its pack is read, and
 //! the commands that run are exactly the ones that were signed.
 
-use crate::deploy;
+use crate::jobs;
 use crate::object;
 use crate::pack;
 use crate::signed_push::{self, PushCert};
@@ -201,8 +201,8 @@ pub fn handle(repo: &str, request: Result<Request, String>, body: &[u8]) -> Outc
     }
 
     // Hoisted out of the command loop: both are loop-invariant stable reads.
-    let deploy_branch = deploy::deploy_branch(repo);
-    let deploy_configured = deploy::any_config(repo);
+    let deploy_branch = jobs::deploy_branch(repo);
+    let deploy_configured = jobs::any_config(repo);
 
     report.extend_from_slice(&pkt_line(b"unpack ok\n"));
     for cmd in &commands {
