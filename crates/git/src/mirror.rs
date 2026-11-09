@@ -33,13 +33,14 @@ fn approved_key(repo: &str) -> String {
 
 /// Record a repo's push policy. A push token lasts only as long as its
 /// minter may write, so when the writers change, the repo's tokens minted
-/// by anyone no longer among them (and not an operator) are revoked.
-pub fn set_push_policy(repo: &str, policy: PushPolicy) {
+/// by anyone no longer among them (and not an operator, by `is_operator`,
+/// the canister's own rule) are revoked.
+pub fn set_push_policy(repo: &str, policy: PushPolicy, is_operator: impl Fn(&Principal) -> bool) {
     let prev: Option<PushPolicy> = crate::kv::get_json(&push_key(repo));
     let writers_changed = prev.as_ref().map(|p| &p.writers) != Some(&policy.writers);
     crate::kv::set_json(&push_key(repo), &policy);
     if writers_changed {
-        crate::tokens::revoke_unless(repo, |p| crate::is_operator(p) || policy.writers.contains(p));
+        crate::tokens::revoke_unless(repo, |p| is_operator(p) || policy.writers.contains(p));
     }
 }
 

@@ -524,6 +524,7 @@ dependencies = [
  "ic-dev-kit-rs",
  "ic-git-common",
  "ic-git-compiler",
+ "ic-git-git",
  "ic-git-types",
  "ic-multisig",
  "ic-stable-structures",
@@ -703,6 +704,27 @@ dependencies = [
  "wasmi",
  "wasmparser 0.253.0",
  "wat",
+]
+
+[[package]]
+name = "ic-git-git"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "candid",
+ "ed25519-dalek",
+ "flate2",
+ "hex",
+ "ic-cdk",
+ "ic-dev-kit-rs",
+ "ic-git-common",
+ "ic-git-types",
+ "ic-multisig",
+ "ic-stable-structures",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
 ]
 
 [[package]]

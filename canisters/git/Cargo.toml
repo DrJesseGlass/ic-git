@@ -38,6 +38,7 @@ ed25519-dalek = { version = "2", default-features = false }
 # into this one canister until phase 3 cuts the boundary.
 ic-git-common = { path = "../../crates/common" }
 ic-git-compiler = { path = "../../crates/compiler" }
+ic-git-git = { path = "../../crates/git" }
 ic-git-types = { path = "../../crates/types" }
 
 # Track A (see ROADMAP.md): sign EVM transactions with threshold ECDSA.
@@ -50,3 +51,4 @@ k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc
 [dev-dependencies]
 # The shared crates' test hooks (a settable clock), for tests only.
 ic-git-common = { path = "../../crates/common", features = ["testing"] }
+ic-git-git = { path = "../../crates/git", features = ["testing"] }

@@ -289,15 +289,20 @@ fn kind_of(mode: &str) -> &'static str {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
-    /// All of /api, as the canister answers it.
-    pub(crate) fn get(url: &str) -> HttpResponse {
-        crate::api_route(url)
+    /// The git side's half of /api, as the canister asks it once the
+    /// authority's half has passed.
+    fn get(url: &str) -> HttpResponse {
+        let path = http::extract_path(url);
+        match ApiPath::parse(path) {
+            Some(req) => handle(&req, url),
+            None => error(404, "not found"),
+        }
     }
 
-    pub(crate) fn body_json(res: &HttpResponse) -> serde_json::Value {
+    fn body_json(res: &HttpResponse) -> serde_json::Value {
         serde_json::from_slice(&res.body).unwrap()
     }
 
@@ -306,7 +311,7 @@ pub(crate) mod tests {
     }
 
     /// Two commits: c1 (a.txt) -> c2 (a.txt, "sub dir"/b.txt), a tag ref on c1.
-    pub(crate) fn seed(repo: &str) -> (Oid, Oid) {
+    fn seed(repo: &str) -> (Oid, Oid) {
         store::create_repo(repo).unwrap();
         let a = store::put_object(ObjectType::Blob, b"alpha\n");
         let b = store::put_object(ObjectType::Blob, b"bravo\n");

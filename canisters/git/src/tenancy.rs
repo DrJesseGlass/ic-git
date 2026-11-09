@@ -1560,7 +1560,7 @@ mod tests {
         assert!(mirror::requires_signed_push("t-mirror"));
 
         // A release before the mirrors left them empty.
-        mirror::set_push_policy("t-mirror", mirror::PushPolicy::default());
+        mirror::set_push_policy("t-mirror", mirror::PushPolicy::default(), |_| false);
         mirror::set_approved("t-mirror", None);
         assert!(mirror::may_write("t-mirror", &w, false).is_err());
         sync_all_mirrors();

@@ -4,42 +4,37 @@
 //! refs + admin API) plus the info/refs advertisement, so `git ls-remote`
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
-mod api;
 mod api_authority;
 // The compiler crate's modules, under the names this crate has always used.
 use ic_git_compiler::{compile, interp, lang};
 // The shared crate, at the paths every module already names (crate::kv, ...).
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{clock, httpjson, kv, memory};
+// The git side (crates/git), likewise.
+use ic_git_git::{api, attest, jobs, mirror, pack, receive, signed_push, site, smart_http, store, tokens};
+#[cfg(test)]
+use ic_git_git::gitproof;
 mod apps;
-mod attest;
+#[cfg(test)]
+mod both_sides;
 mod consent;
+#[cfg(test)]
+mod fixtures;
 mod deploy;
 mod evm;
 mod feed;
 mod fleet;
 // Proofs that a blob is what a commit holds; queued deploy jobs carry them
 // (docs/CANISTER_SPLIT.md, phase 2).
-mod gitproof;
 mod icp;
-mod jobs;
-mod mirror;
 mod ledger;
 mod names;
-mod object;
-mod pack;
 mod provenance;
-mod receive;
 mod records;
 mod rpc_common;
-mod signed_push;
-mod site;
-mod smart_http;
 mod sol;
-mod store;
 mod tenancy;
 mod to_git;
-mod tokens;
 
 use base64::Engine;
 use ic_dev_kit_rs::auth;

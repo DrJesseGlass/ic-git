@@ -236,9 +236,9 @@ pub fn handle(req: &ApiPath) -> Option<HttpResponse> {
 
 #[cfg(test)]
 mod tests {
-    //! These seed repos through the git side (`api::tests::seed`) and ask
+    //! These seed repos through the git side (`fixtures::seed`) and ask
     //! the whole of /api, as the canister does.
-    use crate::api::tests::{body_json, get, seed};
+    use crate::fixtures::{body_json, get, seed};
     use crate::{deploy, jobs, store, tenancy};
     use candid::Principal;
 

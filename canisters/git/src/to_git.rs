@@ -14,9 +14,10 @@ pub fn deploy_config(repo: &str) -> Option<DeployConfig> {
     crate::jobs::get_config(repo)
 }
 
-/// The push-policy mirror (mirror.rs).
+/// The push-policy mirror (mirror.rs). The git side revokes the tokens of
+/// writers it drops, sparing operators by the canister's rule.
 pub fn set_push_policy(repo: &str, policy: crate::mirror::PushPolicy) {
-    crate::mirror::set_push_policy(repo, policy)
+    crate::mirror::set_push_policy(repo, policy, crate::is_operator)
 }
 
 /// The approved-commits mirror (mirror.rs).
