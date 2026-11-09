@@ -281,7 +281,7 @@ canister does what:
    `crates/compiler` (`ic-git-compiler`: `compile`, `lang`, `interp`), both
    pure and linked into the canister crate; and both deferred items. The
    prover (`gitproof::prove`) stays with the object store. Second half,
-   part 1 DONE: inside the one crate, every module belongs to one side,
+   first the one-sided modules, DONE: inside the one crate, every module belongs to one side,
    and the authority reaches the git side only through `to_git.rs`.
    - `memory.rs` holds the memory manager and the table of memory ids;
      `records.rs` the authority's maps (accounts, repo metadata, ballots,
@@ -305,7 +305,7 @@ canister does what:
    - `feed::after_push` takes the branch and both tips from the push glue
      in `lib.rs`, which, with `consent.rs`, is the only code that calls
      both sides.
-   Part 2, open: move the two sides into `authority` and `git` crates.
+   Still open: move the two sides into `authority` and `git` crates.
 5. **The mirrors.** DONE. Site serving and push authorization read the
    approved commits and the writers through the interfaces they will have
    across the boundary, so phase 3 swaps a function call for a message.
