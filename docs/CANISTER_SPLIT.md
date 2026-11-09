@@ -281,8 +281,9 @@ canister does what:
    `crates/compiler` (`ic-git-compiler`: `compile`, `lang`, `interp`), both
    pure and linked into the canister crate; and both deferred items. The
    prover (`gitproof::prove`) stays with the object store. Second half,
-   first the one-sided modules, DONE: inside the one crate, every module belongs to one side,
-   and the authority reaches the git side only through `to_git.rs`.
+   first the one-sided modules, DONE: inside the one crate, every module
+   belongs to one side, and the authority reaches the git side only
+   through `to_git.rs`.
    - `memory.rs` holds the memory manager and the table of memory ids;
      `records.rs` the authority's maps (accounts, repo metadata, ballots,
      deploy-job payloads); `store.rs` the objects, refs, repos and tokens.
@@ -337,7 +338,7 @@ decoding sat on both sides of the future boundary. Now:
 - `lib.rs`'s operator-facing `evm_deploy` decodes on the way in; its candid
   signature `(text, nat64)` is unchanged.
 - `evm::deploy_target` / `require_deploy_target` mirror the existing
-  `publish_target` pair, so `deploy::set_evm_config` and `deploy::attempt_evm`
+  `publish_target` pair, so `jobs::set_evm_config` and `deploy::attempt_evm`
   check config-and-gas from one definition -- and `attempt_evm` checks it
   *before* walking the tree, instead of resolving and decoding an artifact for
   a canister that turns out to have no EVM config.

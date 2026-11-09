@@ -15,6 +15,7 @@
 //!   arguments. The tests below hold the two to each other.
 
 use crate::store::{self, ObjectType, Oid};
+use ic_git_types::oid::commit20;
 use ic_git_types::proof::{check, components, lookup, tree_of};
 
 /// The proof for `path` in `commit`, and the blob it proves: the commit's
@@ -56,8 +57,6 @@ pub fn prove(commit: &Oid, path: &str) -> Result<(Vec<u8>, Vec<Vec<u8>>), String
 fn canonical(ty: ObjectType, body: &[u8]) -> Vec<u8> {
     ic_git_types::proof::canonical(ty.as_str(), body)
 }
-
-pub(crate) use ic_git_types::oid::commit20;
 
 #[cfg(test)]
 mod tests {

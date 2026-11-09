@@ -235,8 +235,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         } => http::upgrade_response(),
         Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
         Route::Site { repo, path } => site::serve(&repo, &path),
-        // The authority's routes first, then the git side's.
-        Route::Api { url } => api_authority::handle(&url).unwrap_or_else(|| api::handle(&url)),
+        Route::Api { url } => api_route(&url),
         Route::Feed { repo } => {
             let host = req
                 .headers
@@ -326,7 +325,7 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
                 Err(e) => return git_response(200, RESULT, receive::refuse(&request, e)),
             };
             // The clock the advertisement's nonce was issued by.
-            let now_s = tenancy::now_ns() / 1_000_000_000;
+            let now_s = crate::clock::now_ns() / 1_000_000_000;
             let required = mirror::requires_signed_push(&repo);
             if let Err(e) = signed_push::check(&repo, grant.key.as_deref(), parsed.cert.as_ref(), required, now_s) {
                 return git_response(200, RESULT, receive::refuse(&request, &e));
@@ -765,6 +764,23 @@ fn follow_approvals(repo: &str, retry: bool) {
     }
 }
 
+/// All of /api: the path parsed once, the authority's routes first, then
+/// the git side's.
+fn api_route(url: &str) -> HttpResponse {
+    let path = ic_dev_kit_rs::http::extract_path(url);
+    match httpjson::ApiPath::parse(path) {
+        Some(req) => api_authority::handle(&req).unwrap_or_else(|| api::handle(&req, url)),
+        None => httpjson::error(404, "not found"),
+    }
+}
+
+/// Every way a repo's wasm deploy config is set goes through here, so the
+/// git side always hears the authority's current word on whether the repo
+/// is governed (which holds it to committed .wasm).
+fn set_wasm_config(repo: &str, target: String, source_path: String) -> Result<(), String> {
+    jobs::set_config(repo, target, source_path, tenancy::is_governed(repo))
+}
+
 /// The git side hands a commit's deploy to the authority (docs/CANISTER_SPLIT.md,
 /// section 4: submit_job). The job -- configs and proven artifacts -- is
 /// built from the git side's state, and only when the authority has not
@@ -849,9 +865,9 @@ fn propose_policy_change(
     let described = change.describe();
     let (t, apply) = tenancy::propose_policy_change(&repo, &caller(), change, decision, reason.clone())?;
     feed::policy_ballot(&repo, &caller(), &described, decision, reason.as_deref(), &t);
-    // The deploy config lives in deploy.rs; tenancy decided, this applies.
+    // The deploy config lives in jobs.rs; tenancy decided, this applies.
     match apply {
-        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => jobs::set_config(&repo, target, source_path, tenancy::is_governed(&repo))?,
+        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => set_wasm_config(&repo, target, source_path)?,
         Some(tenancy::PolicyChange::DeployMode { mode }) => jobs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)?,
         _ => {}
     }
@@ -1102,7 +1118,7 @@ fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<
     } else {
         target
     };
-    jobs::set_config(&repo, target, source_path, tenancy::is_governed(&repo))
+    set_wasm_config(&repo, target, source_path)
 }
 
 /// Set a repo's install mode: "upgrade" (default; preserves target state) or
@@ -1162,8 +1178,7 @@ fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(
     // One definition of "could this canister deploy at all", shared with the
     // deploy leg and with the evm_deploy endpoint, so a config accepted here
     // cannot be rejected at drain time for a reason this check missed.
-    evm::require_deploy_target(gas_limit)?;
-    jobs::set_evm_config(&repo, source_path, gas_limit)
+    jobs::set_evm_config(&repo, source_path, gas_limit, evm::require_deploy_target)
 }
 
 #[ic_cdk::query]

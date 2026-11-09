@@ -538,7 +538,6 @@ async fn run_evm(
     (st, unused)
 }
 
-
 /// Run every deploy leg `job` carries for this commit -- wasm-to-canister,
 /// EVM CREATE, or both -- from its verified artifacts alone. Each leg
 /// persists its own status and provenance; the returned DeployStatus carries
@@ -766,18 +765,17 @@ pub fn in_flight(repo: &str, commit_hex: &str) -> bool {
         || get_status(repo).is_some_and(|s| s.commit == commit_hex && s.message == DEPLOYING)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{gitproof, store};
     use crate::jobs::{get_config, resolve};
+    use crate::store::ObjectType;
+    use crate::{gitproof, store};
 
     /// The git side's config setter, for an ungoverned test repo.
     fn set_config(repo: &str, target: String, source_path: String) -> Result<(), String> {
         crate::jobs::set_config(repo, target, source_path, false)
     }
-    use crate::store::ObjectType;
 
     /// A commit whose root tree holds `files` (plain names only).
     fn commit_of(files: &[(&str, &[u8])]) -> Oid {
@@ -846,7 +844,7 @@ mod tests {
     }
 
     fn c20(commit: &Oid) -> [u8; 20] {
-        gitproof::commit20(commit).unwrap()
+        ic_git_types::oid::commit20(commit).unwrap()
     }
 
     fn resolve_one(commit: &Oid, path: &str) -> Artifact {

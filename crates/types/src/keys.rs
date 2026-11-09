@@ -36,6 +36,22 @@ pub struct Record {
     pub bundle: [u8; 32],
 }
 
+impl Record {
+    /// The deploy-artifact record for a commit: the bare repo name as key
+    /// (no suffix -- that is what distinguishes it from the site record),
+    /// the commit, and `bundle`, which must be the sha256 of the *decoded*
+    /// bytecode. The one construction of it, so the release path (the git
+    /// side's tip record) and the deploy queue's auto-publish cannot drift
+    /// apart on the key or the commit encoding.
+    pub fn artifact(repo: &str, commit: &crate::oid::Oid, bundle: [u8; 32]) -> Result<Self, String> {
+        Ok(Record {
+            key: artifact_record_key(repo),
+            commit: crate::oid::commit20(commit)?,
+            bundle,
+        })
+    }
+}
+
 /// A repo's deploy-artifact record: its EVM contract's creation bytecode.
 pub fn artifact_record_key(repo: &str) -> String {
     repo.to_string()

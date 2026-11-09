@@ -11,7 +11,7 @@ pub fn parse_oid(hex: &str) -> Result<Oid, String> {
     // so `try_from` accepts anything 20 bytes or shorter and this function's
     // own error message would be a lie. A short Oid reaching the store (via
     // set_ref, say) would then violate the 20-byte invariant that
-    // provenance::commit20 and the registry's bytes20 both depend on.
+    // commit20 below and the registry's bytes20 both depend on.
     if bytes.len() != 20 {
         return Err("oid must be 20 bytes".to_string());
     }

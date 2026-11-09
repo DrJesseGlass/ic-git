@@ -175,13 +175,13 @@ pub async fn deposit_from_cycles_ledger(who: Principal, amount: u64) -> Result<u
             who,
             amount: net,
             error: format!("withdraw: {e:?}"),
-            at_ns: tenancy::now_ns(),
+            at_ns: crate::clock::now_ns(),
         }),
         Err(e) => record_stranded(Stranded {
             who,
             amount: net,
             error: format!("withdraw call: {e}"),
-            at_ns: tenancy::now_ns(),
+            at_ns: crate::clock::now_ns(),
         }),
     }
     Ok(tenancy::credit(&who, net).balance)

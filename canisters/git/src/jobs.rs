@@ -51,17 +51,24 @@ pub fn get_config(repo: &str) -> Option<DeployConfig> {
     crate::kv::get_json(&config_key(repo))
 }
 
-/// Set (or replace) a repo's EVM deploy config. The caller checks first
-/// that the authority could deploy it at all (`evm::require_deploy_target`):
-/// a target with no way to reach it is a misconfiguration better rejected
-/// then than discovered at push time.
-pub fn set_evm_config(repo: &str, source_path: String, gas_limit: u64) -> Result<(), String> {
+/// Set (or replace) a repo's EVM deploy config. `deployable` is the
+/// authority's word on whether it could deploy with `gas_limit` at all
+/// (`evm::require_deploy_target`), asked after this side's own checks and
+/// before anything is stored: a target with no way to reach it is a
+/// misconfiguration better rejected now than discovered at push time.
+pub fn set_evm_config(
+    repo: &str,
+    source_path: String,
+    gas_limit: u64,
+    deployable: impl FnOnce(u64) -> Result<(), String>,
+) -> Result<(), String> {
     if !store::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
     if !source_path.ends_with(".hex") {
         return Err("source_path must end in .hex (creation bytecode as hex text)".into());
     }
+    deployable(gas_limit)?;
     crate::kv::set_json(
         &evm_config_key(repo),
         &EvmDeployConfig {

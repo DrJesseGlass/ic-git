@@ -78,15 +78,11 @@ thread_local! {
         StableBTreeMap::init(crate::memory::get(crate::memory::MEM_REPOS)),
     );
 
-
     /// hex(sha256(push token)) -> the token's record (tokens.rs owns the
     /// value format; a bare repo name before expiry existed).
     static TOKENS: RefCell<StableBTreeMap<String, String, Memory>> = RefCell::new(
         StableBTreeMap::init(crate::memory::get(crate::memory::MEM_TOKENS)),
     );
-
-
-
 
     /// Secondary keys over TOKENS, so a repo's tokens and the expired ones
     /// are range reads rather than scans of every token (tokens.rs owns the

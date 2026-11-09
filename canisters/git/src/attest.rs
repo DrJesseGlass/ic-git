@@ -4,7 +4,7 @@
 //! the object store; publishes nothing.
 
 use crate::{jobs, site};
-use ic_git_types::keys::{artifact_record_key, site_record_key, Record};
+use ic_git_types::keys::{site_record_key, Record};
 use ic_git_types::oid::commit20;
 use sha2::Digest;
 
@@ -67,11 +67,7 @@ pub fn tip_record(repo: &str) -> Result<Record, String> {
         jobs::get_evm_config(repo).ok_or("repo has no EVM deploy config (nothing to hash)")?;
     let commit_oid = jobs::release_commit(repo)?;
     let bundle = jobs::evm_artifact_hash(&commit_oid, &cfg.source_path)?;
-    Ok(Record {
-        key: artifact_record_key(repo),
-        commit: commit20(&commit_oid)?,
-        bundle,
-    })
+    Record::artifact(repo, &commit_oid, bundle)
 }
 
 #[cfg(test)]
@@ -79,6 +75,8 @@ mod tests {
     use super::*;
     use crate::store::{self, ObjectType};
 
+    /// A site record's key is namespaced and its bundle is the raw served
+    /// bytes -- the two properties that keep it from clobbering, or being
     /// clobbered by, the same repo's deploy-artifact record.
     #[test]
     fn site_record_is_namespaced_and_hashes_served_bytes() {
@@ -102,6 +100,9 @@ mod tests {
         assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
     }
 
+    /// A repo with site config but nothing committed reports that, rather than
+    /// publishing a record over an empty or absent artifact. Configured on
+    /// purpose, so the failure is the missing entrypoint and not the missing
     /// config.
     #[test]
     fn site_record_requires_an_entrypoint() {
@@ -110,6 +111,9 @@ mod tests {
         assert!(site_record("emptyrepo").is_err());
     }
 
+    /// A site record is refused when the entrypoint references a file the
+    /// record cannot cover, and allowed once the reference is enforceable.
+    /// Without this the publish succeeds, the verifier's hash comparison
     /// passes, and the verdict says verified while unattested code runs.
     #[test]
     fn site_record_refuses_an_entrypoint_it_cannot_fully_cover() {

@@ -18,6 +18,7 @@
 //! Every function that needs the caller takes it as a parameter, and time
 //! goes through [`now_ns`], so all of this is unit-testable off-chain.
 
+use crate::clock::now_ns;
 use ic_git_types::oid::{parse_oid, Oid};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::auth;
@@ -82,13 +83,6 @@ pub fn arm_rent_timer() {
 
 #[cfg(test)]
 pub fn arm_rent_timer() {}
-
-// --- time --------------------------------------------------------------------
-
-
-pub use crate::clock::now_ns;
-#[cfg(test)]
-pub use crate::clock::set_test_now;
 
 // --- accounts ----------------------------------------------------------------
 
@@ -1230,6 +1224,7 @@ pub fn set_app_canister(repo: &str, canister: Principal) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::set_test_now;
     use crate::store;
 
     fn p(n: u8) -> Principal {

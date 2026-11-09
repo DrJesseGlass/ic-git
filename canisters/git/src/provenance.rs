@@ -7,7 +7,7 @@
 
 use crate::evm::{self, TxOutcome};
 pub use ic_git_types::keys::{Record, CANISTER_KEY};
-use ic_git_types::keys::{app_record_key, artifact_record_key};
+use ic_git_types::keys::app_record_key;
 use ic_git_types::oid::{commit20, Oid};
 
 /// The single exit point to the signing side. The error says whether the
@@ -16,26 +16,6 @@ pub async fn publish(rec: &Record) -> Result<TxOutcome, evm::SendError> {
     let out = evm::registry_publish_record(&rec.key, &rec.commit, &rec.bundle).await?;
     crate::feed::published(&rec.key, &hex::encode(rec.commit), &out.tx_hash);
     Ok(out)
-}
-
-/// The deploy-artifact record for a commit: the bare repo name as key (no
-/// suffix -- that is what distinguishes it from the site record), the commit,
-/// and `bundle`, which must be the sha256 of the *decoded* bytecode. Hashing
-/// the decoded bytes rather than the hex text is what keeps this equal to the
-/// `bytecode_sha256` already in `evm_deploy_history`;
-/// `jobs::evm_artifact_hash` is the one function that derives it (the git
-/// side's `attest::tip_record` builds the same record from it).
-///
-/// The hash is a parameter rather than something resolved here because the
-/// caller may already hold it -- the deploy queue does, from the bytes it just
-/// broadcast -- and re-deriving it would both redo the tree walk and open the
-/// window for a mid-deploy config edit to redirect the attestation.
-fn deploy_record(repo: &str, commit_oid: &Oid, bundle: [u8; 32]) -> Result<Record, String> {
-    Ok(Record {
-        key: artifact_record_key(repo),
-        commit: commit20(commit_oid)?,
-        bundle,
-    })
 }
 
 /// The backend record for an install the deploy queue just made: the commit
@@ -79,13 +59,21 @@ pub fn canister_record(commit_hex: &str, module_sha256_hex: &str) -> Result<Reco
 /// and passes the hash of the bytes it broadcast, so nothing here re-reads the
 /// object store. That takes the auto-publish path off git state entirely,
 /// which is what docs/CANISTER_SPLIT.md section 6 needs it to be.
+///
+/// The record is `Record::artifact`, the same one the git side's
+/// `attest::tip_record` builds. `bundle` is the sha256 of the *decoded*
+/// bytecode, which keeps it equal to the `bytecode_sha256` already in
+/// `evm_deploy_history`; `jobs::evm_artifact_hash` is the one function that
+/// derives it. It is a parameter rather than resolved here because the
+/// re-derivation would redo the tree walk and open the window for a
+/// mid-deploy config edit to redirect the attestation.
 pub async fn publish_commit(
     repo: &str,
     commit_oid: &Oid,
     bundle: [u8; 32],
 ) -> Result<TxOutcome, String> {
     evm::require_publish_target()?;
-    Ok(publish(&deploy_record(repo, commit_oid, bundle)?).await?)
+    Ok(publish(&Record::artifact(repo, commit_oid, bundle)?).await?)
 }
 
 #[cfg(test)]
@@ -95,14 +83,6 @@ mod tests {
     use crate::store::{self, ObjectType};
     use sha2::Digest;
 
-    /// A site record's key is namespaced and its bundle is the raw served
-    /// bytes -- the two properties that keep it from clobbering, or being
-    /// A repo with site config but nothing committed reports that, rather than
-    /// publishing a record over an empty or absent artifact. Configured on
-    /// purpose, so the failure is the missing entrypoint and not the missing
-    /// A site record is refused when the entrypoint references a file the
-    /// record cannot cover, and allowed once the reference is enforceable.
-    /// Without this the publish succeeds, the verifier's hash comparison
     /// An app record is namespaced like a site record and carries the
     /// installed module's hash as the queue reported it, so the registry
     /// holds exactly the bytes the IC's certified module hash names.
@@ -151,7 +131,7 @@ mod tests {
         let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
 
         let bundle = jobs::evm_artifact_hash(&commit_oid, "contract.hex").expect("hash resolves");
-        let rec = deploy_record("hexrepo", &commit_oid, bundle).expect("record resolves");
+        let rec = Record::artifact("hexrepo", &commit_oid, bundle).expect("record resolves");
         assert_eq!(rec.key, "hexrepo");
         assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
 

@@ -9,10 +9,10 @@
 //!   GET /api/pricing                            the fee table
 
 use crate::deploy;
-use crate::httpjson::{decode, error, json};
+use crate::httpjson::{decode, error, json, ApiPath};
 use crate::tenancy;
 use candid::Principal;
-use ic_dev_kit_rs::http::{self, HttpResponse};
+use ic_dev_kit_rs::http::HttpResponse;
 use ic_git_types::deploy::DeployConfig;
 use ic_git_types::oid::parse_oid;
 use serde::Serialize;
@@ -111,11 +111,18 @@ struct ProposalView {
     reached: bool,
 }
 
+/// Which of the authority's per-repo views a request names.
+enum View<'a> {
+    Info,
+    Votes(&'a str),
+    Proposals,
+    Deploys,
+}
+
 /// Answer a GET under `/api/` if it is one of the authority's routes;
 /// `None` hands it to the git side's (`api::handle`).
-pub fn handle(url: &str) -> Option<HttpResponse> {
-    let path = http::extract_path(url);
-    let rest = path.strip_prefix("/api/")?.trim_end_matches('/');
+pub fn handle(req: &ApiPath) -> Option<HttpResponse> {
+    let rest = req.rest;
     if rest == "pricing" {
         return Some(json(200, &tenancy::pricing(), None));
     }
@@ -138,17 +145,14 @@ pub fn handle(url: &str) -> Option<HttpResponse> {
             Err(e) => error(400, &format!("bad principal: {e}")),
         });
     }
-    let segs: Vec<&str> = rest.splitn(4, '/').collect();
-    let (Some(repo), Some(what)) = (segs.first(), segs.get(1)) else {
-        return None;
+    let (repo, what, arg, more) = req.repo_route()?;
+    let view = match (what, arg, more) {
+        ("info", None, None) => View::Info,
+        ("votes", Some(commit), None) => View::Votes(commit),
+        ("proposals", None, None) => View::Proposals,
+        ("deploys", None, None) => View::Deploys,
+        _ => return None,
     };
-    let route = (*what, segs.get(2).copied(), segs.get(3).copied());
-    if !matches!(
-        route,
-        ("info", None, None) | ("votes", Some(_), None) | ("proposals", None, None) | ("deploys", None, None)
-    ) {
-        return None;
-    }
     let repo = match decode(repo) {
         Ok(r) => r,
         Err(e) => return Some(error(400, &e)),
@@ -156,8 +160,8 @@ pub fn handle(url: &str) -> Option<HttpResponse> {
     if !crate::to_git::repo_exists(&repo) {
         return Some(error(404, "no such repo"));
     }
-    Some(match route {
-        ("info", None, None) => match tenancy::repo_info(&repo) {
+    Some(match view {
+        View::Info => match tenancy::repo_info(&repo) {
             Some(i) => json(
                 200,
                 &RepoTenancy {
@@ -185,7 +189,7 @@ pub fn handle(url: &str) -> Option<HttpResponse> {
             ),
             None => error(404, "no such repo"),
         },
-        ("votes", Some(commit), None) => {
+        View::Votes(commit) => {
             // A commit id that does not parse has no count: say so rather
             // than report it as a commit that requires nothing.
             if let Err(e) = parse_oid(commit) {
@@ -204,7 +208,7 @@ pub fn handle(url: &str) -> Option<HttpResponse> {
             };
             json(200, &view, None)
         }
-        ("proposals", None, None) => {
+        View::Proposals => {
             let view: Vec<ProposalView> = tenancy::proposals(&repo)
                 .into_iter()
                 .map(|p| ProposalView {
@@ -218,7 +222,7 @@ pub fn handle(url: &str) -> Option<HttpResponse> {
                 .collect();
             json(200, &view, None)
         }
-        ("deploys", None, None) => json(
+        View::Deploys => json(
             200,
             &DeployView {
                 config: crate::to_git::deploy_config(&repo),
@@ -227,7 +231,6 @@ pub fn handle(url: &str) -> Option<HttpResponse> {
             },
             None,
         ),
-        _ => unreachable!("matched above"),
     })
 }
 

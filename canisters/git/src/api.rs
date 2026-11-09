@@ -25,7 +25,7 @@
 use crate::object;
 use crate::site;
 use crate::store::{self, ObjectType, Oid};
-use crate::httpjson::{decode, error, json};
+use crate::httpjson::{decode, error, json, ApiPath};
 use ic_dev_kit_rs::http::{self, HttpResponse};
 use serde::Serialize;
 
@@ -78,20 +78,14 @@ struct TreeInfo {
     entries: Vec<Entry>,
 }
 
-/// Dispatch a GET whose path starts with `/api/`. `url` is the full request
-/// URL (path + query).
-pub fn handle(url: &str) -> HttpResponse {
-    let path = http::extract_path(url);
+/// Answer a GET under `/api/` that the authority's half (api_authority.rs)
+/// did not. `url` is the full request URL, for the query.
+pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
     let query = http::extract_query_params(url);
-    let Some(rest) = path.strip_prefix("/api/") else {
-        return error(404, "not found");
-    };
-    let rest = rest.trim_end_matches('/');
-    if rest == "repos" {
+    if req.rest == "repos" {
         return json(200, &repos(), None);
     }
-    let segs: Vec<&str> = rest.splitn(4, '/').collect();
-    let (Some(repo), Some(what)) = (segs.first(), segs.get(1)) else {
+    let Some((repo, what, arg, more)) = req.repo_route() else {
         return error(404, "not found");
     };
     let repo = match decode(repo) {
@@ -101,7 +95,7 @@ pub fn handle(url: &str) -> HttpResponse {
     if !store::repo_exists(&repo) {
         return error(404, "no such repo");
     }
-    match (*what, segs.get(2).copied(), segs.get(3).copied()) {
+    match (what, arg, more) {
         ("refs", None, None) => {
             let refs: Vec<RefInfo> = store::list_refs(&repo)
                 .into_iter()
@@ -298,9 +292,9 @@ fn kind_of(mode: &str) -> &'static str {
 pub(crate) mod tests {
     use super::*;
 
-    /// Both halves of /api, in the order the canister asks them.
+    /// All of /api, as the canister answers it.
     pub(crate) fn get(url: &str) -> HttpResponse {
-        crate::api_authority::handle(url).unwrap_or_else(|| handle(url))
+        crate::api_route(url)
     }
 
     pub(crate) fn body_json(res: &HttpResponse) -> serde_json::Value {

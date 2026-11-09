@@ -136,7 +136,7 @@ fn one(feed: &Feed, kind: &'static str, title: String, detail: String, subject: 
     append(
         feed,
         vec![New {
-            at_ns: tenancy::now_ns(),
+            at_ns: crate::clock::now_ns(),
             kind,
             title,
             detail,
@@ -646,7 +646,7 @@ fn atom(feed: &Feed, events: &[Event], canister: &str, base: &str) -> String {
         Feed::Repo(r) => format!("urn:ic-git:{canister}:repo:{r}"),
         Feed::Canister => format!("urn:ic-git:{canister}"),
     };
-    let updated = events.last().map_or_else(tenancy::now_ns, |e| e.at_ns);
+    let updated = events.last().map_or_else(crate::clock::now_ns, |e| e.at_ns);
     let mut s = String::with_capacity(1024 + events.len() * 512);
     s.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     s.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
@@ -746,7 +746,7 @@ mod tests {
 
         let feed = Feed::Repo("feed-a".into());
         for i in 0..(MAX_EVENTS + 5) {
-            tenancy::set_test_now(1_700_000_000_000_000_000 + i as u64 * 1_000_000_000);
+            crate::clock::set_test_now(1_700_000_000_000_000_000 + i as u64 * 1_000_000_000);
             one(&feed, "ballot", format!("event {i}"), "<detail & more>".into(), None, Some(&p(1)));
         }
         let res = serve(Some("feed-a"), Some("localhost:4943"));
