@@ -129,9 +129,7 @@ mod tests {
         site::set_config("srirepo", String::new()).unwrap();
 
         commit_index("srirepo", b"<script src=\"app.js\"></script>");
-        let err = site_record("srirepo")
-            .err()
-            .expect("must refuse an uncovered subresource");
+        let err = site_record("srirepo").expect_err("must refuse an uncovered subresource");
         assert!(err.contains("index.html"), "names the entrypoint: {err}");
         assert!(err.contains("integrity"), "says how to fix it: {err}");
 

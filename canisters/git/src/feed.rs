@@ -903,7 +903,7 @@ mod tests {
         assert!(ev[0].detail.contains("needs 0 of 1"), "{}", ev[0].detail);
 
         let hex = store::oid_hex(&commit);
-        let was = tenancy::tally("feed-c", &hex).map_or(false, |t| t.reached);
+        let was = tenancy::tally("feed-c", &hex).is_some_and(|t| t.reached);
         let t = tenancy::cast_ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right".into())).unwrap();
         ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right"), &t, was);
         let ev = events(&Feed::Repo("feed-c".into()));

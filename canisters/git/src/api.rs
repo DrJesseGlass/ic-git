@@ -6,12 +6,10 @@
 //!   GET /api/<repo>/commit/<rev>
 //!   GET /api/<repo>/tree/<rev>[/<path>]
 //!   GET /api/<repo>/blob/<rev>/<path>
-//!   GET /api/<repo>/info                        tenancy: owner, members, rent state
-//!   GET /api/<repo>/votes/<commit>              ballots on a commit, and their count
-//!   GET /api/<repo>/proposals                   pending policy changes, with their ballots
-//!   GET /api/<repo>/deploys                     wasm deploy config, last status, provenance log
-//!   GET /api/account/<principal>                balance and repos of a principal
-//!   GET /api/pricing                            the fee table
+//!
+//! The git side's half; the authority's routes (a repo's info, votes,
+//! proposals and deploys, accounts, pricing) are in api_authority.rs, which
+//! the canister asks first.
 //!
 //! `<rev>` is HEAD, a 40-hex oid, a bare branch or tag name, or a full ref
 //! name. Segments are split on `/` first and percent-decoded second, so a
@@ -24,13 +22,10 @@
 //! their extension: this is a data endpoint for a page that renders content
 //! itself, never a place from which markup executes.
 
-use crate::deploy;
-use crate::jobs;
 use crate::object;
 use crate::site;
 use crate::store::{self, ObjectType, Oid};
-use crate::tenancy;
-use candid::Principal;
+use crate::httpjson::{decode, error, json};
 use ic_dev_kit_rs::http::{self, HttpResponse};
 use serde::Serialize;
 
@@ -77,100 +72,6 @@ struct Entry {
 }
 
 #[derive(Serialize)]
-struct AccountInfo {
-    principal: String,
-    balance: u64,
-    deposited: u64,
-    spent: u64,
-    repos: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct MemberInfo {
-    principal: String,
-    role: &'static str,
-}
-
-#[derive(Serialize)]
-struct RepoTenancy {
-    owner: Option<String>,
-    members: Vec<MemberInfo>,
-    storage_bytes: u64,
-    delinquent: bool,
-    required_votes: u32,
-    app_canister: Option<String>,
-    exempt: bool,
-    require_signed_push: bool,
-    governed: bool,
-}
-
-/// What a deployed app can show about itself: the config that names its
-/// target, the most recent attempt, and the log binding each commit to the
-/// wasm that was installed from it. The log is the record of what actually
-/// ran; the branch tip is not, since a push can be queued, held for votes,
-/// or fail after the ref has moved.
-#[derive(Serialize)]
-struct DeployView {
-    config: Option<deploy::DeployConfig>,
-    status: Option<deploy::DeployStatus>,
-    history: Vec<deploy::DeployRecord>,
-}
-
-#[derive(Serialize)]
-struct BallotInfo {
-    principal: String,
-    /// "approve", "reject" or "object". `approve` says the same as a bool,
-    /// for the clients that read it before objections existed.
-    decision: &'static str,
-    approve: bool,
-    reason: Option<String>,
-    at_ns: u64,
-    /// False for a ballot whose caster has left the policy: it is listed,
-    /// and the count below leaves it out.
-    counts: bool,
-}
-
-/// The ballots on a commit and where they leave it: a commit passes when
-/// `approvals - objections >= required`, over the ballots that count.
-/// `required` is 0 and `reached` true for a repo that needs no votes.
-#[derive(Serialize)]
-struct VotesView {
-    ballots: Vec<BallotInfo>,
-    approvals: u32,
-    objections: u32,
-    required: u32,
-    reached: bool,
-}
-
-fn ballot_info(b: tenancy::Ballot) -> BallotInfo {
-    BallotInfo {
-        principal: b.principal.to_text(),
-        decision: match b.decision {
-            tenancy::Vote::Approve => "approve",
-            tenancy::Vote::Reject => "reject",
-            tenancy::Vote::Object => "object",
-        },
-        approve: b.approve,
-        reason: b.reason,
-        at_ns: b.at_ns,
-        counts: b.counts,
-    }
-}
-
-/// A pending policy change (docs/GOVERNANCE.md) and where its ballots
-/// stand; `change` is the candid variant as JSON, e.g.
-/// {"RequiredVotes":{"k":2}} or {"AddVoter":{"principal":"..."}}.
-#[derive(Serialize)]
-struct ProposalView {
-    change: tenancy::PolicyChange,
-    ballots: Vec<BallotInfo>,
-    approvals: u32,
-    objections: u32,
-    required: u32,
-    reached: bool,
-}
-
-#[derive(Serialize)]
 struct TreeInfo {
     commit: String,
     path: String,
@@ -189,28 +90,6 @@ pub fn handle(url: &str) -> HttpResponse {
     if rest == "repos" {
         return json(200, &repos(), None);
     }
-    if rest == "pricing" {
-        return json(200, &tenancy::pricing(), None);
-    }
-    if let Some(p) = rest.strip_prefix("account/") {
-        return match decode(p).and_then(|t| Principal::from_text(t).map_err(|e| e.to_string())) {
-            Ok(principal) => {
-                let a = tenancy::get_account(&principal);
-                json(
-                    200,
-                    &AccountInfo {
-                        principal: principal.to_text(),
-                        balance: a.balance,
-                        deposited: a.deposited,
-                        spent: a.spent,
-                        repos: tenancy::repos_of(&principal),
-                    },
-                    None,
-                )
-            }
-            Err(e) => error(400, &format!("bad principal: {e}")),
-        };
-    }
     let segs: Vec<&str> = rest.splitn(4, '/').collect();
     let (Some(repo), Some(what)) = (segs.first(), segs.get(1)) else {
         return error(404, "not found");
@@ -223,76 +102,6 @@ pub fn handle(url: &str) -> HttpResponse {
         return error(404, "no such repo");
     }
     match (*what, segs.get(2).copied(), segs.get(3).copied()) {
-        ("info", None, None) => match tenancy::repo_info(&repo) {
-            Some(i) => json(
-                200,
-                &RepoTenancy {
-                    owner: i.owner.map(|p| p.to_text()),
-                    members: i
-                        .members
-                        .iter()
-                        .map(|m| MemberInfo {
-                            principal: m.principal.to_text(),
-                            role: match m.role {
-                                tenancy::Role::Writer => "writer",
-                                tenancy::Role::Voter => "voter",
-                            },
-                        })
-                        .collect(),
-                    storage_bytes: i.storage_bytes,
-                    delinquent: i.delinquent,
-                    required_votes: i.required_votes,
-                    app_canister: i.app_canister.map(|p| p.to_text()),
-                    exempt: i.exempt,
-                    require_signed_push: i.require_signed_push,
-                    governed: i.governed,
-                },
-                None,
-            ),
-            None => error(404, "no such repo"),
-        },
-        ("votes", Some(commit), None) => {
-            // A commit id that does not parse has no count: say so rather
-            // than report it as a commit that requires nothing.
-            if let Err(e) = store::parse_oid(commit) {
-                return error(400, &e);
-            }
-            let ballots: Vec<BallotInfo> = tenancy::votes(&repo, commit).into_iter().map(ballot_info).collect();
-            // A repo without tenancy metadata (legacy, operator-owned) has
-            // no policy: it requires nothing, so every commit is reached.
-            let t = tenancy::tally(&repo, commit);
-            let view = VotesView {
-                ballots,
-                approvals: t.as_ref().map_or(0, |t| t.approvals),
-                objections: t.as_ref().map_or(0, |t| t.objections),
-                required: t.as_ref().map_or(0, |t| t.required),
-                reached: t.as_ref().is_none_or(|t| t.reached),
-            };
-            json(200, &view, None)
-        }
-        ("proposals", None, None) => {
-            let view: Vec<ProposalView> = tenancy::proposals(&repo)
-                .into_iter()
-                .map(|p| ProposalView {
-                    change: p.change,
-                    ballots: p.ballots.into_iter().map(ballot_info).collect(),
-                    approvals: p.approvals,
-                    objections: p.objections,
-                    required: p.required,
-                    reached: p.reached,
-                })
-                .collect();
-            json(200, &view, None)
-        }
-        ("deploys", None, None) => json(
-            200,
-            &DeployView {
-                config: jobs::get_config(&repo),
-                status: deploy::get_status(&repo),
-                history: deploy::get_history(&repo),
-            },
-            None,
-        ),
         ("refs", None, None) => {
             let refs: Vec<RefInfo> = store::list_refs(&repo)
                 .into_iter()
@@ -485,51 +294,16 @@ fn kind_of(mode: &str) -> &'static str {
     }
 }
 
-/// Minimal percent-decoding; the result must be UTF-8.
-fn decode(s: &str) -> Result<String, String> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            let hex = b.get(i + 1..i + 3).ok_or("truncated percent-escape")?;
-            let v = u8::from_str_radix(std::str::from_utf8(hex).map_err(|_| "bad escape")?, 16)
-                .map_err(|_| "bad percent-escape")?;
-            out.push(v);
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).map_err(|_| "path is not UTF-8".to_string())
-}
-
-fn json<T: Serialize>(status: u16, value: &T, commit: Option<&Oid>) -> HttpResponse {
-    let body = serde_json::to_vec(value).unwrap_or_else(|_| b"null".to_vec());
-    let mut res = crate::git_response(status, "application/json", body);
-    res.headers
-        .push(("X-Content-Type-Options".to_string(), "nosniff".to_string()));
-    if let Some(c) = commit {
-        res.headers
-            .push(("X-Ic-Git-Commit".to_string(), store::oid_hex(c)));
-    }
-    res
-}
-
-fn error(status: u16, msg: &str) -> HttpResponse {
-    #[derive(Serialize)]
-    struct Err<'a> {
-        error: &'a str,
-    }
-    json(status, &Err { error: msg }, None)
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn body_json(res: &HttpResponse) -> serde_json::Value {
+    /// Both halves of /api, in the order the canister asks them.
+    pub(crate) fn get(url: &str) -> HttpResponse {
+        crate::api_authority::handle(url).unwrap_or_else(|| handle(url))
+    }
+
+    pub(crate) fn body_json(res: &HttpResponse) -> serde_json::Value {
         serde_json::from_slice(&res.body).unwrap()
     }
 
@@ -538,7 +312,7 @@ mod tests {
     }
 
     /// Two commits: c1 (a.txt) -> c2 (a.txt, "sub dir"/b.txt), a tag ref on c1.
-    fn seed(repo: &str) -> (Oid, Oid) {
+    pub(crate) fn seed(repo: &str) -> (Oid, Oid) {
         store::create_repo(repo).unwrap();
         let a = store::put_object(ObjectType::Blob, b"alpha\n");
         let b = store::put_object(ObjectType::Blob, b"bravo\n");
@@ -582,7 +356,7 @@ mod tests {
     #[test]
     fn lists_repos_and_refs() {
         seed("api-list");
-        let res = handle("/api/repos");
+        let res = get("/api/repos");
         assert_eq!(res.status_code, 200);
         let v = body_json(&res);
         let me = v
@@ -594,7 +368,7 @@ mod tests {
         assert_eq!(me["head"], "refs/heads/main");
         assert_eq!(me["site"], false);
 
-        let refs = body_json(&handle("/api/api-list/refs"));
+        let refs = body_json(&get("/api/api-list/refs"));
         let names: Vec<&str> = refs.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"refs/heads/main"));
         assert!(names.contains(&"refs/tags/v1"));
@@ -603,7 +377,7 @@ mod tests {
     #[test]
     fn walks_commits_first_parent_with_limit() {
         let (c1, c2) = seed("api-log");
-        let res = handle("/api/api-log/commits/HEAD");
+        let res = get("/api/api-log/commits/HEAD");
         assert_eq!(res.status_code, 200);
         assert_eq!(header(&res, "X-Ic-Git-Commit"), Some(store::oid_hex(&c2).as_str()));
         let v = body_json(&res);
@@ -619,19 +393,19 @@ mod tests {
         assert_eq!(arr[1]["committer"]["name"], "Bob");
         assert_eq!(arr[1]["message"], "first\n\nbody line\n");
 
-        let one = body_json(&handle("/api/api-log/commits/main?n=1"));
+        let one = body_json(&get("/api/api-log/commits/main?n=1"));
         assert_eq!(one.as_array().unwrap().len(), 1);
         // A tag name and a raw oid both resolve.
-        let tagged = body_json(&handle("/api/api-log/commit/v1"));
+        let tagged = body_json(&get("/api/api-log/commit/v1"));
         assert_eq!(tagged["oid"], store::oid_hex(&c1));
-        let by_oid = body_json(&handle(&format!("/api/api-log/commit/{}", store::oid_hex(&c1))));
+        let by_oid = body_json(&get(&format!("/api/api-log/commit/{}", store::oid_hex(&c1))));
         assert_eq!(by_oid["parents"].as_array().unwrap().len(), 0);
     }
 
     #[test]
     fn lists_trees_and_serves_blobs() {
         let (_, c2) = seed("api-tree");
-        let root = body_json(&handle("/api/api-tree/tree/HEAD"));
+        let root = body_json(&get("/api/api-tree/tree/HEAD"));
         assert_eq!(root["commit"], store::oid_hex(&c2));
         assert_eq!(root["path"], "");
         let entries = root["entries"].as_array().unwrap();
@@ -643,11 +417,11 @@ mod tests {
         assert_eq!(entries[1]["mode"], "100644");
 
         // Percent-decoded path, trailing slash tolerated.
-        let sub = body_json(&handle("/api/api-tree/tree/HEAD/sub%20dir/"));
+        let sub = body_json(&get("/api/api-tree/tree/HEAD/sub%20dir/"));
         assert_eq!(sub["path"], "sub dir");
         assert_eq!(sub["entries"][0]["name"], "b.txt");
 
-        let blob = handle("/api/api-tree/blob/HEAD/sub%20dir/b.txt");
+        let blob = get("/api/api-tree/blob/HEAD/sub%20dir/b.txt");
         assert_eq!(blob.status_code, 200);
         assert_eq!(blob.body, b"bravo\n");
         assert_eq!(header(&blob, "Content-Type"), Some("text/plain; charset=utf-8"));
@@ -657,145 +431,14 @@ mod tests {
 
         // A slash in a branch name travels percent-encoded as one segment.
         store::set_ref("api-tree", "refs/heads/feature/login", c2).unwrap();
-        let slashy = handle("/api/api-tree/tree/feature%2Flogin/sub%20dir");
+        let slashy = get("/api/api-tree/tree/feature%2Flogin/sub%20dir");
         assert_eq!(slashy.status_code, 200, "{}", String::from_utf8_lossy(&slashy.body));
         assert_eq!(body_json(&slashy)["path"], "sub dir");
-        assert_eq!(handle("/api/api-tree/commit/feature%2Flogin").status_code, 200);
+        assert_eq!(get("/api/api-tree/commit/feature%2Flogin").status_code, 200);
 
         // Old commit sees the old tree.
-        let old = body_json(&handle("/api/api-tree/tree/v1"));
+        let old = body_json(&get("/api/api-tree/tree/v1"));
         assert_eq!(old["entries"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn tenancy_views() {
-        let (_, c2) = seed("api-ten");
-        let owner = Principal::from_slice(&[7; 8]);
-        let voter = Principal::from_slice(&[8; 8]);
-        tenancy::credit(&owner, 10_000_000_000);
-        tenancy::create_repo("api-ten-owned", &owner, false).unwrap();
-        tenancy::add_member("api-ten-owned", &owner, false, voter, tenancy::Role::Voter).unwrap();
-
-        let legacy = body_json(&handle("/api/api-ten/info"));
-        assert_eq!(legacy["exempt"], true);
-        assert!(legacy["owner"].is_null());
-        let owned = body_json(&handle("/api/api-ten-owned/info"));
-        assert_eq!(owned["owner"], owner.to_text());
-        assert_eq!(owned["members"][0]["role"], "voter");
-        assert_eq!(owned["exempt"], false);
-        assert_eq!(owned["governed"], false);
-        assert_eq!(body_json(&handle("/api/api-ten-owned/proposals")).as_array().unwrap().len(), 0);
-
-        let acct = body_json(&handle(&format!("/api/account/{}", owner.to_text())));
-        assert_eq!(acct["balance"], 10_000_000_000u64 - tenancy::pricing().create_repo);
-        assert_eq!(acct["repos"][0], "api-ten-owned");
-        assert_eq!(handle("/api/account/not-a-principal").status_code, 400);
-
-        assert_eq!(body_json(&handle("/api/pricing"))["push_base"], tenancy::pricing().push_base);
-        // Votes on the seeded repo's tip (an object that exists): none yet,
-        // and the legacy repo requires none.
-        let v = body_json(&handle(&format!("/api/api-ten/votes/{}", store::oid_hex(&c2))));
-        assert_eq!(v["ballots"].as_array().unwrap().len(), 0);
-        assert_eq!((v["required"].as_u64(), v["reached"].as_bool()), (Some(0), Some(true)));
-        assert_eq!(handle("/api/api-ten-owned/votes/not-an-oid").status_code, 400);
-
-        // On the owned repo: an approval and an objection with its reason,
-        // and the count they leave: 1 - 1 against a threshold of 1. Objects
-        // are shared across repos, so the seeded commit stands in.
-        let hex = store::oid_hex(&c2);
-        tenancy::set_required_votes("api-ten-owned", &owner, false, 1).unwrap();
-        tenancy::cast_ballot("api-ten-owned", &owner, &hex, tenancy::Vote::Approve, None).unwrap();
-        tenancy::cast_ballot("api-ten-owned", &voter, &hex, tenancy::Vote::Object, Some("needs a test".into())).unwrap();
-        let v = body_json(&handle(&format!("/api/api-ten-owned/votes/{hex}")));
-        assert_eq!(
-            (v["approvals"].as_u64(), v["objections"].as_u64(), v["required"].as_u64(), v["reached"].as_bool()),
-            (Some(1), Some(1), Some(1), Some(false))
-        );
-        let ballots = v["ballots"].as_array().unwrap();
-        let obj = ballots.iter().find(|b| b["principal"] == voter.to_text()).unwrap();
-        assert_eq!((obj["decision"].as_str(), obj["approve"].as_bool()), (Some("object"), Some(false)));
-        assert_eq!(obj["reason"], "needs a test");
-        let yes = ballots.iter().find(|b| b["principal"] == owner.to_text()).unwrap();
-        assert_eq!((yes["decision"].as_str(), yes["approve"].as_bool()), (Some("approve"), Some(true)));
-        assert!(yes["reason"].is_null());
-
-        assert_eq!((obj["counts"].as_bool(), yes["counts"].as_bool()), (Some(true), Some(true)));
-
-        // The objector leaves the policy: the ballot stays on record, marked
-        // as no longer counting, and the count goes on without it.
-        tenancy::remove_member("api-ten-owned", &owner, false, voter).unwrap();
-        let v = body_json(&handle(&format!("/api/api-ten-owned/votes/{hex}")));
-        assert_eq!(
-            (v["approvals"].as_u64(), v["objections"].as_u64(), v["reached"].as_bool()),
-            (Some(1), Some(0), Some(true))
-        );
-        let ballots = v["ballots"].as_array().unwrap();
-        let obj = ballots.iter().find(|b| b["principal"] == voter.to_text()).unwrap();
-        assert_eq!((obj["decision"].as_str(), obj["counts"].as_bool()), (Some("object"), Some(false)));
-        let yes = ballots.iter().find(|b| b["principal"] == owner.to_text()).unwrap();
-        assert_eq!(yes["counts"], true);
-
-        // Governed: info says so, and a pending policy change is listed with
-        // its ballots and the candid variant as JSON.
-        tenancy::set_app_canister("api-ten-owned", Principal::from_slice(&[6; 8])).unwrap();
-        tenancy::mark_governed("api-ten-owned", &owner).unwrap();
-        assert_eq!(body_json(&handle("/api/api-ten-owned/info"))["governed"], true);
-        // The owner is the one approver and K = 1: each approval applies at
-        // once, nothing pending.
-        tenancy::propose_policy_change("api-ten-owned", &owner, tenancy::PolicyChange::AddVoter { principal: voter }, tenancy::Vote::Approve, None).unwrap();
-        tenancy::propose_policy_change("api-ten-owned", &owner, tenancy::PolicyChange::RequiredVotes { k: 2 }, tenancy::Vote::Approve, None).unwrap();
-        assert_eq!(body_json(&handle("/api/api-ten-owned/proposals")).as_array().unwrap().len(), 0);
-        // With K = 2 a proposal waits, and is listed.
-        let third = Principal::from_slice(&[5; 8]);
-        tenancy::propose_policy_change("api-ten-owned", &voter, tenancy::PolicyChange::AddVoter { principal: third }, tenancy::Vote::Approve, Some("two eyes".into())).unwrap();
-        let props = body_json(&handle("/api/api-ten-owned/proposals"));
-        let props = props.as_array().unwrap();
-        assert_eq!(props.len(), 1);
-        assert_eq!(props[0]["change"]["AddVoter"]["principal"], third.to_text());
-        assert_eq!((props[0]["approvals"].as_u64(), props[0]["required"].as_u64(), props[0]["reached"].as_bool()), (Some(1), Some(2), Some(false)));
-        assert_eq!(props[0]["ballots"][0]["reason"], "two eyes");
-    }
-
-    #[test]
-    fn deploys_report_what_was_installed_not_the_tip() {
-        let (c1, c2) = seed("api-dep");
-        let empty = body_json(&handle("/api/api-dep/deploys"));
-        assert!(empty["config"].is_null());
-        assert!(empty["status"].is_null());
-        assert_eq!(empty["history"].as_array().unwrap().len(), 0);
-
-        let target = Principal::from_slice(&[9; 8]).to_text();
-        jobs::set_config("api-dep", target.clone(), "app.wasm".into(), false).unwrap();
-        let cfg = jobs::get_config("api-dep").unwrap();
-        // c1 was installed; c2 (the tip) was pushed later and failed.
-        deploy::record("api-dep", &cfg, &deploy::DeployStatus {
-            commit: store::oid_hex(&c1),
-            ok: true,
-            message: format!("install to {target}"),
-            wasm_len: 7,
-            wasm_sha256: "ab".repeat(32),
-        });
-        deploy::record("api-dep", &cfg, &deploy::DeployStatus {
-            commit: store::oid_hex(&c2),
-            ok: false,
-            message: "install_code: rejected".into(),
-            wasm_len: 0,
-            wasm_sha256: String::new(),
-        });
-
-        let v = body_json(&handle("/api/api-dep/deploys"));
-        assert_eq!(v["config"]["target"], target);
-        assert_eq!(v["config"]["source_path"], "app.wasm");
-        assert_eq!(v["config"]["mode"], "upgrade");
-        let h = v["history"].as_array().unwrap();
-        assert_eq!(h.len(), 2);
-        assert_eq!(h[0]["commit"], store::oid_hex(&c1));
-        assert_eq!(h[0]["target"], target);
-        assert_eq!(h[0]["ok"], true);
-        assert_eq!(h[0]["wasm_sha256"], "ab".repeat(32));
-        assert_eq!(h[1]["commit"], store::oid_hex(&c2));
-        assert_eq!(h[1]["ok"], false);
-        assert_eq!(handle("/api/nope/deploys").status_code, 404);
     }
 
     #[test]
@@ -812,7 +455,7 @@ mod tests {
             ("/api/api-err/blob/HEAD/%zz", 400),
             ("/api/", 404),
         ] {
-            let res = handle(url);
+            let res = get(url);
             assert_eq!(res.status_code, status, "{url}");
             assert_eq!(header(&res, "Content-Type"), Some("application/json"), "{url}");
             assert!(body_json(&res)["error"].is_string(), "{url}");

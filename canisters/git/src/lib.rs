@@ -5,6 +5,7 @@
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
 mod api;
+mod api_authority;
 // The compiler crate's modules, under the names this crate has always used.
 use ic_git_compiler::{compile, interp, lang};
 mod apps;
@@ -14,6 +15,7 @@ mod consent;
 mod deploy;
 mod evm;
 mod feed;
+mod httpjson;
 mod fleet;
 // Proofs that a blob is what a commit holds; queued deploy jobs carry them
 // (docs/CANISTER_SPLIT.md, phase 2).
@@ -233,7 +235,8 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         } => http::upgrade_response(),
         Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
         Route::Site { repo, path } => site::serve(&repo, &path),
-        Route::Api { url } => api::handle(&url),
+        // The authority's routes first, then the git side's.
+        Route::Api { url } => api_authority::handle(&url).unwrap_or_else(|| api::handle(&url)),
         Route::Feed { repo } => {
             let host = req
                 .headers
