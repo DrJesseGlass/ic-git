@@ -12,16 +12,9 @@
 use crate::store;
 use candid::Principal;
 use ic_multisig::Subject;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Who may push to a repo: its owner and its writers. Operators may too,
-/// by each canister's own list.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct PushPolicy {
-    pub writers: Vec<Principal>,
-    pub require_signed_push: bool,
-}
+pub use ic_git_types::git_side::PushPolicy;
 
 fn push_key(repo: &str) -> String {
     format!("mirror:push:{repo}")

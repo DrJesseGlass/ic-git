@@ -36,6 +36,7 @@ ed25519-dalek = { version = "2", default-features = false }
 
 # The workspace crates of docs/CANISTER_SPLIT.md, phase 2 step 4: linked
 # into this one canister until phase 3 cuts the boundary.
+ic-git-authority = { path = "../../crates/authority" }
 ic-git-common = { path = "../../crates/common" }
 ic-git-compiler = { path = "../../crates/compiler" }
 ic-git-git = { path = "../../crates/git" }
@@ -50,5 +51,6 @@ k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc
 
 [dev-dependencies]
 # The shared crates' test hooks (a settable clock), for tests only.
+ic-git-authority = { path = "../../crates/authority", features = ["testing"] }
 ic-git-common = { path = "../../crates/common", features = ["testing"] }
 ic-git-git = { path = "../../crates/git", features = ["testing"] }

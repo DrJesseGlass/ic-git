@@ -87,7 +87,7 @@ const report = (ok, label, detail) => {
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
 // --- entrypoint reference scan (check E) -------------------------------------
-// Port of canisters/git/src/site.rs::unverifiable_subresource; the two must
+// Port of crates/git/src/site.rs::unverifiable_subresource; the two must
 // track each other. Returns a reason string when the entrypoint names a
 // subresource the browser will not enforce, else null. Same bias as the
 // canister: every ambiguity refuses, because a false refusal costs one edit

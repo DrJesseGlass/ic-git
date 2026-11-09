@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod attest;
+pub mod for_authority;
 pub mod gitproof;
 pub mod jobs;
 pub mod mirror;

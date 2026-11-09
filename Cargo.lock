@@ -522,6 +522,7 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-timers",
  "ic-dev-kit-rs",
+ "ic-git-authority",
  "ic-git-common",
  "ic-git-compiler",
  "ic-git-git",
@@ -677,6 +678,30 @@ dependencies = [
  "serde",
  "strum",
  "strum_macros",
+]
+
+[[package]]
+name = "ic-git-authority"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "candid",
+ "futures",
+ "hex",
+ "ic-cdk",
+ "ic-cdk-timers",
+ "ic-dev-kit-rs",
+ "ic-git-common",
+ "ic-git-compiler",
+ "ic-git-git",
+ "ic-git-types",
+ "ic-multisig",
+ "ic-stable-structures",
+ "k256",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sha3",
 ]
 
 [[package]]

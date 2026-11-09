@@ -4,37 +4,23 @@
 //! refs + admin API) plus the info/refs advertisement, so `git ls-remote`
 //! works against seeded repos. upload-pack / receive-pack are stubs.
 
-mod api_authority;
 // The compiler crate's modules, under the names this crate has always used.
 use ic_git_compiler::{compile, interp, lang};
 // The shared crate, at the paths every module already names (crate::kv, ...).
 use ic_git_common::httpjson::git_response;
-use ic_git_common::{clock, httpjson, kv, memory};
+use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git), likewise.
 use ic_git_git::{api, attest, jobs, mirror, pack, receive, signed_push, site, smart_http, store, tokens};
-#[cfg(test)]
-use ic_git_git::gitproof;
-mod apps;
+// The authority (crates/authority), likewise.
+use ic_git_authority::{api_authority, apps, deploy, evm, feed, icp, ledger, names, provenance, sol, tenancy, to_git};
 #[cfg(test)]
 mod both_sides;
 mod consent;
 #[cfg(test)]
 mod fixtures;
-mod deploy;
-mod evm;
-mod feed;
 mod fleet;
 // Proofs that a blob is what a commit holds; queued deploy jobs carry them
 // (docs/CANISTER_SPLIT.md, phase 2).
-mod icp;
-mod ledger;
-mod names;
-mod provenance;
-mod records;
-mod rpc_common;
-mod sol;
-mod tenancy;
-mod to_git;
 
 use base64::Engine;
 use ic_dev_kit_rs::auth;
@@ -47,8 +33,16 @@ use store::ObjectType;
 
 // --- lifecycle --------------------------------------------------------------
 
+/// The authority reaches the git side only through the GitSide interface
+/// (to_git.rs); in this one canister, that is the git crate itself. Done
+/// first in init and post_upgrade, before anything can ask.
+fn install_git_side() {
+    to_git::install(&ic_git_git::for_authority::Git);
+}
+
 #[ic_cdk::init]
 fn init() {
+    install_git_side();
     auth::init_with_caller();
     store::init_schema_version();
     tenancy::arm_rent_timer();
@@ -63,6 +57,7 @@ fn pre_upgrade() {
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
+    install_git_side();
     store::check_schema_version();
     auth::init_from_saved(kv::load_auth_snapshot());
     // Timers do not survive upgrades; re-arm the drain timer if the queue

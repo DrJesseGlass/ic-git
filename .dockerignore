@@ -10,8 +10,9 @@ target
 node_modules
 .git
 
-# Documentation cannot reach the wasm (nothing in canisters/ uses include_str!
-# or include_bytes!), but it sits above the build layer in COPY, so without
+# Documentation cannot reach the wasm (nothing compiled into it, in canisters/
+# or crates/, uses include_str! or include_bytes!; only tests do), but it sits
+# above the build layer in COPY, so without
 # these a one-word edit to a design doc invalidates the cache and forces a full
 # 139-crate wasm32 release rebuild.
 docs
