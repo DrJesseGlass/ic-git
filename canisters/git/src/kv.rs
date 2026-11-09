@@ -13,14 +13,13 @@
 //! Deliberately not generic over a backend trait: indirection bought before
 //! it is needed.
 
-use crate::store;
 use ic_dev_kit_rs::storage;
 use ic_stable_structures::StableBTreeMap;
 use std::cell::RefCell;
 
 thread_local! {
-    static META: RefCell<StableBTreeMap<String, Vec<u8>, store::Memory>> =
-        RefCell::new(StableBTreeMap::init(store::meta_memory()));
+    static META: RefCell<StableBTreeMap<String, Vec<u8>, crate::memory::Memory>> =
+        RefCell::new(StableBTreeMap::init(crate::memory::get(crate::memory::MEM_META)));
 }
 
 /// Read a JSON-encoded value. `None` if absent **or undecodable** -- the two

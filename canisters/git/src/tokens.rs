@@ -34,7 +34,7 @@
 //! one by id without holding the token.
 
 use crate::store;
-use crate::tenancy::now_ns;
+use crate::clock::now_ns;
 use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 
@@ -438,7 +438,7 @@ pub fn migrate() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenancy::set_test_now;
+    use crate::clock::set_test_now;
 
     const T0: u64 = 1_000 * DAY_NS;
 

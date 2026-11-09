@@ -20,7 +20,7 @@ use ic_dev_kit_rs::http::HttpResponse;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::store;
+use ic_git_types::oid::{oid_hex, Oid};
 use crate::tenancy::{self, Vote};
 
 /// The most events kept per feed.
@@ -136,7 +136,7 @@ fn one(feed: &Feed, kind: &'static str, title: String, detail: String, subject: 
     append(
         feed,
         vec![New {
-            at_ns: tenancy::now_ns(),
+            at_ns: crate::clock::now_ns(),
             kind,
             title,
             detail,
@@ -179,16 +179,15 @@ fn with_reason(text: String, reason: Option<&str>) -> String {
 
 // --- repo events ------------------------------------------------------------
 
-/// After a push: the deploy branch moved to a commit the repo's voters have
-/// not approved. Nothing for a repo that requires no votes, or a push that
-/// left the deploy branch where it was.
-pub fn after_push(repo: &str, tip_before: Option<store::Oid>) {
-    let Some(branch) = store::head_target(repo) else { return };
-    let Some(tip) = store::get_ref(repo, &branch) else { return };
+/// After a push (section 4's notify, from the git side): the deploy branch
+/// `branch` moved from `tip_before` to `tip`, a commit the repo's voters
+/// have not approved. Nothing for a repo that requires no votes, or a push
+/// that left the deploy branch where it was.
+pub fn after_push(repo: &str, branch: &str, tip_before: Option<Oid>, tip: Oid) {
     if tip_before.as_ref() == Some(&tip) {
         return;
     }
-    let hex = store::oid_hex(&tip);
+    let hex = oid_hex(&tip);
     let Some(t) = tenancy::tally(repo, &hex) else { return };
     if t.required == 0 || t.reached {
         return;
@@ -615,7 +614,7 @@ pub async fn poll_governor() -> Result<u64, String> {
 pub fn serve(repo: Option<&str>, host: Option<&str>) -> HttpResponse {
     let feed = match repo {
         None => Feed::Canister,
-        Some(r) if store::repo_exists(r) => Feed::Repo(r.to_string()),
+        Some(r) if crate::to_git::repo_exists(r) => Feed::Repo(r.to_string()),
         Some(_) => return crate::git_response(404, "text/plain", b"no such repo\n".to_vec()),
     };
     let canister = self_id();
@@ -647,7 +646,7 @@ fn atom(feed: &Feed, events: &[Event], canister: &str, base: &str) -> String {
         Feed::Repo(r) => format!("urn:ic-git:{canister}:repo:{r}"),
         Feed::Canister => format!("urn:ic-git:{canister}"),
     };
-    let updated = events.last().map_or_else(tenancy::now_ns, |e| e.at_ns);
+    let updated = events.last().map_or_else(crate::clock::now_ns, |e| e.at_ns);
     let mut s = String::with_capacity(1024 + events.len() * 512);
     s.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     s.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
@@ -714,6 +713,7 @@ pub fn rfc3339(ns: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store;
 
     fn p(n: u8) -> Principal {
         Principal::from_slice(&[n; 4])
@@ -746,7 +746,7 @@ mod tests {
 
         let feed = Feed::Repo("feed-a".into());
         for i in 0..(MAX_EVENTS + 5) {
-            tenancy::set_test_now(1_700_000_000_000_000_000 + i as u64 * 1_000_000_000);
+            crate::clock::set_test_now(1_700_000_000_000_000_000 + i as u64 * 1_000_000_000);
             one(&feed, "ballot", format!("event {i}"), "<detail & more>".into(), None, Some(&p(1)));
         }
         let res = serve(Some("feed-a"), Some("localhost:4943"));
@@ -895,15 +895,15 @@ mod tests {
         let commit = store::put_object(store::ObjectType::Commit, b"tree 0000000000000000000000000000000000000000\n\nfirst\n");
         let before = store::get_ref("feed-c", "refs/heads/main");
         store::set_ref("feed-c", "refs/heads/main", commit).unwrap();
-        after_push("feed-c", before.clone());
-        after_push("feed-c", Some(commit)); // the branch did not move
+        after_push("feed-c", "refs/heads/main", before, commit);
+        after_push("feed-c", "refs/heads/main", Some(commit), commit); // the branch did not move
         let ev = events(&Feed::Repo("feed-c".into()));
         assert_eq!(ev.len(), 1, "{ev:?}");
         assert_eq!(ev[0].kind, "awaiting");
         assert!(ev[0].detail.contains("needs 0 of 1"), "{}", ev[0].detail);
 
         let hex = store::oid_hex(&commit);
-        let was = tenancy::tally("feed-c", &hex).map_or(false, |t| t.reached);
+        let was = tenancy::tally("feed-c", &hex).is_some_and(|t| t.reached);
         let t = tenancy::cast_ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right".into())).unwrap();
         ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right"), &t, was);
         let ev = events(&Feed::Repo("feed-c".into()));

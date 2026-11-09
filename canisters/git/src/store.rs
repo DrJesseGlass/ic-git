@@ -1,4 +1,5 @@
-//! Stable-memory object store, refs, and repo metadata.
+//! Stable-memory object store, refs, repos and push tokens: the git side.
+//! The authority's maps are in records.rs, the layout in memory.rs.
 //!
 //! Objects are global (content-addressed, shared across repos); refs and repo
 //! metadata are namespaced by repo name. Object values are stored as a 1-byte
@@ -9,35 +10,15 @@
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
-use ic_stable_structures::storable::Blob;
-use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap};
+use ic_stable_structures::StableBTreeMap;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::cell::RefCell;
 use std::io::{Read, Write};
 
-pub(crate) type Memory = VirtualMemory<DefaultMemoryImpl>;
+use crate::memory::Memory;
 
-/// 20-byte SHA-1 object id.
-pub type Oid = Blob<20>;
-
-pub fn parse_oid(hex: &str) -> Result<Oid, String> {
-    let bytes = hex::decode(hex).map_err(|e| format!("bad oid: {e}"))?;
-    // Length must be checked here, not left to Blob: `Blob<N>` is a MAXIMUM,
-    // so `try_from` accepts anything 20 bytes or shorter and this function's
-    // own error message would be a lie. A short Oid reaching the store (via
-    // set_ref, say) would then violate the 20-byte invariant that
-    // provenance::commit20 and the registry's bytes20 both depend on.
-    if bytes.len() != 20 {
-        return Err("oid must be 20 bytes".to_string());
-    }
-    Oid::try_from(bytes.as_slice()).map_err(|_| "oid must be 20 bytes".to_string())
-}
-
-pub fn oid_hex(oid: &Oid) -> String {
-    hex::encode(oid.as_slice())
-}
+pub use ic_git_types::oid::{oid_hex, parse_oid, Oid};
 
 /// Git object type; discriminants are the packfile type codes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,156 +60,37 @@ impl ObjectType {
     }
 }
 
-const MEM_OBJECTS: MemoryId = MemoryId::new(0);
-const MEM_REFS: MemoryId = MemoryId::new(1);
-const MEM_REPOS: MemoryId = MemoryId::new(2);
-const MEM_META: MemoryId = MemoryId::new(3);
-const MEM_TOKENS: MemoryId = MemoryId::new(4);
-const MEM_ACCOUNTS: MemoryId = MemoryId::new(5);
-const MEM_REPO_META: MemoryId = MemoryId::new(6);
-const MEM_VOTES: MemoryId = MemoryId::new(7);
-const MEM_TOKEN_INDEX: MemoryId = MemoryId::new(8);
-const MEM_DEPLOY_JOBS: MemoryId = MemoryId::new(9);
-
 thread_local! {
-    static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
-        RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
-
     /// oid -> [pack type code][content len u32 LE][zlib(content)]
     /// The length prefix lets the pack writer emit the entry size header
     /// without inflating the object.
     static OBJECTS: RefCell<StableBTreeMap<Oid, Vec<u8>, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_OBJECTS))),
+        StableBTreeMap::init(crate::memory::get(crate::memory::MEM_OBJECTS)),
     );
 
     /// "<repo>\0<refname>" -> oid
     static REFS: RefCell<StableBTreeMap<String, Oid, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_REFS))),
+        StableBTreeMap::init(crate::memory::get(crate::memory::MEM_REFS)),
     );
 
     /// repo name -> HEAD symref target (e.g. "refs/heads/main")
     static REPOS: RefCell<StableBTreeMap<String, String, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_REPOS))),
+        StableBTreeMap::init(crate::memory::get(crate::memory::MEM_REPOS)),
     );
-
 
     /// hex(sha256(push token)) -> the token's record (tokens.rs owns the
     /// value format; a bare repo name before expiry existed).
     static TOKENS: RefCell<StableBTreeMap<String, String, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_TOKENS))),
-    );
-
-    /// Tenancy (see tenancy.rs): principal text -> JSON account.
-    static ACCOUNTS: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_ACCOUNTS))),
-    );
-
-    /// Tenancy: repo name -> JSON repo metadata (owner, members, rent state).
-    static REPO_META: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_REPO_META))),
-    );
-
-    /// Tenancy: "<repo>\0<subject key>" -> JSON list of ic_multisig::Approval
-    /// (tenancy.rs owns the key and the record shape).
-    static VOTES: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_VOTES))),
+        StableBTreeMap::init(crate::memory::get(crate::memory::MEM_TOKENS)),
     );
 
     /// Secondary keys over TOKENS, so a repo's tokens and the expired ones
     /// are range reads rather than scans of every token (tokens.rs owns the
     /// key format).
     static TOKEN_INDEX: RefCell<StableBTreeMap<String, (), Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_TOKEN_INDEX))),
+        StableBTreeMap::init(crate::memory::get(crate::memory::MEM_TOKEN_INDEX)),
     );
 
-    /// A queued deploy job's payload: the bytes it deploys and their proofs
-    /// (deploy.rs owns the key and the encoding). Not in META, because a
-    /// payload can hold a whole module.
-    static DEPLOY_JOBS: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DEPLOY_JOBS))),
-    );
-}
-
-// --- deploy job payloads -----------------------------------------------------
-
-pub fn deploy_job_put(key: &str, payload: Vec<u8>) {
-    DEPLOY_JOBS.with(|j| j.borrow_mut().insert(key.to_string(), payload));
-}
-
-/// Remove a job's payload and return it.
-pub fn deploy_job_take(key: &str) -> Option<Vec<u8>> {
-    DEPLOY_JOBS.with(|j| j.borrow_mut().remove(&key.to_string()))
-}
-
-pub fn deploy_job_has(key: &str) -> bool {
-    DEPLOY_JOBS.with(|j| j.borrow().contains_key(&key.to_string()))
-}
-
-pub fn deploy_job_keys() -> Vec<String> {
-    DEPLOY_JOBS.with(|j| j.borrow().keys().collect())
-}
-
-// --- tenancy maps (JSON values; tenancy.rs owns the schemas) -----------------
-
-pub fn account_get<T: serde::de::DeserializeOwned>(principal: &str) -> Option<T> {
-    ACCOUNTS.with(|a| a.borrow().get(&principal.to_string()))
-        .and_then(|b| serde_json::from_slice(&b).ok())
-}
-
-pub fn account_set<T: serde::Serialize>(principal: &str, value: &T) {
-    if let Ok(b) = serde_json::to_vec(value) {
-        ACCOUNTS.with(|a| a.borrow_mut().insert(principal.to_string(), b));
-    }
-}
-
-pub fn repo_meta_get<T: serde::de::DeserializeOwned>(repo: &str) -> Option<T> {
-    REPO_META.with(|m| m.borrow().get(&repo.to_string()))
-        .and_then(|b| serde_json::from_slice(&b).ok())
-}
-
-pub fn repo_meta_set<T: serde::Serialize>(repo: &str, value: &T) {
-    if let Ok(b) = serde_json::to_vec(value) {
-        REPO_META.with(|m| m.borrow_mut().insert(repo.to_string(), b));
-    }
-}
-
-/// Every repo that has tenancy metadata, with it decoded.
-pub fn repo_meta_all<T: serde::de::DeserializeOwned>() -> Vec<(String, T)> {
-    REPO_META.with(|m| {
-        m.borrow()
-            .iter()
-            .filter_map(|e| serde_json::from_slice(&e.value()).ok().map(|v| (e.key().clone(), v)))
-            .collect()
-    })
-}
-
-fn vote_key(repo: &str, subject_key: &str) -> String {
-    format!("{repo}\0{subject_key}")
-}
-
-pub fn votes_get<T: serde::de::DeserializeOwned>(repo: &str, subject_key: &str) -> Option<T> {
-    VOTES.with(|v| v.borrow().get(&vote_key(repo, subject_key)))
-        .and_then(|b| serde_json::from_slice(&b).ok())
-}
-
-/// The subject keys of a repo's stored ballots that start with `prefix`
-/// (`"commit:"`, say).
-pub fn vote_subject_keys(repo: &str, prefix: &str) -> Vec<String> {
-    let start = vote_key(repo, prefix);
-    let skip = vote_key(repo, "").len();
-    VOTES.with(|v| {
-        v.borrow()
-            .range(start.clone()..)
-            .take_while(|e| e.key().starts_with(&start))
-            .map(|e| e.key()[skip..].to_string())
-            .collect()
-    })
-}
-
-pub fn votes_set<T: serde::Serialize>(repo: &str, subject_key: &str, value: &T) {
-    if let Ok(b) = serde_json::to_vec(value) {
-        VOTES.with(|v| v.borrow_mut().insert(vote_key(repo, subject_key), b));
-    }
 }
 
 // --- objects ----------------------------------------------------------------
@@ -337,48 +199,7 @@ pub fn has_object(oid: &Oid) -> bool {
 
 // --- repos & refs -----------------------------------------------------------
 
-/// Longest label a repo name may map to: ic-name-service's segment limit,
-/// and DNS's.
-pub const MAX_LABEL: usize = 63;
-
-/// ic-name-service's rule for a handle or a label: 1 to MAX_LABEL bytes of
-/// a-z, 0-9 and '-', not starting or ending with '-'.
-pub fn check_segment(what: &str, s: &str) -> Result<(), String> {
-    if s.is_empty() || s.len() > MAX_LABEL {
-        return Err(format!("{what} must be 1 to {MAX_LABEL} bytes"));
-    }
-    if !s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
-        return Err(format!("{what} may only contain a-z, 0-9 and '-'"));
-    }
-    if s.starts_with('-') || s.ends_with('-') {
-        return Err(format!("{what} may not start or end with '-'"));
-    }
-    Ok(())
-}
-
-/// The lower-kebab label a repo name maps to: lowercased, '.' and '_' made
-/// '-', runs of '-' collapsed, and '-' trimmed from both ends. "My_App"
-/// and "my-app" map to the same "my-app". Refused when the result breaks
-/// `check_segment` (empty, over MAX_LABEL bytes, or a character outside
-/// a-z, 0-9 and '-'). It is what the repo is announced under in
-/// ic-name-service (names.rs), whose names are lower kebab case only.
-pub fn repo_label(name: &str) -> Result<String, String> {
-    let mut label = String::with_capacity(name.len());
-    for c in name.chars() {
-        let c = match c {
-            '.' | '_' | '-' => '-',
-            c => c.to_ascii_lowercase(),
-        };
-        if !(c == '-' && label.ends_with('-')) {
-            label.push(c);
-        }
-    }
-    let label = label.trim_matches('-').to_string();
-    check_segment("label", &label).map_err(|e| {
-        format!("repo name '{name}' maps to the label '{label}' (lowercased, '.' and '_' as '-'): {e}")
-    })?;
-    Ok(label)
-}
+use ic_git_types::labels::repo_label;
 
 fn label_key(label: &str) -> String {
     format!("label:{label}")
@@ -554,14 +375,6 @@ pub fn list_refs(repo: &str) -> Vec<(String, Oid)> {
     })
 }
 
-// --- the META map --------------------------------------------------------------
-
-/// The memory behind the META map, which `kv.rs` owns: this module keeps
-/// the memory layout, kv keeps the bucket and its codec.
-pub(crate) fn meta_memory() -> Memory {
-    MEMORY_MANAGER.with(|m| m.borrow().get(MEM_META))
-}
-
 // --- schema version ----------------------------------------------------------
 
 /// Encoding version of OBJECTS values ([pack type code][content len u32 LE]
@@ -598,6 +411,7 @@ pub fn check_schema_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ic_git_types::labels::MAX_LABEL;
 
     #[test]
     fn repo_names_map_to_lower_kebab_labels() {

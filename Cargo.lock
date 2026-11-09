@@ -698,6 +698,7 @@ version = "0.1.0"
 dependencies = [
  "candid",
  "hex",
+ "ic-stable-structures",
  "serde",
  "sha1-checked",
 ]

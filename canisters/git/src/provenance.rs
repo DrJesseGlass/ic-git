@@ -1,74 +1,21 @@
-//! Resolving repo state into provenance records.
-//!
-//! The git-side half of the registry publish path: it answers "what commit and
-//! what artifact hash does this repo attest to?" by walking refs, trees, and
-//! blobs, then hands three plain values to `evm::registry_publish_record`,
-//! which signs and broadcasts. The dependency points one way -- git state
-//! resolves here, signing happens there -- which is what lets the signing half
-//! become its own canister. See docs/CANISTER_SPLIT.md.
+//! Publishing provenance records: the authority's half of the registry path
+//! (docs/CANISTER_SPLIT.md, section 4). It builds records from values the
+//! deploy queue or a controller already holds and hands them to
+//! `evm::registry_publish_record`, which signs and broadcasts. The records
+//! that must be resolved out of a repo -- the served site, the release
+//! commit's artifact -- come from the git side (attest.rs).
 
-use crate::deploy;
 use crate::evm::{self, TxOutcome};
-use crate::site;
-use crate::store::Oid;
-use sha2::Digest;
+pub use ic_git_types::keys::{Record, CANISTER_KEY};
+use ic_git_types::keys::app_record_key;
+use ic_git_types::oid::{commit20, Oid};
 
-// Record keys come from the shared types crate, the one definition the
-// verifiers' copies are tested against.
-pub(crate) use ic_git_types::keys::CANISTER_KEY;
-use ic_git_types::keys::{app_record_key, artifact_record_key, site_record_key};
-
-/// A resolved provenance record: the registry key, the commit being attested,
-/// and the artifact hash bound to it.
-pub struct Record {
-    key: String,
-    commit: [u8; 20],
-    bundle: [u8; 32],
-}
-
-impl Record {
-    /// The module's single exit point to the signing side. The error says
-    /// whether the broadcast was attempted, which decides a refund.
-    pub async fn publish(&self) -> Result<TxOutcome, evm::SendError> {
-        let out = evm::registry_publish_record(&self.key, &self.commit, &self.bundle).await?;
-        crate::feed::published(&self.key, &hex::encode(self.commit), &out.tx_hash);
-        Ok(out)
-    }
-}
-
-/// The leading 20 bytes of an oid, which is what the registry stores.
-///
-/// Fallible on purpose. `Oid` is `Blob<20>`, but that is a *maximum* length --
-/// `Blob::try_from` only rejects slices longer than N -- so the type alone does
-/// not prove 20 bytes are present. `store::parse_oid` now enforces it, and
-/// every caller here resolves the object first, which is why this cannot fire
-/// today; returning an error rather than panicking keeps a future caller that
-/// skips those steps from trapping inside `deploy::run`, which is documented
-/// never to trap and whose queue would stop draining if it did.
-fn commit20(oid: &Oid) -> Result<[u8; 20], String> {
-    oid.as_slice()
-        .first_chunk::<20>()
-        .copied()
-        .ok_or_else(|| "bad oid length".to_string())
-}
-
-/// The deploy-artifact record for a commit: the bare repo name as key (no
-/// suffix -- that is what distinguishes it from the site record), the commit,
-/// and `bundle`, which must be the sha256 of the *decoded* bytecode. Hashing
-/// the decoded bytes rather than the hex text is what keeps this equal to the
-/// `bytecode_sha256` already in `evm_deploy_history`;
-/// `deploy::evm_artifact_hash` is the one function that derives it.
-///
-/// The hash is a parameter rather than something resolved here because the
-/// caller may already hold it -- the deploy queue does, from the bytes it just
-/// broadcast -- and re-deriving it would both redo the tree walk and open the
-/// window for a mid-deploy config edit to redirect the attestation.
-fn deploy_record(repo: &str, commit_oid: &Oid, bundle: [u8; 32]) -> Result<Record, String> {
-    Ok(Record {
-        key: artifact_record_key(repo),
-        commit: commit20(commit_oid)?,
-        bundle,
-    })
+/// The single exit point to the signing side. The error says whether the
+/// broadcast was attempted, which decides a refund.
+pub async fn publish(rec: &Record) -> Result<TxOutcome, evm::SendError> {
+    let out = evm::registry_publish_record(&rec.key, &rec.commit, &rec.bundle).await?;
+    crate::feed::published(&rec.key, &hex::encode(rec.commit), &out.tx_hash);
+    Ok(out)
 }
 
 /// The backend record for an install the deploy queue just made: the commit
@@ -105,52 +52,6 @@ pub fn canister_record(commit_hex: &str, module_sha256_hex: &str) -> Result<Reco
     })
 }
 
-/// Resolve the served-site record: the served commit (the deploy-branch tip,
-/// or with votes required the newest approved commit) and the sha256 of the
-/// served entrypoint blob (site root + index.html fallback -- byte-identical to
-/// what `/site/<repo>/` returns). Needs no EVM deploy config, because the
-/// artifact is a frontend file hashed as raw bytes, matching how the F2
-/// verifier hashes a served non-hex artifact.
-fn site_record(repo: &str) -> Result<Record, String> {
-    let (commit, served, body) = site::resolve_entry(repo, "")
-        .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html, approved if the repo requires votes)")?;
-    // Refuse to attest bytes `site::serve` would answer 413 for. Publishing
-    // one costs a real registry transaction and produces a record no verifier
-    // can ever check -- every fetch of the entrypoint fails before it can be
-    // hashed -- and the only repair is to shrink the bundle and republish.
-    if body.len() > site::MAX_BODY {
-        return Err(format!(
-            "site entrypoint is {} bytes, over the {} serving limit: it would be attested but never served",
-            body.len(),
-            site::MAX_BODY
-        ));
-    }
-    // Same principle, sharper failure: refuse an entrypoint whose hash a
-    // verifier could check and still be wrong. This record covers one blob, so
-    // an uncovered subresource lets a hostile gateway pair the honest
-    // entrypoint with malicious code and still pass the comparison -- the
-    // verifier reports verified, which is worse than reporting nothing.
-    // The scan also refuses what the extensions' pinned policy would stop at
-    // run time, so the advice covers both: `why` names which it was.
-    if let Some(why) = site::unverifiable_subresource(&served, &body) {
-        return Err(format!(
-            "{served}: {why}. This record attests only the entrypoint, so a \
-             referenced file is covered by nothing and a verifier would report \
-             verified while it went unchecked: inline it, or give a script \
-             integrity=\"sha384-...\" so the browser enforces it -- bundlers \
-             do not emit SRI by default, but their plugins do \
-             (vite-plugin-sri, webpack-subresource-integrity, rollup-plugin-sri). \
-             And what the extensions' pinned policy refuses (docs/EXTENSION.md) \
-             would publish and then be stopped: integrity does not admit it."
-        ));
-    }
-    Ok(Record {
-        key: site_record_key(repo),
-        commit: commit20(&commit)?,
-        bundle: sha2::Sha256::digest(&body).into(),
-    })
-}
-
 /// Publish a specific commit's deploy-artifact provenance, given its already
 /// resolved artifact hash. The deploy queue's auto-publish passes the commit it
 /// just deployed rather than the mutable tip, so a push landing mid-deploy
@@ -158,113 +59,29 @@ fn site_record(repo: &str) -> Result<Record, String> {
 /// and passes the hash of the bytes it broadcast, so nothing here re-reads the
 /// object store. That takes the auto-publish path off git state entirely,
 /// which is what docs/CANISTER_SPLIT.md section 6 needs it to be.
+///
+/// The record is `Record::artifact`, the same one the git side's
+/// `attest::tip_record` builds. `bundle` is the sha256 of the *decoded*
+/// bytecode, which keeps it equal to the `bytecode_sha256` already in
+/// `evm_deploy_history`; `jobs::evm_artifact_hash` is the one function that
+/// derives it. It is a parameter rather than resolved here because the
+/// re-derivation would redo the tree walk and open the window for a
+/// mid-deploy config edit to redirect the attestation.
 pub async fn publish_commit(
     repo: &str,
     commit_oid: &Oid,
     bundle: [u8; 32],
 ) -> Result<TxOutcome, String> {
     evm::require_publish_target()?;
-    Ok(deploy_record(repo, commit_oid, bundle)?.publish().await?)
-}
-
-/// The repo's release commit (`deploy::release_commit`: the tip, or with
-/// votes required the approved commit) as its deploy-artifact record, ready
-/// to publish. The operator entry point, and the only deploy-artifact path
-/// that resolves the hash out of the repo: there is no deploy in flight to
-/// inherit bytes from. Resolved before anything is charged, so every way the
-/// publish can fail short of the transaction itself fails for free.
-pub fn tip_record(repo: &str) -> Result<Record, String> {
-    evm::require_publish_target()?;
-    let cfg =
-        deploy::get_evm_config(repo).ok_or("repo has no EVM deploy config (nothing to hash)")?;
-    let commit_oid = deploy::release_commit(repo)?;
-    let bundle = deploy::evm_artifact_hash(&commit_oid, &cfg.source_path)?;
-    deploy_record(repo, &commit_oid, bundle)
-}
-
-/// The repo's served-site record, ready to publish; resolved before anything
-/// is charged, like `tip_record`.
-pub fn served_site_record(repo: &str) -> Result<Record, String> {
-    evm::require_publish_target()?;
-    site_record(repo)
+    Ok(publish(&Record::artifact(repo, commit_oid, bundle)?).await?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs;
     use crate::store::{self, ObjectType};
-
-    /// A site record's key is namespaced and its bundle is the raw served
-    /// bytes -- the two properties that keep it from clobbering, or being
-    /// clobbered by, the same repo's deploy-artifact record.
-    #[test]
-    fn site_record_is_namespaced_and_hashes_served_bytes() {
-        store::create_repo("provrepo").unwrap();
-        let body = b"<h1>hello</h1>";
-        let index = store::put_object(ObjectType::Blob, body);
-        let mut root = Vec::new();
-        root.extend_from_slice(b"100644 index.html\0");
-        root.extend_from_slice(index.as_slice());
-        let root_tree = store::put_object(ObjectType::Tree, &root);
-        let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&root_tree));
-        let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
-        let branch = store::head_target("provrepo").unwrap();
-        store::set_ref("provrepo", &branch, commit_oid).unwrap();
-        site::set_config("provrepo", String::new()).unwrap();
-
-        let rec = site_record("provrepo").expect("site record resolves");
-        assert_eq!(rec.key, "provrepo#site");
-        let expected: [u8; 32] = sha2::Sha256::digest(body).into();
-        assert_eq!(rec.bundle, expected);
-        assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
-    }
-
-    /// A repo with site config but nothing committed reports that, rather than
-    /// publishing a record over an empty or absent artifact. Configured on
-    /// purpose, so the failure is the missing entrypoint and not the missing
-    /// config.
-    #[test]
-    fn site_record_requires_an_entrypoint() {
-        store::create_repo("emptyrepo").unwrap();
-        site::set_config("emptyrepo", String::new()).unwrap();
-        assert!(site_record("emptyrepo").is_err());
-    }
-
-    /// A site record is refused when the entrypoint references a file the
-    /// record cannot cover, and allowed once the reference is enforceable.
-    /// Without this the publish succeeds, the verifier's hash comparison
-    /// passes, and the verdict says verified while unattested code runs.
-    #[test]
-    fn site_record_refuses_an_entrypoint_it_cannot_fully_cover() {
-        let commit_index = |repo: &str, html: &[u8]| {
-            let index = store::put_object(ObjectType::Blob, html);
-            let mut root = Vec::new();
-            root.extend_from_slice(b"100644 index.html\0");
-            root.extend_from_slice(index.as_slice());
-            let root_tree = store::put_object(ObjectType::Tree, &root);
-            let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&root_tree));
-            let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
-            let branch = store::head_target(repo).unwrap();
-            store::set_ref(repo, &branch, commit_oid).unwrap();
-        };
-
-        store::create_repo("srirepo").unwrap();
-        site::set_config("srirepo", String::new()).unwrap();
-
-        commit_index("srirepo", b"<script src=\"app.js\"></script>");
-        let err = site_record("srirepo")
-            .err()
-            .expect("must refuse an uncovered subresource");
-        assert!(err.contains("index.html"), "names the entrypoint: {err}");
-        assert!(err.contains("integrity"), "says how to fix it: {err}");
-
-        // Same page, reference now enforced by the browser: attestable.
-        commit_index(
-            "srirepo",
-            b"<script src=\"app.js\" integrity=\"sha384-x\"></script>",
-        );
-        assert!(site_record("srirepo").is_ok());
-    }
+    use sha2::Digest;
 
     /// An app record is namespaced like a site record and carries the
     /// installed module's hash as the queue reported it, so the registry
@@ -313,8 +130,8 @@ mod tests {
         let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&root_tree));
         let commit_oid = store::put_object(ObjectType::Commit, commit.as_bytes());
 
-        let bundle = deploy::evm_artifact_hash(&commit_oid, "contract.hex").expect("hash resolves");
-        let rec = deploy_record("hexrepo", &commit_oid, bundle).expect("record resolves");
+        let bundle = jobs::evm_artifact_hash(&commit_oid, "contract.hex").expect("hash resolves");
+        let rec = Record::artifact("hexrepo", &commit_oid, bundle).expect("record resolves");
         assert_eq!(rec.key, "hexrepo");
         assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
 

@@ -181,7 +181,7 @@ fn save_pending(all: &[PendingIcpDeposit]) {
 /// the ledger's allowance for a time slightly in the future.
 fn next_id() -> u64 {
     let last = crate::kv::get_json::<u64>(LAST_ID_KEY).unwrap_or(0);
-    let id = tenancy::now_ns().max(last.saturating_add(1));
+    let id = crate::clock::now_ns().max(last.saturating_add(1));
     crate::kv::set_json(LAST_ID_KEY, &id);
     id
 }
@@ -243,7 +243,7 @@ fn fail(id: u64, error: &str) {
             who: p.who,
             e8s: p.e8s,
             error: error.to_string(),
-            at_ns: tenancy::now_ns(),
+            at_ns: crate::clock::now_ns(),
             ledger: p.ledger,
             cmc: p.cmc,
         });
@@ -429,7 +429,7 @@ pub async fn deposit_from_icp(who: Principal, e8s: u64) -> Result<u64, String> {
         block_index: None,
         who,
         e8s,
-        at_ns: tenancy::now_ns(),
+        at_ns: crate::clock::now_ns(),
         last_error: None,
         ledger,
         cmc,
@@ -508,10 +508,10 @@ mod tests {
 
     #[test]
     fn ids_are_unique_even_within_one_instant() {
-        tenancy::set_test_now(1_000);
+        crate::clock::set_test_now(1_000);
         let (a, b) = (next_id(), next_id());
         assert_eq!((a, b), (1_000, 1_001));
-        tenancy::set_test_now(5_000);
+        crate::clock::set_test_now(5_000);
         assert_eq!(next_id(), 5_000);
     }
 

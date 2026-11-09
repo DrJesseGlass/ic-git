@@ -1245,7 +1245,7 @@ fn record(rec: EvmDeployRecord) -> Result<(), String> {
 /// gas limit that could pay for one (21k intrinsic + 32k for the CREATE).
 ///
 /// One definition, used from three places on purpose -- `deploy_bytecode`
-/// needs the config, while `require_deploy_target` lets `deploy::set_evm_config`
+/// needs the config, while `require_deploy_target` lets `jobs::set_evm_config`
 /// reject an unpayable config at configure time and lets `deploy::attempt_evm`
 /// fail *before* it walks the repo tree and decodes the artifact. Same shape as
 /// `publish_target` / `require_publish_target` below.
@@ -1267,7 +1267,7 @@ pub fn require_deploy_target(gas_limit: u64) -> Result<(), String> {
 /// binding, success or failure.
 ///
 /// Takes decoded bytes rather than hex text: hex is an artifact-format concern
-/// of the git side (`deploy::decode_bytecode_hex`), and bytes-plus-scalars is
+/// of the git side (`ic_git_types::deploy::decode_bytecode_hex`), and bytes-plus-scalars is
 /// exactly the signer-side message docs/CANISTER_SPLIT.md section 4 specifies.
 /// `repo` and `commit` are empty for direct deploys outside the E2 git path.
 pub async fn deploy_bytecode(

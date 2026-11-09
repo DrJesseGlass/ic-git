@@ -280,13 +280,33 @@ canister does what:
    `tools/verify.mjs` and `core/verifier.js` to them) and
    `crates/compiler` (`ic-git-compiler`: `compile`, `lang`, `interp`), both
    pure and linked into the canister crate; and both deferred items. The
-   prover (`gitproof::prove`) stays with the object store. Second half
-   open: `authority` and `git` cannot be crates yet, because the modules
-   still call across the line in both directions -- `site`, `smart_http`,
-   `tokens` and `api` read `tenancy` for writers and approvals, `tenancy`
-   reads `deploy`'s config, and `deploy`, `provenance`, `evm` and `feed`
-   call one another. Those calls are what step 5 puts behind interfaces,
-   so step 5 comes before the second half.
+   prover (`gitproof::prove`) stays with the object store. Second half,
+   first the one-sided modules, DONE: inside the one crate, every module
+   belongs to one side, and the authority reaches the git side only
+   through `to_git.rs`.
+   - `memory.rs` holds the memory manager and the table of memory ids;
+     `records.rs` the authority's maps (accounts, repo metadata, ballots,
+     deploy-job payloads); `store.rs` the objects, refs, repos and tokens.
+     The ids are unchanged, so nothing migrates.
+   - `deploy.rs` splits: `jobs.rs` (git) holds the configs and builds a
+     job from a commit; `deploy.rs` (authority) queues, runs and records.
+     `enqueue` takes the job lazily, so a duplicate is still not built.
+   - `provenance.rs` splits: `attest.rs` (git) resolves the site and
+     release records; `provenance.rs` (authority) publishes them.
+   - `api.rs` splits: `api.rs` (git) serves repos, refs, commits, trees and
+     blobs; `api_authority.rs` serves pricing, accounts, a repo's tenancy,
+     ballots, proposals and deploys. `/api` asks the authority half first.
+   - Shared, owned by neither side: `clock.rs` (`now_ns`), `kv.rs`,
+     `httpjson.rs`, and in `ic_git_types` the wire structs (`deploy`), `oid`
+     and `labels`.
+   - `to_git.rs`, the authority's whole view of the git side: a repo's
+     deploy config, the two mirror writers, whether a repo exists, the
+     checks and creation of a new repo, whether a commit exists, and who
+     holds a label. Each becomes a message in phase 3.
+   - `feed::after_push` takes the branch and both tips from the push glue
+     in `lib.rs`, which, with `consent.rs`, is the only code that calls
+     both sides.
+   Still open: move the two sides into `authority` and `git` crates.
 5. **The mirrors.** DONE. Site serving and push authorization read the
    approved commits and the writers through the interfaces they will have
    across the boundary, so phase 3 swaps a function call for a message.
@@ -299,10 +319,10 @@ canister does what:
    token sweep after a membership change moved into the push-policy
    mirror, so losing write access revokes a principal's tokens as the
    change is saved. Operators are not mirrored: each canister keeps its
-   own. What the git side still reads of the authority directly --
-   `tenancy::now_ns` for the clock, `charge_push`, and `api.rs`'s
-   accounts, ballots and proposals -- is either section 4's interface
-   already or the authority's half of the API.
+   own. What the git side still read of the authority directly after this
+   step -- the clock, `charge_push` and the authority's half of `/api` --
+   step 4's second half moved to `clock.rs`, the push glue and
+   `api_authority.rs`.
 
 **The deploy leg's hex seam -- DONE, ahead of the crate boundary.** Phase 1 had
 established the *publish* half of section 4 but not the *deploy* half:
@@ -310,15 +330,15 @@ established the *publish* half of section 4 but not the *deploy* half:
 `provenance.rs` called the then-`pub` `evm::decode_bytecode_hex`, so hex
 decoding sat on both sides of the future boundary. Now:
 
-- `decode_bytecode_hex` lives in `deploy.rs`, next to the resolver
-  (`evm_artifact_bytecode`, which returns decoded bytes, and
-  `evm_artifact_hash`, the one derivation of the bundle hash).
+- `decode_bytecode_hex` lives in `ic_git_types::deploy`; the resolver
+  (`jobs::evm_artifact_bytecode`, which returns decoded bytes, and
+  `jobs::evm_artifact_hash`, the one derivation of the bundle hash) uses it.
 - `evm::deploy_bytecode` takes `Vec<u8>`. The signer's deploy input is bytes
   and scalars, exactly as section 4 specifies.
 - `lib.rs`'s operator-facing `evm_deploy` decodes on the way in; its candid
   signature `(text, nat64)` is unchanged.
 - `evm::deploy_target` / `require_deploy_target` mirror the existing
-  `publish_target` pair, so `deploy::set_evm_config` and `deploy::attempt_evm`
+  `publish_target` pair, so `jobs::set_evm_config` and `deploy::attempt_evm`
   check config-and-gas from one definition -- and `attempt_evm` checks it
   *before* walking the tree, instead of resolving and decoding an artifact for
   a canister that turns out to have no EVM config.
@@ -330,7 +350,7 @@ worth doing. Both DONE in step 4:
   `deploy`/`site`/`fleet` called `store::` directly -- one bucket, two names.
   `kv.rs` now owns the `META` map (same memory id, so nothing migrates), its
   JSON codec, the auth snapshot and the raw bytes the schema marker uses;
-  `store.rs` keeps only the memory layout and hands kv its memory. Every
+  the memory layout lives in `memory.rs`. Every
   caller goes through `kv`.
 - **Record-key construction.** `SITE_KEY_SUFFIX` was defined in
   `provenance.rs` and hardcoded in `tools/verify.mjs`. The suffixes,
