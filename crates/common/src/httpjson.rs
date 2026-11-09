@@ -56,7 +56,7 @@ pub fn decode(s: &str) -> Result<String, String> {
 
 pub fn json<T: Serialize>(status: u16, value: &T, commit: Option<&Oid>) -> HttpResponse {
     let body = serde_json::to_vec(value).unwrap_or_else(|_| b"null".to_vec());
-    let mut res = crate::git_response(status, "application/json", body);
+    let mut res = git_response(status, "application/json", body);
     res.headers
         .push(("X-Content-Type-Options".to_string(), "nosniff".to_string()));
     if let Some(c) = commit {
@@ -72,4 +72,19 @@ pub fn error(status: u16, msg: &str) -> HttpResponse {
         error: &'a str,
     }
     json(status, &Err { error: msg }, None)
+}
+
+/// A response with the content type and no-cache header every git, site and
+/// /api answer carries.
+pub fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
+    HttpResponse {
+        status_code,
+        headers: vec![
+            ("Content-Type".to_string(), content_type.to_string()),
+            ("Cache-Control".to_string(), "no-cache".to_string()),
+        ],
+        body,
+        upgrade: None,
+        streaming_strategy: None,
+    }
 }

@@ -8,22 +8,21 @@ mod api;
 mod api_authority;
 // The compiler crate's modules, under the names this crate has always used.
 use ic_git_compiler::{compile, interp, lang};
+// The shared crate, at the paths every module already names (crate::kv, ...).
+use ic_git_common::httpjson::git_response;
+use ic_git_common::{clock, httpjson, kv, memory};
 mod apps;
 mod attest;
-mod clock;
 mod consent;
 mod deploy;
 mod evm;
 mod feed;
-mod httpjson;
 mod fleet;
 // Proofs that a blob is what a commit holds; queued deploy jobs carry them
 // (docs/CANISTER_SPLIT.md, phase 2).
 mod gitproof;
 mod icp;
 mod jobs;
-mod kv;
-mod memory;
 mod mirror;
 mod ledger;
 mod names;
@@ -161,19 +160,6 @@ fn route(req: &HttpRequest) -> Route {
             None => Route::NotFound,
         },
         _ => Route::NotFound,
-    }
-}
-
-pub(crate) fn git_response(status_code: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
-    HttpResponse {
-        status_code,
-        headers: vec![
-            ("Content-Type".to_string(), content_type.to_string()),
-            ("Cache-Control".to_string(), "no-cache".to_string()),
-        ],
-        body,
-        upgrade: None,
-        streaming_strategy: None,
     }
 }
 

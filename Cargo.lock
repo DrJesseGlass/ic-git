@@ -522,6 +522,7 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-timers",
  "ic-dev-kit-rs",
+ "ic-git-common",
  "ic-git-compiler",
  "ic-git-types",
  "ic-multisig",
@@ -675,6 +676,18 @@ dependencies = [
  "serde",
  "strum",
  "strum_macros",
+]
+
+[[package]]
+name = "ic-git-common"
+version = "0.1.0"
+dependencies = [
+ "ic-cdk",
+ "ic-dev-kit-rs",
+ "ic-git-types",
+ "ic-stable-structures",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
