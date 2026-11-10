@@ -6,7 +6,7 @@
 //! so phase 3 replaces the calls that keep them current with messages and
 //! leaves the readers alone.
 //!
-//! The authority writes them (`tenancy::sync_mirrors`, `configs::mirror`)
+//! The authority writes them (its tenancy.rs and configs.rs)
 //! whenever what they reflect changes: a repo's metadata, a ballot on one
 //! of its commits, or a deploy config.
 //! Operators are not mirrored: each canister keeps its own.

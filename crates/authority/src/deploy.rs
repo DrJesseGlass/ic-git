@@ -545,7 +545,8 @@ async fn run_evm(
 }
 
 /// Run every deploy leg `job` carries for this commit -- wasm-to-canister,
-/// EVM CREATE, or both -- from its verified artifacts alone. Each leg
+/// EVM CREATE, or both -- from its verified artifacts alone, once its configs
+/// are shown to be the repo's (`configs::check_job`). Each leg
 /// persists its own status and provenance; the returned DeployStatus carries
 /// the wasm leg's summary plus the EVM leg's outcome folded into the message.
 /// Never traps. `force` redeploys a commit the EVM provenance log already

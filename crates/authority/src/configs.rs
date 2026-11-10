@@ -145,8 +145,13 @@ fn describe_difference(
     let mut out = Vec::new();
     match (job_wasm, own_wasm) {
         (Some(j), Some(o)) if j != o => out.push(format!(
-            "wasm: the job installs {} into {} ({:?}), the repo's config {} into {} ({:?})",
-            j.source_path, j.target, j.mode, o.source_path, o.target, o.mode
+            "wasm: the job installs {} into {} ({}), the repo's config {} into {} ({})",
+            j.source_path,
+            j.target,
+            j.mode.as_str(),
+            o.source_path,
+            o.target,
+            o.mode.as_str()
         )),
         (Some(j), None) => out.push(format!("wasm: the job installs into {}, the repo has no wasm config", j.target)),
         (None, Some(_)) => out.push("wasm: the job has no wasm leg, the repo's config does".into()),
@@ -221,7 +226,7 @@ mod tests {
         set_mode("mirrored", DeployMode::Reinstall).unwrap();
         assert_eq!(crate::jobs::get_config("mirrored").unwrap().mode, DeployMode::Reinstall);
         let e = check_job("mirrored", before_the_change).err().unwrap();
-        assert!(e.contains("Upgrade") && e.contains("Reinstall"), "{e}");
+        assert!(e.contains("(upgrade)") && e.contains("(reinstall)"), "{e}");
         assert!(check_job("mirrored", queued()).is_ok());
 
         // The mirror starts empty after an upgrade from a release before

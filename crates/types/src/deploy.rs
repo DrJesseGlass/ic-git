@@ -30,6 +30,14 @@ impl DeployMode {
             _ => Err(format!("mode must be 'upgrade' or 'reinstall', got '{s}'")),
         }
     }
+
+    /// The mode as `parse` takes it and the API names it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Upgrade => "upgrade",
+            Self::Reinstall => "reinstall",
+        }
+    }
 }
 
 /// What to build and where to install it, per repo.
@@ -107,8 +115,10 @@ pub struct EvmDeployConfig {
 /// What a job deploys, fixed when it is queued: each configured leg's config
 /// as it stood then, with its artifact or why it could not be resolved (a
 /// missing file, say -- recorded at drain time like any failed deploy).
-/// Running a job reads neither the configs nor the object store, so a
-/// config edit or a push after queueing cannot change what it deploys.
+/// Running a job reads no object store, and the configs only to check that
+/// the job's are still the repo's (the authority's `configs::check_job`),
+/// so a push after queueing cannot change what it deploys and a config
+/// edit refuses it.
 /// The authority keeps queued ones in their own stable map (records.rs).
 #[derive(CandidType, Deserialize)]
 pub struct Job {
