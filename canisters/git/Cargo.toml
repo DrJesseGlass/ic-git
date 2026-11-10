@@ -9,30 +9,18 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 # From crates.io since 0.4.0 (was a git tag). 0.x: minor bumps are breaking.
 ic-dev-kit-rs = { version = "0.4", features = ["storage"] }
-# K-of-N approvals (docs/TENANCY.md, "Votes"): the policy, ballot and tally
-# rules shared with ic-vote. From crates.io; Cargo.lock pins the exact version
-# and the registry checksum. 0.2 added objections.
-ic-multisig = { version = "0.2", features = ["candid"] }
 
 # Keep these pinned to the versions ic-dev-kit-rs uses.
 ic-cdk = "0.20"
 ic-cdk-timers = "1"
 candid = "0.10"
-ic-stable-structures = "0.7"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Track B, rung R4: concurrent fan-out of compile jobs across worker canisters.
 futures = "0.3"
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-sha1 = "0.10"
-sha2 = "0.10"
 hex = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
-# Key-bound pushes (tokens.rs, signed_push.rs): verify the Ed25519 SSH
-# signature on a git push certificate. Verification only: no default
-# features, so no rand/getrandom and nothing that needs the OS.
-ed25519-dalek = { version = "2", default-features = false }
 
 # The workspace crates of docs/CANISTER_SPLIT.md, phase 2 step 4: linked
 # into this one canister until phase 3 cuts the boundary.
@@ -42,15 +30,9 @@ ic-git-compiler = { path = "../../crates/compiler" }
 ic-git-git = { path = "../../crates/git" }
 ic-git-types = { path = "../../crates/types" }
 
-# Track A (see ROADMAP.md): sign EVM transactions with threshold ECDSA.
-# sha3 for keccak256; k256 (pure Rust, no getrandom without the rand feature)
-# to decompress the SEC1 pubkey into an EOA and to find the recovery id by
-# trial recovery. Both build cleanly to wasm32-unknown-unknown.
-sha3 = "0.10"
-k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
-
 [dev-dependencies]
-# The shared crates' test hooks (a settable clock), for tests only.
+# The workspace crates' test hooks (a settable clock and controllers, timer
+# stubs, the git side standing in for the authority), for tests only.
 ic-git-authority = { path = "../../crates/authority", features = ["testing"] }
 ic-git-common = { path = "../../crates/common", features = ["testing"] }
 ic-git-git = { path = "../../crates/git", features = ["testing"] }

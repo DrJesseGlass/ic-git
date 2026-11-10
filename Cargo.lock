@@ -515,8 +515,6 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "candid",
- "ed25519-dalek",
- "flate2",
  "futures",
  "hex",
  "ic-cdk",
@@ -527,14 +525,8 @@ dependencies = [
  "ic-git-compiler",
  "ic-git-git",
  "ic-git-types",
- "ic-multisig",
- "ic-stable-structures",
- "k256",
  "serde",
  "serde_json",
- "sha1",
- "sha2",
- "sha3",
 ]
 
 [[package]]

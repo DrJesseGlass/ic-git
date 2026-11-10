@@ -19,8 +19,6 @@ mod consent;
 #[cfg(test)]
 mod fixtures;
 mod fleet;
-// Proofs that a blob is what a commit holds; queued deploy jobs carry them
-// (docs/CANISTER_SPLIT.md, phase 2).
 
 use base64::Engine;
 use ic_dev_kit_rs::auth;
