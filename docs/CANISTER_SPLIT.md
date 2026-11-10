@@ -537,11 +537,16 @@ The steps in one canister:
      a lost answer is asked again, up to `CREATE_ASKS` times, which the
      git side's idempotent `create_repo` makes safe; past that the owner
      keeps the reservation and the fee, nobody else can take the name,
-     and the owner's next call finishes it without paying again.
+     and the owner's next call finishes it without paying again. The
+     owner may call again while a call waits: the reservation is read
+     again after each answer, and the first answer settles it; a later
+     one takes that settlement. An upgrade meanwhile does not adopt the
+     reserved name as ownerless.
    - The push path (`http_request_update`): the certificate is checked,
-     `charge_push` is awaited, the token is checked again, then the pack
-     is read. A charge the authority does not answer refuses the push,
-     and the charge is kept on a refused pack.
+     `charge_push` is awaited, the token and the signed-push rule are
+     checked again, then the pack is read. A charge the authority does
+     not answer refuses the push, and the charge is kept on a refused
+     pack.
    - A ballot (`tenancy::cast_ballot`) awaits `has_commit`, reads the
      policy again, then counts; one the git side does not answer for is
      not cast.
@@ -552,14 +557,22 @@ The steps in one canister:
      clears the mark on the answer. The git side (`mirror.rs`) ignores a
      write older than the newest it holds for that mirror, so a retry
      that lands late cannot roll it back. An unanswered write is retried
-     on a timer; `post_upgrade` marks every mirror and `mirrors::resume`
-     flushes them once the upgrade is done, so a legacy job is rebuilt
-     there from the authority's own configs (`jobs::resolve_with`).
+     on one timer, armed once per outage; `post_upgrade` marks every
+     mirror and `mirrors::resume` writes them before the upgrade's first
+     message (in one canister the writes complete at once), so no push
+     finds a mirror empty; a legacy job is rebuilt there from the
+     authority's own configs (`jobs::resolve_with`).
    - The outbox (`crates/git/src/outbox.rs`, stable map `MEM_OUTBOX`):
      `submit_job` and `notify` items, numbered, delivered oldest first
-     and one at a time, retried on a timer, and `for_git` takes each
+     and one at a time, retried on one timer, and `for_git` takes each
      number once. The push path builds the job and the push event
      there, and awaits the delivery, so in one canister nothing waits.
+     Waiting jobs are indexed by (repo, commit): a commit's job is built
+     once while it waits, and a deploy-config write on the git side
+     rebuilds the repo's waiting jobs under the new configs, so what the
+     authority gets is what the configs said when it got it. The drain
+     flag is held by a guard, so a trap while the authority answers
+     (step 12) does not leave the outbox stalled.
    - Each rule is tested against a side that refuses, does not run, or
      runs and loses the answer of a chosen call: `to_git::flaky` for the
      authority's flows, `both_sides::push` for the push path, and the

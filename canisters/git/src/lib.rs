@@ -341,10 +341,15 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
                     return git_response(200, RESULT, receive::refuse(&request, &e));
                 }
             }
-            // The writers may have changed while the authority answered.
-            if push_authorized(&repo, &req.headers).is_none() {
+            // The writers, and whether pushes must be signed, may have
+            // changed while the authority answered: both are read again.
+            let Some(grant) = push_authorized(&repo, &req.headers) else {
                 let e = "the token no longer authorizes pushes to this repo";
                 return git_response(200, RESULT, receive::refuse(&request, e));
+            };
+            let required = mirror::requires_signed_push(&repo);
+            if let Err(e) = signed_push::check(&repo, grant.key.as_deref(), parsed.cert.as_ref(), required, now_s) {
+                return git_response(200, RESULT, receive::refuse(&request, &e));
             }
             let tip_before = store::head_target(&repo).and_then(|b| store::get_ref(&repo, &b));
             let outcome = receive::handle(&repo, request, &req.body);
@@ -737,9 +742,9 @@ async fn cast_ballot(
     decision: tenancy::Vote,
     reason: Option<String>,
 ) -> Result<BallotTally, String> {
-    let was_reached = tenancy::tally(&repo, &commit).is_some_and(|t| t.reached);
-    let t = tenancy::cast_ballot(&repo, &caller(), &commit, decision, reason.clone()).await?;
-    feed::ballot(&repo, &caller(), &commit, decision, reason.as_deref(), &t, was_reached);
+    let cast = tenancy::cast_ballot(&repo, &caller(), &commit, decision, reason.clone()).await?;
+    let t = cast.tally;
+    feed::ballot(&repo, &caller(), &commit, decision, reason.as_deref(), &t, cast.was_reached);
     follow_approvals(&repo, true).await;
     Ok(BallotTally {
         approvals: t.approvals,
@@ -753,10 +758,10 @@ async fn cast_ballot(
 /// objections. Returns (approvals, required).
 #[ic_cdk::update]
 async fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
-    let was_reached = tenancy::tally(&repo, &commit).is_some_and(|t| t.reached);
-    let t = tenancy::vote(&repo, &caller(), &commit, approve).await?;
+    let cast = tenancy::vote(&repo, &caller(), &commit, approve).await?;
+    let t = cast.tally;
     let decision = if approve { tenancy::Vote::Approve } else { tenancy::Vote::Reject };
-    feed::ballot(&repo, &caller(), &commit, decision, None, &t, was_reached);
+    feed::ballot(&repo, &caller(), &commit, decision, None, &t, cast.was_reached);
     follow_approvals(&repo, true).await;
     Ok((t.approvals, t.required))
 }

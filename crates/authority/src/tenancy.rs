@@ -342,9 +342,15 @@ fn ownerless(label: Option<String>) -> RepoMeta {
 /// exist and what they are announced under without asking (phase 3,
 /// step 7). A repo created before tenancy gets an ownerless record -- what
 /// it was treated as all along -- and one created before this release its
-/// label. Idempotent: a record that has its label is left alone.
+/// label. Idempotent: a record that has its label is left alone. A name
+/// under reservation is left alone too: its creation ran on the git side
+/// and its answer was lost, and the owner's next `create_repo` records it
+/// as theirs.
 pub fn adopt_repos(repos: impl IntoIterator<Item = (String, Option<String>)>) {
     for (name, label) in repos {
+        if reservation(&name).is_some() {
+            continue;
+        }
         match meta(&name) {
             Some(m) if m.label.is_some() || label.is_none() => {}
             Some(mut m) => {
@@ -519,7 +525,7 @@ pub async fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<
         if r.owner != *who {
             return Err(format!("repo name '{name}' is reserved: a creation of it is waiting for the git side"));
         }
-        return settle(name, r).await;
+        return settle(name).await;
     }
     if repo_exists(name) {
         return Err(format!("repo '{name}' already exists"));
@@ -551,15 +557,27 @@ pub async fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<
         label,
     };
     crate::kv::set_json(&reservation_key(name), &r);
-    settle(name, r).await
+    settle(name).await
 }
 
 /// Ask the git side to create a reserved name, and settle the reservation
-/// by its answer.
-async fn settle(name: &str, r: Reservation) -> Result<(), String> {
+/// by its answer. The owner may call `create_repo` again while an earlier
+/// call waits, so the reservation is read again after each answer and
+/// settled only if it is still there: the first answer back settles it,
+/// and a later one finds it settled, with the repo recorded (Ok) or the
+/// fee refunded (Err).
+async fn settle(name: &str) -> Result<(), String> {
     let mut failure = None;
     for _ in 0..CREATE_ASKS {
-        match crate::to_git::create_repo(name).await {
+        let reply = crate::to_git::create_repo(name).await;
+        let Some(r) = reservation(name) else {
+            return if repo_exists(name) {
+                Ok(())
+            } else {
+                Err(format!("the creation of '{name}' was settled meanwhile: it was refused and refunded"))
+            };
+        };
+        match reply {
             Ok(Ok(())) => {
                 crate::kv::remove(&reservation_key(name));
                 save_meta(
@@ -593,10 +611,10 @@ async fn settle(name: &str, r: Reservation) -> Result<(), String> {
         }
     }
     let f = failure.expect("asked at least once");
+    let owner = reservation(name).map(|r| r.owner.to_text()).unwrap_or_default();
     Err(format!(
-        "the git side did not answer the creation of '{name}' ({f}); the name and the fee are kept for {}: \
-         call create_repo again to finish",
-        r.owner
+        "the git side did not answer the creation of '{name}' ({f}); the name and the fee are kept for {owner}: \
+         call create_repo again to finish"
     ))
 }
 
@@ -1163,10 +1181,18 @@ pub fn ballot_reason(decision: Vote, reason: Option<String>) -> Result<Option<St
     Ok(probe.reason)
 }
 
+/// A ballot cast: the tally it leaves -- approvals and objections so far,
+/// the threshold, and whether it is reached -- and whether the threshold
+/// was reached before it, read once the git side had answered, so the
+/// feed can tell a ballot that reached it from one cast after.
+#[derive(Clone, Debug)]
+pub struct Cast {
+    pub tally: Tally,
+    pub was_reached: bool,
+}
+
 /// Cast or replace a ballot. An objection must give a reason (at most 1 KB);
-/// a reason on an approval or rejection is kept but not required. Returns
-/// the tally: approvals and objections so far, the threshold, and whether
-/// it is reached.
+/// a reason on an approval or rejection is kept but not required.
 ///
 /// The git side is asked whether it holds the commit before the ballot is
 /// counted; one it does not answer for is not cast, and the voter asks
@@ -1177,7 +1203,7 @@ pub async fn cast_ballot(
     commit_hex: &str,
     decision: Vote,
     reason: Option<String>,
-) -> Result<Tally, String> {
+) -> Result<Cast, String> {
     can_vote(repo, who)?;
     let oid = parse_oid(commit_hex)?;
     match crate::to_git::has_commit(&oid).await {
@@ -1191,14 +1217,15 @@ pub async fn cast_ballot(
     }
     // The policy may have changed while the git side answered.
     let m = can_vote(repo, who)?;
+    let was_reached = ungated(count(repo, &policy(&m), &oid), &m).reached;
     let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
     approval.reason = ballot_reason(decision, reason)?;
-    let t = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
+    let tally = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
         .map(|t| ungated(t, &m))
         .map_err(|e| e.to_string())?;
     crate::mirrors::mark(repo, Mirror::Approved);
     crate::mirrors::flush(repo).await;
-    Ok(t)
+    Ok(Cast { tally, was_reached })
 }
 
 /// The original two-way ballot, kept for clients that predate objections.
@@ -1207,7 +1234,7 @@ pub async fn vote(
     who: &Principal,
     commit_hex: &str,
     approve: bool,
-) -> Result<Tally, String> {
+) -> Result<Cast, String> {
     let decision = if approve { Vote::Approve } else { Vote::Reject };
     cast_ballot(repo, who, commit_hex, decision, None).await
 }
@@ -1438,11 +1465,11 @@ mod tests {
     }
 
     fn cast_ballot(repo: &str, who: &Principal, commit_hex: &str, decision: Vote, reason: Option<String>) -> Result<Tally, String> {
-        run(super::cast_ballot(repo, who, commit_hex, decision, reason))
+        run(super::cast_ballot(repo, who, commit_hex, decision, reason)).map(|c| c.tally)
     }
 
     fn vote(repo: &str, who: &Principal, commit_hex: &str, approve: bool) -> Result<Tally, String> {
-        run(super::vote(repo, who, commit_hex, approve))
+        run(super::vote(repo, who, commit_hex, approve)).map(|c| c.tally)
     }
 
     fn propose_policy_change(repo: &str, who: &Principal, change: PolicyChange, decision: Vote, reason: Option<String>) -> Result<(Tally, Option<PolicyChange>), String> {
@@ -2071,12 +2098,15 @@ mod tests {
         assert!(crate::mirror::may_write("t-flaky", &alice, false).is_ok(), "mirrored once created");
 
         for _ in 0..CREATE_ASKS {
-            git.inject("create_repo", Inject::NotDelivered);
+            git.inject("create_repo", Inject::Lost);
         }
         let e = create_repo("t-kept", &alice, false).unwrap_err();
         assert!(e.contains("kept"), "{e}");
         assert_eq!(balance(&alice), 8 * fee, "the fee is kept with the name");
-        assert!(!repo_exists("t-kept"));
+        assert!(!repo_exists("t-kept") && store::repo_exists("t-kept"), "created, answer lost");
+        // An upgrade meanwhile does not adopt the name as ownerless.
+        adopt_repos(vec![("t-kept".to_string(), None)]);
+        assert!(!repo_exists("t-kept"), "reserved, not adopted");
         let bob = p(42);
         credit(&bob, fee);
         assert!(create_repo("t-kept", &bob, false).unwrap_err().contains("reserved"));
@@ -2094,6 +2124,86 @@ mod tests {
         assert_eq!(balance(&alice), 8 * fee);
         create_repo("t-unasked", &alice, false).unwrap();
         assert_eq!(balance(&alice), 7 * fee);
+        crate::to_git::set_test_side(None);
+    }
+
+    /// A git side on which another call of this canister settles the
+    /// reservation while a create_repo waits for its answer: the real one,
+    /// whose create_repo records the repo as the other call would, then
+    /// answers as told.
+    struct Meanwhile {
+        real: Flaky,
+        refuse: std::cell::Cell<bool>,
+    }
+
+    impl ic_git_types::git_side::GitSide for Meanwhile {
+        fn set_deploy_configs<'a>(&'a self, repo: &'a str, seq: u64, configs: ic_git_types::git_side::DeployConfigs) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
+            self.real.set_deploy_configs(repo, seq, configs)
+        }
+        fn set_push_policy<'a>(&'a self, repo: &'a str, seq: u64, policy: ic_git_types::git_side::PushPolicy) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
+            self.real.set_push_policy(repo, seq, policy)
+        }
+        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
+            self.real.set_approved(repo, seq, approved)
+        }
+        fn check_new_repo<'a>(&'a self, name: &'a str) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<String, String>>> {
+            self.real.check_new_repo(name)
+        }
+        fn create_repo<'a>(&'a self, name: &'a str) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<(), String>>> {
+            Box::pin(async move {
+                let reply = self.real.create_repo(name).await;
+                // The other call's answer came first and settled the name.
+                let r = reservation(name).expect("reserved while asked");
+                crate::kv::remove(&reservation_key(name));
+                save_meta(
+                    name,
+                    &RepoMeta {
+                        owner: Some(r.owner),
+                        members: Vec::new(),
+                        storage_bytes: 0,
+                        rent_paid_to_ns: now_ns(),
+                        delinquent: false,
+                        required_votes: 0,
+                        app_canister: None,
+                        created_ns: now_ns(),
+                        require_signed_push: false,
+                        governed: false,
+                        proposals: Vec::new(),
+                        label: Some(r.label),
+                    },
+                );
+                if self.refuse.get() {
+                    Ok(Err("refused by the git side".into()))
+                } else {
+                    reply
+                }
+            })
+        }
+        fn has_commit<'a>(&'a self, oid: &'a ic_git_types::oid::Oid) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<bool>> {
+            self.real.has_commit(oid)
+        }
+    }
+
+    /// A create_repo whose reservation another call settled while it
+    /// waited takes that settlement: the repo is the owner's once, and
+    /// the fee is neither charged nor refunded again, whatever this
+    /// call's answer says.
+    #[test]
+    fn a_creation_settled_meanwhile_is_not_settled_again() {
+        let git = Rc::new(Meanwhile { real: Flaky::new(), refuse: std::cell::Cell::new(false) });
+        crate::to_git::set_test_side(Some(git.clone()));
+        let alice = p(43);
+        let fee = pricing().create_repo;
+        credit(&alice, 10 * fee);
+
+        create_repo("t-meanwhile", &alice, false).unwrap();
+        assert_eq!(balance(&alice), 9 * fee, "one fee");
+        assert_eq!(meta("t-meanwhile").unwrap().owner, Some(alice));
+
+        git.refuse.set(true);
+        create_repo("t-meanwhile-2", &alice, false).unwrap();
+        assert_eq!(balance(&alice), 8 * fee, "the other call's settlement stands: no refund");
+        assert_eq!(meta("t-meanwhile-2").unwrap().owner, Some(alice));
         crate::to_git::set_test_side(None);
     }
 

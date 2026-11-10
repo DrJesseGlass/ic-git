@@ -9,6 +9,11 @@
 //! Delivery stops at the first item the authority does not answer, so the
 //! authority sees the items in order and one high-water mark is enough
 //! there. In one canister every item is answered at once and nothing waits.
+//!
+//! A job is indexed by (repo, commit), so a commit whose job waits is not
+//! built again, and a deploy-config change rebuilds the repo's waiting
+//! jobs under the new configs (`rebuild_jobs`): what the authority gets is
+//! what the configs said when it got it, as before the outbox.
 
 use crate::kv;
 use crate::memory::{self, Memory};
@@ -31,10 +36,32 @@ thread_local! {
     /// after each answer. Heap state: an upgrade clears it and `resume`
     /// drains again.
     static DRAINING: Cell<bool> = const { Cell::new(false) };
+
+    /// True while a retry timer is armed, so an outage arms one, not one
+    /// per push that found the authority away. Heap state likewise.
+    static RETRY_ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The next sequence number, in META so it survives the outbox emptying.
 const NEXT_KEY: &str = "outbox:next";
+
+/// The index of waiting jobs: "outbox:job:<repo>:<commit>" -> sequence
+/// number. Repo names hold no ':' (store::check_new_repo).
+const JOB_PREFIX: &str = "outbox:job:";
+
+fn job_key(repo: &str, commit_hex: &str) -> String {
+    format!("{JOB_PREFIX}{repo}:{commit_hex}")
+}
+
+/// Resets the draining flag when the drain ends, however it ends: a trap
+/// in a callback drops the future, and the flag must not outlive it.
+struct Draining;
+
+impl Drop for Draining {
+    fn drop(&mut self) {
+        DRAINING.with(|f| f.set(false));
+    }
+}
 
 /// How long after an unanswered item the outbox tries again.
 pub const RETRY_SECS: u64 = 30;
@@ -62,6 +89,37 @@ fn remove(seq: u64) {
     OUTBOX.with(|o| o.borrow_mut().remove(&seq));
 }
 
+fn holds(seq: u64) -> bool {
+    OUTBOX.with(|o| o.borrow().contains_key(&seq))
+}
+
+/// The index entry of a waiting job, if its item is still there. An entry
+/// whose item is gone (dropped as undecodable) is cleared.
+fn indexed(repo: &str, commit_hex: &str) -> Option<u64> {
+    let key = job_key(repo, commit_hex);
+    let seq: u64 = kv::get_json(&key)?;
+    if holds(seq) {
+        Some(seq)
+    } else {
+        kv::remove(&key);
+        None
+    }
+}
+
+fn insert(item: &Outgoing) {
+    // Encoding a struct of blobs, strings and integers cannot fail.
+    let Ok(bytes) = candid::encode_one(item) else { return };
+    let seq = next_seq();
+    OUTBOX.with(|o| o.borrow_mut().insert(seq, bytes));
+    if let Outgoing::SubmitJob { repo, commit, .. } = item {
+        // One job per commit: a newer one replaces what waits.
+        if let Some(old) = indexed(repo, commit) {
+            remove(old);
+        }
+        kv::set_json(&job_key(repo, commit), &seq);
+    }
+}
+
 /// How many items wait for an answer.
 pub fn len() -> u64 {
     OUTBOX.with(|o| o.borrow().len())
@@ -71,23 +129,34 @@ pub fn len() -> u64 {
 /// a job by (repo, commit) too; this spares building and storing one that
 /// would be refused there.
 pub fn job_waiting(repo: &str, commit_hex: &str) -> bool {
-    OUTBOX.with(|o| {
-        o.borrow().iter().any(|e| {
-            matches!(
-                candid::decode_one::<Outgoing>(&e.value()),
-                Ok(Outgoing::SubmitJob { repo: r, commit: c, .. }) if r == repo && c == commit_hex
-            )
-        })
-    })
+    indexed(repo, commit_hex).is_some()
+}
+
+/// The repo's deploy configs changed: every job of its that waits is built
+/// again by `resolve`, under the new configs, and takes a fresh number. A
+/// job the authority is answering meanwhile is answered as sent; the
+/// rebuilt one follows, and the authority refuses the stale one or dedupes
+/// the second.
+pub fn rebuild_jobs(repo: &str, resolve: impl Fn(&str) -> Option<Job>) {
+    let prefix = format!("{JOB_PREFIX}{repo}:");
+    for key in kv::keys_with_prefix(&prefix) {
+        let commit = key[prefix.len()..].to_string();
+        let Some(old) = indexed(repo, &commit) else { continue };
+        remove(old);
+        kv::remove(&key);
+        if let Some(job) = resolve(&commit) {
+            insert(&Outgoing::SubmitJob {
+                repo: repo.to_string(),
+                commit,
+                job,
+            });
+        }
+    }
 }
 
 /// Put an item in the outbox, then deliver what waits.
 pub async fn send(item: Outgoing) {
-    // Encoding a struct of blobs, strings and integers cannot fail.
-    if let Ok(bytes) = candid::encode_one(&item) {
-        let seq = next_seq();
-        OUTBOX.with(|o| o.borrow_mut().insert(seq, bytes));
-    }
+    insert(&item);
     drain().await;
 }
 
@@ -99,24 +168,36 @@ pub async fn drain() {
     if DRAINING.with(|f| f.replace(true)) {
         return;
     }
+    let _draining = Draining;
     while let Some((seq, bytes)) = first() {
         let Ok(item) = candid::decode_one::<Outgoing>(&bytes) else {
             remove(seq);
             continue;
         };
-        let reply = match item {
-            Outgoing::SubmitJob { repo, commit, job } => crate::to_authority::submit_job(seq, &repo, &commit, job).await,
-            Outgoing::Notify { event } => crate::to_authority::notify(seq, event).await,
+        let (reply, index) = match item {
+            Outgoing::SubmitJob { repo, commit, job } => {
+                let key = job_key(&repo, &commit);
+                (crate::to_authority::submit_job(seq, &repo, &commit, job).await, Some(key))
+            }
+            Outgoing::Notify { event } => (crate::to_authority::notify(seq, event).await, None),
         };
         match reply {
-            Ok(()) => remove(seq),
+            Ok(()) => {
+                remove(seq);
+                // The index names this item unless a rebuild replaced it
+                // while the authority answered.
+                if let Some(key) = index {
+                    if kv::get_json::<u64>(&key) == Some(seq) {
+                        kv::remove(&key);
+                    }
+                }
+            }
             Err(_) => {
                 arm_retry(std::time::Duration::from_secs(RETRY_SECS));
                 break;
             }
         }
     }
-    DRAINING.with(|f| f.set(false));
 }
 
 /// For post_upgrade: timers do not survive an upgrade, so what the outbox
@@ -129,13 +210,21 @@ pub fn resume() {
 
 #[cfg(not(any(test, feature = "testing")))]
 fn arm_retry(delay: std::time::Duration) {
-    ic_cdk_timers::set_timer(delay, drain());
+    if RETRY_ARMED.with(|a| a.replace(true)) {
+        return;
+    }
+    ic_cdk_timers::set_timer(delay, async {
+        RETRY_ARMED.with(|a| a.set(false));
+        drain().await;
+    });
 }
 
 /// Tests drain the outbox themselves; a timer cannot fire outside a
 /// canister.
 #[cfg(any(test, feature = "testing"))]
-fn arm_retry(_delay: std::time::Duration) {}
+fn arm_retry(_delay: std::time::Duration) {
+    RETRY_ARMED.with(|a| a.set(true));
+}
 
 #[cfg(test)]
 mod tests {
@@ -217,13 +306,26 @@ mod tests {
         block_on(drain());
         assert_eq!(len(), 2);
 
+        // The repo's configs change: the waiting job is built again, under
+        // a fresh number, and is still the one job for its commit.
+        let rebuilt = Cell::new(0);
+        rebuild_jobs("r", |commit| {
+            rebuilt.set(rebuilt.get() + 1);
+            assert_eq!(commit, "c3");
+            Some(Job { wasm: None, evm: None })
+        });
+        assert_eq!(rebuilt.get(), 1);
+        assert_eq!(len(), 2);
+        assert!(job_waiting("r", "c3"));
+
         authority.fail.set(None);
         block_on(drain());
         assert_eq!(len(), 0);
+        assert!(!job_waiting("r", "c3"));
         let taken = authority.taken.borrow().clone();
         assert_eq!(
             taken,
-            vec![(1, "pushed r@c1".into()), (2, "pushed r@c2".into()), (3, "job r@c3".into())],
+            vec![(1, "pushed r@c1".into()), (2, "pushed r@c2".into()), (4, "job r@c3".into())],
             "in sequence, each once"
         );
         set_test_side(None);

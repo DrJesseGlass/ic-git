@@ -37,7 +37,7 @@ mod tenancy {
     }
 
     pub fn cast_ballot(repo: &str, who: &Principal, commit_hex: &str, decision: Vote, reason: Option<String>) -> Result<Tally, String> {
-        run(crate::tenancy::cast_ballot(repo, who, commit_hex, decision, reason))
+        run(crate::tenancy::cast_ballot(repo, who, commit_hex, decision, reason)).map(|c| c.tally)
     }
 
     pub fn propose_policy_change(repo: &str, who: &Principal, change: PolicyChange, decision: Vote, reason: Option<String>) -> Result<(Tally, Option<PolicyChange>), String> {

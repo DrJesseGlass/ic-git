@@ -16,6 +16,15 @@
 
 use ic_git_types::side::Reply;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
+use std::future::Future;
+
+thread_local! {
+    /// True while a retry timer is armed, so an outage arms one, not one
+    /// per unanswered write (each retry would otherwise arm more). Heap
+    /// state: an upgrade clears it, and `resume` arms again.
+    static RETRY_ARMED: Cell<bool> = const { Cell::new(false) };
+}
 
 /// The git side's mirrors of this side's decisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,20 +167,35 @@ pub async fn flush_all() {
     }
 }
 
-/// For post_upgrade, after everything that marks: timers do not survive an
-/// upgrade, so whatever is marked is flushed as soon as the canister is
-/// idle.
+/// For post_upgrade, after everything that marks: the marked mirrors are
+/// written before the upgrade's first message, as they were when the
+/// mirrors were filled in place, so no push finds them empty. In one
+/// canister the writes complete at once; a git side that answers later
+/// (step 12) is left to the timer, as timers do not survive an upgrade.
 pub fn resume() {
-    if !repos_pending().is_empty() {
+    if repos_pending().is_empty() {
+        return;
+    }
+    let mut flush = Box::pin(flush_all());
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    if flush.as_mut().poll(&mut cx).is_pending() {
         arm_retry(std::time::Duration::ZERO);
     }
 }
 
 #[cfg(not(any(test, feature = "testing")))]
 fn arm_retry(delay: std::time::Duration) {
-    ic_cdk_timers::set_timer(delay, flush_all());
+    if RETRY_ARMED.with(|a| a.replace(true)) {
+        return;
+    }
+    ic_cdk_timers::set_timer(delay, async {
+        RETRY_ARMED.with(|a| a.set(false));
+        flush_all().await;
+    });
 }
 
 /// Tests flush themselves; a timer cannot fire outside a canister.
 #[cfg(any(test, feature = "testing"))]
-fn arm_retry(_delay: std::time::Duration) {}
+fn arm_retry(_delay: std::time::Duration) {
+    RETRY_ARMED.with(|a| a.set(true));
+}

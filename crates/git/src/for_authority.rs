@@ -19,7 +19,13 @@ pub struct Git {
 
 impl GitSide for Git {
     fn set_deploy_configs<'a>(&'a self, repo: &'a str, seq: u64, configs: DeployConfigs) -> Fut<'a, Reply<()>> {
-        mirror::set_deploy_configs(repo, seq, configs);
+        if mirror::set_deploy_configs(repo, seq, configs) {
+            // A job built under the old configs would be refused.
+            crate::outbox::rebuild_jobs(repo, |commit| {
+                let oid = ic_git_types::oid::parse_oid(commit).ok()?;
+                Some(crate::jobs::resolve(repo, &oid))
+            });
+        }
         ready(Ok(()))
     }
 

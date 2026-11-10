@@ -917,7 +917,7 @@ mod tests {
 
         let hex = store::oid_hex(&commit);
         let was = tenancy::tally("feed-c", &hex).is_some_and(|t| t.reached);
-        let t = futures::executor::block_on(tenancy::cast_ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right".into()))).unwrap();
+        let t = futures::executor::block_on(tenancy::cast_ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right".into()))).unwrap().tally;
         ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right"), &t, was);
         let ev = events(&Feed::Repo("feed-c".into()));
         let kinds: Vec<_> = ev.iter().map(|e| e.kind.as_str()).collect();
