@@ -102,8 +102,9 @@ and a new proof verifier (section 4).
 
 Holds: the threshold keys, chain configs, the registry address, control of
 every app canister (and sole control of governed ones), the governor
-relationship, the accounts, the ballots and policies, the deploy queue and
-provenance logs, the name-service listing.
+relationship, the accounts, the ballots and policies, the deploy configs
+(phase 3, step 6), the deploy queue and provenance logs, the name-service
+listing.
 
 Properties: no hostile parsing beyond the bounded proof check; changes
 rarely; governed by the existing governor. About half of today's canister
@@ -403,8 +404,8 @@ which *must* match is no longer derived twice from mutable state.
 **Phase 3 -- cut the boundary.** Planned 2026-11-09; the state moves by
 bulk copy (decided then; step 13). After phase 2 the two sides are crates
 in one canister, and the canister crate's glue is the only code that calls
-both: about 20 of its 105 endpoints, `consent.rs`, `init` and
-`post_upgrade`. Phase 3 turns that glue into messages, builds two
+both: 17 of its 105 endpoints, plus `init`, `post_upgrade` and
+`consent.rs`. Phase 3 turns that glue into messages, builds two
 canisters, and moves the git side's state off umobs. The steps continue
 phase 2's numbering. As in phase 2, steps 6 to 11 and 13 each ship as an
 ordinary release of the one canister through the governor, and none
@@ -420,8 +421,8 @@ What a message changes, against today's function calls:
 - **The caller's state can change while it waits.** Every check made
   before an await is made again after it, as `create_push_token` already
   does around `raw_rand`.
-- **Calls from one canister to another arrive in order, but a failed one
-  can be retried after a later one.** Each mirror write carries a
+- **Guaranteed-response calls from one canister to another arrive in
+  order, but a failed one can be retried after a later one.** Each mirror write carries a
   sequence number per repo, and the git canister ignores one older than
   what it holds.
 - **A query cannot call another canister.** What the authority answers in
@@ -464,8 +465,8 @@ The steps in one canister:
      `charge_push`, `stage_job` and `submit_job`, `notify` (feed events)
      and `publish_git_record` (step 12).
    - The in-canister implementations stay plain function calls behind
-     those futures, so behavior is unchanged and step 9 is where the
-     messages start.
+     those futures, so behavior is unchanged; the messages start with
+     step 12's two builds.
    - Every flow that awaits gets its failure rule here, and each rule is
      tested against an implementation that fails, or loses its answer, on
      the chosen call.
@@ -503,8 +504,9 @@ The steps in one canister:
       `Artifact` a job carries. The authority checks the proof, hashes the
       blob itself, and, for a votes-gated repo, requires the commit to be
       approved.
-    - `deploy_now` asks the git side for its job and runs it once it
-      arrives. Either way, the authority acts on bytes it has checked.
+    - In section 4's listing these are `record_artifact`, and
+      `release_job` for `deploy_now`, which asks the git side for its job
+      and runs it once it arrives. Either way, the authority acts on bytes it has checked.
 11. **Retire the one-time paths.** Some paths exist only for an older
     release's state; once mainnet has run them, they go:
     - `resume_pending`'s `resolve` fallback
@@ -602,7 +604,9 @@ The cut on mainnet, in this order:
     2. The git canister imports, and both digests match.
     3. The governor upgrades umobs to the authority build. Its git-side
        state stays in stable memory, unread.
-    4. An operator sets the git canister's id. The authority rewrites
+    4. An operator sets the git canister's id. Until then, every call
+       that needs the git side is refused with a message that names the
+       cut. The authority rewrites
        every mirror, tops up the git canister's cycles, and publishes both
        canister records.
     5. The git canister unfreezes and takes pushes.
@@ -620,8 +624,9 @@ The cut on mainnet, in this order:
     release, which still holds every git-side record as of the freeze. The
     authority build keeps the one-canister memory layout throughout the
     retention window, so the authority state written after the cut
-    (accounts, ballots, deploys) is kept too. Rollback loses only what was
-    pushed to the git canister after the cut. That is why umobs keeps the
+    (accounts, ballots, deploys) is kept too. Rollback loses only the git-side
+    changes made on the git canister after the cut: pushes, tokens minted
+    or revoked, site configs. That is why umobs keeps the
     git-side state for a retention window; a later release frees it.
 
 The compiler canister follows when an ungoverned repo needs `.wat` or
