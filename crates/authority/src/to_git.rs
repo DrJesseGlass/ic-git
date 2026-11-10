@@ -51,11 +51,6 @@ pub fn set_approved(repo: &str, approved: Option<Vec<String>>) {
     git().set_approved(repo, approved)
 }
 
-/// Does the repo exist on the git side?
-pub fn repo_exists(repo: &str) -> bool {
-    git().repo_exists(repo)
-}
-
 /// Would a repo of this name be created? The authority asks before it
 /// charges the creation fee.
 pub fn check_new_repo(name: &str) -> Result<String, String> {
@@ -70,9 +65,4 @@ pub fn create_repo(name: &str) -> Result<(), String> {
 /// Does the git side hold this commit?
 pub fn has_commit(oid: &Oid) -> bool {
     git().has_commit(oid)
-}
-
-/// The repo holding a label, if any.
-pub fn label_holder(label: &str) -> Option<String> {
-    git().label_holder(label)
 }

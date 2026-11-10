@@ -209,6 +209,12 @@ pub struct RepoMeta {
     /// Policy changes with ballots on them and not yet applied.
     #[serde(default)]
     pub proposals: Vec<PolicyChange>,
+    /// The label the repo holds (`labels::repo_label`), as the git side
+    /// reported it when the repo was created: what the name service
+    /// announces it under. `None` for a repo that holds none: one whose
+    /// name maps to no label, or to one an older repo holds.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 pub fn meta(repo: &str) -> Option<RepoMeta> {
@@ -283,15 +289,21 @@ pub fn sync_all_mirrors() {
     }
 }
 
-/// Metadata for any existing repo: legacy repos get an ownerless record.
-fn meta_or_legacy(repo: &str) -> Result<RepoMeta, String> {
-    if let Some(m) = meta(repo) {
-        return Ok(m);
-    }
-    if !crate::to_git::repo_exists(repo) {
-        return Err(format!("no such repo: {repo}"));
-    }
-    Ok(RepoMeta {
+/// Does the repo exist? Every repo has metadata: the authority creates
+/// them all (`create_repo`), and `adopt_repos` gave the older ones theirs.
+pub fn repo_exists(repo: &str) -> bool {
+    meta(repo).is_some()
+}
+
+/// Metadata for an existing repo.
+fn existing(repo: &str) -> Result<RepoMeta, String> {
+    meta(repo).ok_or_else(|| format!("no such repo: {repo}"))
+}
+
+/// A record for a repo with no owner: what a repo created before tenancy
+/// gets. Exempt from charges, and only operators may push to it.
+fn ownerless(label: Option<String>) -> RepoMeta {
+    RepoMeta {
         owner: None,
         members: Vec::new(),
         storage_bytes: 0,
@@ -303,7 +315,37 @@ fn meta_or_legacy(repo: &str) -> Result<RepoMeta, String> {
         require_signed_push: false,
         governed: false,
         proposals: Vec::new(),
-    })
+        label,
+    }
+}
+
+/// For post_upgrade: give the authority its own record of every repo the
+/// git side holds, `(name, label it holds)`, so it answers which repos
+/// exist and what they are announced under without asking (phase 3,
+/// step 7). A repo created before tenancy gets an ownerless record -- what
+/// it was treated as all along -- and one created before this release its
+/// label. Idempotent: a record that has its label is left alone.
+pub fn adopt_repos(repos: impl IntoIterator<Item = (String, Option<String>)>) {
+    for (name, label) in repos {
+        match meta(&name) {
+            Some(m) if m.label.is_some() || label.is_none() => {}
+            Some(mut m) => {
+                m.label = label;
+                save_meta(&name, &m);
+            }
+            None => save_meta(&name, &ownerless(label)),
+        }
+    }
+}
+
+/// A repo on the git side and the authority's record of it, the way
+/// `adopt_repos` leaves a repo created before tenancy: for tests, which
+/// otherwise create repos on the git side alone.
+#[cfg(any(test, feature = "testing"))]
+pub fn test_repo(name: &str) {
+    let label = crate::to_git::check_new_repo(name).ok();
+    crate::to_git::create_repo(name).unwrap();
+    adopt_repos([(name.to_string(), label)]);
 }
 
 /// The one operator rule: controllers and the admin allowlist, and never
@@ -368,7 +410,7 @@ fn exempt(m: &RepoMeta) -> bool {
 }
 
 pub fn is_exempt(repo: &str) -> bool {
-    meta_or_legacy(repo).map(|m| exempt(&m)).unwrap_or(false)
+    existing(repo).map(|m| exempt(&m)).unwrap_or(false)
 }
 
 /// Return cycles taken by `debit` for an action that then failed. Unlike
@@ -392,7 +434,7 @@ fn has_role(m: &RepoMeta, p: &Principal, role: Role) -> bool {
 
 /// Owner, or an operator: may change members, config, and deploy settings.
 pub fn can_admin(repo: &str, p: &Principal, operator: bool) -> Result<RepoMeta, String> {
-    let m = meta_or_legacy(repo)?;
+    let m = existing(repo)?;
     if operator || is_owner(&m, p) {
         Ok(m)
     } else {
@@ -403,7 +445,7 @@ pub fn can_admin(repo: &str, p: &Principal, operator: bool) -> Result<RepoMeta, 
 /// Owner or voter: may cast a ballot. Decided by the vote policy itself, so
 /// whoever passes here is exactly an approver `record` accepts.
 pub fn can_vote(repo: &str, p: &Principal) -> Result<RepoMeta, String> {
-    let m = meta_or_legacy(repo)?;
+    let m = existing(repo)?;
     if policy(&m).is_approver(&Approver::from(*p)) {
         Ok(m)
     } else {
@@ -423,7 +465,7 @@ pub fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), St
     // Every refusal store::create_repo can make, before the fee is taken:
     // an update that returns Err keeps its state changes, so a debit
     // followed by a refused name would keep the fee.
-    crate::to_git::check_new_repo(name)?;
+    let label = crate::to_git::check_new_repo(name)?;
     if !operator {
         debit(who, pricing().create_repo, "create_repo")?;
     }
@@ -442,6 +484,7 @@ pub fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), St
             require_signed_push: false,
             governed: false,
             proposals: Vec::new(),
+            label: Some(label),
         },
     );
     Ok(())
@@ -983,8 +1026,8 @@ fn ungated(mut t: Tally, m: &RepoMeta) -> Tally {
 
 /// The standing of a commit under its repo's policy: the ballots that count
 /// and whether they reach the threshold. With no votes required there is
-/// nothing to count, and `reached` is true. `None` for a repo without
-/// tenancy metadata, or a commit id that does not parse.
+/// nothing to count, and `reached` is true. `None` for a repo that does
+/// not exist, or a commit id that does not parse.
 pub fn tally(repo: &str, commit_hex: &str) -> Option<Tally> {
     let m = meta(repo)?;
     let oid = parse_oid(commit_hex).ok()?;
@@ -1060,11 +1103,11 @@ fn reached(repo: &str, pol: &Policy, oid: &Oid) -> bool {
 /// Called before the pack is ingested; an `Err` means the push must be
 /// refused untouched.
 pub fn charge_push(repo: &str, bytes: usize) -> Result<(), String> {
-    let mut m = meta_or_legacy(repo)?;
+    let mut m = existing(repo)?;
     if exempt(&m) {
         // No fee, but an owned repo still counts its bytes: if the owner
         // stops being an operator, rent covers what was pushed meanwhile.
-        // Ownerless (legacy) repos have no record to keep them in.
+        // An ownerless repo has no one to charge them to.
         if m.owner.is_some() {
             m.storage_bytes = m.storage_bytes.saturating_add(bytes as u64);
             save_meta(repo, &m);
@@ -1089,7 +1132,7 @@ pub fn charge_push(repo: &str, bytes: usize) -> Result<(), String> {
 /// Returns who paid, `None` for an exempt repo, so a caller whose action
 /// then fails before consuming anything can `refund` that principal.
 pub fn charge_action(repo: &str, cycles: u64, what: &str) -> Result<Option<Principal>, String> {
-    let m = meta_or_legacy(repo)?;
+    let m = existing(repo)?;
     if exempt(&m) {
         return Ok(None);
     }
@@ -1179,7 +1222,7 @@ pub struct RepoInfo {
 }
 
 pub fn repo_info(repo: &str) -> Option<RepoInfo> {
-    let m = meta_or_legacy(repo).ok()?;
+    let m = existing(repo).ok()?;
     Some(RepoInfo {
         exempt: exempt(&m),
         owner: m.owner,
@@ -1215,7 +1258,7 @@ pub fn set_require_signed_push(repo: &str, who: &Principal, operator: bool, on: 
 }
 
 pub fn set_app_canister(repo: &str, canister: Principal) -> Result<(), String> {
-    let mut m = meta_or_legacy(repo)?;
+    let mut m = existing(repo)?;
     m.app_canister = Some(canister);
     save_meta(repo, &m);
     Ok(())
@@ -1352,21 +1395,56 @@ mod tests {
         assert_eq!(balance(&bob), before - 35);
     }
 
+    /// Phase 3 step 7: the authority answers which repos exist, and their
+    /// labels, from its own records. A repo the git side holds and the
+    /// authority has no record of -- one created before tenancy -- does not
+    /// exist for it until `adopt_repos` gives it an ownerless record.
     #[test]
-    fn legacy_and_operator_repos_are_exempt() {
+    fn legacy_repos_are_adopted_ownerless_and_exempt() {
         store::create_repo("t-legacy").unwrap();
-        assert!(meta("t-legacy").is_none());
+        assert!(!repo_exists("t-legacy"));
+        assert!(charge_push("t-legacy", 1).unwrap_err().contains("no such repo"));
+        let label = || Some("t-legacy".to_string());
+        adopt_repos([("t-legacy".to_string(), label())]);
+        assert!(repo_exists("t-legacy"));
+        let m = meta("t-legacy").unwrap();
+        assert_eq!((m.owner, m.label.clone()), (None, label()));
+
         charge_push("t-legacy", 10_000_000).unwrap();
+        assert_eq!(meta("t-legacy").unwrap().storage_bytes, 0, "no one to charge the bytes to");
         assert_eq!(charge_action("t-legacy", u64::MAX, "evm"), Ok(None));
         assert!(repo_info("t-legacy").unwrap().exempt);
         // Anyone may push to a legacy repo only as an operator; tokens still
         // gate the HTTP path.
         assert!(crate::mirror::may_write("t-legacy", &p(31), false).is_err());
         assert!(crate::mirror::may_write("t-legacy", &p(31), true).is_ok());
-        // A repo without metadata costs no rent.
-        let (charged, _) = charge_rent_all();
-        assert!(!crate::records::repo_meta_all::<RepoMeta>().iter().any(|(n, _)| n == "t-legacy"));
-        let _ = charged;
+        // Rent passes it by.
+        charge_rent_all();
+        assert!(!meta("t-legacy").unwrap().delinquent);
+
+        // Adopting again changes nothing, nor does a later report with no
+        // label.
+        adopt_repos([("t-legacy".to_string(), None)]);
+        assert_eq!(meta("t-legacy").unwrap().label, label());
+    }
+
+    /// A repo created through the authority records its label; one created
+    /// before labels were recorded gets it from `adopt_repos`, its owner
+    /// and the rest kept.
+    #[test]
+    fn repos_record_their_labels() {
+        let owner = p(32);
+        credit(&owner, 10_000_000_000);
+        create_repo("My_Labelled", &owner, false).unwrap();
+        assert_eq!(meta("My_Labelled").unwrap().label.as_deref(), Some("my-labelled"));
+
+        create_repo("older", &owner, false).unwrap();
+        let mut m = meta("older").unwrap();
+        m.label = None;
+        crate::records::repo_meta_set("older", &m);
+        adopt_repos([("older".to_string(), Some("older".to_string()))]);
+        let m = meta("older").unwrap();
+        assert_eq!((m.owner, m.label.as_deref()), (Some(owner), Some("older")));
     }
 
     /// A controller off the allowlist is an operator for billing too, and

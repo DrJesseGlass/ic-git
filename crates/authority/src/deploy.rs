@@ -817,7 +817,7 @@ mod tests {
     /// current config.
     #[test]
     fn a_job_is_fixed_when_queued() {
-        store::create_repo("fixed").unwrap();
+        crate::tenancy::test_repo("fixed");
         let module = vec![7u8; 3 << 20];
         let commit = commit_of(&[("app.wasm", &module), ("other.wasm", b"other")]);
         set_config("fixed", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
@@ -843,7 +843,7 @@ mod tests {
     /// commit and path; what could not be resolved is carried as the reason.
     #[test]
     fn a_job_deploys_only_proven_bytes() {
-        store::create_repo("proven").unwrap();
+        crate::tenancy::test_repo("proven");
         let commit = commit_of(&[("app.wasm", b"good"), ("c.hex", b"0x6001")]);
         let other = commit_of(&[("app.wasm", b"evil")]);
         let a = || resolve_one(&commit, "app.wasm");
@@ -910,7 +910,7 @@ mod tests {
     /// is installed again.
     #[test]
     fn live_means_last_successful_install() {
-        store::create_repo("live").unwrap();
+        crate::tenancy::test_repo("live");
         // Nothing configured: nothing to run, so any commit is live.
         assert!(is_live("live", "c1", false, false));
         set_config("live", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
@@ -931,7 +931,7 @@ mod tests {
     /// successful install takes the announce over.
     #[test]
     fn a_newer_install_takes_the_announce_over() {
-        store::create_repo("ann").unwrap();
+        crate::tenancy::test_repo("ann");
         set_config("ann", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
         let cfg = get_config("ann").unwrap();
         let older = status("c1", true, "installed");

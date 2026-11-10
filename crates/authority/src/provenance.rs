@@ -119,7 +119,7 @@ mod tests {
     /// print NOT VERIFIED for correctly deployed contracts on mainnet.
     #[test]
     fn deploy_record_hashes_decoded_bytecode_under_the_bare_repo_key() {
-        store::create_repo("hexrepo").unwrap();
+        crate::tenancy::test_repo("hexrepo");
         // Leading 0x and trailing newline both get stripped before decoding.
         let artifact = b"0x6001600155\n";
         let blob = store::put_object(ObjectType::Blob, artifact);

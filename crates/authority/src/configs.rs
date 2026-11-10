@@ -48,7 +48,7 @@ pub fn get(repo: &str) -> DeployConfigs {
 /// chosen before. A governed repo deploys committed `.wasm` only
 /// (`SourceKind::for_repo`).
 pub fn set_wasm(repo: &str, target: String, source_path: String) -> Result<(), String> {
-    if !crate::to_git::repo_exists(repo) {
+    if !crate::tenancy::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
     Principal::from_text(&target).map_err(|e| format!("bad target principal: {e}"))?;
@@ -80,7 +80,7 @@ pub fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
 /// could not deploy with `gas_limit` at all (`evm::require_deploy_target`):
 /// a misconfiguration better rejected now than found at push time.
 pub fn set_evm(repo: &str, source_path: String, gas_limit: u64) -> Result<(), String> {
-    if !crate::to_git::repo_exists(repo) {
+    if !crate::tenancy::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
     if !source_path.ends_with(".hex") {
@@ -105,8 +105,8 @@ fn mirror(repo: &str) {
 
 /// Bring every configured repo's mirror up to date. For post_upgrade: a
 /// release before the authority owned the configs left the mirrors empty.
-/// By key rather than by repo metadata, since a legacy repo can have a
-/// config and no metadata.
+/// By key rather than by repo metadata: it runs before `tenancy::adopt_repos`
+/// gives a repo created before tenancy its metadata.
 pub fn sync_all_mirrors() {
     let mut repos = std::collections::BTreeSet::new();
     for prefix in [WASM_PREFIX, EVM_PREFIX] {
@@ -184,8 +184,8 @@ mod tests {
     /// whatever the git side put in it.
     #[test]
     fn a_job_naming_another_repos_app_canister_is_refused() {
-        store::create_repo("mine").unwrap();
-        store::create_repo("theirs").unwrap();
+        crate::tenancy::test_repo("mine");
+        crate::tenancy::test_repo("theirs");
         set_wasm("mine", app(1), "app.wasm".into()).unwrap();
         set_wasm("theirs", app(2), "app.wasm".into()).unwrap();
         let artifact = || Ok(Artifact { blob: b"m".to_vec(), proof: Vec::new() });
@@ -210,7 +210,7 @@ mod tests {
     /// builds from it passes; one built before a config change does not.
     #[test]
     fn the_mirror_follows_every_setter() {
-        store::create_repo("mirrored").unwrap();
+        crate::tenancy::test_repo("mirrored");
         let a = store::put_object(ObjectType::Blob, b"wasm");
         let mut tree = b"100644 app.wasm\0".to_vec();
         tree.extend_from_slice(a.as_slice());
@@ -229,18 +229,28 @@ mod tests {
         assert!(e.contains("(upgrade)") && e.contains("(reinstall)"), "{e}");
         assert!(check_job("mirrored", queued()).is_ok());
 
+        // The EVM leg too: a job built before it was configured has none.
+        let before_evm = queued();
+        crate::evm::set_config("aaaaa-aa".into(), "key".into(), 11155111, Vec::new()).unwrap();
+        set_evm("mirrored", "c.hex".into(), 100_000).unwrap();
+        assert_eq!(crate::mirror::deploy_configs("mirrored"), get("mirrored"));
+        assert!(crate::mirror::deploy_configs("mirrored").evm.is_some());
+        let e = check_job("mirrored", before_evm).err().unwrap();
+        assert!(e.contains("no EVM leg"), "{e}");
+
         // The mirror starts empty after an upgrade from a release before
         // this one; post_upgrade fills it by key.
         crate::mirror::set_deploy_configs("mirrored", DeployConfigs::default());
         assert_eq!(crate::jobs::get_config("mirrored"), None);
         sync_all_mirrors();
+        assert_eq!(crate::mirror::deploy_configs("mirrored"), get("mirrored"));
         assert_eq!(crate::jobs::get_config("mirrored"), get_wasm("mirrored"));
     }
 
     #[test]
     fn setters_refuse_what_cannot_deploy() {
         assert!(set_wasm("nowhere", app(4), "app.wasm".into()).unwrap_err().contains("no such repo"));
-        store::create_repo("bad").unwrap();
+        crate::tenancy::test_repo("bad");
         assert!(set_wasm("bad", "not a principal".into(), "app.wasm".into()).is_err());
         assert!(set_mode("bad", DeployMode::Reinstall).is_err(), "no config to set the mode of");
         assert!(set_evm("bad", "c.bin".into(), 100_000).unwrap_err().contains(".hex"));

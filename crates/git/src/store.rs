@@ -211,6 +211,13 @@ pub fn label_holder(label: &str) -> Option<String> {
     crate::kv::get_json(&label_key(label))
 }
 
+/// The label a repo holds, if any: its own, unless an older repo holds it.
+pub fn held_label(repo: &str) -> Option<String> {
+    repo_label(repo)
+        .ok()
+        .filter(|l| label_holder(l).as_deref() == Some(repo))
+}
+
 /// Longest repo name, in bytes. Generous for a git repo name, and well
 /// under the 512 bytes ic-name-service accepts for the `repo` text an
 /// announce carries, so every repo that can be created can be announced.
@@ -459,6 +466,8 @@ mod tests {
     }
 
     /// Repos from before labels get theirs on upgrade, first by name order.
+    /// `held_label`, which the authority adopts repos by, names the label a
+    /// repo holds and nothing for one whose label an older repo took.
     #[test]
     fn upgrade_indexes_labels_of_older_repos() {
         REPOS.with(|r| {
@@ -467,9 +476,14 @@ mod tests {
                 r.insert(n.to_string(), "refs/heads/main".to_string());
             }
         });
+        assert_eq!(held_label("Foo"), None, "not indexed yet");
         index_repo_labels();
         assert_eq!(label_holder("foo").as_deref(), Some("Foo"));
         assert_eq!(label_holder("bar-baz").as_deref(), Some("bar_baz"));
+        assert_eq!(held_label("Foo").as_deref(), Some("foo"));
+        assert_eq!(held_label("bar_baz").as_deref(), Some("bar-baz"));
+        assert_eq!(held_label("foo"), None, "an older repo holds its label");
+        assert_eq!(held_label("nowhere"), None);
     }
 
     #[test]

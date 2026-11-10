@@ -22,13 +22,14 @@
 //! against its segment rule (`ic_git_types::labels::check_segment`, a copy of
 //! ic-name-service's) when it is configured; a repo is announced under its label
 //! (`ic_git_types::labels::repo_label`: "My_App" -> "my-app"), which `create_repo` makes
-//! unique across repos, so two repos can never announce the same name. A
+//! unique across repos, so two repos can never announce the same name. The
+//! label is the one the repo's metadata records (`RepoMeta::label`). A
 //! repo from before labels existed that holds none is skipped with a note.
 //!
 //! Direction of dependency: nothing here depends on ic-name-service code;
 //! the argument record is a candid mirror of its `Announcement` type.
 
-use ic_git_types::labels::{check_segment, repo_label};
+use ic_git_types::labels::check_segment;
 use candid::{CandidType, Principal};
 use ic_cdk::call::{Call, CallFailed, RejectCode};
 use serde::{Deserialize, Serialize};
@@ -95,10 +96,9 @@ pub async fn announce(
         Ok(p) => p,
         Err(e) => return format!(" (announce skipped: bad target: {e})"),
     };
-    let label = match repo_label(repo) {
-        Ok(l) if crate::to_git::label_holder(&l).as_deref() == Some(repo) => l,
-        Ok(l) => return format!(" (announce skipped: label '{l}' is not held by this repo)"),
-        Err(e) => return format!(" (announce skipped: {e})"),
+    let label = match crate::tenancy::meta(repo).and_then(|m| m.label) {
+        Some(l) => l,
+        None => return " (announce skipped: this repo holds no label)".into(),
     };
     let name = format!("{}/{}", cfg.handle, label);
     let arg = Announcement {

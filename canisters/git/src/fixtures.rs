@@ -14,8 +14,9 @@ pub fn body_json(res: &HttpResponse) -> serde_json::Value {
 }
 
 /// Two commits: c1 (a.txt) -> c2 (a.txt, "sub dir"/b.txt), a tag ref on c1.
+/// The repo is ownerless, as one created before tenancy.
 pub fn seed(repo: &str) -> (Oid, Oid) {
-    store::create_repo(repo).unwrap();
+    crate::tenancy::test_repo(repo);
     let a = store::put_object(ObjectType::Blob, b"alpha\n");
     let b = store::put_object(ObjectType::Blob, b"bravo\n");
     let mut t1 = Vec::new();

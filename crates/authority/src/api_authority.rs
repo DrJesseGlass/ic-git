@@ -157,7 +157,7 @@ pub fn handle(req: &ApiPath) -> Option<HttpResponse> {
         Ok(r) => r,
         Err(e) => return Some(error(400, &e)),
     };
-    if !crate::to_git::repo_exists(&repo) {
+    if !crate::tenancy::repo_exists(&repo) {
         return Some(error(404, "no such repo"));
     }
     Some(match view {
@@ -196,8 +196,9 @@ pub fn handle(req: &ApiPath) -> Option<HttpResponse> {
                 return Some(error(400, &e));
             }
             let ballots: Vec<BallotInfo> = tenancy::votes(&repo, commit).into_iter().map(ballot_info).collect();
-            // A repo without tenancy metadata (legacy, operator-owned) has
-            // no policy: it requires nothing, so every commit is reached.
+            // The repo exists and the id parsed, so there is a tally;
+            // `None` is handled as no policy, nothing required, all the
+            // same.
             let t = tenancy::tally(&repo, commit);
             let view = VotesView {
                 ballots,
