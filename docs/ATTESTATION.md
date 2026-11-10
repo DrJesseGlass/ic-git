@@ -336,11 +336,11 @@ contracts to EVM chains), with two changes:
 1. Send the deploy to the CREATE2 factory (salt + init code) instead of a raw
    CREATE, so the address is deterministic rather than nonce-dependent.
 2. Derive and record the CREATE2 address explicitly. The canister's current
-   derivation in `canisters/git/src/evm.rs`
+   derivation in `crates/authority/src/evm.rs`
    (`contract_address: to.is_none().then(|| checksum_address(&create_address(&from, nonce)))`)
    only fires for a raw CREATE, where `to` is None. A factory deploy sets
    `to = Some(factory)`, so that field comes back None,
-   `canisters/git/src/deploy.rs` stores `String::new()`, and the status message
+   `crates/authority/src/deploy.rs` stores `String::new()`, and the status message
    renders as `deployed to  (chain via evm config)`. The deploy path must
    instead compute
    `keccak256(0xff ++ factory ++ salt ++ keccak256(initCode))[12..]` when the

@@ -3,7 +3,7 @@
 ic-git started single-tenant: one allowlisted operator created repos and
 minted push tokens, and the canister paid for everything out of its own
 cycles. This document describes the multi-tenant model that replaces it,
-implemented in `canisters/git/src/tenancy.rs`, `ledger.rs`, and `apps.rs`.
+implemented in `crates/authority/src/tenancy.rs`, `ledger.rs`, and `apps.rs`.
 
 ## The one rule
 

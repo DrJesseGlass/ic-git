@@ -524,7 +524,7 @@ fn reconcile(m: &mut Mirror, open: &[GovProposal], pages: &[GovLogPage]) -> Vec<
     out
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 thread_local! {
     static TIMER: std::cell::Cell<Option<ic_cdk_timers::TimerId>> = const { std::cell::Cell::new(None) };
     static POLLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -533,7 +533,7 @@ thread_local! {
 /// Poll the governor every `GOVERNOR_POLL_SECS` while one is set. Called
 /// from init, post_upgrade (timers do not survive an upgrade) and
 /// `set_governor`.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 pub fn arm_governor_timer() {
     TIMER.with(|t| {
         if let Some(id) = t.take() {
@@ -548,10 +548,10 @@ pub fn arm_governor_timer() {
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn arm_governor_timer() {}
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub async fn poll_governor() -> Result<u64, String> {
     Err("no governor in tests".to_string())
 }
@@ -560,7 +560,7 @@ pub async fn poll_governor() -> Result<u64, String> {
 /// that added. One poll at a time: a second one while the first awaits
 /// would report the same changes twice. A poll whose governor was changed
 /// while it awaited reports nothing: its answers are the old governor's.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 pub async fn poll_governor() -> Result<u64, String> {
     use ic_cdk::call::Call;
     let gov = governor().ok_or("no governor set; call feed_set_governor first")?;
@@ -631,11 +631,11 @@ pub fn serve(repo: Option<&str>, host: Option<&str>) -> HttpResponse {
 }
 
 fn self_id() -> String {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     {
         "aaaaa-aa".to_string()
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     {
         ic_cdk::api::canister_self().to_text()
     }

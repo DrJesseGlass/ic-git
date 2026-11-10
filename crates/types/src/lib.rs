@@ -4,6 +4,7 @@
 //! no calls, nothing that reads the object store.
 
 pub mod deploy;
+pub mod git_side;
 pub mod keys;
 pub mod labels;
 pub mod oid;

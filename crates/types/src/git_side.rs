@@ -1,0 +1,49 @@
+//! Everything the authority asks of the git side (docs/CANISTER_SPLIT.md,
+//! section 4), as one interface. The git crate implements it; the
+//! authority crate holds only this trait, so the compiler refuses any other
+//! way across. Phase 3 replaces the implementation with messages.
+
+use crate::deploy::DeployConfig;
+use crate::oid::Oid;
+use candid::Principal;
+use serde::{Deserialize, Serialize};
+
+/// Who may push to a repo: its owner and its writers. Operators may too,
+/// by each canister's own rule.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct PushPolicy {
+    pub writers: Vec<Principal>,
+    pub require_signed_push: bool,
+}
+
+pub trait GitSide {
+    /// A repo's wasm deploy config, for the policy checks that depend on
+    /// one (an install mode needs a config to set it on; governing needs it
+    /// to name a committed .wasm).
+    fn deploy_config(&self, repo: &str) -> Option<DeployConfig>;
+
+    /// Write the push-policy mirror. The git side revokes the tokens of
+    /// writers the policy drops, sparing operators by `is_operator`.
+    fn set_push_policy(&self, repo: &str, policy: PushPolicy, is_operator: &dyn Fn(&Principal) -> bool);
+
+    /// Write the approved-commits mirror: the approved commits by ballot
+    /// key, or `None` when the repo requires no votes.
+    fn set_approved(&self, repo: &str, approved: Option<Vec<String>>);
+
+    /// Does the repo exist on the git side?
+    fn repo_exists(&self, repo: &str) -> bool;
+
+    /// Would a repo of this name be created? Returns its label. The
+    /// authority asks before it charges the creation fee.
+    fn check_new_repo(&self, name: &str) -> Result<String, String>;
+
+    /// Create the repo, once the authority has recorded its owner.
+    fn create_repo(&self, name: &str) -> Result<(), String>;
+
+    /// Does the git side hold this commit? A ballot on one it does not is
+    /// refused.
+    fn has_commit(&self, oid: &Oid) -> bool;
+
+    /// The repo holding a label, if any.
+    fn label_holder(&self, label: &str) -> Option<String>;
+}

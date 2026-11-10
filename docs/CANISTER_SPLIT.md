@@ -272,7 +272,7 @@ canister does what:
    be governed while the job awaits the target's status. On mainnet the
    only governed repo, ic-vote, deploys `app.wasm`, so nothing live
    changes.
-4. **The crate split.** Workspace crates `types` (wire structs, record keys,
+4. **The crate split.** DONE. Workspace crates `types` (wire structs, record keys,
    the proof format and its checker), `authority`, `git` and `compiler`,
    still linked into one canister. The two deferred items below land here.
    First half DONE: `crates/types` (`ic-git-types`: `proof`, the checker,
@@ -306,7 +306,25 @@ canister does what:
    - `feed::after_push` takes the branch and both tips from the push glue
      in `lib.rs`, which, with `consent.rs`, is the only code that calls
      both sides.
-   Still open: move the two sides into `authority` and `git` crates.
+   Then the crates, DONE: the two sides are `crates/authority`
+   (`ic-git-authority`) and `crates/git` (`ic-git-git`), with what neither
+   owns in `crates/common` (`ic-git-common`: the memory layout, `kv`, the
+   clock, the /api JSON helpers). The canister crate is the glue: its
+   endpoints, `consent.rs`, the compile fleet, and the tests that run both
+   sides together (`both_sides.rs`).
+   - The git crate depends on neither the authority nor the canister.
+     `mirror::set_push_policy` takes the operator rule from its caller.
+   - `to_git.rs` is now an interface, `ic_git_types::git_side::GitSide`
+     (with `PushPolicy`, its wire struct). The git crate implements it
+     (`for_authority::Git`); the canister installs that into the authority
+     first thing in `init` and `post_upgrade`. The authority crate does not
+     depend on the git crate, so the compiler refuses any other way across,
+     and phase 3 installs an implementation that sends messages.
+   - Tests run against the real git side rather than a fake: the
+     authority crate's tests take the git crate as a dev-dependency, and a
+     `testing` feature (enabled only from dev-dependencies, never in a
+     wasm build) lets the canister's tests do the same and reach the test
+     hooks (the settable clock and controllers, timer stubs).
 5. **The mirrors.** DONE. Site serving and push authorization read the
    approved commits and the writers through the interfaces they will have
    across the boundary, so phase 3 swaps a function call for a message.

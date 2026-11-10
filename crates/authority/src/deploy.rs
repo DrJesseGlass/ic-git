@@ -121,6 +121,12 @@ pub fn get_history(repo: &str) -> Vec<DeployRecord> {
     crate::kv::get_json(&log_key(repo)).unwrap_or_default()
 }
 
+/// For the canister's tests: record a deploy outcome as the queue would.
+#[cfg(feature = "testing")]
+pub fn record_for_tests(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
+    record(repo, cfg, st)
+}
+
 /// Append the binding for this deploy to the provenance log.
 pub(crate) fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
     let mut log = get_history(repo);

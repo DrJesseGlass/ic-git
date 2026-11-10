@@ -1042,12 +1042,45 @@ mod tests {
         assert_eq!(serve("web", "").status_code, 404);
     }
 
-    /// A fresh repo with an index.html commit per push, owned by `owner`.
-    fn gated_repo(repo: &str, owner: u8) -> (candid::Principal, impl Fn(&[u8], Option<store::Oid>) -> store::Oid + '_) {
-        use crate::tenancy;
-        let owner = candid::Principal::from_slice(&[owner; 8]);
-        tenancy::credit(&owner, 10_000_000_000);
-        tenancy::create_repo(repo, &owner, false).unwrap();
+    /// What the authority's votes do to a repo, as the git side sees it:
+    /// the approved mirror. With no votes required it is `None`; with one
+    /// required, a commit is in it while its one voter approves.
+    mod votes {
+        use crate::{mirror, store};
+        use std::cell::RefCell;
+        use std::collections::BTreeMap;
+
+        thread_local! {
+            static REPOS: RefCell<BTreeMap<String, (u32, Vec<String>)>> = const { RefCell::new(BTreeMap::new()) };
+        }
+
+        fn sync(repo: &str) {
+            let approved = REPOS.with(|r| r.borrow().get(repo).cloned().unwrap_or_default());
+            mirror::set_approved(repo, (approved.0 > 0).then_some(approved.1));
+        }
+
+        pub fn require(repo: &str, k: u32) {
+            REPOS.with(|r| r.borrow_mut().entry(repo.into()).or_default().0 = k);
+            sync(repo);
+        }
+
+        pub fn vote(repo: &str, c: &store::Oid, yes: bool) {
+            let key = mirror::commit_key(c.as_slice());
+            REPOS.with(|r| {
+                let mut r = r.borrow_mut();
+                let keys = &mut r.entry(repo.into()).or_default().1;
+                keys.retain(|k| *k != key);
+                if yes {
+                    keys.push(key);
+                }
+            });
+            sync(repo);
+        }
+    }
+
+    /// A fresh repo with an index.html commit per push.
+    fn gated_repo(repo: &str) -> impl Fn(&[u8], Option<store::Oid>) -> store::Oid + '_ {
+        store::create_repo(repo).unwrap();
         set_config(repo, String::new()).unwrap();
         let push = move |html: &[u8], parent: Option<store::Oid>| {
             let index = store::put_object(ObjectType::Blob, html);
@@ -1062,7 +1095,7 @@ mod tests {
             store::set_ref(repo, &branch, oid).unwrap();
             oid
         };
-        (owner, push)
+        push
     }
 
     /// With votes required, a push is not served until it is approved; the
@@ -1070,10 +1103,9 @@ mod tests {
     /// queue each commit the site moves to, so the app follows the site.
     #[test]
     fn serves_and_deploys_the_newest_approved_commit() {
-        use crate::tenancy;
-        let (owner, push) = gated_repo("gated", 77);
+        let push = gated_repo("gated");
         let vote = |c: &store::Oid, yes: bool| {
-            tenancy::vote("gated", &owner, &store::oid_hex(c), yes).unwrap();
+            votes::vote("gated", c, yes);
             advance("gated")
         };
         let served_by = |res: &HttpResponse| {
@@ -1090,7 +1122,7 @@ mod tests {
         assert_eq!(advance("gated"), None);
 
         // Votes required and nothing approved: nothing is served.
-        tenancy::set_required_votes("gated", &owner, false, 1).unwrap();
+        votes::require("gated", 1);
         assert_eq!(advance("gated"), None);
         let res = serve("gated", "");
         assert_eq!(res.status_code, 404);
@@ -1124,7 +1156,7 @@ mod tests {
         assert_eq!(serve("gated", "").body, b"two");
 
         // Dropping the threshold serves the tip and deploys it, once.
-        tenancy::set_required_votes("gated", &owner, false, 0).unwrap();
+        votes::require("gated", 0);
         assert_eq!(advance("gated"), Some(c3));
         assert_eq!(serve("gated", "").body, b"three");
         assert_eq!(advance("gated"), None);
@@ -1135,14 +1167,13 @@ mod tests {
     /// runs) still takes the commit down rather than serving it.
     #[test]
     fn a_recorded_commit_is_served_only_while_approved() {
-        use crate::tenancy;
-        let (owner, push) = gated_repo("recheck", 79);
+        let push = gated_repo("recheck");
         let c1 = push(b"one", None);
-        tenancy::set_required_votes("recheck", &owner, false, 1).unwrap();
-        tenancy::vote("recheck", &owner, &store::oid_hex(&c1), true).unwrap();
+        votes::require("recheck", 1);
+        votes::vote("recheck", &c1, true);
         advance("recheck");
         assert_eq!(serve("recheck", "").status_code, 200);
-        tenancy::vote("recheck", &owner, &store::oid_hex(&c1), false).unwrap();
+        votes::vote("recheck", &c1, false);
         assert_eq!(serve("recheck", "").status_code, 404);
     }
 
@@ -1151,11 +1182,10 @@ mod tests {
     /// more takes the site down.
     #[test]
     fn unapproved_pushes_bury_the_served_commit_only_past_the_walk() {
-        use crate::tenancy;
-        let (owner, push) = gated_repo("deep", 78);
+        let push = gated_repo("deep");
         let c1 = push(b"approved", None);
-        tenancy::set_required_votes("deep", &owner, false, 1).unwrap();
-        tenancy::vote("deep", &owner, &store::oid_hex(&c1), true).unwrap();
+        votes::require("deep", 1);
+        votes::vote("deep", &c1, true);
         assert_eq!(advance("deep"), Some(c1));
         let mut tip = c1;
         for i in 0..APPROVAL_WALK - 1 {
@@ -1174,11 +1204,10 @@ mod tests {
     /// does not leave the old approved commit live off the branch.
     #[test]
     fn an_approved_commit_off_the_branch_is_not_served() {
-        use crate::tenancy;
-        let (owner, push) = gated_repo("rewrite", 81);
+        let push = gated_repo("rewrite");
         let c1 = push(b"approved", None);
-        tenancy::set_required_votes("rewrite", &owner, false, 1).unwrap();
-        tenancy::vote("rewrite", &owner, &store::oid_hex(&c1), true).unwrap();
+        votes::require("rewrite", 1);
+        votes::vote("rewrite", &c1, true);
         assert_eq!(advance("rewrite"), Some(c1));
 
         // Deleted branch.
@@ -1202,11 +1231,10 @@ mod tests {
     /// upgrade hook records it so the site keeps serving.
     #[test]
     fn upgrade_records_repos_gated_before_advance() {
-        use crate::tenancy;
-        let (owner, push) = gated_repo("legacy-gated", 80);
+        let push = gated_repo("legacy-gated");
         let c1 = push(b"one", None);
-        tenancy::set_required_votes("legacy-gated", &owner, false, 1).unwrap();
-        tenancy::vote("legacy-gated", &owner, &store::oid_hex(&c1), true).unwrap();
+        votes::require("legacy-gated", 1);
+        votes::vote("legacy-gated", &c1, true);
         assert_eq!(serve("legacy-gated", "").status_code, 404);
         record_gated_repos();
         assert_eq!(served_commit("legacy-gated").unwrap(), c1);

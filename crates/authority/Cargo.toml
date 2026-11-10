@@ -1,0 +1,45 @@
+[package]
+name = "ic-git-authority"
+version = "0.1.0"
+edition = "2021"
+description = "ic-git's authority (docs/CANISTER_SPLIT.md, phase 2 step 4): tenancy, ballots and governance, accounts and payments, names, the EVM and Solana signers, the deploy queue and provenance publishing. Reaches the git side only through ic_git_types::git_side."
+
+[features]
+# Test hooks for crates that test against this one (a settable clock and
+# controller set, timer stubs, the real git side standing in when none is
+# installed): enabled only from dev-dependencies, so they never reach a
+# wasm build.
+testing = ["dep:ic-git-git", "ic-git-git/testing", "ic-git-common/testing"]
+
+[dependencies]
+# Keep these pinned to the versions ic-dev-kit-rs uses (see canisters/git).
+ic-dev-kit-rs = { version = "0.4", features = ["storage"] }
+ic-cdk = "0.20"
+ic-cdk-timers = "1"
+candid = "0.10"
+ic-stable-structures = "0.7"
+# K-of-N approvals (docs/TENANCY.md, "Votes"): the policy, ballot and tally
+# rules shared with ic-vote. From crates.io; Cargo.lock pins the exact version
+# and the registry checksum. 0.2 added objections.
+ic-multisig = { version = "0.2", features = ["candid"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+sha2 = "0.10"
+hex = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+# Track A (see ROADMAP.md): sign EVM transactions with threshold ECDSA.
+# sha3 for keccak256; k256 (pure Rust, no getrandom without the rand feature)
+# to decompress the SEC1 pubkey into an EOA and to find the recovery id by
+# trial recovery. Both build cleanly to wasm32-unknown-unknown.
+sha3 = "0.10"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
+ic-git-common = { path = "../common" }
+ic-git-compiler = { path = "../compiler" }
+ic-git-types = { path = "../types" }
+# Only with the testing feature: never a production dependency.
+ic-git-git = { path = "../git", optional = true }
+
+[dev-dependencies]
+ic-git-common = { path = "../common", features = ["testing"] }
+ic-git-git = { path = "../git", features = ["testing"] }

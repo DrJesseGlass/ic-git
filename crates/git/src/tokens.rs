@@ -250,7 +250,7 @@ pub fn authorize_if(token: &str, may_write: impl Fn(&str, &Principal) -> bool) -
 }
 
 /// The repo `authorize_if` grants, with every minter still a writer.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn authorize(token: &str) -> Option<String> {
     authorize_if(token, |_, _| true).map(|g| g.repo)
 }
@@ -547,35 +547,39 @@ mod tests {
         assert_eq!(authorize("tok-alice-2").as_deref(), Some("mem-other"));
     }
 
-    /// Against the real write rule: removing a writer, demoting one to
-    /// voter, and transferring the repo each revoke the tokens of whoever
-    /// lost write access, and only theirs -- as the change is saved, through
-    /// the push-policy mirror (mirror::set_push_policy), with no sweep.
+    /// A narrower push policy revokes, as it is saved, the tokens of every
+    /// minter it drops, and only theirs: an operator (by the canister's own
+    /// rule) keeps theirs, and saving the same writers again revokes nothing.
+    /// The tenancy changes that narrow it are tested against this in the
+    /// canister crate.
     #[test]
-    fn losing_write_access_revokes_your_tokens() {
-        use crate::tenancy::{self, Role};
+    fn a_narrower_push_policy_revokes_the_dropped_writers_tokens() {
+        use crate::mirror::{set_push_policy, PushPolicy};
         set_test_now(T0);
-        let (owner, w1, w2, next) = (alice(), bob(), Principal::from_slice(&[11; 8]), Principal::from_slice(&[12; 8]));
-        tenancy::credit(&owner, 10_000_000_000);
-        tenancy::create_repo("acl", &owner, false).unwrap();
-        tenancy::add_member("acl", &owner, false, w1, Role::Writer).unwrap();
-        tenancy::add_member("acl", &owner, false, w2, Role::Writer).unwrap();
+        let (owner, w1, w2, op) = (alice(), bob(), Principal::from_slice(&[11; 8]), Principal::from_slice(&[13; 8]));
+        let policy = |writers: &[Principal]| PushPolicy {
+            writers: writers.to_vec(),
+            require_signed_push: false,
+        };
+        let is_op = |p: &Principal| *p == op;
+        crate::store::create_repo("acl").unwrap();
+        set_push_policy("acl", policy(&[owner, w1, w2]), is_op);
         mint("acl", "tok-owner", owner, None, None).unwrap();
         mint("acl", "tok-w1", w1, None, None).unwrap();
         mint("acl", "tok-w2", w2, None, None).unwrap();
-        let sweep = || revoke_unless("acl", |p| crate::mirror::may_write("acl", p, false).is_ok());
+        mint("acl", "tok-op", op, None, None).unwrap();
 
-        tenancy::remove_member("acl", &owner, false, w1).unwrap();
+        set_push_policy("acl", policy(&[owner, w2]), is_op);
         assert_eq!(authorize("tok-w1"), None);
         assert_eq!(authorize("tok-w2").as_deref(), Some("acl"));
-
-        tenancy::add_member("acl", &owner, false, w2, Role::Voter).unwrap();
-        assert_eq!(authorize("tok-w2"), None);
-
         assert_eq!(authorize("tok-owner").as_deref(), Some("acl"));
-        tenancy::transfer_repo("acl", &owner, false, next).unwrap();
+        assert_eq!(authorize("tok-op").as_deref(), Some("acl"), "an operator keeps theirs");
+
+        set_push_policy("acl", policy(&[w2]), is_op);
         assert_eq!(authorize("tok-owner"), None);
-        assert_eq!(sweep(), 0, "nothing was left for a sweep");
+        assert_eq!(authorize("tok-w2").as_deref(), Some("acl"));
+        set_push_policy("acl", policy(&[w2]), |_| false);
+        assert_eq!(authorize("tok-op").as_deref(), Some("acl"), "unchanged writers revoke nothing");
     }
 
     /// A repo holds at most MAX_LIVE_PER_REPO live tokens; revoking one or

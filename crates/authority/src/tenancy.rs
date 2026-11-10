@@ -74,14 +74,14 @@ pub fn set_pricing(p: Pricing) {
 
 /// Settle rent every hour. Timers do not survive upgrades, so init and
 /// post_upgrade both call this.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 pub fn arm_rent_timer() {
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(3600), || async {
         let _ = charge_rent_all();
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn arm_rent_timer() {}
 
 // --- accounts ----------------------------------------------------------------
@@ -320,12 +320,12 @@ pub fn is_operator(p: &Principal) -> bool {
     !is_self(p) && (is_controller(p) || auth::is_principal_authorized(*p).unwrap_or(false))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 thread_local! {
     static TEST_CONTROLLERS: std::cell::RefCell<Vec<Principal>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn set_test_controller(p: Principal, on: bool) {
     TEST_CONTROLLERS.with(|c| {
         let mut c = c.borrow_mut();
@@ -337,23 +337,23 @@ pub fn set_test_controller(p: Principal, on: bool) {
 }
 
 fn is_controller(p: &Principal) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     {
         TEST_CONTROLLERS.with(|c| c.borrow().contains(p))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     {
         ic_cdk::api::is_controller(p)
     }
 }
 
 fn is_self(p: &Principal) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     {
         let _ = p;
         false
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     {
         *p == ic_cdk::api::canister_self()
     }
@@ -1560,7 +1560,7 @@ mod tests {
         assert!(mirror::requires_signed_push("t-mirror"));
 
         // A release before the mirrors left them empty.
-        mirror::set_push_policy("t-mirror", mirror::PushPolicy::default());
+        mirror::set_push_policy("t-mirror", mirror::PushPolicy::default(), |_| false);
         mirror::set_approved("t-mirror", None);
         assert!(mirror::may_write("t-mirror", &w, false).is_err());
         sync_all_mirrors();
