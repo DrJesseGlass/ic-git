@@ -37,9 +37,6 @@ pub trait GitSide {
     /// key, or `None` when the repo requires no votes.
     fn set_approved(&self, repo: &str, approved: Option<Vec<String>>);
 
-    /// Does the repo exist on the git side?
-    fn repo_exists(&self, repo: &str) -> bool;
-
     /// Would a repo of this name be created? Returns its label. The
     /// authority asks before it charges the creation fee.
     fn check_new_repo(&self, name: &str) -> Result<String, String>;
@@ -50,7 +47,4 @@ pub trait GitSide {
     /// Does the git side hold this commit? A ballot on one it does not is
     /// refused.
     fn has_commit(&self, oid: &Oid) -> bool;
-
-    /// The repo holding a label, if any.
-    fn label_holder(&self, label: &str) -> Option<String>;
 }

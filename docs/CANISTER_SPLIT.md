@@ -466,7 +466,7 @@ The steps in one canister:
      differ is refused, and its status names both sides of the
      difference and points at `deploy_now`. Such a job is either queued
      before a config change or forged.
-7. **The authority keeps what it already decides.** Repos are created
+7. **The authority keeps what it already decides.** DONE. Repos are created
    only through the authority, which charges for them. So it records the
    label `check_new_repo` returns in the repo's metadata, and a release
    fills in metadata, label included, for every legacy ownerless repo.
@@ -476,6 +476,19 @@ The steps in one canister:
    `check_new_repo`, `create_repo`, `has_commit` (a ballot on a commit it
    does not hold is refused) and the records of step 10. Each of these is
    asked from an update call, so it can await.
+   What shipped:
+   - `RepoMeta` gains `label`. `tenancy::create_repo` records the label
+     `check_new_repo` returns.
+   - `tenancy::adopt_repos`, run by `post_upgrade` over the git side's
+     repos and the labels they hold (`store::held_label`), gives a repo
+     created before tenancy an ownerless record and a repo created
+     before this release its label. It is idempotent.
+   - `tenancy::repo_exists` is "has metadata". `configs`, `feed` and
+     `api_authority` use it, and the legacy fallback that asked the git
+     side is gone: a repo with no record does not exist for the
+     authority.
+   - `names` announces under `RepoMeta::label`. `repo_exists` and
+     `label_holder` leave `GitSide`.
 8. **Both directions become async traits.**
    - `GitSide`'s methods return futures.
    - A new `AuthoritySide` in `ic-git-types` carries the git side's calls:

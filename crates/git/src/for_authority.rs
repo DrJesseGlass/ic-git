@@ -23,10 +23,6 @@ impl GitSide for Git {
         mirror::set_approved(repo, approved)
     }
 
-    fn repo_exists(&self, repo: &str) -> bool {
-        store::repo_exists(repo)
-    }
-
     fn check_new_repo(&self, name: &str) -> Result<String, String> {
         store::check_new_repo(name)
     }
@@ -37,9 +33,5 @@ impl GitSide for Git {
 
     fn has_commit(&self, oid: &Oid) -> bool {
         store::has_object(oid)
-    }
-
-    fn label_holder(&self, label: &str) -> Option<String> {
-        store::label_holder(label)
     }
 }

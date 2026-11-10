@@ -614,7 +614,7 @@ pub async fn poll_governor() -> Result<u64, String> {
 pub fn serve(repo: Option<&str>, host: Option<&str>) -> HttpResponse {
     let feed = match repo {
         None => Feed::Canister,
-        Some(r) if crate::to_git::repo_exists(r) => Feed::Repo(r.to_string()),
+        Some(r) if crate::tenancy::repo_exists(r) => Feed::Repo(r.to_string()),
         Some(_) => return crate::git_response(404, "text/plain", b"no such repo\n".to_vec()),
     };
     let canister = self_id();
@@ -735,7 +735,7 @@ mod tests {
     /// A repo's feed: valid Atom, newest first, capped.
     #[test]
     fn repo_feed_is_atom_newest_first() {
-        store::create_repo("feed-a").unwrap();
+        crate::tenancy::test_repo("feed-a");
         let res = serve(Some("feed-a"), None);
         assert_eq!(res.status_code, 200);
         let body = String::from_utf8(res.body).unwrap();
@@ -872,7 +872,7 @@ mod tests {
     /// goes to the repo, whatever its suffix.
     #[test]
     fn published_records_land_in_the_right_feed() {
-        store::create_repo("feed-b").unwrap();
+        crate::tenancy::test_repo("feed-b");
         published("feed-b#site", &"c".repeat(40), "0xtx1");
         published("feed-b", &"d".repeat(40), "0xtx2");
         published(crate::provenance::CANISTER_KEY, &"e".repeat(40), "0xtx3");
