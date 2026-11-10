@@ -558,6 +558,17 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
         wasm_len: 0,
         wasm_sha256: String::new(),
     };
+    // The configs are this side's (configs.rs): a job runs only when the
+    // ones it carries are the repo's, so where it installs is the repo's
+    // choice and not the job builder's.
+    let job = match crate::configs::check_job(repo, job) {
+        Ok(job) => job,
+        Err(e) => {
+            st.message = e;
+            put_status(repo, &st);
+            return st;
+        }
+    };
     let (wasm_cfg, wasm_artifact) = job.wasm.unzip();
     let (evm_cfg, evm_artifact) = job.evm.unzip();
     if wasm_cfg.is_none() && evm_cfg.is_none() {
@@ -778,9 +789,10 @@ mod tests {
     use crate::store::ObjectType;
     use crate::{gitproof, store};
 
-    /// The git side's config setter, for an ungoverned test repo.
+    /// The config setter (configs.rs), which also writes the git side's
+    /// mirror that `resolve` reads.
     fn set_config(repo: &str, target: String, source_path: String) -> Result<(), String> {
-        crate::jobs::set_config(repo, target, source_path, false)
+        crate::configs::set_wasm(repo, target, source_path)
     }
 
     /// A commit whose root tree holds `files` (plain names only).
@@ -797,9 +809,11 @@ mod tests {
         store::put_object(ObjectType::Commit, commit.as_bytes())
     }
 
-    /// A queued job keeps the config and bytes it was queued with: editing
-    /// the config afterwards changes nothing it deploys, and a module of
-    /// megabytes survives the trip through its stable map.
+    /// A queued job keeps the config and bytes it was queued with, and a
+    /// module of megabytes survives the trip through its stable map. Editing
+    /// the config afterwards changes nothing it would deploy: the queue
+    /// refuses it instead (configs::check_job), and deploy_now runs the
+    /// current config.
     #[test]
     fn a_job_is_fixed_when_queued() {
         store::create_repo("fixed").unwrap();
@@ -812,10 +826,16 @@ mod tests {
         let hex = store::oid_hex(&commit);
         let job = job_take("fixed", &hex).expect("the job decodes");
         assert!(job.evm.is_none());
-        let (cfg, artifact) = job.wasm.unwrap();
-        assert_eq!(cfg.source_path, "app.wasm");
-        assert_eq!(artifact.unwrap().verified(&c20(&commit), &cfg.source_path).unwrap(), module);
+        assert_eq!(job.wasm.as_ref().unwrap().0.source_path, "app.wasm");
         assert!(job_take("fixed", &hex).is_none(), "taking a job removes it");
+        let e = crate::configs::check_job("fixed", job).err().unwrap();
+        assert!(e.contains("the job installs app.wasm") && e.contains("other.wasm"), "{e}");
+
+        set_config("fixed", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        job_save("fixed", &commit, &resolve("fixed", &commit));
+        let job = crate::configs::check_job("fixed", job_take("fixed", &hex).unwrap()).unwrap();
+        let (cfg, artifact) = job.wasm.unwrap();
+        assert_eq!(artifact.unwrap().verified(&c20(&commit), &cfg.source_path).unwrap(), module);
     }
 
     /// The drain deploys only bytes whose proof checks against the job's

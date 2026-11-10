@@ -225,7 +225,7 @@ pub fn handle(req: &ApiPath) -> Option<HttpResponse> {
         View::Deploys => json(
             200,
             &DeployView {
-                config: crate::to_git::deploy_config(&repo),
+                config: crate::configs::get_wasm(&repo),
                 status: deploy::get_status(&repo),
                 history: deploy::get_history(&repo),
             },

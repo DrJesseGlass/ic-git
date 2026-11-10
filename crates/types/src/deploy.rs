@@ -33,7 +33,7 @@ impl DeployMode {
 }
 
 /// What to build and where to install it, per repo.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct DeployConfig {
     /// Target canister principal (text form) to install the compiled wasm into.
     /// The git canister must be one of its controllers.
@@ -96,7 +96,7 @@ impl SourceKind {
 /// build-locally-commit-the-artifact, same rung as the wasm path's `.wasm`
 /// SourceKind. The chain, key, and RPC provider come from the global
 /// evm::EvmConfig; this only names the artifact and its gas budget.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EvmDeployConfig {
     /// Path within the repo tree to the creation bytecode as hex text (.hex).
     pub source_path: String,

@@ -3,7 +3,7 @@
 //! authority crate holds only this trait, so the compiler refuses any other
 //! way across. Phase 3 replaces the implementation with messages.
 
-use crate::deploy::DeployConfig;
+use crate::deploy::{DeployConfig, EvmDeployConfig};
 use crate::oid::Oid;
 use candid::Principal;
 use serde::{Deserialize, Serialize};
@@ -16,11 +16,18 @@ pub struct PushPolicy {
     pub require_signed_push: bool,
 }
 
+/// A repo's deploy configs, as the authority holds them (phase 3, step 6):
+/// the git side mirrors them to know which paths a job proves.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct DeployConfigs {
+    pub wasm: Option<DeployConfig>,
+    pub evm: Option<EvmDeployConfig>,
+}
+
 pub trait GitSide {
-    /// A repo's wasm deploy config, for the policy checks that depend on
-    /// one (an install mode needs a config to set it on; governing needs it
-    /// to name a committed .wasm).
-    fn deploy_config(&self, repo: &str) -> Option<DeployConfig>;
+    /// Write the deploy-config mirror: the repo's configs as the authority
+    /// holds them.
+    fn set_deploy_configs(&self, repo: &str, configs: DeployConfigs);
 
     /// Write the push-policy mirror. The git side revokes the tokens of
     /// writers the policy drops, sparing operators by `is_operator`.

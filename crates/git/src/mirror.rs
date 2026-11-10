@@ -1,12 +1,14 @@
 //! The git side's copy of what the authority decides about a repo
 //! (docs/CANISTER_SPLIT.md, section 4 and phase 2 step 5): who may push,
-//! whether pushes must be signed, and which commits the voters approve.
+//! whether pushes must be signed, which commits the voters approve, and
+//! (phase 3 step 6) the deploy configs.
 //! Push authorization and site serving read these and nothing of tenancy,
 //! so phase 3 replaces the calls that keep them current with messages and
 //! leaves the readers alone.
 //!
-//! The authority writes them (`tenancy::sync_mirrors`) whenever what they
-//! reflect changes: a repo's metadata, or a ballot on one of its commits.
+//! The authority writes them (`tenancy::sync_mirrors`, `configs::mirror`)
+//! whenever what they reflect changes: a repo's metadata, a ballot on one
+//! of its commits, or a deploy config.
 //! Operators are not mirrored: each canister keeps its own.
 
 use crate::store;
@@ -14,10 +16,14 @@ use candid::Principal;
 use ic_multisig::Subject;
 use std::collections::BTreeSet;
 
-pub use ic_git_types::git_side::PushPolicy;
+pub use ic_git_types::git_side::{DeployConfigs, PushPolicy};
 
 fn push_key(repo: &str) -> String {
     format!("mirror:push:{repo}")
+}
+
+fn deploy_key(repo: &str) -> String {
+    format!("mirror:deploy:{repo}")
 }
 
 fn approved_key(repo: &str) -> String {
@@ -86,4 +92,15 @@ impl Approved {
     pub fn contains(&self, oid: &store::Oid) -> bool {
         self.0.contains(&commit_key(oid.as_slice()))
     }
+}
+
+/// Record a repo's deploy configs, as the authority holds them.
+pub fn set_deploy_configs(repo: &str, configs: DeployConfigs) {
+    crate::kv::set_json(&deploy_key(repo), &configs);
+}
+
+/// A repo's deploy configs: what a job proves (`jobs::resolve`), whether a
+/// push queues one, and which artifact a registry record hashes.
+pub fn deploy_configs(repo: &str) -> DeployConfigs {
+    crate::kv::get_json(&deploy_key(repo)).unwrap_or_default()
 }

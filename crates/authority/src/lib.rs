@@ -8,6 +8,7 @@
 
 pub mod api_authority;
 pub mod apps;
+pub mod configs;
 pub mod deploy;
 pub mod evm;
 // The testing feature swaps the governor poll for a stub, which leaves the

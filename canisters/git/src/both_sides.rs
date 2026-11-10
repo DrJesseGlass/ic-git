@@ -4,7 +4,7 @@
 
 use crate::clock::set_test_now;
 use crate::fixtures::{body_json, get, seed};
-use crate::{deploy, jobs, store};
+use crate::{configs, deploy, store};
 use crate::tenancy::{self, Role};
 use crate::{mirror, tokens};
 use candid::Principal;
@@ -142,8 +142,8 @@ fn deploys_report_what_was_installed_not_the_tip() {
     assert_eq!(empty["history"].as_array().unwrap().len(), 0);
 
     let target = Principal::from_slice(&[9; 8]).to_text();
-    jobs::set_config("api-dep", target.clone(), "app.wasm".into(), false).unwrap();
-    let cfg = jobs::get_config("api-dep").unwrap();
+    configs::set_wasm("api-dep", target.clone(), "app.wasm".into()).unwrap();
+    let cfg = configs::get_wasm("api-dep").unwrap();
     // c1 was installed; c2 (the tip) was pushed later and failed.
     deploy::record_for_tests("api-dep", &cfg, &deploy::DeployStatus {
         commit: store::oid_hex(&c1),

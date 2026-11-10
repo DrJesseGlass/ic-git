@@ -2,18 +2,17 @@
 //! implementation of the interface, over this crate's store and mirrors.
 //! The canister installs it into the authority at init and upgrade.
 
-use crate::{jobs, mirror, store};
+use crate::{mirror, store};
 use candid::Principal;
-use ic_git_types::deploy::DeployConfig;
-use ic_git_types::git_side::{GitSide, PushPolicy};
+use ic_git_types::git_side::{DeployConfigs, GitSide, PushPolicy};
 use ic_git_types::oid::Oid;
 
 /// This crate, as the authority sees it.
 pub struct Git;
 
 impl GitSide for Git {
-    fn deploy_config(&self, repo: &str) -> Option<DeployConfig> {
-        jobs::get_config(repo)
+    fn set_deploy_configs(&self, repo: &str, configs: DeployConfigs) {
+        mirror::set_deploy_configs(repo, configs)
     }
 
     fn set_push_policy(&self, repo: &str, policy: PushPolicy, is_operator: &dyn Fn(&Principal) -> bool) {
