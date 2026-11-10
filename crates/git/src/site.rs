@@ -1054,9 +1054,14 @@ mod tests {
             static REPOS: RefCell<BTreeMap<String, (u32, Vec<String>)>> = const { RefCell::new(BTreeMap::new()) };
         }
 
+        thread_local! {
+            static SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        }
+
         fn sync(repo: &str) {
             let approved = REPOS.with(|r| r.borrow().get(repo).cloned().unwrap_or_default());
-            mirror::set_approved(repo, (approved.0 > 0).then_some(approved.1));
+            let seq = SEQ.with(|s| s.replace(s.get() + 1) + 1);
+            mirror::set_approved(repo, seq, (approved.0 > 0).then_some(approved.1));
         }
 
         pub fn require(repo: &str, k: u32) {

@@ -10,9 +10,10 @@ use ic_git_compiler::{compile, interp, lang};
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git), likewise.
-use ic_git_git::{api, attest, jobs, mirror, pack, receive, signed_push, site, smart_http, store, tokens};
+use ic_git_git::{api, attest, jobs, mirror, outbox, pack, receive, signed_push, site, smart_http, store, to_authority, tokens};
 // The authority (crates/authority), likewise.
-use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, icp, ledger, names, provenance, sol, tenancy, to_git};
+use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, for_git, icp, ledger, mirrors, names, provenance, sol, tenancy, to_git};
+use ic_git_types::authority_side::Event;
 #[cfg(test)]
 mod both_sides;
 mod consent;
@@ -31,16 +32,20 @@ use store::ObjectType;
 
 // --- lifecycle --------------------------------------------------------------
 
-/// The authority reaches the git side only through the GitSide interface
-/// (to_git.rs); in this one canister, that is the git crate itself. Done
-/// first in init and post_upgrade, before anything can ask.
-fn install_git_side() {
-    to_git::install(&ic_git_git::for_authority::Git);
+/// Each side reaches the other only through its interface (the
+/// authority's to_git.rs, the git side's to_authority.rs); in this one
+/// canister, each is the other crate itself. Done first in init and
+/// post_upgrade, before anything can ask. The git side's operator rule is
+/// this canister's one rule (`is_operator`).
+fn install_sides() {
+    static GIT: ic_git_git::for_authority::Git = ic_git_git::for_authority::Git { is_operator };
+    to_git::install(&GIT);
+    to_authority::install(&for_git::Authority);
 }
 
 #[ic_cdk::init]
 fn init() {
-    install_git_side();
+    install_sides();
     auth::init_with_caller();
     store::init_schema_version();
     tenancy::arm_rent_timer();
@@ -55,15 +60,18 @@ fn pre_upgrade() {
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
-    install_git_side();
+    install_sides();
     store::check_schema_version();
     auth::init_from_saved(kv::load_auth_snapshot());
     // The deploy-config mirror (configs.rs): a release before the authority
-    // owned the configs left it empty, and resume_pending's jobs read it.
+    // owned the configs left it empty. Marked here, written by the flush
+    // mirrors::resume arms below.
     configs::sync_all_mirrors();
     // Timers do not survive upgrades; re-arm the drain timer if the queue
     // (which does survive, in stable memory) still holds pending deploys.
-    deploy::resume_pending(jobs::resolve);
+    // A legacy job is rebuilt from the authority's own configs, since the
+    // mirror is filled only once the upgrade is done.
+    deploy::resume_pending(|repo, commit| jobs::resolve_with(&configs::get(repo), commit));
     tenancy::arm_rent_timer();
     tokens::migrate();
     // The authority's own record of every repo (phase 3, step 7): a repo
@@ -83,6 +91,11 @@ fn post_upgrade() {
     site::record_gated_repos();
     arm_push_cert_seed();
     feed::arm_governor_timer();
+    // What the sides have not yet told each other (phase 3, step 8): the
+    // mirrors marked above and before the upgrade, and the git side's
+    // outbox. Both survive in stable memory; their timers do not.
+    mirrors::resume();
+    outbox::resume();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -282,7 +295,7 @@ fn http_request_streaming_callback(token: StreamingCallbackToken) -> StreamingCa
 }
 
 #[ic_cdk::update]
-fn http_request_update(req: HttpRequest) -> HttpResponse {
+async fn http_request_update(req: HttpRequest) -> HttpResponse {
     match route(&req) {
         Route::Rpc {
             service: Service::ReceivePack,
@@ -316,29 +329,53 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
                 return git_response(200, RESULT, receive::refuse(&request, &e));
             }
             // Tenancy: the owner pays for the push before anything is
-            // ingested.
-            if let Err(e) = tenancy::charge_push(&repo, req.body.len()) {
-                return git_response(200, RESULT, receive::refuse(&request, &e));
+            // ingested. The authority is asked and waited for. A charge it
+            // did not answer refuses the push, and the pusher tries again:
+            // the charge is kept on a refused pack, so a lost answer may
+            // have charged this one (section 4).
+            match to_authority::charge_push(&repo, req.body.len() as u64).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return git_response(200, RESULT, receive::refuse(&request, &e)),
+                Err(f) => {
+                    let e = format!("the push could not be charged ({f}); push again");
+                    return git_response(200, RESULT, receive::refuse(&request, &e));
+                }
+            }
+            // The writers may have changed while the authority answered.
+            if push_authorized(&repo, &req.headers).is_none() {
+                let e = "the token no longer authorizes pushes to this repo";
+                return git_response(200, RESULT, receive::refuse(&request, e));
             }
             let tip_before = store::head_target(&repo).and_then(|b| store::get_ref(&repo, &b));
             let outcome = receive::handle(&repo, request, &req.body);
-            // A votes-gated repo tells its feed about a tip nobody approved.
+            // A votes-gated repo's feed tells of a tip nobody approved: the
+            // authority hears of the push through the outbox. Only a gated
+            // repo's (the approved-set mirror says which), since the feed
+            // has nothing to say of the others.
             if let Some(branch) = store::head_target(&repo) {
                 if let Some(tip) = store::get_ref(&repo, &branch) {
-                    feed::after_push(&repo, &branch, tip_before, tip);
+                    if tip_before.as_ref() != Some(&tip) && mirror::approved(&repo).is_some() {
+                        let event = Event::Pushed {
+                            repo: repo.clone(),
+                            branch,
+                            tip_before: tip_before.as_ref().map(store::oid_hex),
+                            tip: store::oid_hex(&tip),
+                        };
+                        outbox::send(outbox::Outgoing::Notify { event }).await;
+                    }
                 }
             }
             // m4: if the push moved the deploy branch and a deploy is
-            // configured, enqueue a job and return immediately. The compile +
+            // configured, hand the authority a job and return. The compile +
             // validate + install_code runs from a timer, off the push path
             // (see deploy::enqueue). Outcome is readable via get_deploy_status.
             if let Some(commit) = outcome.deploy_commit {
-                submit_job(&repo, commit);
+                submit_job(&repo, commit).await;
             }
             // A push never approves anything, but it moves the tip the
             // approval walk starts from (a force push can drop the served
             // commit off the branch).
-            follow_approvals(&repo, false);
+            follow_approvals(&repo, false).await;
             git_response(200, RESULT, outcome.report)
         }
         _ => git_response(404, "text/plain", b"not found\n".to_vec()),
@@ -350,8 +387,8 @@ fn http_request_update(req: HttpRequest) -> HttpResponse {
 /// Anyone signed in with a funded account may create a repo and becomes its
 /// owner; operators pay nothing. See tenancy.rs.
 #[ic_cdk::update]
-fn create_repo(name: String) -> Result<(), String> {
-    tenancy::create_repo(&name, &caller(), operator())
+async fn create_repo(name: String) -> Result<(), String> {
+    tenancy::create_repo(&name, &caller(), operator()).await
 }
 
 /// Store an object from (type, content); returns the hex oid.
@@ -469,8 +506,8 @@ async fn create_push_token(repo: String, days: Option<u32>, key: Option<String>)
 /// is not bound to an SSH key is refused (signed_push.rs). Owner or
 /// operator.
 #[ic_cdk::update]
-fn set_require_signed_push(repo: String, on: bool) -> Result<(), String> {
-    tenancy::set_require_signed_push(&repo, &caller(), operator(), on)
+async fn set_require_signed_push(repo: String, on: bool) -> Result<(), String> {
+    tenancy::set_require_signed_push(&repo, &caller(), operator(), on).await
 }
 
 /// Create the secret seed push-certificate nonces are keyed with, once. From
@@ -638,30 +675,30 @@ fn get_repo_info(repo: String) -> Option<tenancy::RepoInfo> {
 /// Grant a principal a role on a repo: "writer" (push, tokens, config) or
 /// "voter" (approve commits for deploy). Owner or operator only.
 #[ic_cdk::update]
-fn add_member(repo: String, principal: candid::Principal, role: String) -> Result<Vec<tenancy::Member>, String> {
-    let members = tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?)?;
+async fn add_member(repo: String, principal: candid::Principal, role: String) -> Result<Vec<tenancy::Member>, String> {
+    let members = tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?).await?;
     // A voter added back brings their earlier ballots back into the count.
     // Re-adding a writer as a voter is a demotion, which revokes their push
     // tokens (mirror::set_push_policy).
-    follow_approvals(&repo, false);
+    follow_approvals(&repo, false).await;
     Ok(members)
 }
 
 #[ic_cdk::update]
-fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
-    let members = tenancy::remove_member(&repo, &caller(), operator(), principal)?;
-    follow_approvals(&repo, false);
+async fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
+    let members = tenancy::remove_member(&repo, &caller(), operator(), principal).await?;
+    follow_approvals(&repo, false).await;
     Ok(members)
 }
 
 /// Hand a repo to a new owner, who pays for it from then on.
 #[ic_cdk::update]
-fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), String> {
-    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner)?;
+async fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), String> {
+    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner).await?;
     // The owner is an approver, so a new owner changes whose ballots count.
     // The previous owner's push tokens go with the repo, unless they can
     // still write as an operator (mirror::set_push_policy).
-    follow_approvals(&repo, false);
+    follow_approvals(&repo, false).await;
     Ok(())
 }
 
@@ -669,9 +706,9 @@ fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), Strin
 /// before a site serves it (see `site::served_commit`): raising it from 0 on
 /// a live site takes the site down until a commit is approved.
 #[ic_cdk::update]
-fn set_required_votes(repo: String, k: u32) -> Result<(), String> {
-    tenancy::set_required_votes(&repo, &caller(), operator(), k)?;
-    follow_approvals(&repo, false);
+async fn set_required_votes(repo: String, k: u32) -> Result<(), String> {
+    tenancy::set_required_votes(&repo, &caller(), operator(), k).await?;
+    follow_approvals(&repo, false).await;
     Ok(())
 }
 
@@ -694,16 +731,16 @@ struct BallotTally {
 /// voters can get the app back in step with the site without first taking
 /// the site down.
 #[ic_cdk::update]
-fn cast_ballot(
+async fn cast_ballot(
     repo: String,
     commit: String,
     decision: tenancy::Vote,
     reason: Option<String>,
 ) -> Result<BallotTally, String> {
     let was_reached = tenancy::tally(&repo, &commit).is_some_and(|t| t.reached);
-    let t = tenancy::cast_ballot(&repo, &caller(), &commit, decision, reason.clone())?;
+    let t = tenancy::cast_ballot(&repo, &caller(), &commit, decision, reason.clone()).await?;
     feed::ballot(&repo, &caller(), &commit, decision, reason.as_deref(), &t, was_reached);
-    follow_approvals(&repo, true);
+    follow_approvals(&repo, true).await;
     Ok(BallotTally {
         approvals: t.approvals,
         objections: t.objections,
@@ -715,12 +752,12 @@ fn cast_ballot(
 /// The two-way form of `cast_ballot`, kept for clients that predate
 /// objections. Returns (approvals, required).
 #[ic_cdk::update]
-fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
+async fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), String> {
     let was_reached = tenancy::tally(&repo, &commit).is_some_and(|t| t.reached);
-    let t = tenancy::vote(&repo, &caller(), &commit, approve)?;
+    let t = tenancy::vote(&repo, &caller(), &commit, approve).await?;
     let decision = if approve { tenancy::Vote::Approve } else { tenancy::Vote::Reject };
     feed::ballot(&repo, &caller(), &commit, decision, None, &t, was_reached);
-    follow_approvals(&repo, true);
+    follow_approvals(&repo, true).await;
     Ok((t.approvals, t.required))
 }
 
@@ -732,7 +769,7 @@ fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32), Strin
 /// the repo has nothing to deploy. Pushes do not retry: a deploy that keeps
 /// failing would be charged again on every push. A repo that requires no
 /// votes deploys on push, so this does nothing for it.
-fn follow_approvals(repo: &str, retry: bool) {
+async fn follow_approvals(repo: &str, retry: bool) {
     let moved = site::advance(repo);
     let commit = match moved {
         Some(c) => c,
@@ -746,7 +783,7 @@ fn follow_approvals(repo: &str, retry: bool) {
     let cfg = configs::get(repo);
     let (wasm, evm) = (cfg.wasm.is_some(), cfg.evm.is_some());
     if !deploy::is_live(repo, &hex, wasm, evm) && !deploy::in_flight(repo, &hex) {
-        submit_job(repo, commit);
+        submit_job(repo, commit).await;
     }
 }
 
@@ -761,11 +798,22 @@ fn api_route(url: &str) -> HttpResponse {
 }
 
 /// The git side hands a commit's deploy to the authority (docs/CANISTER_SPLIT.md,
-/// section 4: submit_job). The job -- configs and proven artifacts -- is
-/// built from the git side's state, and only when the authority has not
-/// queued that commit already.
-fn submit_job(repo: &str, commit: store::Oid) {
-    deploy::enqueue(repo, commit, || jobs::resolve(repo, &commit));
+/// section 4: submit_job), through its outbox. The job -- configs and
+/// proven artifacts -- is built from the git side's state, unless one for
+/// the commit still waits in the outbox; the authority dedupes a job it
+/// has queued.
+async fn submit_job(repo: &str, commit: store::Oid) {
+    let hex = store::oid_hex(&commit);
+    if outbox::job_waiting(repo, &hex) {
+        return;
+    }
+    let job = jobs::resolve(repo, &commit);
+    outbox::send(outbox::Outgoing::SubmitJob {
+        repo: repo.to_string(),
+        commit: hex,
+        job,
+    })
+    .await;
 }
 
 #[ic_cdk::query]
@@ -835,19 +883,19 @@ async fn govern_app_canister(repo: String) -> Result<candid::Principal, String> 
 /// required votes. Any voter may. On a governed repo this is the only way
 /// to make such a change; on another, the owner could also make it directly.
 #[ic_cdk::update]
-fn propose_policy_change(
+async fn propose_policy_change(
     repo: String,
     change: tenancy::PolicyChange,
     decision: tenancy::Vote,
     reason: Option<String>,
 ) -> Result<BallotTally, String> {
     let described = change.describe();
-    let (t, apply) = tenancy::propose_policy_change(&repo, &caller(), change, decision, reason.clone())?;
+    let (t, apply) = tenancy::propose_policy_change(&repo, &caller(), change, decision, reason.clone()).await?;
     feed::policy_ballot(&repo, &caller(), &described, decision, reason.as_deref(), &t);
     // The deploy configs live in configs.rs; tenancy decided, this applies.
     match apply {
-        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => configs::set_wasm(&repo, target, source_path)?,
-        Some(tenancy::PolicyChange::DeployMode { mode }) => configs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)?,
+        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => configs::set_wasm(&repo, target, source_path).await?,
+        Some(tenancy::PolicyChange::DeployMode { mode }) => configs::set_mode(&repo, deploy::DeployMode::parse(&mode)?).await?,
         _ => {}
     }
     if t.reached {
@@ -855,7 +903,7 @@ fn propose_policy_change(
         // newest approved one.
         // (A writer re-added as a voter, or a transferred-away owner, loses
         // their push tokens as the change is saved: mirror::set_push_policy.)
-        follow_approvals(&repo, false);
+        follow_approvals(&repo, false).await;
     }
     Ok(BallotTally {
         approvals: t.approvals,
@@ -1085,7 +1133,7 @@ async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeRepo
 /// .wasm only. The git canister must be a controller of `target`. Install mode
 /// defaults to upgrade; change it with set_deploy_mode.
 #[ic_cdk::update]
-fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
+async fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
     let m = tenancy::can_admin(&repo, &caller(), operator())?;
     // Governed: what the queue installs is the voters' decision.
     tenancy::locked(&m, "the deploy config", Some("WasmDeploy"))?;
@@ -1097,16 +1145,16 @@ fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<
     } else {
         target
     };
-    configs::set_wasm(&repo, target, source_path)
+    configs::set_wasm(&repo, target, source_path).await
 }
 
 /// Set a repo's install mode: "upgrade" (default; preserves target state) or
 /// "reinstall" (wipes target state).
 #[ic_cdk::update]
-fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
+async fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
     let m = tenancy::can_admin(&repo, &caller(), operator())?;
     tenancy::locked(&m, "the install mode", Some("DeployMode"))?;
-    configs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
+    configs::set_mode(&repo, deploy::DeployMode::parse(&mode)?).await
 }
 
 /// Run the configured deploy now against the repo's release commit -- the
@@ -1152,12 +1200,12 @@ fn deploy_queue_len() -> u64 {
 /// set_wasm_deploy: a repo can deploy to a canister and an EVM chain from the
 /// same push.
 #[ic_cdk::update]
-fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(), String> {
+async fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(), String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
     // One definition of "could this canister deploy at all", shared with the
     // deploy leg and with the evm_deploy endpoint, so a config accepted here
     // cannot be rejected at drain time for a reason this check missed.
-    configs::set_evm(&repo, source_path, gas_limit)
+    configs::set_evm(&repo, source_path, gas_limit).await
 }
 
 #[ic_cdk::query]

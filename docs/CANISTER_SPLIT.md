@@ -209,11 +209,13 @@ walks. The set is recounted from every commit with a ballot whenever it
 can change, which is fine at today's ballot counts and the place to look
 if a repo collects thousands of voted commits.
 
-Failure modes the queue must now handle (they do not exist today):
-- authority unreachable or stopped -- the git canister retries the job and
-  does not lose it;
-- the call succeeds but the response is lost -- the authority dedupes jobs
-  by (repo, commit), as the provenance log already dedupes deploys;
+Failure modes the queue handles (phase 3 step 8: the git side's outbox):
+- authority unreachable or stopped -- the git canister keeps the job in
+  its outbox and retries it;
+- the call succeeds but the response is lost -- the item is sent again
+  with the same sequence number, which the authority takes once; it
+  dedupes jobs by (repo, commit) too, as the provenance log already
+  dedupes deploys;
 - a job whose proof fails -- refused and logged; the repo's status says why.
 
 ## 5. Order of operations
@@ -489,7 +491,7 @@ The steps in one canister:
      authority.
    - `names` announces under `RepoMeta::label`. `repo_exists` and
      `label_holder` leave `GitSide`.
-8. **Both directions become async traits.**
+8. **Both directions become async traits.** DONE.
    - `GitSide`'s methods return futures.
    - A new `AuthoritySide` in `ic-git-types` carries the git side's calls:
      `charge_push`, `stage_job` and `submit_job`, `notify` (feed events)
@@ -517,6 +519,54 @@ The steps in one canister:
        authority acknowledges them. The authority already dedupes jobs by
        (repo, commit) (section 4). It dedupes feed events by a sequence
        number.
+   What shipped:
+   - `ic_git_types::side`: `Failure` (`NotDelivered`, the call never ran;
+     `Lost`, it may have), `Reply<T>`, and the boxed `Fut` the trait
+     objects answer with. Every `GitSide` method answers a `Reply`, and
+     so does the new `AuthoritySide` (`ic_git_types::authority_side`:
+     `charge_push`, `submit_job`, `notify`; `publish_git_record` comes
+     with step 12). The in-canister implementations,
+     `for_authority::Git` and `for_git::Authority`, answer ready futures
+     and never fail, so behavior is unchanged until step 12 installs the
+     ones that send messages. Each crate reaches the other only through
+     `to_git` and `to_authority`, which tests can stand a failing side
+     in for.
+   - Creating a repo (`tenancy::create_repo`): `check_new_repo` is
+     awaited, then the name is reserved and the fee taken, then
+     `create_repo` is awaited. A refusal refunds and releases the name;
+     a lost answer is asked again, up to `CREATE_ASKS` times, which the
+     git side's idempotent `create_repo` makes safe; past that the owner
+     keeps the reservation and the fee, nobody else can take the name,
+     and the owner's next call finishes it without paying again.
+   - The push path (`http_request_update`): the certificate is checked,
+     `charge_push` is awaited, the token is checked again, then the pack
+     is read. A charge the authority does not answer refuses the push,
+     and the charge is kept on a refused pack.
+   - A ballot (`tenancy::cast_ballot`) awaits `has_commit`, reads the
+     policy again, then counts; one the git side does not answer for is
+     not cast.
+   - Mirror writes (`crates/authority/src/mirrors.rs`): whatever changes
+     what a mirror reflects marks it, in stable memory; the flow that
+     changed it awaits `flush`, which sends each marked mirror's whole
+     state under a fresh sequence number, one counter per repo, and
+     clears the mark on the answer. The git side (`mirror.rs`) ignores a
+     write older than the newest it holds for that mirror, so a retry
+     that lands late cannot roll it back. An unanswered write is retried
+     on a timer; `post_upgrade` marks every mirror and `mirrors::resume`
+     flushes them once the upgrade is done, so a legacy job is rebuilt
+     there from the authority's own configs (`jobs::resolve_with`).
+   - The outbox (`crates/git/src/outbox.rs`, stable map `MEM_OUTBOX`):
+     `submit_job` and `notify` items, numbered, delivered oldest first
+     and one at a time, retried on a timer, and `for_git` takes each
+     number once. The push path builds the job and the push event
+     there, and awaits the delivery, so in one canister nothing waits.
+   - Each rule is tested against a side that refuses, does not run, or
+     runs and loses the answer of a chosen call: `to_git::flaky` for the
+     authority's flows, `both_sides::push` for the push path, and the
+     outbox's own tests.
+   - Not here: staging a job in chunks (`stage_job`) belongs to the
+     message implementation of step 12; `set_approved`'s `retry` flag
+     to step 9.
 9. **Following approvals moves to the git side.** `follow_approvals` is
    glue: it walks the history (git) and queues a deploy (authority). After
    this step the git side runs it when the approved-set mirror changes:

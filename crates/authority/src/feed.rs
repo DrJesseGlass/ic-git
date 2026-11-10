@@ -20,7 +20,8 @@ use ic_dev_kit_rs::http::HttpResponse;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use ic_git_types::oid::{oid_hex, Oid};
+use ic_git_types::authority_side::Event as GitEvent;
+use ic_git_types::oid::{oid_hex, parse_oid, Oid};
 use crate::tenancy::{self, Vote};
 
 /// The most events kept per feed.
@@ -179,10 +180,22 @@ fn with_reason(text: String, reason: Option<&str>) -> String {
 
 // --- repo events ------------------------------------------------------------
 
-/// After a push (section 4's notify, from the git side): the deploy branch
-/// `branch` moved from `tip_before` to `tip`, a commit the repo's voters
-/// have not approved. Nothing for a repo that requires no votes, or a push
-/// that left the deploy branch where it was.
+/// What the git side tells (section 4's notify, through the outbox): each
+/// event lands as the entries below.
+pub fn notify(event: GitEvent) {
+    match event {
+        GitEvent::Pushed { repo, branch, tip_before, tip } => {
+            let Ok(tip) = parse_oid(&tip) else { return };
+            let tip_before = tip_before.and_then(|h| parse_oid(&h).ok());
+            after_push(&repo, &branch, tip_before, tip);
+        }
+    }
+}
+
+/// After a push: the deploy branch `branch` moved from `tip_before` to
+/// `tip`, a commit the repo's voters have not approved. Nothing for a repo
+/// that requires no votes, or a push that left the deploy branch where it
+/// was.
 pub fn after_push(repo: &str, branch: &str, tip_before: Option<Oid>, tip: Oid) {
     if tip_before.as_ref() == Some(&tip) {
         return;
@@ -890,8 +903,8 @@ mod tests {
     fn push_and_ballots_on_a_gated_repo() {
         let owner = p(5);
         tenancy::credit(&owner, 10_000_000_000);
-        tenancy::create_repo("feed-c", &owner, false).unwrap();
-        tenancy::set_required_votes("feed-c", &owner, false, 1).unwrap();
+        futures::executor::block_on(tenancy::create_repo("feed-c", &owner, false)).unwrap();
+        futures::executor::block_on(tenancy::set_required_votes("feed-c", &owner, false, 1)).unwrap();
         let commit = store::put_object(store::ObjectType::Commit, b"tree 0000000000000000000000000000000000000000\n\nfirst\n");
         let before = store::get_ref("feed-c", "refs/heads/main");
         store::set_ref("feed-c", "refs/heads/main", commit).unwrap();
@@ -904,7 +917,7 @@ mod tests {
 
         let hex = store::oid_hex(&commit);
         let was = tenancy::tally("feed-c", &hex).is_some_and(|t| t.reached);
-        let t = tenancy::cast_ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right".into())).unwrap();
+        let t = futures::executor::block_on(tenancy::cast_ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right".into()))).unwrap();
         ballot("feed-c", &owner, &hex, Vote::Approve, Some("looks right"), &t, was);
         let ev = events(&Feed::Repo("feed-c".into()));
         let kinds: Vec<_> = ev.iter().map(|e| e.kind.as_str()).collect();

@@ -3,11 +3,57 @@
 //! Each side's own behavior is tested in its crate.
 
 use crate::clock::set_test_now;
-use crate::fixtures::{body_json, get, seed};
-use crate::{configs, deploy, store};
-use crate::tenancy::{self, Role};
+use crate::fixtures::{body_json, get, run, seed, sides};
+use crate::{deploy, store};
 use crate::{mirror, tokens};
 use candid::Principal;
+use tenancy::Role;
+
+/// The authority's flows that await the git side, driven to completion
+/// (`fixtures::run`); the rest of the module as it is.
+mod tenancy {
+    pub use crate::tenancy::*;
+    use crate::fixtures::run;
+    use candid::Principal;
+
+    pub fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), String> {
+        run(crate::tenancy::create_repo(name, who, operator))
+    }
+
+    pub fn add_member(repo: &str, who: &Principal, operator: bool, target: Principal, role: Role) -> Result<Vec<Member>, String> {
+        run(crate::tenancy::add_member(repo, who, operator, target, role))
+    }
+
+    pub fn remove_member(repo: &str, who: &Principal, operator: bool, target: Principal) -> Result<Vec<Member>, String> {
+        run(crate::tenancy::remove_member(repo, who, operator, target))
+    }
+
+    pub fn transfer_repo(repo: &str, who: &Principal, operator: bool, new_owner: Principal) -> Result<(), String> {
+        run(crate::tenancy::transfer_repo(repo, who, operator, new_owner))
+    }
+
+    pub fn set_required_votes(repo: &str, who: &Principal, operator: bool, k: u32) -> Result<(), String> {
+        run(crate::tenancy::set_required_votes(repo, who, operator, k))
+    }
+
+    pub fn cast_ballot(repo: &str, who: &Principal, commit_hex: &str, decision: Vote, reason: Option<String>) -> Result<Tally, String> {
+        run(crate::tenancy::cast_ballot(repo, who, commit_hex, decision, reason))
+    }
+
+    pub fn propose_policy_change(repo: &str, who: &Principal, change: PolicyChange, decision: Vote, reason: Option<String>) -> Result<(Tally, Option<PolicyChange>), String> {
+        run(crate::tenancy::propose_policy_change(repo, who, change, decision, reason))
+    }
+}
+
+/// Likewise the config setters.
+mod configs {
+    pub use crate::configs::*;
+    use crate::fixtures::run;
+
+    pub fn set_wasm(repo: &str, target: String, source_path: String) -> Result<(), String> {
+        run(crate::configs::set_wasm(repo, target, source_path))
+    }
+}
 
 const T0: u64 = 1_000 * 86_400 * 1_000_000_000;
 
@@ -17,6 +63,7 @@ const T0: u64 = 1_000 * 86_400 * 1_000_000_000;
 /// the push-policy mirror (mirror::set_push_policy), with no sweep.
 #[test]
 fn losing_write_access_revokes_your_tokens() {
+    sides();
     set_test_now(T0);
     let (owner, w1, w2, next) = (Principal::from_slice(&[9; 8]), Principal::from_slice(&[10; 8]), Principal::from_slice(&[11; 8]), Principal::from_slice(&[12; 8]));
     tenancy::credit(&owner, 10_000_000_000);
@@ -173,4 +220,106 @@ fn deploys_report_what_was_installed_not_the_tip() {
     assert_eq!(h[1]["commit"], store::oid_hex(&c2));
     assert_eq!(h[1]["ok"], false);
     assert_eq!(get("/api/nope/deploys").status_code, 404);
+}
+
+// The push path's failure rule (phase 3, step 8), against an authority
+// that does not answer the charge, or whose answer arrives after the
+// writers changed.
+
+mod push {
+    use super::*;
+    use crate::{for_git, smart_http, to_authority};
+    use base64::Engine;
+    use ic_dev_kit_rs::http::{HttpRequest, HttpResponse};
+    use ic_git_types::authority_side::{AuthoritySide, Event};
+    use ic_git_types::deploy::Job;
+    use ic_git_types::side::{ready, Failure, Fut, Reply};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// The real authority, with the next charge failing as told, or landing
+    /// after the repo's writers changed.
+    #[derive(Default)]
+    pub struct Flaky {
+        pub fail: Cell<Option<Failure>>,
+        pub drop_writers: Cell<bool>,
+    }
+
+    impl AuthoritySide for Flaky {
+        fn charge_push<'a>(&'a self, repo: &'a str, bytes: u64) -> Fut<'a, Reply<Result<(), String>>> {
+            if let Some(f) = self.fail.take() {
+                return ready(Err(f));
+            }
+            let reply = for_git::Authority.charge_push(repo, bytes);
+            if self.drop_writers.take() {
+                // While the charge was in flight the writers changed, and
+                // the authority's mirror write landed before the answer.
+                mirror::set_push_policy(repo, u64::MAX, mirror::PushPolicy::default(), |_| false);
+            }
+            reply
+        }
+
+        fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, job: Job) -> Fut<'a, Reply<()>> {
+            for_git::Authority.submit_job(seq, repo, commit_hex, job)
+        }
+
+        fn notify<'a>(&'a self, seq: u64, event: Event) -> Fut<'a, Reply<()>> {
+            for_git::Authority.notify(seq, event)
+        }
+    }
+
+    /// A push creating `refname` at `oid`, with no pack (the object is
+    /// there already), through the canister's receive-pack endpoint.
+    fn push(repo: &str, token: &str, refname: &str, oid: &store::Oid) -> HttpResponse {
+        let mut body = smart_http::pkt_line(
+            format!("{} {} {refname}\0 report-status\n", smart_http::ZERO_OID, store::oid_hex(oid)).as_bytes(),
+        );
+        body.extend_from_slice(smart_http::FLUSH_PKT);
+        let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("ic:{token}")));
+        run(crate::http_request_update(HttpRequest {
+            method: "POST".into(),
+            url: format!("/{repo}.git/git-receive-pack"),
+            headers: vec![("authorization".into(), auth)],
+            body,
+        }))
+    }
+
+    #[test]
+    fn a_push_waits_for_the_charge_and_checks_its_writer_again() {
+        sides();
+        set_test_now(T0);
+        let owner = Principal::from_slice(&[21; 8]);
+        tenancy::credit(&owner, 10_000_000_000);
+        tenancy::create_repo("push-ack", &owner, false).unwrap();
+        tokens::mint("push-ack", "tok-push", owner, None, None).unwrap();
+        let blob = store::put_object(store::ObjectType::Blob, b"pushed");
+        let authority = Rc::new(Flaky::default());
+        to_authority::set_test_side(Some(authority.clone()));
+        let before = tenancy::balance(&owner);
+
+        // The charge is not answered: the push is refused with nothing
+        // ingested, and the pusher is told to push again.
+        authority.fail.set(Some(Failure::NotDelivered("stopped".into())));
+        let report = String::from_utf8(push("push-ack", "tok-push", "refs/tags/one", &blob).body).unwrap();
+        assert!(report.contains("could not be charged") && report.contains("push again"), "{report}");
+        assert!(store::get_ref("push-ack", "refs/tags/one").is_none());
+        assert_eq!(tenancy::balance(&owner), before, "a charge that never ran");
+
+        // Answered: charged, and applied.
+        let report = String::from_utf8(push("push-ack", "tok-push", "refs/tags/one", &blob).body).unwrap();
+        assert!(report.contains("ok refs/tags/one"), "{report}");
+        assert!(store::get_ref("push-ack", "refs/tags/one").is_some());
+        let charged = before - tenancy::balance(&owner);
+        assert!(charged > 0);
+
+        // The writers changed while the charge was in flight: the token is
+        // checked again after it, and the push is refused -- charged, as a
+        // refused pack is.
+        authority.drop_writers.set(true);
+        let report = String::from_utf8(push("push-ack", "tok-push", "refs/tags/two", &blob).body).unwrap();
+        assert!(report.contains("no longer authorizes"), "{report}");
+        assert!(store::get_ref("push-ack", "refs/tags/two").is_none());
+        assert_eq!(tenancy::balance(&owner), before - 2 * charged);
+        to_authority::set_test_side(None);
+    }
 }

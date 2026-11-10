@@ -563,22 +563,22 @@ mod tests {
         };
         let is_op = |p: &Principal| *p == op;
         crate::store::create_repo("acl").unwrap();
-        set_push_policy("acl", policy(&[owner, w1, w2]), is_op);
+        set_push_policy("acl", 1, policy(&[owner, w1, w2]), is_op);
         mint("acl", "tok-owner", owner, None, None).unwrap();
         mint("acl", "tok-w1", w1, None, None).unwrap();
         mint("acl", "tok-w2", w2, None, None).unwrap();
         mint("acl", "tok-op", op, None, None).unwrap();
 
-        set_push_policy("acl", policy(&[owner, w2]), is_op);
+        set_push_policy("acl", 2, policy(&[owner, w2]), is_op);
         assert_eq!(authorize("tok-w1"), None);
         assert_eq!(authorize("tok-w2").as_deref(), Some("acl"));
         assert_eq!(authorize("tok-owner").as_deref(), Some("acl"));
         assert_eq!(authorize("tok-op").as_deref(), Some("acl"), "an operator keeps theirs");
 
-        set_push_policy("acl", policy(&[w2]), is_op);
+        set_push_policy("acl", 3, policy(&[w2]), is_op);
         assert_eq!(authorize("tok-owner"), None);
         assert_eq!(authorize("tok-w2").as_deref(), Some("acl"));
-        set_push_policy("acl", policy(&[w2]), |_| false);
+        set_push_policy("acl", 4, policy(&[w2]), |_| false);
         assert_eq!(authorize("tok-op").as_deref(), Some("acl"), "unchanged writers revoke nothing");
     }
 

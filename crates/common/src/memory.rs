@@ -20,6 +20,9 @@ pub const MEM_REPO_META: MemoryId = MemoryId::new(6);
 pub const MEM_VOTES: MemoryId = MemoryId::new(7);
 pub const MEM_TOKEN_INDEX: MemoryId = MemoryId::new(8);
 pub const MEM_DEPLOY_JOBS: MemoryId = MemoryId::new(9);
+/// The git side's outbox (outbox.rs): what it has told the authority and
+/// the authority has not yet answered.
+pub const MEM_OUTBOX: MemoryId = MemoryId::new(10);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =

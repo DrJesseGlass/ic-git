@@ -19,6 +19,7 @@
 //! goes through [`now_ns`], so all of this is unit-testable off-chain.
 
 use crate::clock::now_ns;
+use crate::mirrors::Mirror;
 use ic_git_types::oid::{parse_oid, Oid};
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::auth;
@@ -221,13 +222,20 @@ pub fn meta(repo: &str) -> Option<RepoMeta> {
     crate::records::repo_meta_get(repo)
 }
 
-/// Save a repo's metadata, and bring the git side's mirrors up to date when
-/// the change touches what they reflect.
+/// Save a repo's metadata, and mark the git side's mirrors the change
+/// touches (mirrors.rs). The flow that made the change awaits
+/// `mirrors::flush` next; a flow that cannot (post_upgrade) leaves the
+/// marks to `mirrors::resume`.
 fn save_meta(repo: &str, m: &RepoMeta) {
     let prev = meta(repo);
     crate::records::repo_meta_set(repo, m);
-    if prev.as_ref().map(mirrored) != Some(mirrored(m)) {
-        sync_mirrors_with(repo, m);
+    let (push, votes, approvers) = mirrored(m);
+    let was = prev.as_ref().map(mirrored);
+    if was.as_ref().map(|w| &w.0) != Some(&push) {
+        crate::mirrors::mark(repo, Mirror::PushPolicy);
+    }
+    if was.as_ref().map(|w| (w.1, &w.2)) != Some((votes, &approvers)) {
+        crate::mirrors::mark(repo, Mirror::Approved);
     }
 }
 
@@ -276,16 +284,26 @@ fn approved_keys(repo: &str, m: &RepoMeta) -> Option<Vec<String>> {
     )
 }
 
-fn sync_mirrors_with(repo: &str, m: &RepoMeta) {
-    crate::to_git::set_push_policy(repo, push_policy(m));
-    crate::to_git::set_approved(repo, approved_keys(repo, m));
+/// The repo's push policy as the git side mirrors it; `None` for a repo
+/// this side has no record of.
+pub fn push_policy_of(repo: &str) -> Option<crate::to_git::PushPolicy> {
+    meta(repo).map(|m| push_policy(&m))
 }
 
-/// Bring every repo's mirrors up to date. For post_upgrade: a release
-/// before the mirrors existed left them empty.
+/// The repo's approved commits as the git side mirrors them (`None` inside
+/// when it requires no votes); `None` for a repo this side has no record
+/// of.
+pub fn approved_of(repo: &str) -> Option<Option<Vec<String>>> {
+    meta(repo).map(|m| approved_keys(repo, &m))
+}
+
+/// Mark every repo's mirrors for writing. For post_upgrade: a release
+/// before the mirrors existed left them empty; `mirrors::resume` flushes
+/// the marks once the upgrade is done.
 pub fn sync_all_mirrors() {
-    for (repo, m) in crate::records::repo_meta_all::<RepoMeta>() {
-        sync_mirrors_with(&repo, &m);
+    for (repo, _) in crate::records::repo_meta_all::<RepoMeta>() {
+        crate::mirrors::mark(&repo, Mirror::PushPolicy);
+        crate::mirrors::mark(&repo, Mirror::Approved);
     }
 }
 
@@ -343,9 +361,11 @@ pub fn adopt_repos(repos: impl IntoIterator<Item = (String, Option<String>)>) {
 /// otherwise create repos on the git side alone.
 #[cfg(any(test, feature = "testing"))]
 pub fn test_repo(name: &str) {
-    let label = crate::to_git::check_new_repo(name).ok();
-    crate::to_git::create_repo(name).unwrap();
+    let label = ic_git_git::store::check_new_repo(name).ok();
+    ic_git_git::store::create_repo(name).unwrap();
     adopt_repos([(name.to_string(), label)]);
+    // Its mirrors, as the flush after post_upgrade leaves them.
+    futures::executor::block_on(crate::mirrors::flush(name));
 }
 
 /// The one operator rule: controllers and the admin allowlist, and never
@@ -455,39 +475,129 @@ pub fn can_vote(repo: &str, p: &Principal) -> Result<RepoMeta, String> {
 
 // --- repo lifecycle ------------------------------------------------------------
 
+/// A repo name taken at this side while the git side is asked to create
+/// it: who holds it, the fee they paid, and the label the git side gave
+/// the name, so a refusal can be refunded and a lost answer settled by
+/// asking again.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Reservation {
+    owner: Principal,
+    fee: u64,
+    label: String,
+}
+
+fn reservation_key(name: &str) -> String {
+    format!("tenancy:reserved:{name}")
+}
+
+fn reservation(name: &str) -> Option<Reservation> {
+    crate::kv::get_json(&reservation_key(name))
+}
+
+/// How often one call asks the git side to create a reserved name before
+/// leaving the reservation to a later call.
+const CREATE_ASKS: u32 = 3;
+
 /// Create a repo owned by `who`. Non-operators pay the creation fee, which is
 /// also what "a positive balance" means in practice: an account that cannot
 /// cover it cannot create.
-pub fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), String> {
+///
+/// The git side is asked twice: whether the name can be created, then to
+/// create it. Between the two this side reserves the name and takes the
+/// fee, so a second creation of the name is refused while the first waits,
+/// and the fee is accounted for whatever the git side answers: a refusal
+/// refunds it and releases the name; an answer that does not come is asked
+/// for again, since the name is reserved and nothing else can have taken
+/// it (the git side's `create_repo` is idempotent); and if it still does
+/// not come, the owner keeps the reservation and the fee, and a later
+/// `create_repo` of the name by them finishes it without paying again.
+pub async fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), String> {
     if *who == Principal::anonymous() {
         return Err("sign in first: the anonymous principal cannot own a repo".into());
     }
-    // Every refusal store::create_repo can make, before the fee is taken:
-    // an update that returns Err keeps its state changes, so a debit
-    // followed by a refused name would keep the fee.
-    let label = crate::to_git::check_new_repo(name)?;
-    if !operator {
-        debit(who, pricing().create_repo, "create_repo")?;
+    if let Some(r) = reservation(name) {
+        if r.owner != *who {
+            return Err(format!("repo name '{name}' is reserved: a creation of it is waiting for the git side"));
+        }
+        return settle(name, r).await;
     }
-    crate::to_git::create_repo(name)?;
-    save_meta(
-        name,
-        &RepoMeta {
-            owner: Some(*who),
-            members: Vec::new(),
-            storage_bytes: 0,
-            rent_paid_to_ns: now_ns(),
-            delinquent: false,
-            required_votes: 0,
-            app_canister: None,
-            created_ns: now_ns(),
-            require_signed_push: false,
-            governed: false,
-            proposals: Vec::new(),
-            label: Some(label),
-        },
-    );
-    Ok(())
+    if repo_exists(name) {
+        return Err(format!("repo '{name}' already exists"));
+    }
+    // Every refusal the git side can make, before the fee is taken: an
+    // update that returns Err keeps its state changes, so a debit followed
+    // by a refused name would keep the fee.
+    let label = match crate::to_git::check_new_repo(name).await {
+        Ok(Ok(label)) => label,
+        Ok(Err(e)) => return Err(e),
+        Err(f) => {
+            return Err(format!(
+                "the git side did not say whether '{name}' can be created ({f}); nothing was charged, try again"
+            ))
+        }
+    };
+    // Another creation of the name may have got this far while the git
+    // side answered.
+    if reservation(name).is_some() || repo_exists(name) {
+        return Err(format!("repo name '{name}' was taken while the git side answered"));
+    }
+    let fee = if operator { 0 } else { pricing().create_repo };
+    if fee > 0 {
+        debit(who, fee, "create_repo")?;
+    }
+    let r = Reservation {
+        owner: *who,
+        fee,
+        label,
+    };
+    crate::kv::set_json(&reservation_key(name), &r);
+    settle(name, r).await
+}
+
+/// Ask the git side to create a reserved name, and settle the reservation
+/// by its answer.
+async fn settle(name: &str, r: Reservation) -> Result<(), String> {
+    let mut failure = None;
+    for _ in 0..CREATE_ASKS {
+        match crate::to_git::create_repo(name).await {
+            Ok(Ok(())) => {
+                crate::kv::remove(&reservation_key(name));
+                save_meta(
+                    name,
+                    &RepoMeta {
+                        owner: Some(r.owner),
+                        members: Vec::new(),
+                        storage_bytes: 0,
+                        rent_paid_to_ns: now_ns(),
+                        delinquent: false,
+                        required_votes: 0,
+                        app_canister: None,
+                        created_ns: now_ns(),
+                        require_signed_push: false,
+                        governed: false,
+                        proposals: Vec::new(),
+                        label: Some(r.label),
+                    },
+                );
+                crate::mirrors::flush(name).await;
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                crate::kv::remove(&reservation_key(name));
+                if r.fee > 0 {
+                    refund(&r.owner, r.fee);
+                }
+                return Err(e);
+            }
+            Err(f) => failure = Some(f),
+        }
+    }
+    let f = failure.expect("asked at least once");
+    Err(format!(
+        "the git side did not answer the creation of '{name}' ({f}); the name and the fee are kept for {}: \
+         call create_repo again to finish",
+        r.owner
+    ))
 }
 
 /// On a governed repo, a change to who approves or what deploys is a vote,
@@ -505,7 +615,7 @@ pub fn locked(m: &RepoMeta, what: &str, variant: Option<&str>) -> Result<(), Str
     Ok(())
 }
 
-pub fn add_member(
+pub async fn add_member(
     repo: &str,
     who: &Principal,
     operator: bool,
@@ -520,6 +630,7 @@ pub fn add_member(
     }
     add_member_in(&mut m, target, role)?;
     save_meta(repo, &m);
+    crate::mirrors::flush(repo).await;
     Ok(m.members)
 }
 
@@ -538,7 +649,7 @@ fn add_member_in(m: &mut RepoMeta, target: Principal, role: Role) -> Result<(), 
     Ok(())
 }
 
-pub fn remove_member(
+pub async fn remove_member(
     repo: &str,
     who: &Principal,
     operator: bool,
@@ -550,6 +661,7 @@ pub fn remove_member(
     }
     remove_member_in(&mut m, repo, target)?;
     save_meta(repo, &m);
+    crate::mirrors::flush(repo).await;
     Ok(m.members)
 }
 
@@ -563,7 +675,7 @@ fn remove_member_in(m: &mut RepoMeta, repo: &str, target: Principal) -> Result<(
 }
 
 /// Hand a repo to a new owner, who pays from then on.
-pub fn transfer_repo(
+pub async fn transfer_repo(
     repo: &str,
     who: &Principal,
     operator: bool,
@@ -573,6 +685,7 @@ pub fn transfer_repo(
     locked(&m, "transferring the repo", Some("Transfer"))?;
     transfer_in(&mut m, new_owner)?;
     save_meta(repo, &m);
+    crate::mirrors::flush(repo).await;
     Ok(())
 }
 
@@ -588,11 +701,12 @@ fn transfer_in(m: &mut RepoMeta, new_owner: Principal) -> Result<(), String> {
 /// Approvals a commit needs before it deploys. A `k` above the owner plus
 /// voters is refused: a threshold nobody could reach is a configuration
 /// error, not a strict policy, and `vote` would refuse every ballot under it.
-pub fn set_required_votes(repo: &str, who: &Principal, operator: bool, k: u32) -> Result<(), String> {
+pub async fn set_required_votes(repo: &str, who: &Principal, operator: bool, k: u32) -> Result<(), String> {
     let mut m = can_admin(repo, who, operator)?;
     locked(&m, "changing the required votes", Some("RequiredVotes"))?;
     set_required_votes_in(&mut m, k)?;
     save_meta(repo, &m);
+    crate::mirrors::flush(repo).await;
     Ok(())
 }
 
@@ -771,7 +885,7 @@ pub fn unmark_governed(repo: &str) {
 /// is reached at once, so any voter's ballot would apply any change (the
 /// repo to themselves, say). There is nothing to vote on; the owner changes
 /// it.
-pub fn propose_policy_change(
+pub async fn propose_policy_change(
     repo: &str,
     who: &Principal,
     change: PolicyChange,
@@ -796,6 +910,7 @@ pub fn propose_policy_change(
             VoteStore { repo }.save(&subj, Vec::new());
             m.proposals.retain(|p| p != &change);
             save_meta(repo, &m);
+            crate::mirrors::flush(repo).await;
             return Err(format!("{e}; the pending proposal is dropped"));
         }
         return Err(e);
@@ -829,6 +944,7 @@ pub fn propose_policy_change(
         m.proposals.push(change);
     }
     save_meta(repo, &m);
+    crate::mirrors::flush(repo).await;
     Ok((tally, apply_deploy))
 }
 
@@ -885,7 +1001,8 @@ pub fn repos_of(p: &Principal) -> Vec<String> {
 // supplies the policy (owner plus voters, threshold = required_votes), the
 // subject (the commit), and storage over the VOTES stable map, scoped by repo.
 
-use ic_multisig::{Approval, Approver, Ballots, Decision, Policy, Store, Subject, Tally};
+use ic_multisig::{Approval, Approver, Ballots, Decision, Policy, Store, Subject};
+pub use ic_multisig::Tally;
 
 /// Which way a ballot goes. Approve counts 1, Reject 0 (a "no", or an
 /// approval withdrawn), Object -1 with a reason: a commit passes when
@@ -1050,36 +1167,49 @@ pub fn ballot_reason(decision: Vote, reason: Option<String>) -> Result<Option<St
 /// a reason on an approval or rejection is kept but not required. Returns
 /// the tally: approvals and objections so far, the threshold, and whether
 /// it is reached.
-pub fn cast_ballot(
+///
+/// The git side is asked whether it holds the commit before the ballot is
+/// counted; one it does not answer for is not cast, and the voter asks
+/// again.
+pub async fn cast_ballot(
     repo: &str,
     who: &Principal,
     commit_hex: &str,
     decision: Vote,
     reason: Option<String>,
 ) -> Result<Tally, String> {
-    let m = can_vote(repo, who)?;
+    can_vote(repo, who)?;
     let oid = parse_oid(commit_hex)?;
-    if !crate::to_git::has_commit(&oid) {
-        return Err(format!("no such commit in {repo}: {commit_hex}"));
+    match crate::to_git::has_commit(&oid).await {
+        Ok(true) => {}
+        Ok(false) => return Err(format!("no such commit in {repo}: {commit_hex}")),
+        Err(f) => {
+            return Err(format!(
+                "the git side did not say whether it holds {commit_hex} ({f}); the ballot is not cast, try again"
+            ))
+        }
     }
+    // The policy may have changed while the git side answered.
+    let m = can_vote(repo, who)?;
     let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
     approval.reason = ballot_reason(decision, reason)?;
     let t = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
         .map(|t| ungated(t, &m))
         .map_err(|e| e.to_string())?;
-    crate::to_git::set_approved(repo, approved_keys(repo, &m));
+    crate::mirrors::mark(repo, Mirror::Approved);
+    crate::mirrors::flush(repo).await;
     Ok(t)
 }
 
 /// The original two-way ballot, kept for clients that predate objections.
-pub fn vote(
+pub async fn vote(
     repo: &str,
     who: &Principal,
     commit_hex: &str,
     approve: bool,
 ) -> Result<Tally, String> {
     let decision = if approve { Vote::Approve } else { Vote::Reject };
-    cast_ballot(repo, who, commit_hex, decision, None)
+    cast_ballot(repo, who, commit_hex, decision, None).await
 }
 
 /// May the deploy queue run this commit? Yes when the repo requires no votes
@@ -1250,10 +1380,11 @@ pub fn governed_target(repo: &str, target: &str) -> bool {
 }
 
 /// Turn required signed pushes on or off (owner or operator).
-pub fn set_require_signed_push(repo: &str, who: &Principal, operator: bool, on: bool) -> Result<(), String> {
+pub async fn set_require_signed_push(repo: &str, who: &Principal, operator: bool, on: bool) -> Result<(), String> {
     let mut m = can_admin(repo, who, operator)?;
     m.require_signed_push = on;
     save_meta(repo, &m);
+    crate::mirrors::flush(repo).await;
     Ok(())
 }
 
@@ -1272,6 +1403,56 @@ mod tests {
 
     fn p(n: u8) -> Principal {
         Principal::from_slice(&[n; 8])
+    }
+
+    // The flows that await the git side, driven to completion: in one
+    // canister every answer is ready at once. These shadow the module's
+    // async functions for the tests below, which read as the calls they
+    // make.
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        futures::executor::block_on(f)
+    }
+
+    fn create_repo(name: &str, who: &Principal, operator: bool) -> Result<(), String> {
+        run(super::create_repo(name, who, operator))
+    }
+
+    fn add_member(repo: &str, who: &Principal, operator: bool, target: Principal, role: Role) -> Result<Vec<Member>, String> {
+        run(super::add_member(repo, who, operator, target, role))
+    }
+
+    fn remove_member(repo: &str, who: &Principal, operator: bool, target: Principal) -> Result<Vec<Member>, String> {
+        run(super::remove_member(repo, who, operator, target))
+    }
+
+    fn transfer_repo(repo: &str, who: &Principal, operator: bool, new_owner: Principal) -> Result<(), String> {
+        run(super::transfer_repo(repo, who, operator, new_owner))
+    }
+
+    fn set_required_votes(repo: &str, who: &Principal, operator: bool, k: u32) -> Result<(), String> {
+        run(super::set_required_votes(repo, who, operator, k))
+    }
+
+    fn set_require_signed_push(repo: &str, who: &Principal, operator: bool, on: bool) -> Result<(), String> {
+        run(super::set_require_signed_push(repo, who, operator, on))
+    }
+
+    fn cast_ballot(repo: &str, who: &Principal, commit_hex: &str, decision: Vote, reason: Option<String>) -> Result<Tally, String> {
+        run(super::cast_ballot(repo, who, commit_hex, decision, reason))
+    }
+
+    fn vote(repo: &str, who: &Principal, commit_hex: &str, approve: bool) -> Result<Tally, String> {
+        run(super::vote(repo, who, commit_hex, approve))
+    }
+
+    fn propose_policy_change(repo: &str, who: &Principal, change: PolicyChange, decision: Vote, reason: Option<String>) -> Result<(Tally, Option<PolicyChange>), String> {
+        run(super::propose_policy_change(repo, who, change, decision, reason))
+    }
+
+    /// post_upgrade's marks and the flush that follows them.
+    fn sync_all_mirrors() {
+        super::sync_all_mirrors();
+        run(crate::mirrors::flush_all());
     }
 
     /// (approvals, required) of a successful vote.
@@ -1638,8 +1819,7 @@ mod tests {
         assert!(mirror::requires_signed_push("t-mirror"));
 
         // A release before the mirrors left them empty.
-        mirror::set_push_policy("t-mirror", mirror::PushPolicy::default(), |_| false);
-        mirror::set_approved("t-mirror", None);
+        mirror::clear("t-mirror");
         assert!(mirror::may_write("t-mirror", &w, false).is_err());
         sync_all_mirrors();
         assert!(mirror::may_write("t-mirror", &w, false).is_ok());
@@ -1659,18 +1839,18 @@ mod tests {
         set_required_votes("t-wasm", &alice, false, 1).unwrap();
         let target = app.to_text();
 
-        crate::configs::set_wasm("t-wasm", target.clone(), "app.wat".into()).unwrap();
+        run(crate::configs::set_wasm("t-wasm", target.clone(), "app.wat".into())).unwrap();
         let e = mark_governed("t-wasm", &alice).unwrap_err();
         assert!(e.contains(".wasm only") && e.contains("app.wat"), "{e}");
         assert!(!meta("t-wasm").unwrap().governed);
-        crate::configs::set_wasm("t-wasm", target.clone(), "app.wasm".into()).unwrap();
+        run(crate::configs::set_wasm("t-wasm", target.clone(), "app.wasm".into())).unwrap();
         assert_eq!(mark_governed("t-wasm", &alice).unwrap(), app);
 
         for path in ["app.wat", "src/app.lang"] {
             let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: path.into() };
             let e = propose_policy_change("t-wasm", &alice, change, Vote::Approve, None).unwrap_err();
             assert!(e.contains(".wasm only"), "{e}");
-            assert!(crate::configs::set_wasm("t-wasm", target.clone(), path.into()).is_err());
+            assert!(run(crate::configs::set_wasm("t-wasm", target.clone(), path.into())).is_err());
         }
         assert!(proposals("t-wasm").is_empty());
         let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: "v2.wasm".into() };
@@ -1781,7 +1961,7 @@ mod tests {
         // not after the ballots are cleared.
         let e = propose_policy_change("t-gov", &v1, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap_err();
         assert!(e.contains("no deploy config"), "{e}");
-        crate::configs::set_wasm("t-gov", app.to_text(), "app.wasm".into()).unwrap();
+        run(crate::configs::set_wasm("t-gov", app.to_text(), "app.wasm".into())).unwrap();
         let (t, apply) = propose_policy_change("t-gov", &v1, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap();
         assert!(!t.reached && apply.is_none());
         let (t, apply) = propose_policy_change("t-gov", &alice, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap();
@@ -1856,5 +2036,131 @@ mod tests {
         assert!(!proposals("t-gov").iter().any(|p| p.change == wasm(0)), "withdrawn");
         assert!(propose_policy_change("t-gov", &alice, wasm(0), Vote::Reject, None).is_err(), "and its ballots went with it");
         assert!(propose_policy_change("t-gov", &alice, wasm(99), Vote::Approve, None).is_ok());
+    }
+
+    // --- phase 3 step 8: the flows that await the git side, against one that
+    // refuses, does not run, or loses its answer (to_git::flaky) ------------
+
+    use crate::to_git::flaky::{Flaky, Inject};
+    use std::rc::Rc;
+
+    /// Creating a repo reserves the name and takes the fee, then asks the
+    /// git side: a refusal refunds and releases; a lost answer is asked
+    /// again, and the git side's idempotent create makes that safe; an
+    /// answer that never comes leaves the name and the fee with the owner,
+    /// who finishes later without paying again.
+    #[test]
+    fn creating_a_repo_settles_what_the_git_side_answers() {
+        let git = Rc::new(Flaky::new());
+        crate::to_git::set_test_side(Some(git.clone()));
+        let alice = p(41);
+        let fee = pricing().create_repo;
+        credit(&alice, 10 * fee);
+
+        git.inject("create_repo", Inject::Refuse);
+        assert!(create_repo("t-flaky", &alice, false).unwrap_err().contains("refused"));
+        assert_eq!(balance(&alice), 10 * fee, "refunded");
+        assert!(!repo_exists("t-flaky") && !store::repo_exists("t-flaky"));
+
+        git.inject("create_repo", Inject::Lost);
+        create_repo("t-flaky", &alice, false).unwrap();
+        assert_eq!(balance(&alice), 9 * fee, "one fee");
+        assert!(repo_exists("t-flaky") && store::repo_exists("t-flaky"));
+        assert_eq!(git.count("create_repo"), 3, "refused, lost, asked again");
+        assert_eq!(meta("t-flaky").unwrap().owner, Some(alice));
+        assert!(crate::mirror::may_write("t-flaky", &alice, false).is_ok(), "mirrored once created");
+
+        for _ in 0..CREATE_ASKS {
+            git.inject("create_repo", Inject::NotDelivered);
+        }
+        let e = create_repo("t-kept", &alice, false).unwrap_err();
+        assert!(e.contains("kept"), "{e}");
+        assert_eq!(balance(&alice), 8 * fee, "the fee is kept with the name");
+        assert!(!repo_exists("t-kept"));
+        let bob = p(42);
+        credit(&bob, fee);
+        assert!(create_repo("t-kept", &bob, false).unwrap_err().contains("reserved"));
+        assert_eq!(balance(&bob), fee);
+        create_repo("t-kept", &alice, false).unwrap();
+        assert_eq!(balance(&alice), 8 * fee, "no second fee");
+        assert_eq!(meta("t-kept").unwrap().owner, Some(alice));
+        assert!(store::repo_exists("t-kept"));
+        assert!(create_repo("t-kept", &alice, false).unwrap_err().contains("already exists"));
+
+        // The question before the fee: unanswered, nothing is charged or
+        // reserved, and the next call starts over.
+        git.inject("check_new_repo", Inject::Lost);
+        assert!(create_repo("t-unasked", &alice, false).unwrap_err().contains("nothing was charged"));
+        assert_eq!(balance(&alice), 8 * fee);
+        create_repo("t-unasked", &alice, false).unwrap();
+        assert_eq!(balance(&alice), 7 * fee);
+        crate::to_git::set_test_side(None);
+    }
+
+    /// A ballot counts only once the git side has said it holds the commit:
+    /// one it does not answer for is not cast, and the voter asks again.
+    #[test]
+    fn a_ballot_waits_for_the_git_side_to_confirm_the_commit() {
+        let git = Rc::new(Flaky::new());
+        crate::to_git::set_test_side(Some(git.clone()));
+        let alice = p(43);
+        credit(&alice, 10_000_000_000);
+        create_repo("t-ballot", &alice, false).unwrap();
+        set_required_votes("t-ballot", &alice, false, 1).unwrap();
+        let c = store::put_object(store::ObjectType::Blob, b"ballot");
+        let hex = store::oid_hex(&c);
+
+        git.inject("has_commit", Inject::Lost);
+        let e = vote("t-ballot", &alice, &hex, true).unwrap_err();
+        assert!(e.contains("not cast"), "{e}");
+        assert!(votes("t-ballot", &hex).is_empty());
+        assert!(!crate::mirror::approved("t-ballot").unwrap().contains(&c));
+
+        vote("t-ballot", &alice, &hex, true).unwrap();
+        assert!(crate::mirror::approved("t-ballot").unwrap().contains(&c));
+        crate::to_git::set_test_side(None);
+    }
+
+    /// A mirror write the git side does not take leaves its mark, and the
+    /// retry (a timer in the canister) delivers the mirror's current state;
+    /// one whose answer was lost landed, and is sent again all the same,
+    /// which the git side takes as the newer write it is.
+    #[test]
+    fn a_mirror_write_the_git_side_does_not_take_is_retried() {
+        use crate::mirrors::{self, Mirror};
+        let git = Rc::new(Flaky::new());
+        crate::to_git::set_test_side(Some(git.clone()));
+        let (alice, w) = (p(44), p(45));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-retry", &alice, false).unwrap();
+        assert!(mirrors::pending("t-retry").is_empty());
+
+        git.inject("set_push_policy", Inject::NotDelivered);
+        add_member("t-retry", &alice, false, w, Role::Writer).unwrap();
+        assert!(crate::mirror::may_write("t-retry", &w, false).is_err(), "the git side has not taken the write");
+        assert_eq!(mirrors::pending("t-retry"), vec![Mirror::PushPolicy]);
+        run(mirrors::flush_all());
+        assert!(crate::mirror::may_write("t-retry", &w, false).is_ok());
+        assert!(mirrors::pending("t-retry").is_empty());
+
+        git.inject("set_push_policy", Inject::Lost);
+        remove_member("t-retry", &alice, false, w).unwrap();
+        assert!(crate::mirror::may_write("t-retry", &w, false).is_err(), "landed");
+        assert_eq!(mirrors::pending("t-retry"), vec![Mirror::PushPolicy]);
+        run(mirrors::flush_all());
+        assert!(mirrors::pending("t-retry").is_empty());
+        assert!(crate::mirror::may_write("t-retry", &w, false).is_err());
+
+        // The approved set likewise, from a ballot.
+        set_required_votes("t-retry", &alice, false, 1).unwrap();
+        let c = store::put_object(store::ObjectType::Blob, b"retry");
+        git.inject("set_approved", Inject::NotDelivered);
+        vote("t-retry", &alice, &store::oid_hex(&c), true).unwrap();
+        assert!(!crate::mirror::approved("t-retry").unwrap().contains(&c));
+        assert_eq!(mirrors::pending("t-retry"), vec![Mirror::Approved]);
+        run(mirrors::flush_all());
+        assert!(crate::mirror::approved("t-retry").unwrap().contains(&c));
+        assert!(mirrors::pending("t-retry").is_empty());
+        crate::to_git::set_test_side(None);
     }
 }

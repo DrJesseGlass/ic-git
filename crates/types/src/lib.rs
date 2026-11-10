@@ -3,9 +3,11 @@
 //! the wire structs, and the registry record keys. Pure: no canister state,
 //! no calls, nothing that reads the object store.
 
+pub mod authority_side;
 pub mod deploy;
 pub mod git_side;
 pub mod keys;
 pub mod labels;
 pub mod oid;
 pub mod proof;
+pub mod side;
