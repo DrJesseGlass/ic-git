@@ -12,7 +12,7 @@ use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git), likewise.
 use ic_git_git::{api, attest, jobs, mirror, pack, receive, signed_push, site, smart_http, store, tokens};
 // The authority (crates/authority), likewise.
-use ic_git_authority::{api_authority, apps, deploy, evm, feed, icp, ledger, names, provenance, sol, tenancy, to_git};
+use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, icp, ledger, names, provenance, sol, tenancy, to_git};
 #[cfg(test)]
 mod both_sides;
 mod consent;
@@ -58,6 +58,9 @@ fn post_upgrade() {
     install_git_side();
     store::check_schema_version();
     auth::init_from_saved(kv::load_auth_snapshot());
+    // The deploy-config mirror (configs.rs): a release before the authority
+    // owned the configs left it empty, and resume_pending's jobs read it.
+    configs::sync_all_mirrors();
     // Timers do not survive upgrades; re-arm the drain timer if the queue
     // (which does survive, in stable memory) still holds pending deploys.
     deploy::resume_pending(jobs::resolve);
@@ -732,7 +735,8 @@ fn follow_approvals(repo: &str, retry: bool) {
         None => return,
     };
     let hex = store::oid_hex(&commit);
-    let (wasm, evm) = (jobs::get_config(repo).is_some(), jobs::get_evm_config(repo).is_some());
+    let cfg = configs::get(repo);
+    let (wasm, evm) = (cfg.wasm.is_some(), cfg.evm.is_some());
     if !deploy::is_live(repo, &hex, wasm, evm) && !deploy::in_flight(repo, &hex) {
         submit_job(repo, commit);
     }
@@ -746,13 +750,6 @@ fn api_route(url: &str) -> HttpResponse {
         Some(req) => api_authority::handle(&req).unwrap_or_else(|| api::handle(&req, url)),
         None => httpjson::error(404, "not found"),
     }
-}
-
-/// Every way a repo's wasm deploy config is set goes through here, so the
-/// git side always hears the authority's current word on whether the repo
-/// is governed (which holds it to committed .wasm).
-fn set_wasm_config(repo: &str, target: String, source_path: String) -> Result<(), String> {
-    jobs::set_config(repo, target, source_path, tenancy::is_governed(repo))
 }
 
 /// The git side hands a commit's deploy to the authority (docs/CANISTER_SPLIT.md,
@@ -839,10 +836,10 @@ fn propose_policy_change(
     let described = change.describe();
     let (t, apply) = tenancy::propose_policy_change(&repo, &caller(), change, decision, reason.clone())?;
     feed::policy_ballot(&repo, &caller(), &described, decision, reason.as_deref(), &t);
-    // The deploy config lives in jobs.rs; tenancy decided, this applies.
+    // The deploy configs live in configs.rs; tenancy decided, this applies.
     match apply {
-        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => set_wasm_config(&repo, target, source_path)?,
-        Some(tenancy::PolicyChange::DeployMode { mode }) => jobs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)?,
+        Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => configs::set_wasm(&repo, target, source_path)?,
+        Some(tenancy::PolicyChange::DeployMode { mode }) => configs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)?,
         _ => {}
     }
     if t.reached {
@@ -1092,7 +1089,7 @@ fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<
     } else {
         target
     };
-    set_wasm_config(&repo, target, source_path)
+    configs::set_wasm(&repo, target, source_path)
 }
 
 /// Set a repo's install mode: "upgrade" (default; preserves target state) or
@@ -1101,7 +1098,7 @@ fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<
 fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
     let m = tenancy::can_admin(&repo, &caller(), operator())?;
     tenancy::locked(&m, "the install mode", Some("DeployMode"))?;
-    jobs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
+    configs::set_mode(&repo, deploy::DeployMode::parse(&mode)?)
 }
 
 /// Run the configured deploy now against the repo's release commit -- the
@@ -1118,7 +1115,7 @@ async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
 
 #[ic_cdk::query]
 fn get_deploy_config(repo: String) -> Option<deploy::DeployConfig> {
-    jobs::get_config(&repo)
+    configs::get_wasm(&repo)
 }
 
 #[ic_cdk::query]
@@ -1152,12 +1149,12 @@ fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(
     // One definition of "could this canister deploy at all", shared with the
     // deploy leg and with the evm_deploy endpoint, so a config accepted here
     // cannot be rejected at drain time for a reason this check missed.
-    jobs::set_evm_config(&repo, source_path, gas_limit, evm::require_deploy_target)
+    configs::set_evm(&repo, source_path, gas_limit)
 }
 
 #[ic_cdk::query]
 fn get_evm_deploy_config(repo: String) -> Option<deploy::EvmDeployConfig> {
-    jobs::get_evm_config(&repo)
+    configs::get_evm(&repo)
 }
 
 #[ic_cdk::query]

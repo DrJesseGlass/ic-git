@@ -635,7 +635,7 @@ impl PolicyChange {
             PolicyChange::DeployMode { mode } => {
                 crate::deploy::DeployMode::parse(mode)?;
                 // set_mode has nothing to change the mode of without one.
-                if crate::to_git::deploy_config(repo).is_none() {
+                if crate::configs::get_wasm(repo).is_none() {
                     return Err(format!("{repo} has no deploy config to set the install mode of; propose WasmDeploy first"));
                 }
                 Ok(())
@@ -691,7 +691,7 @@ pub fn mark_governed(repo: &str, who: &Principal) -> Result<Principal, String> {
     if m.required_votes == 0 {
         return Err("set required votes to 1 or more first: a governed repo deploys only approved commits".into());
     }
-    if let Some(cfg) = crate::to_git::deploy_config(repo) {
+    if let Some(cfg) = crate::configs::get_wasm(repo) {
         crate::deploy::SourceKind::for_repo(true, &cfg.source_path)
             .map_err(|e| format!("{e}; point the deploy config at a committed .wasm first"))?;
     }
@@ -1581,18 +1581,18 @@ mod tests {
         set_required_votes("t-wasm", &alice, false, 1).unwrap();
         let target = app.to_text();
 
-        crate::jobs::set_config("t-wasm", target.clone(), "app.wat".into(), is_governed("t-wasm")).unwrap();
+        crate::configs::set_wasm("t-wasm", target.clone(), "app.wat".into()).unwrap();
         let e = mark_governed("t-wasm", &alice).unwrap_err();
         assert!(e.contains(".wasm only") && e.contains("app.wat"), "{e}");
         assert!(!meta("t-wasm").unwrap().governed);
-        crate::jobs::set_config("t-wasm", target.clone(), "app.wasm".into(), is_governed("t-wasm")).unwrap();
+        crate::configs::set_wasm("t-wasm", target.clone(), "app.wasm".into()).unwrap();
         assert_eq!(mark_governed("t-wasm", &alice).unwrap(), app);
 
         for path in ["app.wat", "src/app.lang"] {
             let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: path.into() };
             let e = propose_policy_change("t-wasm", &alice, change, Vote::Approve, None).unwrap_err();
             assert!(e.contains(".wasm only"), "{e}");
-            assert!(crate::jobs::set_config("t-wasm", target.clone(), path.into(), is_governed("t-wasm")).is_err());
+            assert!(crate::configs::set_wasm("t-wasm", target.clone(), path.into()).is_err());
         }
         assert!(proposals("t-wasm").is_empty());
         let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: "v2.wasm".into() };
@@ -1703,7 +1703,7 @@ mod tests {
         // not after the ballots are cleared.
         let e = propose_policy_change("t-gov", &v1, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap_err();
         assert!(e.contains("no deploy config"), "{e}");
-        crate::jobs::set_config("t-gov", app.to_text(), "app.wasm".into(), is_governed("t-gov")).unwrap();
+        crate::configs::set_wasm("t-gov", app.to_text(), "app.wasm".into()).unwrap();
         let (t, apply) = propose_policy_change("t-gov", &v1, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap();
         assert!(!t.reached && apply.is_none());
         let (t, apply) = propose_policy_change("t-gov", &alice, PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None).unwrap();

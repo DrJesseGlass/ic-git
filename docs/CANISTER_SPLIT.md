@@ -274,7 +274,8 @@ canister does what:
    against the job's commit and the snapshot's path, reading neither the
    configs nor the object store; a refused proof is the deploy's failure
    message. `deploy_now` resolves and runs the same kind of job. A config
-   edit cannot change a queued job. A job queued by an older release is
+   edit cannot change a queued job (since phase 3 step 6 the queue
+   refuses one whose configs are no longer the repo's). A job queued by an older release is
    resolved in `post_upgrade`, which also frees any payload whose job is
    gone (drained by an older release after a rollback).
 3. **Governed repos deploy `.wasm` only.** DONE. One rule,
@@ -371,7 +372,8 @@ decoding sat on both sides of the future boundary. Now:
 - `lib.rs`'s operator-facing `evm_deploy` decodes on the way in; its candid
   signature `(text, nat64)` is unchanged.
 - `evm::deploy_target` / `require_deploy_target` mirror the existing
-  `publish_target` pair, so `jobs::set_evm_config` and `deploy::attempt_evm`
+  `publish_target` pair, so the EVM config setter (now `configs::set_evm`)
+  and `deploy::attempt_evm`
   check config-and-gas from one definition -- and `attempt_evm` checks it
   *before* walking the tree, instead of resolving and decoding an artifact for
   a canister that turns out to have no EVM config.
@@ -435,8 +437,9 @@ What a message changes, against today's function calls:
 
 The steps in one canister:
 
-6. **The authority owns the deploy configs.** Today the git side holds
-   them, and a job carries a snapshot of the one it was built from. Across
+6. **The authority owns the deploy configs.** DONE. Before this step the
+   git side held them, and a job carried a snapshot of the one it was
+   built from. Across
    the cut that snapshot is the git canister's word: a job could name any
    canister the authority controls as its target, another tenant's app
    canister included, and the queue installs into `cfg.target`. Fix: the
@@ -449,6 +452,20 @@ The steps in one canister:
    nothing but the proven artifacts from the job. `to_git::deploy_config`
    goes away. A test shows that a job naming another repo's app canister
    is refused.
+   What shipped:
+   - `crates/authority/src/configs.rs` owns the configs, under the META
+     keys they always had, so nothing migrates. Every setter writes the
+     git side's mirror (`mirror::set_deploy_configs`, through
+     `GitSide::set_deploy_configs`, with `DeployConfigs` in
+     `ic_git_types::git_side`).
+   - The git side's `jobs` reads only the mirror. `post_upgrade` fills
+     the mirror by key (`configs::sync_all_mirrors`) before
+     `resume_pending`, since a legacy repo can have a config and no
+     tenancy metadata.
+   - `deploy::run` starts with `configs::check_job`. A job whose configs
+     differ is refused, and its status names both sides of the
+     difference and points at `deploy_now`. Such a job is either queued
+     before a config change or forged.
 7. **The authority keeps what it already decides.** Repos are created
    only through the authority, which charges for them. So it records the
    label `check_new_repo` returns in the repo's metadata, and a release

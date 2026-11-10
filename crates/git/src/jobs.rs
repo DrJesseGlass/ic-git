@@ -1,90 +1,30 @@
-//! The git side of deploying (docs/CANISTER_SPLIT.md, section 3): each
-//! repo's deploy configs, and the job builder that snapshots them and proves
-//! each leg's artifact out of a commit. The authority (deploy.rs) queues
-//! and runs what this builds and reads nothing here while it does.
+//! The git side of deploying (docs/CANISTER_SPLIT.md, section 3): the job
+//! builder, which proves each configured leg's artifact out of a commit.
+//! The configs are the authority's (phase 3, step 6); this side reads its
+//! mirror of them. The authority (deploy.rs) queues and runs what this
+//! builds, refuses a job whose configs are not its own, and reads nothing
+//! here while it does.
 
 use crate::gitproof;
 use crate::object;
 use crate::store::{self, Oid};
-use ic_git_types::deploy::{bytecode_of, DeployConfig, DeployMode, EvmDeployConfig, Job, SourceKind};
+use ic_git_types::deploy::{bytecode_of, DeployConfig, EvmDeployConfig, Job};
 use ic_git_types::proof::{plain, Artifact};
-use candid::Principal;
 use sha2::Digest as _;
 
-// META keys for the configs (JSON via kv::set_json).
-fn config_key(repo: &str) -> String {
-    format!("deploy:{repo}")
-}
-fn evm_config_key(repo: &str) -> String {
-    format!("deploy_evm:{repo}")
-}
-
-/// Set (or replace) a repo's deploy config, preserving any previously-chosen
-/// install mode. `governed` is the authority's word on whether the repo is
-/// governed, which holds it to committed `.wasm` (SourceKind::for_repo).
-pub fn set_config(repo: &str, target: String, source_path: String, governed: bool) -> Result<(), String> {
-    if !store::repo_exists(repo) {
-        return Err(format!("no such repo: {repo}"));
-    }
-    Principal::from_text(&target).map_err(|e| format!("bad target principal: {e}"))?;
-    SourceKind::for_repo(governed, &source_path)?;
-    let mode = get_config(repo).map(|c| c.mode).unwrap_or_default();
-    let cfg = DeployConfig {
-        target,
-        source_path,
-        mode,
-    };
-    crate::kv::set_json(&config_key(repo), &cfg);
-    Ok(())
-}
-
-/// Change a repo's install mode (upgrade vs reinstall) without touching the
-/// rest of its config.
-pub fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
-    let mut cfg = get_config(repo).ok_or("no deploy config for repo")?;
-    cfg.mode = mode;
-    crate::kv::set_json(&config_key(repo), &cfg);
-    Ok(())
-}
-
+/// The repo's wasm deploy config, from the mirror of the authority's
+/// (phase 3, step 6: the authority owns the configs).
 pub fn get_config(repo: &str) -> Option<DeployConfig> {
-    crate::kv::get_json(&config_key(repo))
+    crate::mirror::deploy_configs(repo).wasm
 }
 
-/// Set (or replace) a repo's EVM deploy config. `deployable` is the
-/// authority's word on whether it could deploy with `gas_limit` at all
-/// (`evm::require_deploy_target`), asked after this side's own checks and
-/// before anything is stored: a target with no way to reach it is a
-/// misconfiguration better rejected now than discovered at push time.
-pub fn set_evm_config(
-    repo: &str,
-    source_path: String,
-    gas_limit: u64,
-    deployable: impl FnOnce(u64) -> Result<(), String>,
-) -> Result<(), String> {
-    if !store::repo_exists(repo) {
-        return Err(format!("no such repo: {repo}"));
-    }
-    if !source_path.ends_with(".hex") {
-        return Err("source_path must end in .hex (creation bytecode as hex text)".into());
-    }
-    deployable(gas_limit)?;
-    crate::kv::set_json(
-        &evm_config_key(repo),
-        &EvmDeployConfig {
-            source_path,
-            gas_limit,
-        },
-    );
-    Ok(())
-}
-
+/// The repo's EVM deploy config, likewise.
 pub fn get_evm_config(repo: &str) -> Option<EvmDeployConfig> {
-    crate::kv::get_json(&evm_config_key(repo))
+    crate::mirror::deploy_configs(repo).evm
 }
 
-/// The git side of a job: snapshot the repo's deploy configs and prove each
-/// leg's artifact out of `commit`.
+/// The git side of a job: the repo's deploy configs, as mirrored, and each
+/// leg's artifact proved out of `commit`.
 pub fn resolve(repo: &str, commit: &Oid) -> Job {
     let artifact = |path: &str| {
         gitproof::prove(commit, &plain(path))

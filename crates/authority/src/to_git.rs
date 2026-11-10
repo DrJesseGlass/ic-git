@@ -6,8 +6,7 @@
 //! authority calls.
 
 use candid::Principal;
-use ic_git_types::deploy::DeployConfig;
-use ic_git_types::git_side::GitSide;
+use ic_git_types::git_side::{DeployConfigs, GitSide};
 pub use ic_git_types::git_side::PushPolicy;
 use ic_git_types::oid::Oid;
 use std::sync::OnceLock;
@@ -36,9 +35,9 @@ fn git() -> &'static dyn GitSide {
     }
 }
 
-/// A repo's wasm deploy config.
-pub fn deploy_config(repo: &str) -> Option<DeployConfig> {
-    git().deploy_config(repo)
+/// The deploy-config mirror (configs.rs owns the configs).
+pub fn set_deploy_configs(repo: &str, configs: DeployConfigs) {
+    git().set_deploy_configs(repo, configs)
 }
 
 /// The push-policy mirror. Operators, by the authority's rule, keep their

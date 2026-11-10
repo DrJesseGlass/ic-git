@@ -1245,7 +1245,7 @@ fn record(rec: EvmDeployRecord) -> Result<(), String> {
 /// gas limit that could pay for one (21k intrinsic + 32k for the CREATE).
 ///
 /// One definition, used from three places on purpose -- `deploy_bytecode`
-/// needs the config, while `require_deploy_target` lets `jobs::set_evm_config`
+/// needs the config, while `require_deploy_target` lets `configs::set_evm`
 /// reject an unpayable config at configure time and lets `deploy::attempt_evm`
 /// fail *before* it walks the repo tree and decodes the artifact. Same shape as
 /// `publish_target` / `require_publish_target` below.

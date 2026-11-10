@@ -60,6 +60,17 @@ pub fn set_bytes(key: &str, bytes: Vec<u8>) {
     META.with(|m| storage::save_bytes(m, key, bytes));
 }
 
+/// Every key that starts with `prefix`, in key order.
+pub fn keys_with_prefix(prefix: &str) -> Vec<String> {
+    META.with(|m| {
+        m.borrow()
+            .range(prefix.to_string()..)
+            .map(|e| e.key().clone())
+            .take_while(|k| k.starts_with(prefix))
+            .collect()
+    })
+}
+
 const AUTH_KEY: &str = "auth";
 
 pub fn save_auth_snapshot(bytes: Vec<u8>) {
