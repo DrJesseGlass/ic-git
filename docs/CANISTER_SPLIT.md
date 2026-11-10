@@ -102,8 +102,9 @@ and a new proof verifier (section 4).
 
 Holds: the threshold keys, chain configs, the registry address, control of
 every app canister (and sole control of governed ones), the governor
-relationship, the accounts, the ballots and policies, the deploy queue and
-provenance logs, the name-service listing.
+relationship, the accounts, the ballots and policies, the deploy configs
+(phase 3, step 6), the deploy queue and provenance logs, the name-service
+listing.
 
 Properties: no hostile parsing beyond the bounded proof check; changes
 rarely; governed by the existing governor. About half of today's canister
@@ -116,9 +117,11 @@ keeping the vote check where installs happen.
 `site.rs`, `api.rs` (its git half), `tokens.rs`, `signed_push.rs`, the
 resolving half of `provenance.rs`, and a new job builder (section 4).
 
-Holds: objects, refs, repos, deploy and site config, push tokens and keys,
-and mirrors the authority keeps current: each repo's writers and, for a
-gated repo, the commit it serves.
+Holds: objects, refs, repos, site config, push tokens and keys, and
+mirrors the authority keeps current: each repo's writers, its approved
+commits, and its deploy config (phase 3, step 6: the authority owns the
+deploy configs, since a job's config names the canister it installs
+into).
 
 Properties: large, hostile input, changes often, **holds no keys and
 controls nothing**. A second instance of the governor module governs it.
@@ -157,14 +160,26 @@ acts.**
     submit_job(repo, commit: blob(20), artifacts: vec Artifact)   // staged in chunks
     notify(repo, event)                    // e.g. a push awaiting votes, for the feed
     charge_push(repo, bytes: nat64)
+    publish_git_record(commit, module_sha256)   // the git canister's own module
+                                                // record (phase 3, step 12)
 
     Artifact = record { path: text; blob: blob; proof: vec blob }
       // proof: the raw commit object, then each tree object on the path
 
-    // authority -> git (the mirrors, mirror.rs)
+    // authority -> git (the mirrors, mirror.rs; each with a sequence
+    // number, phase 3 step 8)
     set_push_policy(repo, PushPolicy)      // writers, require_signed_push
-    set_approved(repo, opt vec text)       // the commits reaching the threshold,
+    set_approved(repo, opt vec text, retry: bool)
+                                           // the commits reaching the threshold,
                                            // by ballot key; null: no votes required
+    set_deploy_config(repo, ...)           // the source paths a job resolves
+                                           // (phase 3, step 6)
+    set_site(repo, root)
+
+    // authority -> git (asked from update calls; phase 3, steps 7 and 10)
+    check_new_repo(name) -> label; create_repo(name); has_commit(oid)
+    release_job(repo)                      // deploy_now: the job, by submit_job
+    record_artifact(repo, kind)            // a registry publish: Artifact + proof
 
 The authority checks a proof by recomputing each object's id (SHA-1 with
 collision detection over `"<type> <len>\0" + body`), the first against the
@@ -386,17 +401,236 @@ and `publish_commit` takes it as a parameter. Negligible in cycles either way
 against a threshold signature plus RPC outcalls -- the point is that a value
 which *must* match is no longer derived twice from mutable state.
 
-**Phase 3 -- cut the boundary.** Create the git canister on umobs' subnet
-and install it from a reproducible build; install a second instance of the
-governor module with the git canister as its target and the same
-approvers, and hand the git canister to it. The git canister calls the
-authority over section 4's interface; umobs is upgraded in place to the
-authority build. Migrate objects and refs by re-push or bulk copy
-(`tools/seed-repo.sh` does bulk import). The compiler canister follows when
-an ungoverned repo needs `.wat` or `.lang` builds again. Before the cut:
-the extensions' expected list gains the git canister, `tools/verify.mjs`
-learns the two canisters apart, and docs/ATTESTATION.md's full-stack
-closure gets its two-canister paragraph (section 7).
+**Phase 3 -- cut the boundary.** Planned 2026-11-09; the state moves by
+bulk copy (decided then; step 13). After phase 2 the two sides are crates
+in one canister, and the canister crate's glue is the only code that calls
+both: 17 of its 105 endpoints, plus `init`, `post_upgrade` and
+`consent.rs`. Phase 3 turns that glue into messages, builds two
+canisters, and moves the git side's state off umobs. The steps continue
+phase 2's numbering. As in phase 2, steps 6 to 11 and 13 each ship as an
+ordinary release of the one canister through the governor, and none
+changes which canister does what. Step 12 builds the two canisters and
+step 14 the clients; neither reaches mainnet before steps 15 and 16, the
+cut.
+
+What a message changes, against today's function calls:
+
+- **It can fail, or succeed with its answer lost.** Every message is a
+  full-state write or carries a key the receiver dedupes by, so a retry
+  is always safe.
+- **The caller's state can change while it waits.** Every check made
+  before an await is made again after it, as `create_push_token` already
+  does around `raw_rand`.
+- **Guaranteed-response calls from one canister to another arrive in
+  order, but a failed one can be retried after a later one.** Each mirror write carries a
+  sequence number per repo, and the git canister ignores one older than
+  what it holds.
+- **A query cannot call another canister.** What the authority answers in
+  a query (the authority's half of `/api`, `/feed`) must come from its own
+  state, never from the git side.
+- **The 2 MiB message limit.** Jobs and proofs are staged in chunks
+  (section 6.4, item 3).
+- **Each canister pays for its own cycles.** The git canister holds the
+  objects, and the rent for them is collected on the authority.
+
+The steps in one canister:
+
+6. **The authority owns the deploy configs.** Today the git side holds
+   them, and a job carries a snapshot of the one it was built from. Across
+   the cut that snapshot is the git canister's word: a job could name any
+   canister the authority controls as its target, another tenant's app
+   canister included, and the queue installs into `cfg.target`. Fix: the
+   wasm and EVM deploy configs and the install mode are kept at the
+   authority, which every setter already goes through (`set_wasm_deploy`,
+   `set_deploy_mode`, `set_evm_deploy`, a `WasmDeploy` or `DeployMode`
+   policy change). The git side gets a mirror, since it needs the source
+   path to build a job. At drain time the queue installs by its own
+   config: it refuses a job whose config differs from its own and takes
+   nothing but the proven artifacts from the job. `to_git::deploy_config`
+   goes away. A test shows that a job naming another repo's app canister
+   is refused.
+7. **The authority keeps what it already decides.** Repos are created
+   only through the authority, which charges for them. So it records the
+   label `check_new_repo` returns in the repo's metadata, and a release
+   fills in metadata, label included, for every legacy ownerless repo.
+   With that, `repo_exists` and `label_holder` are answered from the
+   authority's own state, and the authority's queries never need the git
+   side. What it still asks of the git side, besides the mirrors:
+   `check_new_repo`, `create_repo`, `has_commit` (a ballot on a commit it
+   does not hold is refused) and the records of step 10. Each of these is
+   asked from an update call, so it can await.
+8. **Both directions become async traits.**
+   - `GitSide`'s methods return futures.
+   - A new `AuthoritySide` in `ic-git-types` carries the git side's calls:
+     `charge_push`, `stage_job` and `submit_job`, `notify` (feed events)
+     and `publish_git_record` (step 12).
+   - The in-canister implementations stay plain function calls behind
+     those futures, so behavior is unchanged; the messages start with
+     step 12's two builds.
+   - Every flow that awaits gets its failure rule here, and each rule is
+     tested against an implementation that fails, or loses its answer, on
+     the chosen call.
+   - The flows:
+     - **Creating a repo** reserves the name at the authority, debits,
+       then awaits `create_repo`. A definite refusal refunds and releases
+       the name. A lost answer is settled by asking again: the name is
+       reserved, so nothing else can have taken it.
+     - **The push path** checks the certificate, then awaits
+       `charge_push`, then checks `may_write` again before it ingests.
+       The charge is kept on a refused pack, as it is today.
+     - **A ballot** awaits `has_commit` before it counts.
+     - **Mirror writes** are full state, sequence-numbered, and kept in a
+       per-repo dirty set until the git side acknowledges them, retried
+       by a timer.
+     - **The git side's outbox.** `submit_job` and `notify` go into an
+       outbox in stable memory, drained by a timer and retried until the
+       authority acknowledges them. The authority already dedupes jobs by
+       (repo, commit) (section 4). It dedupes feed events by a sequence
+       number.
+9. **Following approvals moves to the git side.** `follow_approvals` is
+   glue: it walks the history (git) and queues a deploy (authority). After
+   this step the git side runs it when the approved-set mirror changes:
+   `set_approved` carries a `retry` flag for ballots. When the served
+   commit moves, the git side submits that commit's job. The authority
+   then makes the check that `follow_approvals` makes today: it skips the
+   job when the app already runs that commit or a deploy of it is queued
+   (`deploy::is_live`, `deploy::in_flight`).
+10. **Attestations carry proofs.**
+    - `evm_registry_publish` and `evm_registry_publish_site` take the
+      record from the git side today (`attest::tip_record`,
+      `attest::site_record`). Across the cut, the authority would be
+      signing what the git canister says.
+    - So the git side returns the artifact with its proof, the same
+      `Artifact` a job carries. The authority checks the proof, hashes the
+      blob itself, and, for a votes-gated repo, requires the commit to be
+      approved.
+    - In section 4's listing these are `record_artifact`, and
+      `release_job` for `deploy_now`, which asks the git side for its job
+      and runs it once it arrives. Either way, the authority acts on bytes it has checked.
+11. **Retire the one-time paths.** Some paths exist only for an older
+    release's state; once mainnet has run them, they go:
+    - `resume_pending`'s `resolve` fallback
+    - `tokens::migrate`
+    - `site::record_gated_repos`
+    - `store::index_repo_labels`
+    `post_upgrade` then needs only its own side's state, which is what
+    lets it be split in two.
+
+The two canisters:
+
+12. **Two builds.**
+    - **`canisters/authority` (`authority_canister.wasm`, for umobs).**
+      The lifecycle, the authority's endpoints and their consent
+      messages. A `GitSide` that sends messages to the git canister,
+      whose id is set once by an operator: the setter checks, through the
+      management canister's `canister_info`, that the canister has one
+      controller and that the controller itself has none (a governor).
+    - **`canisters/git` (`git_canister.wasm`, for the new canister).**
+      HTTP, both git services, `/site/`, the git half of `/api`, push
+      tokens, the object admin calls and their consent messages. An
+      `AuthoritySide` that sends messages to the authority, whose id is
+      an init argument.
+    - **Who may call.** Each canister accepts the other's calls only from
+      the other's principal. Each keeps its own operators (phase 2, step 5: operators are not
+      mirrored): controllers and its own allowlist.
+    - **The record of the git canister's own module.** The second
+      governor calls `registry_publish_canister` on its target after an
+      upgrade, as the first governor does on umobs. The git canister holds
+      no keys, so it forwards the call (`publish_git_record`). The
+      authority reads the git canister's module hash itself, with
+      `canister_info`, publishes only if it matches, and writes it under a
+      new key in `ic_git_types::keys`, beside `CANISTER_KEY`.
+    - **Cycles.** The authority tops up the git canister from the rent it
+      collects, on a timer, above a floor it reports in `/api/pricing`.
+    - **Where the endpoints land.** They land where their state is, and a
+      decision lands where it is made:
+      - **The git canister:** `http_request`,
+        `http_request_streaming_callback`, `http_request_update`,
+        `put_object`, `get_object`, `set_ref`, `list_refs`, `list_repos`,
+        every push-token call and `get_site`.
+      - **The authority:** everything else, including every setter that
+        checks `can_admin` (`set_site` too: the authority decides and
+        sends the site config across), membership and ballots, accounts,
+        app canisters, the signers, names, the feed, the queue and its
+        statuses, and the compile endpoints until the compiler canister.
+      - **Clients:** nothing on umobs forwards to the git canister.
+        Clients change (step 14).
+    - **The reproducible build.** It produces both modules. The recipe in
+      REPRODUCIBLE_BUILD.md and `verified.json` name the new artifact
+      paths.
+13. **The copy and the freeze, in the last one-canister release.**
+    - **Freeze.** An operator switch puts the git side in read-only mode:
+      pushes, token minting, `create_repo`, `set_site` and the object
+      admin calls are refused with a message that names the cut.
+      Membership changes and ballots stay open: they reach the git side
+      only through the mirrors, which the authority rewrites at the cut.
+    - **Export.** Paged update calls export every git-side record:
+      objects, repos and refs, push tokens (their hashes, minters, expiries
+      and bound keys), site configs and labels. Operators may call them,
+      and so may the one importing canister an operator names.
+    - **What is not copied.** The push-certificate seed is a secret, and
+      the git canister makes its own: a nonce lives for minutes. The
+      mirrors are not copied either: the authority rewrites them at the
+      cut.
+    - **The import.** The git canister pulls the pages with its own update
+      calls, so what it gets is what umobs replied, through consensus.
+    - **The check.** Each side computes a digest of its copy, record
+      count and a hash over the records in key order. The cut proceeds
+      only when the two match.
+    - **The rehearsal.** The local e2e runs this whole sequence, from the
+      last one-canister release.
+14. **Clients, before the cut** (as this phase always required):
+    - the console talks to both canisters
+    - `tools/verify.mjs` takes the site's canister and the registry
+      owner's apart
+    - `core/verifier.js`, the loader and both extensions have the git
+      canister in their expected list (EXTENSION.md, "What the page talks
+      to") and a host rule for its `/site/`
+    - the verifiers check the git canister's governor and module record
+      as they check umobs'
+    - docs/ATTESTATION.md gets its two-canister closure paragraph
+    - docs/TENANCY.md says that a repo with no votes required trusts the
+      git canister for what deploys (decision 6.5.4)
+
+The cut on mainnet, in this order:
+
+15. **The git canister exists before anything moves.** Create it on umobs'
+    subnet from the reproducible build, install the second governor with
+    the git canister as its target and the same approvers, and hand the
+    canister over. Its id is now fixed. Publish the step 14 clients and
+    extensions with it.
+16. **The cut.**
+    1. Freeze umobs (step 13).
+    2. The git canister imports, and both digests match.
+    3. The governor upgrades umobs to the authority build. Its git-side
+       state stays in stable memory, unread.
+    4. An operator sets the git canister's id. Until then, every call
+       that needs the git side is refused with a message that names the
+       cut. The authority rewrites
+       every mirror, tops up the git canister's cycles, and publishes both
+       canister records.
+    5. The git canister unfreezes and takes pushes.
+    6. umobs answers the old URLs: `/site/...` and `/<repo>.git/info/refs`
+       with a permanent redirect to the same path on the git canister.
+       Git follows a redirect on its first request
+       (`http.followRedirects`, default `initial`). curl drops the
+       credentials on a redirect to another host, so a push through the
+       old URL fails, but a fetch still works. A push needs the new
+       remote, and the same token works there.
+       Until the local e2e confirms this with a real git client, treat it
+       as expected, not shown.
+
+    **Rollback** is an upgrade of umobs back to the last one-canister
+    release, which still holds every git-side record as of the freeze. The
+    authority build keeps the one-canister memory layout throughout the
+    retention window, so the authority state written after the cut
+    (accounts, ballots, deploys) is kept too. Rollback loses only the git-side
+    changes made on the git canister after the cut: pushes, tokens minted
+    or revoked, site configs. That is why umobs keeps the
+    git-side state for a retention window; a later release frees it.
+
+The compiler canister follows when an ungoverned repo needs `.wat` or
+`.lang` builds again.
 
 **Phase 4 -- re-attest.** The authority's module hash changes at phase 3
 and then goes quiet. That is the point of the whole exercise.
@@ -543,7 +777,9 @@ which is section 1.2's point.
 ## 7. What this does not change
 
 - The public git remote URL changes (new canister id). Anyone with an existing
-  remote must update it; there is no redirect story on the raw domain.
+  remote must update it to push. umobs redirects the old URLs (phase 3,
+  step 16), which serves fetches and pages but not pushes: curl drops the
+  credentials on a redirect to another host.
 - `verify.mjs`'s `--canister` argument becomes ambiguous -- it needs to know
   which canister serves the site and which one owns the registry record. The
   F2 verifier and docs/ATTESTATION.md's step 5 ("full-stack closure") both
