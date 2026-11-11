@@ -6,12 +6,10 @@
 //! here while it does.
 
 use crate::gitproof;
-use crate::object;
 use crate::store::{self, Oid};
-use ic_git_types::deploy::{bytecode_of, DeployConfig, EvmDeployConfig, Job};
-use ic_git_types::git_side::{DeployConfigs, Retry};
+use ic_git_types::deploy::{DeployConfig, EvmDeployConfig, Job};
+use ic_git_types::git_side::{DeployConfigs, Release, Retry};
 use ic_git_types::proof::{plain, Artifact};
-use sha2::Digest as _;
 
 /// The repo's wasm deploy config, from the mirror of the authority's
 /// (phase 3, step 6: the authority owns the configs).
@@ -105,23 +103,6 @@ pub async fn follow_approvals(repo: &str, retry: Option<&Retry>) {
     submit(repo, &commit).await;
 }
 
-/// The creation bytecode of an EVM artifact at `path` within a commit's tree,
-/// for the registry publisher's operator path. The deploy leg decodes the
-/// proven blob with `bytecode_of` instead; both hash the same bytes.
-pub fn evm_artifact_bytecode(commit_oid: &Oid, path: &str) -> Result<Vec<u8>, String> {
-    let bytes =
-        object::blob_at_path(commit_oid, path).map_err(|e| format!("resolve {path}: {e}"))?;
-    bytecode_of(path, bytes)
-}
-
-/// sha256 of a commit's decoded EVM artifact -- the bundle hash the registry
-/// stores, and the value `evm_deploy_history.bytecode_sha256` must equal.
-/// Used by the publish paths that have no deploy in flight to inherit the
-/// hash from; see `provenance::publish_commit`.
-pub fn evm_artifact_hash(commit_oid: &Oid, path: &str) -> Result<[u8; 32], String> {
-    Ok(sha2::Sha256::digest(evm_artifact_bytecode(commit_oid, path)?).into())
-}
-
 /// Whether a push to the deploy branch should enqueue a deploy: true when
 /// either the wasm-to-canister or the EVM target is configured.
 pub fn any_config(repo: &str) -> bool {
@@ -141,6 +122,16 @@ pub fn deploy_branch(repo: &str) -> Option<String> {
 /// commit -- or about how to phrase not finding one.
 pub fn release_commit(repo: &str) -> Result<Oid, String> {
     crate::site::served_commit(repo).map_err(str::to_string)
+}
+
+/// The release commit and its job, for `deploy_now` (phase 3, step 10:
+/// `release_job`). The authority checks the job as it checks any.
+pub fn release(repo: &str) -> Result<Release, String> {
+    let commit = release_commit(repo)?;
+    Ok(Release {
+        commit: store::oid_hex(&commit),
+        job: resolve(repo, &commit),
+    })
 }
 
 

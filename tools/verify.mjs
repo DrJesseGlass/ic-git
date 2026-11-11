@@ -608,7 +608,7 @@ report(commitOk, "A: served commit == registry commit", commitOk ? "" : `served 
 
 // B. The artifact hashes to the attested bundleHash, hashed the way THIS
 // record's publisher hashed it: the deploy-artifact record (Record::artifact)
-// hashes the decoded contract bytecode, attest::site_record hashes the served
+// hashes the decoded contract bytecode, provenance::site_record hashes the served
 // bytes exactly as delivered (both then write through
 // evm::registry_publish_record).
 // Choosing by the artifact's shape instead would mis-hash a site

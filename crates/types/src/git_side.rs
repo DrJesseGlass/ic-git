@@ -11,10 +11,11 @@
 //! the mirror back. A mirror write is the mirror's whole state, so any one
 //! of them can be sent again.
 
-use crate::deploy::{DeployConfig, EvmDeployConfig};
+use crate::deploy::{DeployConfig, EvmDeployConfig, Job};
 use crate::oid::Oid;
+use crate::proof::Artifact;
 use crate::side::{Fut, Reply};
-use candid::Principal;
+use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 
 /// Who may push to a repo: its owner and its writers. Operators may too,
@@ -44,6 +45,40 @@ pub struct DeployConfigs {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Retry {
     pub running: Option<String>,
+}
+
+/// Which registry record the authority asks the git side to resolve
+/// (phase 3, step 10: `record_artifact`).
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub enum RecordKind {
+    /// The served site's entrypoint: the site root, or its `index.html`,
+    /// in the commit the site serves. Which file that is the git side
+    /// says, since it holds the site config.
+    Site,
+    /// The release commit's EVM artifact at `path`, the source path of the
+    /// authority's own EVM deploy config.
+    Release { path: String },
+}
+
+/// A record's artifact as the git side resolves it: the commit (40 hex
+/// digits), the path within it, and the blob with its proof. The authority
+/// checks the proof against the commit and the path, requires the commit to
+/// be approved when the repo requires votes, and hashes the blob itself.
+#[derive(CandidType, Deserialize)]
+pub struct Attested {
+    pub commit: String,
+    pub path: String,
+    pub artifact: Artifact,
+}
+
+/// `deploy_now`'s job (phase 3, step 10: `release_job`): the release
+/// commit (40 hex digits) and its job, built as the push path builds one.
+/// The authority runs it as it runs any job: its own configs, its own
+/// ballots, and only the bytes the proofs show.
+#[derive(CandidType, Deserialize)]
+pub struct Release {
+    pub commit: String,
+    pub job: Job,
 }
 
 pub trait GitSide {
@@ -80,4 +115,16 @@ pub trait GitSide {
     /// Does the git side hold this commit? A ballot on one it does not is
     /// refused.
     fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>>;
+
+    /// The artifact behind a registry record, with its proof (phase 3,
+    /// step 10). The git side picks the commit -- the release commit, which
+    /// with votes required is the approved commit the site serves -- and,
+    /// for the site, the entrypoint; it refuses an entrypoint it would not
+    /// serve, or that the record could not cover. Read-only, so a lost
+    /// answer is settled by asking again.
+    fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>>;
+
+    /// The release commit's job, for `deploy_now` (phase 3, step 10).
+    /// Read-only, like `record_artifact`.
+    fn release_job<'a>(&'a self, repo: &'a str) -> Fut<'a, Reply<Result<Release, String>>>;
 }

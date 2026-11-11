@@ -804,6 +804,18 @@ fn is_current(repo: &str, st: &DeployStatus) -> bool {
     get_status(repo).is_some_and(|s| s.commit == st.commit && s.message == st.message)
 }
 
+/// deploy_now's job: the git side's release commit -- the deploy-branch
+/// tip, or with votes required the approved commit the site serves -- and
+/// its job (phase 3, step 10: `release_job`). Nothing here believes it:
+/// `run` checks its configs against this side's, its commit against this
+/// side's ballots, and each artifact's proof against the commit.
+pub async fn release_job(repo: &str) -> Result<(Oid, Job), String> {
+    let r = crate::to_git::release_job(repo)
+        .await
+        .map_err(|f| format!("the git side did not answer ({f}); nothing was charged, ask again"))??;
+    Ok((parse_oid(&r.commit)?, r.job))
+}
+
 /// Run `job` for `commit` now, without the queue. Always deploys, even if
 /// the commit is already in the provenance log -- the explicit-redeploy
 /// escape hatch (deploy_now), and the retry for a failed deploy of an
@@ -888,6 +900,32 @@ mod tests {
         let tree = store::put_object(ObjectType::Tree, &root);
         let commit = format!("tree {}\n\ncommit\n", store::oid_hex(&tree));
         store::put_object(ObjectType::Commit, commit.as_bytes())
+    }
+
+    /// deploy_now asks the git side for the release commit's job: the tip
+    /// and the job built for it; an unanswered ask fails with nothing run,
+    /// and a job whose artifact is not what the commit holds is refused by
+    /// the run, as a queued one is.
+    #[test]
+    fn deploy_now_asks_the_git_side_for_the_release_job() {
+        use crate::to_git::flaky::{Flaky, Inject};
+        crate::tenancy::test_repo("released");
+        set_config("released", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        let tip = store::commit_file_for_tests("released", "app.wasm", b"\0asm\x01\0\0\0", None);
+        let git = std::rc::Rc::new(Flaky::new());
+        crate::to_git::set_test_side(Some(git.clone()));
+        git.inject("release_job", Inject::Lost);
+        let e = futures::executor::block_on(release_job("released")).err().unwrap();
+        assert!(e.contains("ask again"), "{e}");
+        let (commit, mut job) = futures::executor::block_on(release_job("released")).unwrap();
+        assert_eq!(commit, tip);
+        crate::to_git::set_test_side(None);
+        // A forged blob: the run refuses it, as it refuses a queued one.
+        let Some((_, Ok(a))) = job.wasm.as_mut() else { panic!("the release job carries the wasm leg") };
+        a.blob = b"\0asm\x01\0\0\0forged".to_vec();
+        let st = futures::executor::block_on(run_now("released", commit, job));
+        assert!(!st.ok);
+        assert!(st.message.contains("refused"), "{}", st.message);
     }
 
     /// A queued job keeps the config and bytes it was queued with, and a

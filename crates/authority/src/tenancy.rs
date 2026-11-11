@@ -2185,6 +2185,12 @@ mod tests {
         fn has_commit<'a>(&'a self, oid: &'a ic_git_types::oid::Oid) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<bool>> {
             self.real.has_commit(oid)
         }
+        fn record_artifact<'a>(&'a self, repo: &'a str, kind: ic_git_types::git_side::RecordKind) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<ic_git_types::git_side::Attested, String>>> {
+            self.real.record_artifact(repo, kind)
+        }
+        fn release_job<'a>(&'a self, repo: &'a str) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<ic_git_types::git_side::Release, String>>> {
+            self.real.release_job(repo)
+        }
     }
 
     /// A create_repo whose reservation another call settled while it
