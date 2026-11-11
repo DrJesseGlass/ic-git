@@ -142,7 +142,6 @@ pub fn release_commit(repo: &str) -> Result<Oid, String> {
 mod tests {
     use super::*;
     use crate::for_authority::Git;
-    use crate::store::ObjectType;
     use crate::{mirror, site, to_authority};
     use futures::executor::block_on;
     use ic_git_types::authority_side::{AuthoritySide, Event};
@@ -175,17 +174,7 @@ mod tests {
     /// A commit holding `app.wasm`, on top of `parent`, as the repo's new
     /// branch tip.
     fn push(repo: &str, wasm: &[u8], parent: Option<Oid>) -> Oid {
-        let blob = store::put_object(ObjectType::Blob, wasm);
-        let mut root = Vec::new();
-        root.extend_from_slice(b"100644 app.wasm\0");
-        root.extend_from_slice(blob.as_slice());
-        let tree = store::put_object(ObjectType::Tree, &root);
-        let parent = parent.map_or(String::new(), |p| format!("parent {}\n", store::oid_hex(&p)));
-        let commit = format!("tree {}\n{parent}\n{}\n", store::oid_hex(&tree), wasm.len());
-        let oid = store::put_object(ObjectType::Commit, commit.as_bytes());
-        let branch = store::head_target(repo).unwrap();
-        store::set_ref(repo, &branch, oid).unwrap();
-        oid
+        store::commit_file_for_tests(repo, "app.wasm", wasm, parent)
     }
 
     /// A write of the approved set the git side takes is followed: the

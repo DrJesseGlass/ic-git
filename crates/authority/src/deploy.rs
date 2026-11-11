@@ -65,11 +65,13 @@ pub struct EvmDeployStatus {
 }
 
 // META keys for this module's persisted state (JSON via kv::set_json).
+const EVM_STATUS_PREFIX: &str = "deploy_evm_status:";
 fn evm_status_key(repo: &str) -> String {
-    format!("deploy_evm_status:{repo}")
+    format!("{EVM_STATUS_PREFIX}{repo}")
 }
+const STATUS_PREFIX: &str = "deploy_status:";
 fn status_key(repo: &str) -> String {
-    format!("deploy_status:{repo}")
+    format!("{STATUS_PREFIX}{repo}")
 }
 fn log_key(repo: &str) -> String {
     format!("deploy_log:{repo}")
@@ -120,9 +122,11 @@ pub fn get_history(repo: &str) -> Vec<DeployRecord> {
     crate::kv::get_json(&log_key(repo)).unwrap_or_default()
 }
 
-/// For the canister's tests: record a deploy outcome as the queue would.
+/// For the canister's tests: record a deploy outcome as the queue would,
+/// as the repo's status and in its log.
 #[cfg(feature = "testing")]
 pub fn record_for_tests(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
+    put_status(repo, st);
     record(repo, cfg, st)
 }
 
@@ -200,40 +204,31 @@ pub fn queue_len() -> usize {
     queue_load().len()
 }
 
-/// Queue the job the git side built for `commit` (section 4's submit_job),
-/// and arm the drain timer. Returns without deploying. A job for the same
-/// (repo, commit) already waiting is not queued again, and `job` is not even
-/// built then -- this covers only the still-queued window; run_evm's
-/// provenance-log check is what dedupes a commit that already deployed.
-pub fn enqueue(repo: &str, commit: Oid, job: impl FnOnce() -> Job) {
-    let mut jobs = queue_load();
-    let hex = oid_hex(&commit);
-    if !jobs.iter().any(|j| j.repo == repo && j.commit == hex) {
-        job_save(repo, &commit, &job());
-        jobs.push(DeployJob {
-            repo: repo.to_string(),
-            commit: hex,
-        });
-        queue_save(&jobs);
-    }
-    arm_timer();
-}
-
-/// Take a job the git side submitted (section 4's submit_job): queue it,
-/// unless the app already runs the commit (`is_live`, by this side's
-/// configs) or a deploy of it is queued or running (`in_flight`), which
-/// would install it twice and charge twice. The git side submits a job
-/// whenever what a repo serves moves, and again on any ballot (phase 3,
-/// step 9), so a failed deploy of the approved commit can be retried
-/// without the authority asking the git side anything. Returns whether
-/// the job was queued.
+/// Take a job the git side submitted (section 4's submit_job): queue it
+/// and arm the drain timer, without deploying. The job is dropped when the
+/// app already runs the commit (`is_live`, by this side's configs) or a
+/// deploy of it is queued or running (`in_flight`), which would install
+/// it twice and charge twice; an unapproved commit's job is queued, and
+/// the drain refuses it with a status that says so. The git side submits
+/// a job whenever what a repo serves moves, and again on a ballot while
+/// the app is not in step (phase 3, step 9), so a failed deploy of the
+/// approved commit is retried without this side asking the git side
+/// anything. Returns whether the job was queued.
 pub fn accept(repo: &str, commit: Oid, job: Job) -> bool {
     let hex = oid_hex(&commit);
     let cfg = crate::configs::get(repo);
-    if is_live(repo, &hex, cfg.wasm.is_some(), cfg.evm.is_some()) || in_flight(repo, &hex) {
+    let mut jobs = queue_load();
+    let in_flight = in_queue(&jobs, repo, &hex) || deploying(repo, &hex);
+    if in_flight || is_live(repo, &hex, cfg.wasm.as_ref().map(|c| c.target.as_str()), cfg.evm.is_some()) {
         return false;
     }
-    enqueue(repo, commit, move || job);
+    job_save(repo, &commit, &job);
+    jobs.push(DeployJob {
+        repo: repo.to_string(),
+        commit: hex,
+    });
+    queue_save(&jobs);
+    arm_timer();
     true
 }
 
@@ -257,6 +252,26 @@ pub fn resume_pending(resolve: impl Fn(&str, &Oid) -> Job) {
             if !crate::records::deploy_job_has(&job_key(&j.repo, &j.commit)) {
                 job_save(&j.repo, &commit, &resolve(&j.repo, &commit));
             }
+        }
+    }
+    // A deploy the upgrade interrupted: its job left the queue before it
+    // ran, and its status says "deploying" with nothing deploying. Left
+    // so, the commit would count as in flight forever and no retry of it
+    // would be taken (`accept`). It is recorded as the failure it is, and
+    // a ballot retries it.
+    const INTERRUPTED: &str = "interrupted by an upgrade; a ballot retries it, or deploy_now";
+    for key in crate::kv::keys_with_prefix(STATUS_PREFIX) {
+        let repo = &key[STATUS_PREFIX.len()..];
+        if let Some(mut st) = get_status(repo).filter(|s| s.message == DEPLOYING && !in_queue(&jobs, repo, &s.commit)) {
+            st.message = INTERRUPTED.into();
+            put_status(repo, &st);
+        }
+    }
+    for key in crate::kv::keys_with_prefix(EVM_STATUS_PREFIX) {
+        let repo = &key[EVM_STATUS_PREFIX.len()..];
+        if let Some(mut st) = get_evm_status(repo).filter(|s| s.message == DEPLOYING && !in_queue(&jobs, repo, &s.commit)) {
+            st.message = INTERRUPTED.into();
+            crate::kv::set_json(&evm_status_key(repo), &st);
         }
     }
     if !jobs.is_empty() {
@@ -798,21 +813,45 @@ pub async fn run_now(repo: &str, commit: Oid, job: Job) -> DeployStatus {
 }
 
 /// Is the app already running `commit`? The wasm leg is when the latest
-/// successful install recorded for the repo is that commit -- a failed
-/// attempt does not count, so a retry is not mistaken for a no-op; the EVM
-/// leg is when that commit's contract was deployed. A leg that is not
-/// configured (the git side says which are) has nothing to run.
-pub fn is_live(repo: &str, commit_hex: &str, wasm_configured: bool, evm_configured: bool) -> bool {
-    let wasm = !wasm_configured || latest_install(repo).is_some_and(|r| r.commit == commit_hex);
+/// successful install recorded for the repo is that commit, into the
+/// target configured now -- a failed attempt does not count, so a retry is
+/// not mistaken for a no-op, and neither does an install into a target the
+/// config has since left; the EVM leg is when that commit's contract was
+/// deployed. A leg that is not configured has nothing to run.
+pub fn is_live(repo: &str, commit_hex: &str, wasm_target: Option<&str>, evm_configured: bool) -> bool {
+    let wasm = wasm_target.is_none_or(|target| latest_install(repo).is_some_and(|r| r.commit == commit_hex && r.target == target));
     let evm = !evm_configured || evm::latest_deploy(repo, commit_hex).is_some();
     wasm && evm
+}
+
+fn in_queue(jobs: &[DeployJob], repo: &str, commit_hex: &str) -> bool {
+    jobs.iter().any(|j| j.repo == repo && j.commit == commit_hex)
+}
+
+fn deploying(repo: &str, commit_hex: &str) -> bool {
+    get_status(repo).is_some_and(|s| s.commit == commit_hex && s.message == DEPLOYING)
 }
 
 /// Is a deploy of `commit` waiting in the queue or running now? Queueing it
 /// again would install it twice and charge twice.
 pub fn in_flight(repo: &str, commit_hex: &str) -> bool {
-    queue_load().iter().any(|j| j.repo == repo && j.commit == commit_hex)
-        || get_status(repo).is_some_and(|s| s.commit == commit_hex && s.message == DEPLOYING)
+    in_queue(&queue_load(), repo, commit_hex) || deploying(repo, commit_hex)
+}
+
+/// Is the app in step with the last deploy this side made for the repo:
+/// every configured leg's latest attempt succeeded, the wasm leg's into
+/// the target configured now? When it is, a ballot has nothing to retry,
+/// and the authority does not ask the git side to build the served
+/// commit's job for it (mirrors.rs). A repo with nothing configured has
+/// nothing to be out of step with. What the served commit is only the git
+/// side knows; the intake (`accept`) still checks the job it is handed.
+pub fn in_step(repo: &str) -> bool {
+    let cfg = crate::configs::get(repo);
+    let wasm = cfg.wasm.is_none_or(|c| {
+        get_status(repo).is_some_and(|s| s.ok) && latest_install(repo).is_some_and(|r| r.target == c.target)
+    });
+    let evm = cfg.evm.is_none() || get_evm_status(repo).is_some_and(|s| s.ok);
+    wasm && evm
 }
 
 #[cfg(test)]
@@ -943,19 +982,70 @@ mod tests {
     #[test]
     fn live_means_last_successful_install() {
         crate::tenancy::test_repo("live");
+        let t = Some("aaaaa-aa");
         // Nothing configured: nothing to run, so any commit is live.
-        assert!(is_live("live", "c1", false, false));
+        assert!(is_live("live", "c1", None, false));
         set_config("live", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
         let cfg = get_config("live").unwrap();
-        assert!(!is_live("live", "c1", true, false));
+        assert!(!is_live("live", "c1", t, false));
         record("live", &cfg, &status("c1", true, "installed"));
-        assert!(is_live("live", "c1", true, false));
+        assert!(is_live("live", "c1", t, false));
         record("live", &cfg, &status("c2", false, "install_code failed"));
-        assert!(!is_live("live", "c2", true, false));
-        assert!(is_live("live", "c1", true, false));
+        assert!(!is_live("live", "c2", t, false));
+        assert!(is_live("live", "c1", t, false));
         record("live", &cfg, &status("c2", true, "installed"));
-        assert!(is_live("live", "c2", true, false));
-        assert!(!is_live("live", "c1", true, false));
+        assert!(is_live("live", "c2", t, false));
+        assert!(!is_live("live", "c1", t, false));
+        // The target moved: the install into the old one does not count.
+        assert!(!is_live("live", "c2", Some("2vxsx-fae"), false));
+    }
+
+    /// The app is in step when every configured leg's last attempt
+    /// succeeded, the wasm leg's into the target configured now; a ballot
+    /// then has nothing to retry, and the git side is not asked to build.
+    #[test]
+    fn in_step_means_the_last_attempt_succeeded_at_the_target() {
+        crate::tenancy::test_repo("step");
+        assert!(in_step("step"), "nothing configured");
+        set_config("step", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        let cfg = get_config("step").unwrap();
+        assert!(!in_step("step"), "never deployed");
+        put_status("step", &status("c1", false, "install_code failed"));
+        record("step", &cfg, &status("c1", false, "install_code failed"));
+        assert!(!in_step("step"));
+        put_status("step", &status("c1", true, "installed"));
+        record("step", &cfg, &status("c1", true, "installed"));
+        assert!(in_step("step"));
+        put_status("step", &status("c2", false, DEPLOYING));
+        assert!(!in_step("step"), "deploying: the retry is dropped as in flight instead");
+        put_status("step", &status("c1", true, "installed"));
+        set_config("step", "2vxsx-fae".into(), "app.wasm".into()).unwrap();
+        assert!(!in_step("step"), "the target moved");
+    }
+
+    /// A deploy an upgrade interrupted is recorded as a failure, so the
+    /// commit is not in flight forever and a ballot can retry it; one
+    /// whose job still waits in the queue is left deploying.
+    #[test]
+    fn an_upgrade_records_an_interrupted_deploy_as_failed() {
+        put_status("cut", &status("c1", false, DEPLOYING));
+        crate::kv::set_json(&evm_status_key("cut"), &EvmDeployStatus {
+            commit: "c1".into(),
+            ok: false,
+            message: DEPLOYING.into(),
+            contract_address: String::new(),
+            tx_hash: String::new(),
+        });
+        put_status("still", &status("c2", false, DEPLOYING));
+        queue_save(&[DeployJob { repo: "still".into(), commit: "c2".into() }]);
+        crate::records::deploy_job_put(&job_key("still", "c2"), vec![1]);
+        resume_pending(resolve);
+        assert!(!in_flight("cut", "c1"));
+        assert!(get_status("cut").unwrap().message.contains("interrupted"));
+        assert!(get_evm_status("cut").unwrap().message.contains("interrupted"));
+        assert!(in_flight("still", "c2"));
+        assert_eq!(get_status("still").unwrap().message, DEPLOYING);
+        queue_save(&[]);
     }
 
     /// The announce guard: a newer deploy that failed or was refused leaves

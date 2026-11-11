@@ -373,7 +373,7 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
             // m4: if the push moved the deploy branch and a deploy is
             // configured, hand the authority a job and return. The compile +
             // validate + install_code runs from a timer, off the push path
-            // (see deploy::enqueue). Outcome is readable via get_deploy_status.
+            // (see deploy::accept). Outcome is readable via get_deploy_status.
             if let Some(commit) = outcome.deploy_commit {
                 jobs::submit(&repo, &commit).await;
             }

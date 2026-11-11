@@ -596,14 +596,25 @@ The steps in one canister:
      with it (`mirrors::mark_ballot`), and the ask stays with the mark,
      through retries of the write, until the git side has taken a write
      that carried it; a membership, owner or threshold change writes
-     without it.
+     without it. The ask is sent only while the app is not in step with
+     the authority's last deploy (`deploy::in_step`: a configured leg's
+     latest attempt failed, never ran, or installed into a target the
+     config has since left), so a ballot on a repo whose app runs what
+     the site serves does not have the git side build a job the intake
+     would drop.
    - The authority's intake, `deploy::accept` (for `submit_job`), queues
      a job unless the app already runs the commit (`is_live`, by its own
-     configs) or a deploy of it is queued or running (`in_flight`). The
-     check that `follow_approvals` made before the walk is made after
-     the message instead, for every job: a push of a commit the app
-     already runs is dropped there too, where before it ran the wasm leg
-     again.
+     configs: the latest successful install of that commit, into the
+     target configured now) or a deploy of it is queued or running
+     (`in_flight`). The check that `follow_approvals` made before the
+     walk is made after the message instead, for every job: a push of a
+     commit the app already runs is dropped there too, where before it
+     ran the wasm leg again. An unapproved commit's job is still queued
+     and refused by the drain, as before, so the status says it waits
+     for votes. A deploy an upgrade interrupted (its job gone from the
+     queue, its status still "deploying") is recorded as failed in
+     `resume_pending`, or the commit would count as in flight forever
+     and no retry of it would be taken.
    - The canister's endpoints no longer follow anything: whatever
      changes the approved set reaches the git side as the mirror's
      write, and that is the whole trigger. One less thing the canister

@@ -2271,6 +2271,11 @@ mod tests {
         set_required_votes("t-retry", &alice, false, 1).unwrap();
         assert_eq!(git.retries.borrow().last(), Some(&false));
         let c = store::put_object(store::ObjectType::Blob, b"retry");
+        // Nothing configured to deploy: nothing to retry, so no ask.
+        vote("t-retry", &alice, &store::oid_hex(&c), false).unwrap();
+        assert_eq!(git.retries.borrow().last(), Some(&false));
+        // Configured and never deployed: the app is not in step.
+        run(crate::configs::set_wasm("t-retry", "aaaaa-aa".into(), "app.wasm".into())).unwrap();
         let writes = git.retries.borrow().len();
         git.inject("set_approved", Inject::NotDelivered);
         vote("t-retry", &alice, &store::oid_hex(&c), true).unwrap();

@@ -332,17 +332,7 @@ mod push {
 /// A commit holding `app.wasm`, on top of `parent`, as the repo's new
 /// branch tip.
 fn push_wasm(repo: &str, wasm: &[u8], parent: Option<store::Oid>) -> store::Oid {
-    let blob = store::put_object(store::ObjectType::Blob, wasm);
-    let mut root = Vec::new();
-    root.extend_from_slice(b"100644 app.wasm\0");
-    root.extend_from_slice(blob.as_slice());
-    let tree = store::put_object(store::ObjectType::Tree, &root);
-    let parent = parent.map_or(String::new(), |p| format!("parent {}\n", store::oid_hex(&p)));
-    let commit = format!("tree {}\n{parent}\n{}\n", store::oid_hex(&tree), wasm.len());
-    let oid = store::put_object(store::ObjectType::Commit, commit.as_bytes());
-    let branch = store::head_target(repo).unwrap();
-    store::set_ref(repo, &branch, oid).unwrap();
-    oid
+    store::commit_file_for_tests(repo, "app.wasm", wasm, parent)
 }
 
 /// A ballot that moves what a votes-gated repo serves queues the served

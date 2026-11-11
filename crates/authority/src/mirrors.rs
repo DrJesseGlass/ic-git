@@ -81,8 +81,27 @@ impl Pending {
         }
     }
 
+    fn marked(&self, m: Mirror) -> Option<u64> {
+        match m {
+            Mirror::PushPolicy => self.push,
+            Mirror::Approved => self.approved,
+            Mirror::DeployConfigs => self.deploy,
+        }
+    }
+
+    /// The git side took the mirror's write: clear its mark, and with the
+    /// approved set's the retry ask that rode on it.
+    fn clear(&mut self, m: Mirror) {
+        *self.slot(m) = None;
+        if m == Mirror::Approved {
+            self.retry = false;
+        }
+    }
+
+    /// No mark: nothing to flush. A retry ask has no write to ride on
+    /// without the approved set's mark, so it does not count.
     fn is_empty(&self) -> bool {
-        *self == Pending::default()
+        ALL.iter().all(|m| self.marked(*m).is_none())
     }
 }
 
@@ -130,8 +149,8 @@ pub fn mark_ballot(repo: &str) {
 
 /// Which of a repo's mirrors are marked.
 pub fn pending(repo: &str) -> Vec<Mirror> {
-    let mut p = load(repo);
-    ALL.into_iter().filter(|m| p.slot(*m).is_some()).collect()
+    let p = load(repo);
+    ALL.into_iter().filter(|m| p.marked(*m).is_some()).collect()
 }
 
 /// Every repo with a marked mirror.
@@ -143,7 +162,11 @@ pub fn repos_pending() -> Vec<String> {
 }
 
 /// Send one mirror's current state. A repo this side has no record of has
-/// nothing to send, and nothing to mark.
+/// nothing to send, and nothing to mark. The approved set's write carries
+/// a ballot's retry ask only while the app is not in step with this
+/// side's last deploy (`deploy::in_step`): when it is, there is nothing to
+/// retry, and the git side is spared building a job the intake would
+/// drop.
 async fn send(repo: &str, m: Mirror, seq: u64, retry: bool) -> Reply<()> {
     match m {
         Mirror::PushPolicy => match crate::tenancy::push_policy_of(repo) {
@@ -151,7 +174,10 @@ async fn send(repo: &str, m: Mirror, seq: u64, retry: bool) -> Reply<()> {
             None => Ok(()),
         },
         Mirror::Approved => match crate::tenancy::approved_of(repo) {
-            Some(approved) => crate::to_git::set_approved(repo, seq, approved, retry).await,
+            Some(approved) => {
+                let retry = retry && !crate::deploy::in_step(repo);
+                crate::to_git::set_approved(repo, seq, approved, retry).await
+            }
             None => Ok(()),
         },
         Mirror::DeployConfigs => crate::to_git::set_deploy_configs(repo, seq, crate::configs::get(repo)).await,
@@ -165,17 +191,14 @@ async fn send(repo: &str, m: Mirror, seq: u64, retry: bool) -> Reply<()> {
 /// retry.
 pub async fn flush(repo: &str) {
     for m in ALL {
-        let mut sent = load(repo);
-        let Some(marked) = *sent.slot(m) else { continue };
+        let sent = load(repo);
+        let Some(marked) = sent.marked(m) else { continue };
         let seq = next_seq(repo);
         match send(repo, m, seq, sent.retry).await {
             Ok(()) => {
                 let mut p = load(repo);
-                if *p.slot(m) == Some(marked) {
-                    *p.slot(m) = None;
-                    if m == Mirror::Approved {
-                        p.retry = false;
-                    }
+                if p.marked(m) == Some(marked) {
+                    p.clear(m);
                     save(repo, &p);
                 }
             }
