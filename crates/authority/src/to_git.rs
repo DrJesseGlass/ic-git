@@ -78,9 +78,11 @@ pub async fn set_push_policy(repo: &str, seq: u64, policy: PushPolicy) -> Reply<
     via!(set_push_policy(repo, seq, policy))
 }
 
-/// The approved-commits mirror.
-pub async fn set_approved(repo: &str, seq: u64, approved: Option<Vec<String>>) -> Reply<()> {
-    via!(set_approved(repo, seq, approved))
+/// The approved-commits mirror. The git side follows the approvals once it
+/// has taken the write, and on `retry` submits the served commit's job
+/// even when nothing moved (a ballot sets it).
+pub async fn set_approved(repo: &str, seq: u64, approved: Option<Vec<String>>, retry: bool) -> Reply<()> {
+    via!(set_approved(repo, seq, approved, retry))
 }
 
 /// Would a repo of this name be created? The authority asks before it
@@ -125,6 +127,8 @@ pub(crate) mod flaky {
         real: ic_git_git::for_authority::Git,
         queue: RefCell<Vec<(&'static str, Inject)>>,
         pub calls: RefCell<Vec<&'static str>>,
+        /// The `retry` flag of each `set_approved`, in order.
+        pub retries: RefCell<Vec<bool>>,
     }
 
     impl Flaky {
@@ -135,6 +139,7 @@ pub(crate) mod flaky {
                 },
                 queue: RefCell::new(Vec::new()),
                 calls: RefCell::new(Vec::new()),
+                retries: RefCell::new(Vec::new()),
             }
         }
 
@@ -175,8 +180,9 @@ pub(crate) mod flaky {
             self.go("set_push_policy", move || self.real.set_push_policy(repo, seq, policy), None)
         }
 
-        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>) -> Fut<'a, Reply<()>> {
-            self.go("set_approved", move || self.real.set_approved(repo, seq, approved), None)
+        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: bool) -> Fut<'a, Reply<()>> {
+            self.retries.borrow_mut().push(retry);
+            self.go("set_approved", move || self.real.set_approved(repo, seq, approved, retry), None)
         }
 
         fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {

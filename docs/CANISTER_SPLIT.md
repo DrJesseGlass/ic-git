@@ -580,14 +580,39 @@ The steps in one canister:
    - Not here: staging a job in chunks (`stage_job`) belongs to the
      message implementation of step 12; `set_approved`'s `retry` flag
      to step 9.
-9. **Following approvals moves to the git side.** `follow_approvals` is
-   glue: it walks the history (git) and queues a deploy (authority). After
-   this step the git side runs it when the approved-set mirror changes:
-   `set_approved` carries a `retry` flag for ballots. When the served
-   commit moves, the git side submits that commit's job. The authority
-   then makes the check that `follow_approvals` makes today: it skips the
-   job when the app already runs that commit or a deploy of it is queued
-   (`deploy::is_live`, `deploy::in_flight`).
+9. **Following approvals moves to the git side.** DONE 2026-11-11.
+   `follow_approvals` was glue: it walked the history (git) and queued a
+   deploy (authority). Now the git side runs it when the approved-set
+   mirror changes, and the authority checks what it is handed.
+   What shipped:
+   - `jobs::follow_approvals` (git side) is the walk and the submission:
+     `site::advance`, then the served commit's job through the outbox
+     (`jobs::submit`, which the push path uses too) when the served
+     commit moved, or on `retry` when it did not. A repo with nothing
+     configured to deploy submits nothing. `for_authority::Git` runs it
+     after every `set_approved` write it takes; a stale write changes
+     nothing, so it moves nothing.
+   - `set_approved` carries `retry`. A ballot marks the approved set
+     with it (`mirrors::mark_ballot`), and the ask stays with the mark,
+     through retries of the write, until the git side has taken a write
+     that carried it; a membership, owner or threshold change writes
+     without it.
+   - The authority's intake, `deploy::accept` (for `submit_job`), queues
+     a job unless the app already runs the commit (`is_live`, by its own
+     configs) or a deploy of it is queued or running (`in_flight`). The
+     check that `follow_approvals` made before the walk is made after
+     the message instead, for every job: a push of a commit the app
+     already runs is dropped there too, where before it ran the wasm leg
+     again.
+   - The canister's endpoints no longer follow anything: whatever
+     changes the approved set reaches the git side as the mirror's
+     write, and that is the whole trigger. One less thing the canister
+     glue does, and one less call the authority makes across.
+   - Tests: the write followed on the git side (every way the served
+     commit can move, the retry, a stale write, nothing configured); the
+     intake's rule; the retry ask kept through an undelivered write; and
+     both sides together, a ballot queuing the served commit's deploy
+     once, again after it failed, and not once it runs.
 10. **Attestations carry proofs.**
     - `evm_registry_publish` and `evm_registry_publish_site` take the
       record from the git side today (`attest::tip_record`,

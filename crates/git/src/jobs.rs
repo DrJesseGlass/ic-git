@@ -51,6 +51,54 @@ pub fn resolve_with(configs: &DeployConfigs, commit: &Oid) -> Job {
     }
 }
 
+/// Hand the authority a commit's deploy job (docs/CANISTER_SPLIT.md,
+/// section 4: submit_job), through the outbox. The job is built from this
+/// side's state, unless one for the commit still waits in the outbox; the
+/// authority drops a job it has queued, or whose commit the app already
+/// runs.
+pub async fn submit(repo: &str, commit: &Oid) {
+    let hex = store::oid_hex(commit);
+    if crate::outbox::job_waiting(repo, &hex) {
+        return;
+    }
+    let job = resolve(repo, commit);
+    crate::outbox::send(crate::outbox::Outgoing::SubmitJob {
+        repo: repo.to_string(),
+        commit: hex,
+        job,
+    })
+    .await;
+}
+
+/// After anything that can change a votes-gated repo's newest approved
+/// commit -- a write of the approved-set mirror (a ballot, the threshold,
+/// the voters, the owner) or a push, which moves the tip the walk starts
+/// from: record it as what the site serves (`site::advance`) and, when it
+/// moved -- or on `retry`, when it did not -- submit its job, so the site
+/// and the app follow the same approvals. A ballot retries, so voters can
+/// get an app whose deploy failed back in step with the site without first
+/// taking the site down; a push does not, or a deploy that keeps failing
+/// would be charged again on every push. The authority drops the job when
+/// the app already runs the commit or a deploy of it is queued or running
+/// (phase 3, step 9); a repo with nothing configured to deploy submits
+/// nothing. A repo that requires no votes deploys on push, so this does
+/// nothing for it.
+pub async fn follow_approvals(repo: &str, retry: bool) {
+    let commit = match crate::site::advance(repo) {
+        Some(c) => c,
+        None if retry && crate::site::gated(repo) => match crate::site::served_commit(repo) {
+            Ok(c) => c,
+            Err(_) => return,
+        },
+        None => return,
+    };
+    let configs = crate::mirror::deploy_configs(repo);
+    if configs.wasm.is_none() && configs.evm.is_none() {
+        return;
+    }
+    submit(repo, &commit).await;
+}
+
 /// The creation bytecode of an EVM artifact at `path` within a commit's tree,
 /// for the registry publisher's operator path. The deploy leg decodes the
 /// proven blob with `bytecode_of` instead; both hash the same bytes.
@@ -89,3 +137,131 @@ pub fn release_commit(repo: &str) -> Result<Oid, String> {
     crate::site::served_commit(repo).map_err(str::to_string)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::for_authority::Git;
+    use crate::store::ObjectType;
+    use crate::{mirror, site, to_authority};
+    use futures::executor::block_on;
+    use ic_git_types::authority_side::{AuthoritySide, Event};
+    use ic_git_types::git_side::GitSide;
+    use ic_git_types::side::{ready, Fut, Reply};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// An authority that records the jobs it is handed.
+    #[derive(Default)]
+    struct Recorder {
+        jobs: RefCell<Vec<String>>,
+    }
+
+    impl AuthoritySide for Recorder {
+        fn charge_push<'a>(&'a self, _repo: &'a str, _bytes: u64) -> Fut<'a, Reply<Result<(), String>>> {
+            ready(Ok(Ok(())))
+        }
+
+        fn submit_job<'a>(&'a self, _seq: u64, repo: &'a str, commit_hex: &'a str, _job: Job) -> Fut<'a, Reply<()>> {
+            self.jobs.borrow_mut().push(format!("{repo}@{commit_hex}"));
+            ready(Ok(()))
+        }
+
+        fn notify<'a>(&'a self, _seq: u64, _event: Event) -> Fut<'a, Reply<()>> {
+            ready(Ok(()))
+        }
+    }
+
+    /// A commit holding `app.wasm`, on top of `parent`, as the repo's new
+    /// branch tip.
+    fn push(repo: &str, wasm: &[u8], parent: Option<Oid>) -> Oid {
+        let blob = store::put_object(ObjectType::Blob, wasm);
+        let mut root = Vec::new();
+        root.extend_from_slice(b"100644 app.wasm\0");
+        root.extend_from_slice(blob.as_slice());
+        let tree = store::put_object(ObjectType::Tree, &root);
+        let parent = parent.map_or(String::new(), |p| format!("parent {}\n", store::oid_hex(&p)));
+        let commit = format!("tree {}\n{parent}\n{}\n", store::oid_hex(&tree), wasm.len());
+        let oid = store::put_object(ObjectType::Commit, commit.as_bytes());
+        let branch = store::head_target(repo).unwrap();
+        store::set_ref(repo, &branch, oid).unwrap();
+        oid
+    }
+
+    /// A write of the approved set the git side takes is followed: the
+    /// site moves to the newest approved commit and the commit's job goes
+    /// to the authority, whichever way it moved; one that moves nothing
+    /// submits nothing unless it asks for the retry (a ballot), and then
+    /// the served commit's job; a stale write is not taken, so it moves
+    /// nothing. What the authority does with a job it already runs is its
+    /// own check.
+    #[test]
+    fn the_approved_sets_write_is_followed() {
+        store::create_repo("follow").unwrap();
+        let configured = |seq, wasm: bool| {
+            let wasm = wasm.then(|| DeployConfig {
+                target: "aaaaa-aa".into(),
+                source_path: "app.wasm".into(),
+                mode: Default::default(),
+            });
+            assert!(mirror::set_deploy_configs("follow", seq, DeployConfigs { wasm, evm: None }));
+        };
+        configured(1, true);
+        let authority = Rc::new(Recorder::default());
+        to_authority::set_test_side(Some(authority.clone()));
+        let git = Git { is_operator: |_| false };
+        let set = |seq: u64, approved: Option<Vec<&Oid>>, retry: bool| {
+            let keys = approved.map(|cs| cs.into_iter().map(|c| mirror::commit_key(c.as_slice())).collect());
+            block_on(git.set_approved("follow", seq, keys, retry)).unwrap();
+        };
+        let taken = || authority.jobs.borrow().clone();
+        let job = |c: &Oid| format!("follow@{}", store::oid_hex(c));
+
+        let c1 = push("follow", b"one", None);
+        let c2 = push("follow", b"two", Some(c1));
+        // Votes required and nothing approved: nothing served, nothing
+        // submitted.
+        set(1, Some(vec![]), false);
+        assert!(taken().is_empty());
+        assert!(site::served_commit("follow").is_err());
+        // c1 approved below the tip: served, and its job submitted.
+        set(2, Some(vec![&c1]), false);
+        assert_eq!(site::served_commit("follow").unwrap(), c1);
+        assert_eq!(taken(), vec![job(&c1)]);
+        // The same set written again (a member added, say): nothing moved,
+        // nothing submitted.
+        set(3, Some(vec![&c1]), false);
+        assert_eq!(taken().len(), 1);
+        // A ballot that changes nothing retries the served commit.
+        set(4, Some(vec![&c1]), true);
+        assert_eq!(taken(), vec![job(&c1), job(&c1)]);
+        // A write older than the newest taken: ignored, so not followed.
+        set(3, Some(vec![&c1, &c2]), true);
+        assert_eq!(taken().len(), 2);
+        assert_eq!(site::served_commit("follow").unwrap(), c1);
+        // c2 approved: the site moves up to it, and so does the app.
+        set(5, Some(vec![&c1, &c2]), false);
+        assert_eq!(taken()[2], job(&c2));
+        // c2's approval withdrawn: both roll back to c1.
+        set(6, Some(vec![&c1]), false);
+        assert_eq!(taken()[3], job(&c1));
+        // Nothing approved: nothing served, and a ballot's retry has
+        // nothing to retry.
+        set(7, Some(vec![]), true);
+        assert_eq!(taken().len(), 4);
+        assert!(site::served_commit("follow").is_err());
+        // Votes no longer required: the tip is served and deploys once,
+        // since the held pushes never did; a retry then is a no-op.
+        set(8, None, false);
+        assert_eq!(taken()[4], job(&c2));
+        set(9, None, true);
+        assert_eq!(taken().len(), 5);
+        // Nothing configured to deploy: the move is recorded, and nothing
+        // is submitted.
+        configured(2, false);
+        set(10, Some(vec![&c1]), true);
+        assert_eq!(site::served_commit("follow").unwrap(), c1);
+        assert_eq!(taken().len(), 5);
+        to_authority::set_test_side(None);
+    }
+}

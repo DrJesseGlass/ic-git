@@ -43,8 +43,14 @@ pub trait GitSide {
     fn set_push_policy<'a>(&'a self, repo: &'a str, seq: u64, policy: PushPolicy) -> Fut<'a, Reply<()>>;
 
     /// Write the approved-commits mirror: the approved commits by ballot
-    /// key, or `None` when the repo requires no votes.
-    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>) -> Fut<'a, Reply<()>>;
+    /// key, or `None` when the repo requires no votes. A write it takes
+    /// makes the git side follow the approvals (phase 3, step 9): it
+    /// records what the repo now serves and, when that moved -- or on
+    /// `retry`, when it did not -- submits the served commit's job. A
+    /// ballot sets `retry`, so voters can get an app whose deploy failed
+    /// back in step with the site; the authority drops a job for a commit
+    /// the app already runs or a deploy of which is queued.
+    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: bool) -> Fut<'a, Reply<()>>;
 
     /// Would a repo of this name be created? Returns its label. The
     /// authority asks before it charges the creation fee.

@@ -13,6 +13,12 @@
 //! Full state and a fresh number on every send is what makes a retry safe:
 //! a retry carries what the mirror should hold now, and the git side
 //! ignores a write older than the newest it holds.
+//!
+//! The approved set's write carries one more thing (phase 3, step 9): a
+//! ballot asks the git side, which follows the approvals once it has the
+//! write, to submit the served commit's job even when nothing moved
+//! (`mark_ballot`). The ask stays with the mark until the git side has
+//! taken a write that carried it.
 
 use ic_git_types::side::Reply;
 use serde::{Deserialize, Serialize};
@@ -60,6 +66,10 @@ struct Pending {
     push: Option<u64>,
     approved: Option<u64>,
     deploy: Option<u64>,
+    /// A ballot since the git side last took the approved set: its write
+    /// asks for the served commit's deploy to be retried.
+    #[serde(default)]
+    retry: bool,
 }
 
 impl Pending {
@@ -108,6 +118,16 @@ pub fn mark(repo: &str, m: Mirror) {
     save(repo, &p);
 }
 
+/// A ballot: mark the approved set, and have its write ask the git side
+/// to retry the served commit's deploy, so voters can get an app whose
+/// deploy failed back in step with the site.
+pub fn mark_ballot(repo: &str) {
+    let mut p = load(repo);
+    *p.slot(Mirror::Approved) = Some(last_seq(repo));
+    p.retry = true;
+    save(repo, &p);
+}
+
 /// Which of a repo's mirrors are marked.
 pub fn pending(repo: &str) -> Vec<Mirror> {
     let mut p = load(repo);
@@ -124,14 +144,14 @@ pub fn repos_pending() -> Vec<String> {
 
 /// Send one mirror's current state. A repo this side has no record of has
 /// nothing to send, and nothing to mark.
-async fn send(repo: &str, m: Mirror, seq: u64) -> Reply<()> {
+async fn send(repo: &str, m: Mirror, seq: u64, retry: bool) -> Reply<()> {
     match m {
         Mirror::PushPolicy => match crate::tenancy::push_policy_of(repo) {
             Some(policy) => crate::to_git::set_push_policy(repo, seq, policy).await,
             None => Ok(()),
         },
         Mirror::Approved => match crate::tenancy::approved_of(repo) {
-            Some(approved) => crate::to_git::set_approved(repo, seq, approved).await,
+            Some(approved) => crate::to_git::set_approved(repo, seq, approved, retry).await,
             None => Ok(()),
         },
         Mirror::DeployConfigs => crate::to_git::set_deploy_configs(repo, seq, crate::configs::get(repo)).await,
@@ -140,17 +160,22 @@ async fn send(repo: &str, m: Mirror, seq: u64) -> Reply<()> {
 
 /// Write every marked mirror of the repo and clear the marks the git side
 /// answered. A mark made while a write was in flight (by another call of
-/// this canister) is newer than what was sent and stays. An unanswered
-/// write leaves its mark and arms the retry.
+/// this canister) is newer than what was sent and stays, and so does a
+/// ballot's retry ask. An unanswered write leaves its mark and arms the
+/// retry.
 pub async fn flush(repo: &str) {
     for m in ALL {
-        let Some(marked) = *load(repo).slot(m) else { continue };
+        let mut sent = load(repo);
+        let Some(marked) = *sent.slot(m) else { continue };
         let seq = next_seq(repo);
-        match send(repo, m, seq).await {
+        match send(repo, m, seq, sent.retry).await {
             Ok(()) => {
                 let mut p = load(repo);
                 if *p.slot(m) == Some(marked) {
                     *p.slot(m) = None;
+                    if m == Mirror::Approved {
+                        p.retry = false;
+                    }
                     save(repo, &p);
                 }
             }

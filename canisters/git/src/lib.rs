@@ -375,12 +375,12 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
             // validate + install_code runs from a timer, off the push path
             // (see deploy::enqueue). Outcome is readable via get_deploy_status.
             if let Some(commit) = outcome.deploy_commit {
-                submit_job(&repo, commit).await;
+                jobs::submit(&repo, &commit).await;
             }
             // A push never approves anything, but it moves the tip the
             // approval walk starts from (a force push can drop the served
             // commit off the branch).
-            follow_approvals(&repo, false).await;
+            jobs::follow_approvals(&repo, false).await;
             git_response(200, RESULT, outcome.report)
         }
         _ => git_response(404, "text/plain", b"not found\n".to_vec()),
@@ -677,34 +677,34 @@ fn get_repo_info(repo: String) -> Option<tenancy::RepoInfo> {
     tenancy::repo_info(&repo)
 }
 
+// Whatever changes which commits of a repo are approved -- its voters, its
+// owner, its threshold, a ballot -- reaches the git side as a write of the
+// approved-set mirror, and the git side follows it (jobs::follow_approvals):
+// the site moves to the newest approved commit and its deploy is queued
+// (phase 3, step 9). Nothing here has to ask.
+
 /// Grant a principal a role on a repo: "writer" (push, tokens, config) or
 /// "voter" (approve commits for deploy). Owner or operator only.
 #[ic_cdk::update]
 async fn add_member(repo: String, principal: candid::Principal, role: String) -> Result<Vec<tenancy::Member>, String> {
-    let members = tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?).await?;
     // A voter added back brings their earlier ballots back into the count.
     // Re-adding a writer as a voter is a demotion, which revokes their push
     // tokens (mirror::set_push_policy).
-    follow_approvals(&repo, false).await;
-    Ok(members)
+    tenancy::add_member(&repo, &caller(), operator(), principal, tenancy::Role::parse(&role)?).await
 }
 
 #[ic_cdk::update]
 async fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec<tenancy::Member>, String> {
-    let members = tenancy::remove_member(&repo, &caller(), operator(), principal).await?;
-    follow_approvals(&repo, false).await;
-    Ok(members)
+    tenancy::remove_member(&repo, &caller(), operator(), principal).await
 }
 
 /// Hand a repo to a new owner, who pays for it from then on.
 #[ic_cdk::update]
 async fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), String> {
-    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner).await?;
     // The owner is an approver, so a new owner changes whose ballots count.
     // The previous owner's push tokens go with the repo, unless they can
     // still write as an operator (mirror::set_push_policy).
-    follow_approvals(&repo, false).await;
-    Ok(())
+    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner).await
 }
 
 /// Approvals a commit needs from voters before the deploy queue runs it, and
@@ -712,9 +712,7 @@ async fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(),
 /// a live site takes the site down until a commit is approved.
 #[ic_cdk::update]
 async fn set_required_votes(repo: String, k: u32) -> Result<(), String> {
-    tenancy::set_required_votes(&repo, &caller(), operator(), k).await?;
-    follow_approvals(&repo, false).await;
-    Ok(())
+    tenancy::set_required_votes(&repo, &caller(), operator(), k).await
 }
 
 /// What a ballot did to its commit's count.
@@ -745,7 +743,6 @@ async fn cast_ballot(
     let cast = tenancy::cast_ballot(&repo, &caller(), &commit, decision, reason.clone()).await?;
     let t = cast.tally;
     feed::ballot(&repo, &caller(), &commit, decision, reason.as_deref(), &t, cast.was_reached);
-    follow_approvals(&repo, true).await;
     Ok(BallotTally {
         approvals: t.approvals,
         objections: t.objections,
@@ -762,34 +759,7 @@ async fn vote(repo: String, commit: String, approve: bool) -> Result<(u32, u32),
     let t = cast.tally;
     let decision = if approve { tenancy::Vote::Approve } else { tenancy::Vote::Reject };
     feed::ballot(&repo, &caller(), &commit, decision, None, &t, cast.was_reached);
-    follow_approvals(&repo, true).await;
     Ok((t.approvals, t.required))
-}
-
-/// After anything that can change a votes-gated repo's newest approved
-/// commit: record it as what the site serves (`site::advance`) and, when it
-/// moved -- or on `retry`, when it did not -- queue its deploy, so the site
-/// and the app follow the same approvals. Nothing is queued when the app
-/// already runs the commit, a deploy of it is already queued or running, or
-/// the repo has nothing to deploy. Pushes do not retry: a deploy that keeps
-/// failing would be charged again on every push. A repo that requires no
-/// votes deploys on push, so this does nothing for it.
-async fn follow_approvals(repo: &str, retry: bool) {
-    let moved = site::advance(repo);
-    let commit = match moved {
-        Some(c) => c,
-        None if retry && site::gated(repo) => match site::served_commit(repo) {
-            Ok(c) => c,
-            Err(_) => return,
-        },
-        None => return,
-    };
-    let hex = store::oid_hex(&commit);
-    let cfg = configs::get(repo);
-    let (wasm, evm) = (cfg.wasm.is_some(), cfg.evm.is_some());
-    if !deploy::is_live(repo, &hex, wasm, evm) && !deploy::in_flight(repo, &hex) {
-        submit_job(repo, commit).await;
-    }
 }
 
 /// All of /api: the path parsed once, the authority's routes first, then
@@ -800,25 +770,6 @@ fn api_route(url: &str) -> HttpResponse {
         Some(req) => api_authority::handle(&req).unwrap_or_else(|| api::handle(&req, url)),
         None => httpjson::error(404, "not found"),
     }
-}
-
-/// The git side hands a commit's deploy to the authority (docs/CANISTER_SPLIT.md,
-/// section 4: submit_job), through its outbox. The job -- configs and
-/// proven artifacts -- is built from the git side's state, unless one for
-/// the commit still waits in the outbox; the authority dedupes a job it
-/// has queued.
-async fn submit_job(repo: &str, commit: store::Oid) {
-    let hex = store::oid_hex(&commit);
-    if outbox::job_waiting(repo, &hex) {
-        return;
-    }
-    let job = jobs::resolve(repo, &commit);
-    outbox::send(outbox::Outgoing::SubmitJob {
-        repo: repo.to_string(),
-        commit: hex,
-        job,
-    })
-    .await;
 }
 
 #[ic_cdk::query]
@@ -898,17 +849,14 @@ async fn propose_policy_change(
     let (t, apply) = tenancy::propose_policy_change(&repo, &caller(), change, decision, reason.clone()).await?;
     feed::policy_ballot(&repo, &caller(), &described, decision, reason.as_deref(), &t);
     // The deploy configs live in configs.rs; tenancy decided, this applies.
+    // A changed threshold or voter set reaches the git side as the
+    // approved-set mirror's write, which it follows; a writer re-added as a
+    // voter, or a transferred-away owner, loses their push tokens as the
+    // change is saved (mirror::set_push_policy).
     match apply {
         Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => configs::set_wasm(&repo, target, source_path).await?,
         Some(tenancy::PolicyChange::DeployMode { mode }) => configs::set_mode(&repo, deploy::DeployMode::parse(&mode)?).await?,
         _ => {}
-    }
-    if t.reached {
-        // A changed threshold or voter set can change which commit is the
-        // newest approved one.
-        // (A writer re-added as a voter, or a transferred-away owner, loses
-        // their push tokens as the change is saved: mirror::set_push_policy.)
-        follow_approvals(&repo, false).await;
     }
     Ok(BallotTally {
         approvals: t.approvals,

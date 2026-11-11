@@ -1223,7 +1223,10 @@ pub async fn cast_ballot(
     let tally = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
         .map(|t| ungated(t, &m))
         .map_err(|e| e.to_string())?;
-    crate::mirrors::mark(repo, Mirror::Approved);
+    // The write asks the git side to retry the served commit's deploy
+    // (mirrors::mark_ballot): the site and the app follow the approvals
+    // there (phase 3, step 9).
+    crate::mirrors::mark_ballot(repo);
     crate::mirrors::flush(repo).await;
     Ok(Cast { tally, was_reached })
 }
@@ -2143,8 +2146,8 @@ mod tests {
         fn set_push_policy<'a>(&'a self, repo: &'a str, seq: u64, policy: ic_git_types::git_side::PushPolicy) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
             self.real.set_push_policy(repo, seq, policy)
         }
-        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
-            self.real.set_approved(repo, seq, approved)
+        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: bool) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
+            self.real.set_approved(repo, seq, approved, retry)
         }
         fn check_new_repo<'a>(&'a self, name: &'a str) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<String, String>>> {
             self.real.check_new_repo(name)
@@ -2261,9 +2264,14 @@ mod tests {
         assert!(mirrors::pending("t-retry").is_empty());
         assert!(crate::mirror::may_write("t-retry", &w, false).is_err());
 
-        // The approved set likewise, from a ballot.
+        // The approved set likewise, from a ballot. A ballot's write asks
+        // the git side to retry the served commit's deploy, and so does
+        // the retry of the write, until the git side has taken one; a
+        // change that is no ballot does not ask.
         set_required_votes("t-retry", &alice, false, 1).unwrap();
+        assert_eq!(git.retries.borrow().last(), Some(&false));
         let c = store::put_object(store::ObjectType::Blob, b"retry");
+        let writes = git.retries.borrow().len();
         git.inject("set_approved", Inject::NotDelivered);
         vote("t-retry", &alice, &store::oid_hex(&c), true).unwrap();
         assert!(!crate::mirror::approved("t-retry").unwrap().contains(&c));
@@ -2271,6 +2279,9 @@ mod tests {
         run(mirrors::flush_all());
         assert!(crate::mirror::approved("t-retry").unwrap().contains(&c));
         assert!(mirrors::pending("t-retry").is_empty());
+        assert_eq!(git.retries.borrow()[writes..], [true, true]);
+        add_member("t-retry", &alice, false, w, Role::Voter).unwrap();
+        assert_eq!(git.retries.borrow()[writes..], [true, true, false]);
         crate::to_git::set_test_side(None);
     }
 }

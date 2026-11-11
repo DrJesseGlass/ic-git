@@ -17,7 +17,6 @@ use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
-use std::time::Duration;
 
 /// Outcome of the most recent deploy attempt for a repo.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -127,6 +126,12 @@ pub fn record_for_tests(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
     record(repo, cfg, st)
 }
 
+/// For the canister's tests: empty the queue, as the drain would have.
+#[cfg(feature = "testing")]
+pub fn clear_queue_for_tests() {
+    queue_save(&[]);
+}
+
 /// Append the binding for this deploy to the provenance log.
 pub(crate) fn record(repo: &str, cfg: &DeployConfig, st: &DeployStatus) {
     let mut log = get_history(repo);
@@ -175,6 +180,8 @@ fn job_save(repo: &str, commit: &Oid, job: &Job) {
     }
 }
 
+// Reached only from the drain, which tests never run.
+#[cfg_attr(any(test, feature = "testing"), allow(dead_code))]
 fn job_take(repo: &str, commit_hex: &str) -> Option<Job> {
     crate::records::deploy_job_take(&job_key(repo, commit_hex))
         .and_then(|bytes| candid::decode_one(&bytes).ok())
@@ -212,6 +219,24 @@ pub fn enqueue(repo: &str, commit: Oid, job: impl FnOnce() -> Job) {
     arm_timer();
 }
 
+/// Take a job the git side submitted (section 4's submit_job): queue it,
+/// unless the app already runs the commit (`is_live`, by this side's
+/// configs) or a deploy of it is queued or running (`in_flight`), which
+/// would install it twice and charge twice. The git side submits a job
+/// whenever what a repo serves moves, and again on any ballot (phase 3,
+/// step 9), so a failed deploy of the approved commit can be retried
+/// without the authority asking the git side anything. Returns whether
+/// the job was queued.
+pub fn accept(repo: &str, commit: Oid, job: Job) -> bool {
+    let hex = oid_hex(&commit);
+    let cfg = crate::configs::get(repo);
+    if is_live(repo, &hex, cfg.wasm.is_some(), cfg.evm.is_some()) || in_flight(repo, &hex) {
+        return false;
+    }
+    enqueue(repo, commit, move || job);
+    true
+}
+
 /// Re-arm the drain timer if jobs are pending. Called from post_upgrade, since
 /// timers do not survive upgrades. A job queued by a release before jobs
 /// carried their artifacts is built here by the git side (`resolve`), from
@@ -242,9 +267,15 @@ pub fn resume_pending(resolve: impl Fn(&str, &Oid) -> Job) {
 /// Arm a zero-delay timer to drain one job. Safe to call redundantly: a timer
 /// that fires on an empty queue is a no-op. In ic-cdk-timers 1.0 the timer
 /// drives the future directly (its only await is the install_code call).
+#[cfg(not(any(test, feature = "testing")))]
 fn arm_timer() {
-    ic_cdk_timers::set_timer(Duration::ZERO, drain_one());
+    ic_cdk_timers::set_timer(std::time::Duration::ZERO, drain_one());
 }
+
+/// Tests read the queue and never drain it (a deploy is an install_code
+/// call); a timer cannot fire outside a canister.
+#[cfg(any(test, feature = "testing"))]
+fn arm_timer() {}
 
 thread_local! {
     /// True while a drain chain is awaiting a deploy. Every push arms its own
@@ -258,6 +289,7 @@ thread_local! {
 /// Pop the front job, run it, and re-arm if more remain. The job is removed
 /// (and the removal persisted) before running, so a job can never loop forever;
 /// `run` records its own outcome and is written never to trap.
+#[cfg_attr(any(test, feature = "testing"), allow(dead_code))]
 async fn drain_one() {
     if DRAINING.with(|f| f.replace(true)) {
         return;
@@ -965,5 +997,43 @@ mod tests {
         assert!(in_flight("fly", "c2"));
         put_status("fly", &status("c2", false, "install_code failed"));
         assert!(!in_flight("fly", "c2"));
+    }
+
+    /// A job the git side submitted is queued once: not again while it
+    /// waits or runs, and not at all once the app runs the commit. A
+    /// failed attempt is not running it, so a ballot's retry (the git side
+    /// submits the served commit's job again) is queued.
+    #[test]
+    fn a_submitted_job_is_queued_unless_live_or_in_flight() {
+        crate::tenancy::test_repo("accept");
+        set_config("accept", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        let cfg = get_config("accept").unwrap();
+        let commit = commit_of(&[("app.wasm", b"v1")]);
+        let hex = store::oid_hex(&commit);
+        let job = || resolve("accept", &commit);
+        let queued = || queue_load().iter().filter(|j| j.repo == "accept").count();
+
+        assert!(accept("accept", commit, job()));
+        assert!(in_flight("accept", &hex));
+        assert!(!accept("accept", commit, job()), "waiting already");
+        assert_eq!(queued(), 1);
+        // Running now: not queued again.
+        queue_save(&[]);
+        put_status("accept", &status(&hex, false, DEPLOYING));
+        assert!(!accept("accept", commit, job()));
+        // It failed: the app is not running it, so a retry is queued.
+        put_status("accept", &status(&hex, false, "install_code failed"));
+        record("accept", &cfg, &status(&hex, false, "install_code failed"));
+        assert!(accept("accept", commit, job()));
+        assert_eq!(queued(), 1);
+        // It installed: nothing to queue.
+        queue_save(&[]);
+        put_status("accept", &status(&hex, true, "installed"));
+        record("accept", &cfg, &status(&hex, true, "installed"));
+        assert!(!accept("accept", commit, job()));
+        assert_eq!(queued(), 0);
+        // Another commit is not live, whatever this one did.
+        let next = commit_of(&[("app.wasm", b"v2")]);
+        assert!(accept("accept", next, resolve("accept", &next)));
     }
 }
