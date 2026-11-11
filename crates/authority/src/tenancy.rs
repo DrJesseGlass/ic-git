@@ -2146,7 +2146,7 @@ mod tests {
         fn set_push_policy<'a>(&'a self, repo: &'a str, seq: u64, policy: ic_git_types::git_side::PushPolicy) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
             self.real.set_push_policy(repo, seq, policy)
         }
-        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: bool) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
+        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: Option<ic_git_types::git_side::Retry>) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
             self.real.set_approved(repo, seq, approved, retry)
         }
         fn check_new_repo<'a>(&'a self, name: &'a str) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<String, String>>> {
@@ -2265,17 +2265,13 @@ mod tests {
         assert!(crate::mirror::may_write("t-retry", &w, false).is_err());
 
         // The approved set likewise, from a ballot. A ballot's write asks
-        // the git side to retry the served commit's deploy, and so does
-        // the retry of the write, until the git side has taken one; a
-        // change that is no ballot does not ask.
+        // the git side to retry the served commit's deploy, saying what
+        // the app runs (nothing it can vouch for here: never deployed),
+        // and so does the retry of the write, until the git side has
+        // taken one; a change that is no ballot does not ask.
         set_required_votes("t-retry", &alice, false, 1).unwrap();
-        assert_eq!(git.retries.borrow().last(), Some(&false));
+        assert_eq!(git.retries.borrow().last(), Some(&None));
         let c = store::put_object(store::ObjectType::Blob, b"retry");
-        // Nothing configured to deploy: nothing to retry, so no ask.
-        vote("t-retry", &alice, &store::oid_hex(&c), false).unwrap();
-        assert_eq!(git.retries.borrow().last(), Some(&false));
-        // Configured and never deployed: the app is not in step.
-        run(crate::configs::set_wasm("t-retry", "aaaaa-aa".into(), "app.wasm".into())).unwrap();
         let writes = git.retries.borrow().len();
         git.inject("set_approved", Inject::NotDelivered);
         vote("t-retry", &alice, &store::oid_hex(&c), true).unwrap();
@@ -2284,9 +2280,10 @@ mod tests {
         run(mirrors::flush_all());
         assert!(crate::mirror::approved("t-retry").unwrap().contains(&c));
         assert!(mirrors::pending("t-retry").is_empty());
-        assert_eq!(git.retries.borrow()[writes..], [true, true]);
+        let ask = Some(ic_git_types::git_side::Retry { running: None });
+        assert_eq!(git.retries.borrow()[writes..], [ask.clone(), ask]);
         add_member("t-retry", &alice, false, w, Role::Voter).unwrap();
-        assert_eq!(git.retries.borrow()[writes..], [true, true, false]);
+        assert_eq!(git.retries.borrow().last(), Some(&None));
         crate::to_git::set_test_side(None);
     }
 }

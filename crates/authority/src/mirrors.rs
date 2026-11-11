@@ -20,6 +20,7 @@
 //! (`mark_ballot`). The ask stays with the mark until the git side has
 //! taken a write that carried it.
 
+use ic_git_types::git_side::Retry;
 use ic_git_types::side::Reply;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -162,11 +163,11 @@ pub fn repos_pending() -> Vec<String> {
 }
 
 /// Send one mirror's current state. A repo this side has no record of has
-/// nothing to send, and nothing to mark. The approved set's write carries
-/// a ballot's retry ask only while the app is not in step with this
-/// side's last deploy (`deploy::in_step`): when it is, there is nothing to
-/// retry, and the git side is spared building a job the intake would
-/// drop.
+/// nothing to send, and nothing to mark. A ballot's retry ask rides on the
+/// approved set's write with what the app runs as far as this side's
+/// deploys say (`deploy::running`); which commit is served only the git
+/// side knows, so it decides whether there is anything to retry, and is
+/// spared building a job the intake would drop when the app runs it.
 async fn send(repo: &str, m: Mirror, seq: u64, retry: bool) -> Reply<()> {
     match m {
         Mirror::PushPolicy => match crate::tenancy::push_policy_of(repo) {
@@ -175,7 +176,9 @@ async fn send(repo: &str, m: Mirror, seq: u64, retry: bool) -> Reply<()> {
         },
         Mirror::Approved => match crate::tenancy::approved_of(repo) {
             Some(approved) => {
-                let retry = retry && !crate::deploy::in_step(repo);
+                let retry = retry.then(|| Retry {
+                    running: crate::deploy::running(repo),
+                });
                 crate::to_git::set_approved(repo, seq, approved, retry).await
             }
             None => Ok(()),

@@ -9,7 +9,7 @@ use crate::gitproof;
 use crate::object;
 use crate::store::{self, Oid};
 use ic_git_types::deploy::{bytecode_of, DeployConfig, EvmDeployConfig, Job};
-use ic_git_types::git_side::DeployConfigs;
+use ic_git_types::git_side::{DeployConfigs, Retry};
 use ic_git_types::proof::{plain, Artifact};
 use sha2::Digest as _;
 
@@ -74,23 +74,29 @@ pub async fn submit(repo: &str, commit: &Oid) {
 /// commit -- a write of the approved-set mirror (a ballot, the threshold,
 /// the voters, the owner) or a push, which moves the tip the walk starts
 /// from: record it as what the site serves (`site::advance`) and, when it
-/// moved -- or on `retry`, when it did not -- submit its job, so the site
-/// and the app follow the same approvals. A ballot retries, so voters can
-/// get an app whose deploy failed back in step with the site without first
-/// taking the site down; a push does not, or a deploy that keeps failing
-/// would be charged again on every push. The authority drops the job when
-/// the app already runs the commit or a deploy of it is queued or running
-/// (phase 3, step 9); a repo with nothing configured to deploy submits
-/// nothing. A repo that requires no votes deploys on push, so this does
-/// nothing for it.
-pub async fn follow_approvals(repo: &str, retry: bool) {
+/// moved -- or on a `retry`, when it did not and the app does not run it
+/// -- submit its job, so the site and the app follow the same approvals.
+/// A ballot retries, so voters can get an app whose deploy failed back in
+/// step with the site without first taking the site down; a push does
+/// not, or a deploy that keeps failing would be charged again on every
+/// push. The retry says what the authority's app runs, as far as its
+/// deploys say; when that is the served commit there is nothing to
+/// retry, and no job is built. The authority drops the job when the app
+/// already runs the commit or a deploy of it is queued or running (phase
+/// 3, step 9); a repo with nothing configured to deploy submits nothing.
+/// A repo that requires no votes deploys on push, so this does nothing
+/// for it.
+pub async fn follow_approvals(repo: &str, retry: Option<&Retry>) {
     let commit = match crate::site::advance(repo) {
         Some(c) => c,
-        None if retry && crate::site::gated(repo) => match crate::site::served_commit(repo) {
-            Ok(c) => c,
-            Err(_) => return,
-        },
-        None => return,
+        None => {
+            let Some(retry) = retry.filter(|_| crate::site::gated(repo)) else { return };
+            let Ok(served) = crate::site::served_commit(repo) else { return };
+            if retry.running.as_deref() == Some(store::oid_hex(&served).as_str()) {
+                return;
+            }
+            served
+        }
     };
     let configs = crate::mirror::deploy_configs(repo);
     if configs.wasm.is_none() && configs.evm.is_none() {
@@ -199,10 +205,15 @@ mod tests {
         let authority = Rc::new(Recorder::default());
         to_authority::set_test_side(Some(authority.clone()));
         let git = Git { is_operator: |_| false };
-        let set = |seq: u64, approved: Option<Vec<&Oid>>, retry: bool| {
+        let set = |seq: u64, approved: Option<Vec<&Oid>>, retry: Option<Option<&Oid>>| {
             let keys = approved.map(|cs| cs.into_iter().map(|c| mirror::commit_key(c.as_slice())).collect());
+            let retry = retry.map(|running| Retry {
+                running: running.map(store::oid_hex),
+            });
             block_on(git.set_approved("follow", seq, keys, retry)).unwrap();
         };
+        // `retry`: a ballot's ask, with the commit the app runs, or `None`
+        // inside when the authority cannot vouch for one.
         let taken = || authority.jobs.borrow().clone();
         let job = |c: &Oid| format!("follow@{}", store::oid_hex(c));
 
@@ -210,47 +221,53 @@ mod tests {
         let c2 = push("follow", b"two", Some(c1));
         // Votes required and nothing approved: nothing served, nothing
         // submitted.
-        set(1, Some(vec![]), false);
+        set(1, Some(vec![]), None);
         assert!(taken().is_empty());
         assert!(site::served_commit("follow").is_err());
         // c1 approved below the tip: served, and its job submitted.
-        set(2, Some(vec![&c1]), false);
+        set(2, Some(vec![&c1]), None);
         assert_eq!(site::served_commit("follow").unwrap(), c1);
         assert_eq!(taken(), vec![job(&c1)]);
         // The same set written again (a member added, say): nothing moved,
         // nothing submitted.
-        set(3, Some(vec![&c1]), false);
+        set(3, Some(vec![&c1]), None);
         assert_eq!(taken().len(), 1);
-        // A ballot that changes nothing retries the served commit.
-        set(4, Some(vec![&c1]), true);
+        // A ballot that changes nothing retries the served commit when the
+        // app does not run it (its deploy failed, say): once more when the
+        // authority cannot say what runs, and not at all when it runs c1.
+        set(4, Some(vec![&c1]), Some(Some(&c2)));
         assert_eq!(taken(), vec![job(&c1), job(&c1)]);
+        set(5, Some(vec![&c1]), Some(None));
+        assert_eq!(taken().len(), 3);
+        set(6, Some(vec![&c1]), Some(Some(&c1)));
+        assert_eq!(taken().len(), 3, "the app runs the served commit: nothing to retry");
         // A write older than the newest taken: ignored, so not followed.
-        set(3, Some(vec![&c1, &c2]), true);
-        assert_eq!(taken().len(), 2);
+        set(3, Some(vec![&c1, &c2]), Some(None));
+        assert_eq!(taken().len(), 3);
         assert_eq!(site::served_commit("follow").unwrap(), c1);
         // c2 approved: the site moves up to it, and so does the app.
-        set(5, Some(vec![&c1, &c2]), false);
-        assert_eq!(taken()[2], job(&c2));
+        set(7, Some(vec![&c1, &c2]), None);
+        assert_eq!(taken()[3], job(&c2));
         // c2's approval withdrawn: both roll back to c1.
-        set(6, Some(vec![&c1]), false);
-        assert_eq!(taken()[3], job(&c1));
+        set(8, Some(vec![&c1]), None);
+        assert_eq!(taken()[4], job(&c1));
         // Nothing approved: nothing served, and a ballot's retry has
         // nothing to retry.
-        set(7, Some(vec![]), true);
-        assert_eq!(taken().len(), 4);
+        set(9, Some(vec![]), Some(None));
+        assert_eq!(taken().len(), 5);
         assert!(site::served_commit("follow").is_err());
         // Votes no longer required: the tip is served and deploys once,
         // since the held pushes never did; a retry then is a no-op.
-        set(8, None, false);
-        assert_eq!(taken()[4], job(&c2));
-        set(9, None, true);
-        assert_eq!(taken().len(), 5);
+        set(10, None, None);
+        assert_eq!(taken()[5], job(&c2));
+        set(11, None, Some(None));
+        assert_eq!(taken().len(), 6);
         // Nothing configured to deploy: the move is recorded, and nothing
         // is submitted.
         configured(2, false);
-        set(10, Some(vec![&c1]), true);
+        set(12, Some(vec![&c1]), Some(None));
         assert_eq!(site::served_commit("follow").unwrap(), c1);
-        assert_eq!(taken().len(), 5);
+        assert_eq!(taken().len(), 6);
         to_authority::set_test_side(None);
     }
 }

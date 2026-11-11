@@ -8,7 +8,7 @@
 
 use crate::{mirror, store};
 use candid::Principal;
-use ic_git_types::git_side::{DeployConfigs, GitSide, PushPolicy};
+use ic_git_types::git_side::{DeployConfigs, GitSide, PushPolicy, Retry};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{ready, Fut, Reply};
 
@@ -40,10 +40,10 @@ impl GitSide for Git {
     /// the repo serves is recorded, and its job submitted when that moved
     /// or `retry` says to. A stale write changes nothing, so it moves
     /// nothing either.
-    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: bool) -> Fut<'a, Reply<()>> {
+    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry>) -> Fut<'a, Reply<()>> {
         Box::pin(async move {
             if mirror::set_approved(repo, seq, approved) {
-                crate::jobs::follow_approvals(repo, retry).await;
+                crate::jobs::follow_approvals(repo, retry.as_ref()).await;
             }
             Ok(())
         })

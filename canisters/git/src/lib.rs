@@ -380,7 +380,7 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
             // A push never approves anything, but it moves the tip the
             // approval walk starts from (a force push can drop the served
             // commit off the branch).
-            jobs::follow_approvals(&repo, false).await;
+            jobs::follow_approvals(&repo, None).await;
             git_response(200, RESULT, outcome.report)
         }
         _ => git_response(404, "text/plain", b"not found\n".to_vec()),

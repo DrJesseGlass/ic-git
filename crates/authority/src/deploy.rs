@@ -838,20 +838,29 @@ pub fn in_flight(repo: &str, commit_hex: &str) -> bool {
     in_queue(&queue_load(), repo, commit_hex) || deploying(repo, commit_hex)
 }
 
-/// Is the app in step with the last deploy this side made for the repo:
-/// every configured leg's latest attempt succeeded, the wasm leg's into
-/// the target configured now? When it is, a ballot has nothing to retry,
-/// and the authority does not ask the git side to build the served
-/// commit's job for it (mirrors.rs). A repo with nothing configured has
-/// nothing to be out of step with. What the served commit is only the git
-/// side knows; the intake (`accept`) still checks the job it is handed.
-pub fn in_step(repo: &str) -> bool {
+/// What the app runs, as far as this side's deploys say: the commit every
+/// configured leg last deployed successfully, the wasm leg's into the
+/// target configured now; `None` when a leg failed, never ran, or the
+/// legs disagree, or nothing is configured. A ballot's retry ask carries
+/// it (mirrors.rs), so the git side, which alone knows the served commit,
+/// can tell whether there is anything to retry before it builds a job.
+/// The intake (`accept`) still checks the job it is handed.
+pub fn running(repo: &str) -> Option<String> {
     let cfg = crate::configs::get(repo);
-    let wasm = cfg.wasm.is_none_or(|c| {
-        get_status(repo).is_some_and(|s| s.ok) && latest_install(repo).is_some_and(|r| r.target == c.target)
+    let wasm = cfg.wasm.map(|c| {
+        let st = get_status(repo).filter(|s| s.ok)?;
+        latest_install(repo).filter(|r| r.commit == st.commit && r.target == c.target).map(|r| r.commit)
     });
-    let evm = cfg.evm.is_none() || get_evm_status(repo).is_some_and(|s| s.ok);
-    wasm && evm
+    let evm = cfg.evm.map(|_| get_evm_status(repo).filter(|s| s.ok).map(|s| s.commit));
+    let mut commit: Option<String> = None;
+    for leg in [wasm, evm].into_iter().flatten() {
+        let c = leg?;
+        if commit.as_ref().is_some_and(|x| *x != c) {
+            return None;
+        }
+        commit = Some(c);
+    }
+    commit
 }
 
 #[cfg(test)]
@@ -1000,27 +1009,50 @@ mod tests {
         assert!(!is_live("live", "c2", Some("2vxsx-fae"), false));
     }
 
-    /// The app is in step when every configured leg's last attempt
-    /// succeeded, the wasm leg's into the target configured now; a ballot
-    /// then has nothing to retry, and the git side is not asked to build.
+    /// What the app runs is the commit every configured leg last deployed
+    /// successfully, the wasm leg's into the target configured now, and
+    /// nothing this side can vouch for otherwise.
     #[test]
-    fn in_step_means_the_last_attempt_succeeded_at_the_target() {
+    fn running_is_the_last_successful_deploy_at_the_target() {
         crate::tenancy::test_repo("step");
-        assert!(in_step("step"), "nothing configured");
+        assert_eq!(running("step"), None, "nothing configured");
         set_config("step", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
         let cfg = get_config("step").unwrap();
-        assert!(!in_step("step"), "never deployed");
+        assert_eq!(running("step"), None, "never deployed");
         put_status("step", &status("c1", false, "install_code failed"));
         record("step", &cfg, &status("c1", false, "install_code failed"));
-        assert!(!in_step("step"));
+        assert_eq!(running("step"), None);
         put_status("step", &status("c1", true, "installed"));
         record("step", &cfg, &status("c1", true, "installed"));
-        assert!(in_step("step"));
+        assert_eq!(running("step").as_deref(), Some("c1"));
         put_status("step", &status("c2", false, DEPLOYING));
-        assert!(!in_step("step"), "deploying: the retry is dropped as in flight instead");
+        assert_eq!(running("step"), None, "deploying: the retry is dropped as in flight instead");
         put_status("step", &status("c1", true, "installed"));
         set_config("step", "2vxsx-fae".into(), "app.wasm".into()).unwrap();
-        assert!(!in_step("step"), "the target moved");
+        assert_eq!(running("step"), None, "the target moved");
+        // Both legs configured: they must agree. (The EVM config is written
+        // as its setter would, which needs a chain configured first.)
+        set_config("step", "aaaaa-aa".into(), "app.wasm".into()).unwrap();
+        crate::kv::set_json(
+            "deploy_evm:step",
+            &ic_git_types::deploy::EvmDeployConfig {
+                source_path: "c.hex".into(),
+                gas_limit: 1_000_000,
+            },
+        );
+        assert!(crate::configs::get("step").evm.is_some());
+        assert_eq!(running("step"), None, "the EVM leg never ran");
+        let evm = |commit: &str, ok: bool| EvmDeployStatus {
+            commit: commit.into(),
+            ok,
+            message: String::new(),
+            contract_address: String::new(),
+            tx_hash: String::new(),
+        };
+        crate::kv::set_json(&evm_status_key("step"), &evm("c2", true));
+        assert_eq!(running("step"), None, "the legs disagree");
+        crate::kv::set_json(&evm_status_key("step"), &evm("c1", true));
+        assert_eq!(running("step").as_deref(), Some("c1"));
     }
 
     /// A deploy an upgrade interrupted is recorded as a failure, so the

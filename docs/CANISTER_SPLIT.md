@@ -592,16 +592,21 @@ The steps in one canister:
      configured to deploy submits nothing. `for_authority::Git` runs it
      after every `set_approved` write it takes; a stale write changes
      nothing, so it moves nothing.
-   - `set_approved` carries `retry`. A ballot marks the approved set
-     with it (`mirrors::mark_ballot`), and the ask stays with the mark,
-     through retries of the write, until the git side has taken a write
-     that carried it; a membership, owner or threshold change writes
-     without it. The ask is sent only while the app is not in step with
-     the authority's last deploy (`deploy::in_step`: a configured leg's
-     latest attempt failed, never ran, or installed into a target the
-     config has since left), so a ballot on a repo whose app runs what
-     the site serves does not have the git side build a job the intake
-     would drop.
+   - `set_approved` carries a ballot's `Retry`. A ballot marks the
+     approved set with it (`mirrors::mark_ballot`), and the ask stays
+     with the mark, through retries of the write, until the git side has
+     taken a write that carried it; a membership, owner or threshold
+     change writes without it. The ask says what the authority's app
+     runs as far as its deploys say (`deploy::running`: the commit every
+     configured leg last deployed successfully, the wasm leg's into the
+     target configured now, else nothing it can vouch for), and the git
+     side, which alone knows the served commit, retries unless that is
+     it. So a ballot on a repo whose app runs what the site serves builds
+     no job, while one whose app runs a commit the site has left (an
+     approval withdrawn while its install ran) brings the app back. The
+     comparison cannot live on the authority: it does not know what is
+     served, and gating the ask on its own last deploy alone would
+     withhold that retry.
    - The authority's intake, `deploy::accept` (for `submit_job`), queues
      a job unless the app already runs the commit (`is_live`, by its own
      configs: the latest successful install of that commit, into the
