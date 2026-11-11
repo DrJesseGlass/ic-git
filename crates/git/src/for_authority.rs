@@ -1,12 +1,14 @@
 //! The git side's answer to the authority (ic_git_types::git_side): one
 //! implementation of the interface, over this crate's store and mirrors.
 //! The canister installs it into the authority at init and upgrade. Each
-//! call is a plain function behind a ready future (phase 3, step 8): in
-//! one canister nothing is lost, so every reply is `Ok`.
+//! call is a plain function behind a future (phase 3, step 8): in one
+//! canister nothing is lost, so every reply is `Ok`. One of them,
+//! `set_approved`, tells the authority something back on the way (a job,
+//! through the outbox), which in one canister is answered at once too.
 
 use crate::{mirror, store};
 use candid::Principal;
-use ic_git_types::git_side::{DeployConfigs, GitSide, PushPolicy};
+use ic_git_types::git_side::{DeployConfigs, GitSide, PushPolicy, Retry};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{ready, Fut, Reply};
 
@@ -34,9 +36,17 @@ impl GitSide for Git {
         ready(Ok(()))
     }
 
-    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>) -> Fut<'a, Reply<()>> {
-        mirror::set_approved(repo, seq, approved);
-        ready(Ok(()))
+    /// A write that is taken is followed (jobs::follow_approvals): what
+    /// the repo serves is recorded, and its job submitted when that moved
+    /// or `retry` says to. A stale write changes nothing, so it moves
+    /// nothing either.
+    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry>) -> Fut<'a, Reply<()>> {
+        Box::pin(async move {
+            if mirror::set_approved(repo, seq, approved) {
+                crate::jobs::follow_approvals(repo, retry.as_ref()).await;
+            }
+            Ok(())
+        })
     }
 
     fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {

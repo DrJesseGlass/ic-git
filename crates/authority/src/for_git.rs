@@ -36,10 +36,14 @@ impl AuthoritySide for Authority {
         ready(Ok(crate::tenancy::charge_push(repo, bytes as usize)))
     }
 
+    /// Queued unless the app already runs the commit or a deploy of it is
+    /// queued or running (deploy::accept). The git side is not told which:
+    /// a dropped job is one it had no way to know was moot, and the deploy
+    /// status says what the app runs.
     fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, job: Job) -> Fut<'a, Reply<()>> {
         if take(seq) {
             if let Ok(commit) = parse_oid(commit_hex) {
-                crate::deploy::enqueue(repo, commit, move || job);
+                let _queued = crate::deploy::accept(repo, commit, job);
             }
         }
         ready(Ok(()))

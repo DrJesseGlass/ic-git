@@ -33,6 +33,19 @@ pub struct DeployConfigs {
     pub evm: Option<EvmDeployConfig>,
 }
 
+/// A ballot's ask, carried on the approved set's write (phase 3, step 9):
+/// retry the served commit's deploy, unless the app runs it already.
+/// `running` is what the authority's app runs as far as its deploys say:
+/// the commit every configured leg last deployed successfully, the wasm
+/// leg's into the target configured now; `None` when a leg failed, never
+/// ran, or the legs disagree, and then whatever is served is retried.
+/// Which commit is served only the git side knows, so it makes the
+/// comparison; the authority still checks the job it is handed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Retry {
+    pub running: Option<String>,
+}
+
 pub trait GitSide {
     /// Write the deploy-config mirror: the repo's configs as the authority
     /// holds them.
@@ -43,8 +56,15 @@ pub trait GitSide {
     fn set_push_policy<'a>(&'a self, repo: &'a str, seq: u64, policy: PushPolicy) -> Fut<'a, Reply<()>>;
 
     /// Write the approved-commits mirror: the approved commits by ballot
-    /// key, or `None` when the repo requires no votes.
-    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>) -> Fut<'a, Reply<()>>;
+    /// key, or `None` when the repo requires no votes. A write it takes
+    /// makes the git side follow the approvals (phase 3, step 9): it
+    /// records what the repo now serves and, when that moved -- or on a
+    /// `retry`, when it did not and the app does not run it -- submits
+    /// the served commit's job. A ballot sends the `Retry`, so voters can
+    /// get an app whose deploy failed back in step with the site; the
+    /// authority drops a job for a commit the app already runs or a
+    /// deploy of which is queued.
+    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry>) -> Fut<'a, Reply<()>>;
 
     /// Would a repo of this name be created? Returns its label. The
     /// authority asks before it charges the creation fee.

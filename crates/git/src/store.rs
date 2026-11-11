@@ -415,6 +415,25 @@ pub fn check_schema_version() {
     }
 }
 
+/// For tests, here and in the crates that test against this one: a commit
+/// whose root tree holds one regular file `path` with `bytes`, on top of
+/// `parent`, set as the repo's branch tip. The commit body is minimal (no
+/// author): nothing here parses more than `tree` and `parent`.
+#[cfg(any(test, feature = "testing"))]
+pub fn commit_file_for_tests(repo: &str, path: &str, bytes: &[u8], parent: Option<Oid>) -> Oid {
+    let blob = put_object(ObjectType::Blob, bytes);
+    let mut root = Vec::new();
+    root.extend_from_slice(format!("100644 {path}\0").as_bytes());
+    root.extend_from_slice(blob.as_slice());
+    let tree = put_object(ObjectType::Tree, &root);
+    let parent = parent.map_or(String::new(), |p| format!("parent {}\n", oid_hex(&p)));
+    let commit = format!("tree {}\n{parent}\n{}\n", oid_hex(&tree), bytes.len());
+    let oid = put_object(ObjectType::Commit, commit.as_bytes());
+    let branch = head_target(repo).expect("the repo exists");
+    set_ref(repo, &branch, oid).expect("the ref is set");
+    oid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

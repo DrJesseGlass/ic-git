@@ -6,7 +6,7 @@
 //! authority calls; each is awaited and answers a `Reply` (phase 3, step
 //! 8). The mirror writes are made only by mirrors.rs, which numbers them.
 
-use ic_git_types::git_side::{DeployConfigs, GitSide};
+use ic_git_types::git_side::{DeployConfigs, GitSide, Retry};
 pub use ic_git_types::git_side::PushPolicy;
 use ic_git_types::oid::Oid;
 use ic_git_types::side::Reply;
@@ -78,9 +78,12 @@ pub async fn set_push_policy(repo: &str, seq: u64, policy: PushPolicy) -> Reply<
     via!(set_push_policy(repo, seq, policy))
 }
 
-/// The approved-commits mirror.
-pub async fn set_approved(repo: &str, seq: u64, approved: Option<Vec<String>>) -> Reply<()> {
-    via!(set_approved(repo, seq, approved))
+/// The approved-commits mirror. The git side follows the approvals once it
+/// has taken the write, and on a `retry` (a ballot's) submits the served
+/// commit's job even when nothing moved, unless the retry says the app
+/// runs it.
+pub async fn set_approved(repo: &str, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry>) -> Reply<()> {
+    via!(set_approved(repo, seq, approved, retry))
 }
 
 /// Would a repo of this name be created? The authority asks before it
@@ -125,6 +128,8 @@ pub(crate) mod flaky {
         real: ic_git_git::for_authority::Git,
         queue: RefCell<Vec<(&'static str, Inject)>>,
         pub calls: RefCell<Vec<&'static str>>,
+        /// The `retry` of each `set_approved`, in order.
+        pub retries: RefCell<Vec<Option<Retry>>>,
     }
 
     impl Flaky {
@@ -135,6 +140,7 @@ pub(crate) mod flaky {
                 },
                 queue: RefCell::new(Vec::new()),
                 calls: RefCell::new(Vec::new()),
+                retries: RefCell::new(Vec::new()),
             }
         }
 
@@ -175,8 +181,9 @@ pub(crate) mod flaky {
             self.go("set_push_policy", move || self.real.set_push_policy(repo, seq, policy), None)
         }
 
-        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>) -> Fut<'a, Reply<()>> {
-            self.go("set_approved", move || self.real.set_approved(repo, seq, approved), None)
+        fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry>) -> Fut<'a, Reply<()>> {
+            self.retries.borrow_mut().push(retry.clone());
+            self.go("set_approved", move || self.real.set_approved(repo, seq, approved, retry), None)
         }
 
         fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {

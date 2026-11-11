@@ -323,3 +323,138 @@ mod push {
         to_authority::set_test_side(None);
     }
 }
+
+// The approvals, followed across the cut (phase 3, step 9): a ballot at
+// the authority writes the approved-set mirror; the git side follows it
+// and hands the served commit's job back through the outbox; the
+// authority's intake (deploy::accept) queues it or not.
+
+/// A commit holding `app.wasm`, on top of `parent`, as the repo's new
+/// branch tip.
+fn push_wasm(repo: &str, wasm: &[u8], parent: Option<store::Oid>) -> store::Oid {
+    store::commit_file_for_tests(repo, "app.wasm", wasm, parent)
+}
+
+/// A ballot that moves what a votes-gated repo serves queues the served
+/// commit's deploy, once: a ballot while it waits queues nothing more, a
+/// ballot after it failed queues it again, and a ballot once the app runs
+/// it queues nothing. A policy change that moves the site moves the app
+/// with it.
+#[test]
+fn a_ballot_queues_the_served_commits_deploy_once() {
+    sides();
+    set_test_now(T0);
+    let (owner, voter) = (Principal::from_slice(&[31; 8]), Principal::from_slice(&[32; 8]));
+    tenancy::credit(&owner, 10_000_000_000);
+    tenancy::create_repo("follow", &owner, false).unwrap();
+    tenancy::add_member("follow", &owner, false, voter, Role::Voter).unwrap();
+    configs::set_wasm("follow", Principal::from_slice(&[33; 8]).to_text(), "app.wasm".into()).unwrap();
+    let cfg = configs::get_wasm("follow").unwrap();
+    let c1 = push_wasm("follow", b"one", None);
+    let c2 = push_wasm("follow", b"two", Some(c1));
+    let (h1, h2) = (store::oid_hex(&c1), store::oid_hex(&c2));
+    let status = |commit: &str, ok: bool| deploy::DeployStatus {
+        commit: commit.into(),
+        ok,
+        message: if ok { "installed".into() } else { "install_code failed".into() },
+        wasm_len: 0,
+        wasm_sha256: String::new(),
+    };
+
+    tenancy::set_required_votes("follow", &owner, false, 1).unwrap();
+    assert!(crate::site::served_commit("follow").is_err());
+    assert!(!deploy::in_flight("follow", &h1) && !deploy::in_flight("follow", &h2));
+
+    // c1 approved below the tip: served, and queued.
+    tenancy::cast_ballot("follow", &owner, &h1, tenancy::Vote::Approve, None).unwrap();
+    assert_eq!(crate::site::served_commit("follow").unwrap(), c1);
+    assert!(deploy::in_flight("follow", &h1));
+    let queued = deploy::queue_len();
+    // A second ballot on it while it waits: nothing more.
+    tenancy::cast_ballot("follow", &voter, &h1, tenancy::Vote::Approve, None).unwrap();
+    assert_eq!(deploy::queue_len(), queued);
+
+    // The deploy ran and failed: the next ballot, whatever it says, queues
+    // it again, so voters can get the app back in step with the site.
+    deploy::clear_queue_for_tests();
+    deploy::record_for_tests("follow", &cfg, &status(&h1, false));
+    tenancy::cast_ballot("follow", &voter, &h1, tenancy::Vote::Reject, None).unwrap();
+    assert_eq!(crate::site::served_commit("follow").unwrap(), c1);
+    assert!(deploy::in_flight("follow", &h1), "retried");
+
+    // It installed: a ballot queues nothing.
+    deploy::clear_queue_for_tests();
+    deploy::record_for_tests("follow", &cfg, &status(&h1, true));
+    tenancy::cast_ballot("follow", &voter, &h1, tenancy::Vote::Approve, None).unwrap();
+    assert!(!deploy::in_flight("follow", &h1), "the app runs it");
+
+    // The tip approved: the site moves up, and the app follows.
+    tenancy::cast_ballot("follow", &owner, &h2, tenancy::Vote::Approve, None).unwrap();
+    assert_eq!(crate::site::served_commit("follow").unwrap(), c2);
+    assert!(deploy::in_flight("follow", &h2));
+    // Its approval withdrawn: both roll back to c1, which is live, so
+    // nothing is queued for it.
+    deploy::clear_queue_for_tests();
+    tenancy::cast_ballot("follow", &owner, &h2, tenancy::Vote::Reject, None).unwrap();
+    assert_eq!(crate::site::served_commit("follow").unwrap(), c1);
+    assert!(!deploy::in_flight("follow", &h1) && !deploy::in_flight("follow", &h2));
+
+    // Votes no longer required: the tip is served and, never having
+    // deployed, queued -- through the policy's write, with nobody asking.
+    tenancy::set_required_votes("follow", &owner, false, 0).unwrap();
+    assert_eq!(crate::site::served_commit("follow").unwrap(), c2);
+    assert!(deploy::in_flight("follow", &h2));
+}
+
+/// The app and the site can part without a failed deploy: an approval
+/// withdrawn while its install runs rolls the site back, the rollback's
+/// job is dropped as live (the install has not finished), and then the
+/// install finishes. The next ballot brings the app back: the authority
+/// says what runs, the git side sees that is not what it serves, and the
+/// served commit's job is queued. A ballot while they agree queues nothing.
+#[test]
+fn a_ballot_brings_the_app_back_to_the_site_after_a_withdrawn_install() {
+    sides();
+    set_test_now(T0);
+    let (owner, voter) = (Principal::from_slice(&[34; 8]), Principal::from_slice(&[35; 8]));
+    tenancy::credit(&owner, 10_000_000_000);
+    tenancy::create_repo("parted", &owner, false).unwrap();
+    tenancy::add_member("parted", &owner, false, voter, Role::Voter).unwrap();
+    configs::set_wasm("parted", Principal::from_slice(&[36; 8]).to_text(), "app.wasm".into()).unwrap();
+    let cfg = configs::get_wasm("parted").unwrap();
+    let c1 = push_wasm("parted", b"one", None);
+    let c2 = push_wasm("parted", b"two", Some(c1));
+    let (h1, h2) = (store::oid_hex(&c1), store::oid_hex(&c2));
+    let installed = |commit: &str| deploy::DeployStatus {
+        commit: commit.into(),
+        ok: true,
+        message: "installed".into(),
+        wasm_len: 0,
+        wasm_sha256: String::new(),
+    };
+    tenancy::set_required_votes("parted", &owner, false, 1).unwrap();
+
+    // c1 approved, deployed, running; then c2 approved: queued.
+    tenancy::cast_ballot("parted", &owner, &h1, tenancy::Vote::Approve, None).unwrap();
+    deploy::clear_queue_for_tests();
+    deploy::record_for_tests("parted", &cfg, &installed(&h1));
+    tenancy::cast_ballot("parted", &owner, &h2, tenancy::Vote::Approve, None).unwrap();
+    assert!(deploy::in_flight("parted", &h2));
+    // c2's install is running when its approval is withdrawn: the site
+    // rolls back to c1, which is live, so nothing is queued for it.
+    deploy::clear_queue_for_tests();
+    tenancy::cast_ballot("parted", &owner, &h2, tenancy::Vote::Reject, None).unwrap();
+    assert_eq!(crate::site::served_commit("parted").unwrap(), c1);
+    assert!(!deploy::in_flight("parted", &h1));
+    // The install finishes: the app runs c2, the site serves c1.
+    deploy::record_for_tests("parted", &cfg, &installed(&h2));
+    assert_eq!(deploy::running("parted").as_deref(), Some(h2.as_str()));
+    // Any ballot: the served commit's job is queued again.
+    tenancy::cast_ballot("parted", &voter, &h1, tenancy::Vote::Approve, None).unwrap();
+    assert!(deploy::in_flight("parted", &h1), "the app follows the site back");
+    // It installed: the app and the site agree, and a ballot queues nothing.
+    deploy::clear_queue_for_tests();
+    deploy::record_for_tests("parted", &cfg, &installed(&h1));
+    tenancy::cast_ballot("parted", &voter, &h1, tenancy::Vote::Reject, None).unwrap();
+    assert!(!deploy::in_flight("parted", &h1));
+}
