@@ -4,6 +4,18 @@
 use crate::store::{self, ObjectType, Oid};
 use ic_dev_kit_rs::http::HttpResponse;
 
+/// Both sides installed into each other, as init does. Every test that
+/// reaches across the cut starts here.
+pub fn sides() {
+    crate::install_sides();
+}
+
+/// The flows that await the other side, driven to completion: in one
+/// canister every answer is ready at once.
+pub fn run<F: std::future::Future>(f: F) -> F::Output {
+    futures::executor::block_on(f)
+}
+
 /// All of /api, as the canister answers it.
 pub fn get(url: &str) -> HttpResponse {
     crate::api_route(url)
@@ -16,6 +28,7 @@ pub fn body_json(res: &HttpResponse) -> serde_json::Value {
 /// Two commits: c1 (a.txt) -> c2 (a.txt, "sub dir"/b.txt), a tag ref on c1.
 /// The repo is ownerless, as one created before tenancy.
 pub fn seed(repo: &str) -> (Oid, Oid) {
+    sides();
     crate::tenancy::test_repo(repo);
     let a = store::put_object(ObjectType::Blob, b"alpha\n");
     let b = store::put_object(ObjectType::Blob, b"bravo\n");

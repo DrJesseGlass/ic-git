@@ -13,6 +13,8 @@ testing = ["ic-git-common/testing"]
 # Keep these pinned to the versions ic-dev-kit-rs uses (see canisters/git).
 ic-dev-kit-rs = { version = "0.4", features = ["storage"] }
 ic-cdk = "0.20"
+# The outbox retry timer (outbox.rs).
+ic-cdk-timers = "1"
 candid = "0.10"
 ic-stable-structures = "0.7"
 # The approved set names commits by their ballot key (mirror.rs).
@@ -33,3 +35,5 @@ ic-git-types = { path = "../types" }
 
 [dev-dependencies]
 ic-git-common = { path = "../common", features = ["testing"] }
+# Drives the futures the interfaces answer with (side.rs), in tests.
+futures = "0.3"

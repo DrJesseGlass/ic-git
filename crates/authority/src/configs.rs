@@ -13,6 +13,7 @@
 //! paths a job proves.
 
 use crate::deploy::{DeployConfig, DeployMode, EvmDeployConfig, Job, SourceKind};
+use crate::mirrors::Mirror;
 use candid::Principal;
 use ic_git_types::git_side::DeployConfigs;
 
@@ -47,7 +48,7 @@ pub fn get(repo: &str) -> DeployConfigs {
 /// Set (or replace) a repo's wasm deploy config, keeping any install mode
 /// chosen before. A governed repo deploys committed `.wasm` only
 /// (`SourceKind::for_repo`).
-pub fn set_wasm(repo: &str, target: String, source_path: String) -> Result<(), String> {
+pub async fn set_wasm(repo: &str, target: String, source_path: String) -> Result<(), String> {
     if !crate::tenancy::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
@@ -62,24 +63,24 @@ pub fn set_wasm(repo: &str, target: String, source_path: String) -> Result<(), S
             mode,
         },
     );
-    mirror(repo);
+    mirror(repo).await;
     Ok(())
 }
 
 /// Change a repo's install mode (upgrade or reinstall), leaving the rest
 /// of its wasm config alone.
-pub fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
+pub async fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
     let mut cfg = get_wasm(repo).ok_or("no deploy config for repo")?;
     cfg.mode = mode;
     crate::kv::set_json(&wasm_key(repo), &cfg);
-    mirror(repo);
+    mirror(repo).await;
     Ok(())
 }
 
 /// Set (or replace) a repo's EVM deploy config. Refused when this canister
 /// could not deploy with `gas_limit` at all (`evm::require_deploy_target`):
 /// a misconfiguration better rejected now than found at push time.
-pub fn set_evm(repo: &str, source_path: String, gas_limit: u64) -> Result<(), String> {
+pub async fn set_evm(repo: &str, source_path: String, gas_limit: u64) -> Result<(), String> {
     if !crate::tenancy::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
@@ -94,18 +95,21 @@ pub fn set_evm(repo: &str, source_path: String, gas_limit: u64) -> Result<(), St
             gas_limit,
         },
     );
-    mirror(repo);
+    mirror(repo).await;
     Ok(())
 }
 
-/// Write the git side's mirror of the repo's configs.
-fn mirror(repo: &str) {
-    crate::to_git::set_deploy_configs(repo, get(repo));
+/// Write the git side's mirror of the repo's configs (mirrors.rs: marked,
+/// then flushed; a write the git side does not answer is retried).
+async fn mirror(repo: &str) {
+    crate::mirrors::mark(repo, Mirror::DeployConfigs);
+    crate::mirrors::flush(repo).await;
 }
 
-/// Bring every configured repo's mirror up to date. For post_upgrade: a
-/// release before the authority owned the configs left the mirrors empty.
-/// By key rather than by repo metadata: it runs before `tenancy::adopt_repos`
+/// Mark every configured repo's mirror for writing. For post_upgrade: a
+/// release before the authority owned the configs left the mirrors empty,
+/// and `mirrors::resume` flushes the marks once the upgrade is done. By
+/// key rather than by repo metadata: it runs before `tenancy::adopt_repos`
 /// gives a repo created before tenancy its metadata.
 pub fn sync_all_mirrors() {
     let mut repos = std::collections::BTreeSet::new();
@@ -115,7 +119,7 @@ pub fn sync_all_mirrors() {
         }
     }
     for repo in repos {
-        mirror(&repo);
+        crate::mirrors::mark(&repo, Mirror::DeployConfigs);
     }
 }
 
@@ -172,6 +176,30 @@ fn describe_difference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The setters, driven to completion (they await the mirror write, which
+    // is ready at once in one canister); these shadow the async ones.
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        futures::executor::block_on(f)
+    }
+
+    fn set_wasm(repo: &str, target: String, source_path: String) -> Result<(), String> {
+        run(super::set_wasm(repo, target, source_path))
+    }
+
+    fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
+        run(super::set_mode(repo, mode))
+    }
+
+    fn set_evm(repo: &str, source_path: String, gas_limit: u64) -> Result<(), String> {
+        run(super::set_evm(repo, source_path, gas_limit))
+    }
+
+    /// post_upgrade's marks and the flush that follows them.
+    fn sync_all_mirrors() {
+        super::sync_all_mirrors();
+        run(crate::mirrors::flush_all());
+    }
     use crate::store::{self, ObjectType};
     use ic_git_types::proof::Artifact;
 
@@ -239,8 +267,8 @@ mod tests {
         assert!(e.contains("no EVM leg"), "{e}");
 
         // The mirror starts empty after an upgrade from a release before
-        // this one; post_upgrade fills it by key.
-        crate::mirror::set_deploy_configs("mirrored", DeployConfigs::default());
+        // this one; post_upgrade marks it by key and the flush fills it.
+        crate::mirror::clear("mirrored");
         assert_eq!(crate::jobs::get_config("mirrored"), None);
         sync_all_mirrors();
         assert_eq!(crate::mirror::deploy_configs("mirrored"), get("mirrored"));

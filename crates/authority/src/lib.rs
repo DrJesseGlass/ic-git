@@ -4,7 +4,8 @@
 //!
 //! It reaches the git side only through `to_git` (the GitSide interface),
 //! so it cannot depend on git state any other way: production builds of
-//! this crate do not link the git side at all.
+//! this crate do not link the git side at all. What the git side tells it
+//! arrives through `for_git` (the AuthoritySide interface).
 
 pub mod api_authority;
 pub mod apps;
@@ -15,8 +16,10 @@ pub mod evm;
 // real poll's types unused in those builds only.
 #[cfg_attr(all(feature = "testing", not(test)), allow(dead_code))]
 pub mod feed;
+pub mod for_git;
 pub mod icp;
 pub mod ledger;
+pub mod mirrors;
 pub mod names;
 pub mod provenance;
 pub mod records;

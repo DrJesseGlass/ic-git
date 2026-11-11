@@ -793,7 +793,7 @@ mod tests {
     /// The config setter (configs.rs), which also writes the git side's
     /// mirror that `resolve` reads.
     fn set_config(repo: &str, target: String, source_path: String) -> Result<(), String> {
-        crate::configs::set_wasm(repo, target, source_path)
+        futures::executor::block_on(crate::configs::set_wasm(repo, target, source_path))
     }
 
     /// A commit whose root tree holds `files` (plain names only).

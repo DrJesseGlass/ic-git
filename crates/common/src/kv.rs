@@ -60,6 +60,11 @@ pub fn set_bytes(key: &str, bytes: Vec<u8>) {
     META.with(|m| storage::save_bytes(m, key, bytes));
 }
 
+/// Drop `key`, if it is there.
+pub fn remove(key: &str) {
+    META.with(|m| m.borrow_mut().remove(&key.to_string()));
+}
+
 /// Every key that starts with `prefix`, in key order.
 pub fn keys_with_prefix(prefix: &str) -> Vec<String> {
     META.with(|m| {

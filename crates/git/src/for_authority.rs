@@ -1,37 +1,59 @@
 //! The git side's answer to the authority (ic_git_types::git_side): one
 //! implementation of the interface, over this crate's store and mirrors.
-//! The canister installs it into the authority at init and upgrade.
+//! The canister installs it into the authority at init and upgrade. Each
+//! call is a plain function behind a ready future (phase 3, step 8): in
+//! one canister nothing is lost, so every reply is `Ok`.
 
 use crate::{mirror, store};
 use candid::Principal;
 use ic_git_types::git_side::{DeployConfigs, GitSide, PushPolicy};
 use ic_git_types::oid::Oid;
+use ic_git_types::side::{ready, Fut, Reply};
 
-/// This crate, as the authority sees it.
-pub struct Git;
+/// This crate, as the authority sees it. `is_operator` is this side's own
+/// operator rule (operators are not mirrored), which spares an operator's
+/// push tokens when a push policy drops them as a writer.
+pub struct Git {
+    pub is_operator: fn(&Principal) -> bool,
+}
 
 impl GitSide for Git {
-    fn set_deploy_configs(&self, repo: &str, configs: DeployConfigs) {
-        mirror::set_deploy_configs(repo, configs)
+    fn set_deploy_configs<'a>(&'a self, repo: &'a str, seq: u64, configs: DeployConfigs) -> Fut<'a, Reply<()>> {
+        if mirror::set_deploy_configs(repo, seq, configs) {
+            // A job built under the old configs would be refused.
+            crate::outbox::rebuild_jobs(repo, |commit| {
+                let oid = ic_git_types::oid::parse_oid(commit).ok()?;
+                Some(crate::jobs::resolve(repo, &oid))
+            });
+        }
+        ready(Ok(()))
     }
 
-    fn set_push_policy(&self, repo: &str, policy: PushPolicy, is_operator: &dyn Fn(&Principal) -> bool) {
-        mirror::set_push_policy(repo, policy, is_operator)
+    fn set_push_policy<'a>(&'a self, repo: &'a str, seq: u64, policy: PushPolicy) -> Fut<'a, Reply<()>> {
+        mirror::set_push_policy(repo, seq, policy, self.is_operator);
+        ready(Ok(()))
     }
 
-    fn set_approved(&self, repo: &str, approved: Option<Vec<String>>) {
-        mirror::set_approved(repo, approved)
+    fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>) -> Fut<'a, Reply<()>> {
+        mirror::set_approved(repo, seq, approved);
+        ready(Ok(()))
     }
 
-    fn check_new_repo(&self, name: &str) -> Result<String, String> {
-        store::check_new_repo(name)
+    fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {
+        ready(Ok(store::check_new_repo(name)))
     }
 
-    fn create_repo(&self, name: &str) -> Result<(), String> {
-        store::create_repo(name)
+    /// Idempotent, as the interface requires: the authority holds the name
+    /// (tenancy::create_repo reserves it), so a repo of that name is its own
+    /// earlier call having landed.
+    fn create_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<(), String>>> {
+        if store::repo_exists(name) {
+            return ready(Ok(Ok(())));
+        }
+        ready(Ok(store::create_repo(name)))
     }
 
-    fn has_commit(&self, oid: &Oid) -> bool {
-        store::has_object(oid)
+    fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
+        ready(Ok(store::has_object(oid)))
     }
 }

@@ -9,6 +9,7 @@ use crate::gitproof;
 use crate::object;
 use crate::store::{self, Oid};
 use ic_git_types::deploy::{bytecode_of, DeployConfig, EvmDeployConfig, Job};
+use ic_git_types::git_side::DeployConfigs;
 use ic_git_types::proof::{plain, Artifact};
 use sha2::Digest as _;
 
@@ -26,17 +27,24 @@ pub fn get_evm_config(repo: &str) -> Option<EvmDeployConfig> {
 /// The git side of a job: the repo's deploy configs, as mirrored, and each
 /// leg's artifact proved out of `commit`.
 pub fn resolve(repo: &str, commit: &Oid) -> Job {
+    resolve_with(&crate::mirror::deploy_configs(repo), commit)
+}
+
+/// A job for `commit` under `configs`: for `resolve`, and for the
+/// authority's post_upgrade, which rebuilds a legacy job from its own
+/// configs before the mirror is filled.
+pub fn resolve_with(configs: &DeployConfigs, commit: &Oid) -> Job {
     let artifact = |path: &str| {
         gitproof::prove(commit, &plain(path))
             .map(|(blob, proof)| Artifact { blob, proof })
             .map_err(|e| format!("resolve {path}: {e}"))
     };
     Job {
-        wasm: get_config(repo).map(|c| {
+        wasm: configs.wasm.clone().map(|c| {
             let a = artifact(&c.source_path);
             (c, a)
         }),
-        evm: get_evm_config(repo).map(|c| {
+        evm: configs.evm.clone().map(|c| {
             let a = artifact(&c.source_path);
             (c, a)
         }),
