@@ -297,18 +297,9 @@ pub fn approved_of(repo: &str) -> Option<Option<Vec<String>>> {
     meta(repo).map(|m| approved_keys(repo, &m))
 }
 
-/// Mark every repo's mirrors for writing. For post_upgrade: a release
-/// before the mirrors existed left them empty; `mirrors::resume` flushes
-/// the marks once the upgrade is done.
-pub fn sync_all_mirrors() {
-    for (repo, _) in crate::records::repo_meta_all::<RepoMeta>() {
-        crate::mirrors::mark(&repo, Mirror::PushPolicy);
-        crate::mirrors::mark(&repo, Mirror::Approved);
-    }
-}
-
 /// Does the repo exist? Every repo has metadata: the authority creates
-/// them all (`create_repo`), and `adopt_repos` gave the older ones theirs.
+/// them all (`create_repo`), and a one-time upgrade path gave the ones
+/// created before tenancy an ownerless record.
 pub fn repo_exists(repo: &str) -> bool {
     meta(repo).is_some()
 }
@@ -318,10 +309,15 @@ fn existing(repo: &str) -> Result<RepoMeta, String> {
     meta(repo).ok_or_else(|| format!("no such repo: {repo}"))
 }
 
-/// A record for a repo with no owner: what a repo created before tenancy
-/// gets. Exempt from charges, and only operators may push to it.
-fn ownerless(label: Option<String>) -> RepoMeta {
-    RepoMeta {
+/// A repo on the git side and the authority's record of it, as one
+/// created before tenancy has: ownerless, exempt from charges, and only
+/// operators may push to it. For tests, which otherwise create repos on the
+/// git side alone.
+#[cfg(any(test, feature = "testing"))]
+pub fn test_repo(name: &str) {
+    let label = ic_git_git::store::check_new_repo(name).ok();
+    ic_git_git::store::create_repo(name).unwrap();
+    save_meta(name, &RepoMeta {
         owner: None,
         members: Vec::new(),
         storage_bytes: 0,
@@ -334,43 +330,8 @@ fn ownerless(label: Option<String>) -> RepoMeta {
         governed: false,
         proposals: Vec::new(),
         label,
-    }
-}
-
-/// For post_upgrade: give the authority its own record of every repo the
-/// git side holds, `(name, label it holds)`, so it answers which repos
-/// exist and what they are announced under without asking (phase 3,
-/// step 7). A repo created before tenancy gets an ownerless record -- what
-/// it was treated as all along -- and one created before this release its
-/// label. Idempotent: a record that has its label is left alone. A name
-/// under reservation is left alone too: its creation ran on the git side
-/// and its answer was lost, and the owner's next `create_repo` records it
-/// as theirs.
-pub fn adopt_repos(repos: impl IntoIterator<Item = (String, Option<String>)>) {
-    for (name, label) in repos {
-        if reservation(&name).is_some() {
-            continue;
-        }
-        match meta(&name) {
-            Some(m) if m.label.is_some() || label.is_none() => {}
-            Some(mut m) => {
-                m.label = label;
-                save_meta(&name, &m);
-            }
-            None => save_meta(&name, &ownerless(label)),
-        }
-    }
-}
-
-/// A repo on the git side and the authority's record of it, the way
-/// `adopt_repos` leaves a repo created before tenancy: for tests, which
-/// otherwise create repos on the git side alone.
-#[cfg(any(test, feature = "testing"))]
-pub fn test_repo(name: &str) {
-    let label = ic_git_git::store::check_new_repo(name).ok();
-    ic_git_git::store::create_repo(name).unwrap();
-    adopt_repos([(name.to_string(), label)]);
-    // Its mirrors, as the flush after post_upgrade leaves them.
+    });
+    // Its mirrors, as create_repo's flush leaves them.
     futures::executor::block_on(crate::mirrors::flush(name));
 }
 
@@ -1479,11 +1440,6 @@ mod tests {
         run(super::propose_policy_change(repo, who, change, decision, reason))
     }
 
-    /// post_upgrade's marks and the flush that follows them.
-    fn sync_all_mirrors() {
-        super::sync_all_mirrors();
-        run(crate::mirrors::flush_all());
-    }
 
     /// (approvals, required) of a successful vote.
     fn counts(t: Result<Tally, String>) -> (u32, u32) {
@@ -1608,18 +1564,16 @@ mod tests {
 
     /// Phase 3 step 7: the authority answers which repos exist, and their
     /// labels, from its own records. A repo the git side holds and the
-    /// authority has no record of -- one created before tenancy -- does not
-    /// exist for it until `adopt_repos` gives it an ownerless record.
+    /// authority has no record of does not exist for it. One created before
+    /// tenancy has an ownerless record, and is exempt.
     #[test]
-    fn legacy_repos_are_adopted_ownerless_and_exempt() {
-        store::create_repo("t-legacy").unwrap();
-        assert!(!repo_exists("t-legacy"));
-        assert!(charge_push("t-legacy", 1).unwrap_err().contains("no such repo"));
-        let label = || Some("t-legacy".to_string());
-        adopt_repos([("t-legacy".to_string(), label())]);
-        assert!(repo_exists("t-legacy"));
+    fn legacy_repos_are_ownerless_and_exempt() {
+        store::create_repo("t-unknown").unwrap();
+        assert!(!repo_exists("t-unknown"));
+        assert!(charge_push("t-unknown", 1).unwrap_err().contains("no such repo"));
+        test_repo("t-legacy");
         let m = meta("t-legacy").unwrap();
-        assert_eq!((m.owner, m.label.clone()), (None, label()));
+        assert_eq!((m.owner, m.label.as_deref()), (None, Some("t-legacy")));
 
         charge_push("t-legacy", 10_000_000).unwrap();
         assert_eq!(meta("t-legacy").unwrap().storage_bytes, 0, "no one to charge the bytes to");
@@ -1632,30 +1586,15 @@ mod tests {
         // Rent passes it by.
         charge_rent_all();
         assert!(!meta("t-legacy").unwrap().delinquent);
-
-        // Adopting again changes nothing, nor does a later report with no
-        // label.
-        adopt_repos([("t-legacy".to_string(), None)]);
-        assert_eq!(meta("t-legacy").unwrap().label, label());
     }
 
-    /// A repo created through the authority records its label; one created
-    /// before labels were recorded gets it from `adopt_repos`, its owner
-    /// and the rest kept.
+    /// A repo created through the authority records its label.
     #[test]
     fn repos_record_their_labels() {
         let owner = p(32);
         credit(&owner, 10_000_000_000);
         create_repo("My_Labelled", &owner, false).unwrap();
         assert_eq!(meta("My_Labelled").unwrap().label.as_deref(), Some("my-labelled"));
-
-        create_repo("older", &owner, false).unwrap();
-        let mut m = meta("older").unwrap();
-        m.label = None;
-        crate::records::repo_meta_set("older", &m);
-        adopt_repos([("older".to_string(), Some("older".to_string()))]);
-        let m = meta("older").unwrap();
-        assert_eq!((m.owner, m.label.as_deref()), (Some(owner), Some("older")));
     }
 
     /// A controller off the allowlist is an operator for billing too, and
@@ -1847,14 +1786,6 @@ mod tests {
         assert!(!mirror::requires_signed_push("t-mirror"));
         set_require_signed_push("t-mirror", &alice, false, true).unwrap();
         assert!(mirror::requires_signed_push("t-mirror"));
-
-        // A release before the mirrors left them empty.
-        mirror::clear("t-mirror");
-        assert!(mirror::may_write("t-mirror", &w, false).is_err());
-        sync_all_mirrors();
-        assert!(mirror::may_write("t-mirror", &w, false).is_ok());
-        assert!(mirror::requires_signed_push("t-mirror"));
-        assert!(mirror::approved("t-mirror").is_some());
     }
 
     /// A governed repo deploys committed .wasm only: governing waits for a
@@ -2107,9 +2038,7 @@ mod tests {
         assert!(e.contains("kept"), "{e}");
         assert_eq!(balance(&alice), 8 * fee, "the fee is kept with the name");
         assert!(!repo_exists("t-kept") && store::repo_exists("t-kept"), "created, answer lost");
-        // An upgrade meanwhile does not adopt the name as ownerless.
-        adopt_repos(vec![("t-kept".to_string(), None)]);
-        assert!(!repo_exists("t-kept"), "reserved, not adopted");
+        assert!(!repo_exists("t-kept"), "reserved, not recorded");
         let bob = p(42);
         credit(&bob, fee);
         assert!(create_repo("t-kept", &bob, false).unwrap_err().contains("reserved"));

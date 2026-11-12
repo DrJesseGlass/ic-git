@@ -135,15 +135,6 @@ impl Approved {
     }
 }
 
-/// Empty a repo's mirrors and forget the writes they took: the state a
-/// release before the mirrors existed leaves, for tests of the catch-up.
-#[cfg(any(test, feature = "testing"))]
-pub fn clear(repo: &str) {
-    for key in [push_key(repo), approved_key(repo), deploy_key(repo), seq_key(repo)] {
-        crate::kv::remove(&key);
-    }
-}
-
 /// Record a repo's deploy configs, as the authority holds them. Returns
 /// whether the write was applied.
 pub fn set_deploy_configs(repo: &str, seq: u64, configs: DeployConfigs) -> bool {

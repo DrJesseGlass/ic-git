@@ -914,18 +914,6 @@ fn recorded_if_approved(served: &Served, approved: &crate::mirror::Approved) -> 
     approved.contains(&oid).then_some(oid)
 }
 
-/// Record what every votes-gated repo serves. For post_upgrade: a repo that
-/// set its threshold before `advance` existed has nothing recorded, and would
-/// serve nothing until its next vote. Queues no deploys; the apps are left
-/// where they are.
-pub fn record_gated_repos() {
-    for repo in store::list_repos() {
-        if gated(&repo) && crate::kv::get_json::<Served>(&served_key(&repo)).is_none() {
-            advance(&repo);
-        }
-    }
-}
-
 /// The commit a site serves. With no votes required (the default, and every
 /// legacy repo) that is the deploy-branch tip. With votes required it is the
 /// commit `advance` last recorded, re-checked on every request against the
@@ -1230,19 +1218,6 @@ mod tests {
         push(b"on top", Some(c1));
         assert_eq!(advance("rewrite"), Some(c1));
         assert_eq!(serve("rewrite", "").body, b"approved");
-    }
-
-    /// A repo gated before `advance` existed has nothing recorded; the
-    /// upgrade hook records it so the site keeps serving.
-    #[test]
-    fn upgrade_records_repos_gated_before_advance() {
-        let push = gated_repo("legacy-gated");
-        let c1 = push(b"one", None);
-        votes::require("legacy-gated", 1);
-        votes::vote("legacy-gated", &c1, true);
-        assert_eq!(serve("legacy-gated", "").status_code, 404);
-        record_gated_repos();
-        assert_eq!(served_commit("legacy-gated").unwrap(), c1);
     }
 
     /// The repo browser is the first page ic-git serves about itself; it
