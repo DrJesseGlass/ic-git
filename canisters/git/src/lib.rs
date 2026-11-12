@@ -63,30 +63,15 @@ fn post_upgrade() {
     install_sides();
     store::check_schema_version();
     auth::init_from_saved(kv::load_auth_snapshot());
-    // The deploy-config mirror (configs.rs): a release before the authority
-    // owned the configs left it empty. Marked here, written by the flush
-    // mirrors::resume arms below.
-    configs::sync_all_mirrors();
     // Timers do not survive upgrades; re-arm the drain timer if the queue
     // (which does survive, in stable memory) still holds pending deploys.
     deploy::resume_pending();
     tenancy::arm_rent_timer();
-    // The authority's own record of every repo (phase 3, step 7): a repo
-    // created before tenancy gets an ownerless one, and every repo the
-    // label it holds.
-    tenancy::adopt_repos(store::list_repos().into_iter().map(|name| {
-        let label = store::held_label(&name);
-        (name, label)
-    }));
-    // The git side's mirrors of the authority's decisions (mirror.rs): a
-    // release before them left them empty, and site serving and push
-    // authorization read nothing else.
-    tenancy::sync_all_mirrors();
     arm_push_cert_seed();
     feed::arm_governor_timer();
     // What the sides have not yet told each other (phase 3, step 8): the
-    // mirrors marked above and before the upgrade, and the git side's
-    // outbox. Both survive in stable memory; their timers do not.
+    // mirrors marked before the upgrade, and the git side's outbox. Both
+    // survive in stable memory; their timers do not.
     mirrors::resume();
     outbox::resume();
 }

@@ -106,23 +106,6 @@ async fn mirror(repo: &str) {
     crate::mirrors::flush(repo).await;
 }
 
-/// Mark every configured repo's mirror for writing. For post_upgrade: a
-/// release before the authority owned the configs left the mirrors empty,
-/// and `mirrors::resume` flushes the marks once the upgrade is done. By
-/// key rather than by repo metadata: it runs before `tenancy::adopt_repos`
-/// gives a repo created before tenancy its metadata.
-pub fn sync_all_mirrors() {
-    let mut repos = std::collections::BTreeSet::new();
-    for prefix in [WASM_PREFIX, EVM_PREFIX] {
-        for key in crate::kv::keys_with_prefix(prefix) {
-            repos.insert(key[prefix.len()..].to_string());
-        }
-    }
-    for repo in repos {
-        crate::mirrors::mark(&repo, Mirror::DeployConfigs);
-    }
-}
-
 /// A job, if its configs are the repo's: the git side built it from its
 /// mirror, and a job whose configs differ was either built before a config
 /// change or is not one the repo chose. Refused with the reason, which the
@@ -195,11 +178,6 @@ mod tests {
         run(super::set_evm(repo, source_path, gas_limit))
     }
 
-    /// post_upgrade's marks and the flush that follows them.
-    fn sync_all_mirrors() {
-        super::sync_all_mirrors();
-        run(crate::mirrors::flush_all());
-    }
     use crate::store::{self, ObjectType};
     use ic_git_types::proof::Artifact;
 
@@ -265,14 +243,6 @@ mod tests {
         assert!(crate::mirror::deploy_configs("mirrored").evm.is_some());
         let e = check_job("mirrored", before_evm).err().unwrap();
         assert!(e.contains("no EVM leg"), "{e}");
-
-        // The mirror starts empty after an upgrade from a release before
-        // this one; post_upgrade marks it by key and the flush fills it.
-        crate::mirror::clear("mirrored");
-        assert_eq!(crate::jobs::get_config("mirrored"), None);
-        sync_all_mirrors();
-        assert_eq!(crate::mirror::deploy_configs("mirrored"), get("mirrored"));
-        assert_eq!(crate::jobs::get_config("mirrored"), get_wasm("mirrored"));
     }
 
     #[test]

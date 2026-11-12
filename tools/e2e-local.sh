@@ -12,8 +12,8 @@
 #   KEEP=1 tools/e2e-local.sh          # leave the network running after
 #   E2E_PORT=4960 tools/e2e-local.sh   # another port (default 4950)
 #   NAMES_REPO=../ic-name-service ...  # where ic-name-service is (optional)
-#   BASE_REF=v0.3.7 tools/e2e-local.sh # the release to upgrade from (default:
-#                                      # the newest tag; v0.3.0 or later);
+#   BASE_REF=v0.3.8 tools/e2e-local.sh # the release to upgrade from (default:
+#                                      # the newest tag; v0.3.8 or later);
 #                                      # BASE_REF=none skips
 #
 # Identities: e2e-local (controller and operator) and e2e-tenant (a paying,
@@ -117,14 +117,16 @@ if [ -n "$BASE_REF" ] && [ "$BASE_REF" != none ]; then
   # Built from a worktree of the release, into its own target dir so later
   # runs reuse it.
   BASE_SRC=$WORK/base-src
-  git -C "$ROOT" worktree add -q --detach "$BASE_SRC" "$BASE_REF"
-  # Releases before v0.3.0 wrote state (bare-name tokens, unrecorded gated
-  # sites, unindexed labels) that only one-time upgrade paths converted;
-  # mainnet has run them and this build no longer carries them.
-  if ! grep -q 'create_push_token : (text, opt nat32' "$BASE_SRC/canisters/git/git.did"; then
-    echo "BASE_REF $BASE_REF is older than v0.3.0; upgrades from it are no longer supported" >&2
+  # Releases before v0.3.8 left state (bare-name tokens, unrecorded gated
+  # sites, unindexed labels, repos the authority has no record of, empty
+  # mirrors) that only one-time upgrade paths converted; mainnet has run
+  # them and this build no longer carries them. v0.3.8 is the first
+  # release with the authority's own repo records (phase 3, step 7).
+  if ! git -C "$ROOT" merge-base --is-ancestor e55d0bc "$BASE_REF"; then
+    echo "BASE_REF $BASE_REF is older than v0.3.8; upgrades from it are no longer supported" >&2
     exit 1
   fi
+  git -C "$ROOT" worktree add -q --detach "$BASE_SRC" "$BASE_REF"
   (cd "$BASE_SRC" && CARGO_TARGET_DIR="$ROOT/target/e2e-base" cargo build -q --target wasm32-unknown-unknown --release -p git_canister)
   BASE_WASM=$ROOT/target/e2e-base/wasm32-unknown-unknown/release/git_canister.wasm
   echo "base release $BASE_REF: $BASE_WASM"

@@ -211,13 +211,6 @@ pub fn label_holder(label: &str) -> Option<String> {
     crate::kv::get_json(&label_key(label))
 }
 
-/// The label a repo holds, if any: its own, unless an older repo holds it.
-pub fn held_label(repo: &str) -> Option<String> {
-    repo_label(repo)
-        .ok()
-        .filter(|l| label_holder(l).as_deref() == Some(repo))
-}
-
 /// Longest repo name, in bytes. Generous for a git repo name, and well
 /// under the 512 bytes ic-name-service accepts for the `repo` text an
 /// announce carries, so every repo that can be created can be announced.
@@ -463,20 +456,6 @@ mod tests {
         assert!(create_repo("my-app").unwrap_err().contains("already exists"));
         create_repo("Other.Thing").unwrap();
         assert_eq!(label_holder("other-thing").as_deref(), Some("Other.Thing"));
-    }
-
-    /// `held_label`, which the authority adopts repos by, names the label a
-    /// repo holds and nothing for one whose label another repo holds (a
-    /// repo from before labels, which `create_repo` would have refused).
-    #[test]
-    fn held_label_names_only_the_holders_label() {
-        create_repo("Foo").unwrap();
-        create_repo("bar_baz").unwrap();
-        REPOS.with(|r| r.borrow_mut().insert("foo".to_string(), "refs/heads/main".to_string()));
-        assert_eq!(held_label("Foo").as_deref(), Some("foo"));
-        assert_eq!(held_label("bar_baz").as_deref(), Some("bar-baz"));
-        assert_eq!(held_label("foo"), None, "another repo holds its label");
-        assert_eq!(held_label("nowhere"), None);
     }
 
     #[test]

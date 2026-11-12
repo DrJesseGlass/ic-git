@@ -695,12 +695,14 @@ The steps in one canister:
     - Mainnet ran all four by v0.3.8. A job queued without its payload
       (only a rollback could leave one) is recorded as failed by the
       drain; a bare-name token is dead (unreadable, purgeable by an
-      operator). The e2e upgrades only from v0.3.0 or later.
-    - Still in `post_upgrade`, also one-time fills that v0.3.8 has run:
-      `tenancy::adopt_repos` (reads the git side's repos and labels) and
-      the two `sync_all_mirrors`. They go when step 12 splits
-      `post_upgrade`, since the authority's state then comes from the
-      export (step 13), not from reading the git side.
+      operator).
+    - The one-time fills of steps 6 and 7 go too, which v0.3.8 also ran:
+      `tenancy::adopt_repos` (with `store::held_label`, which only it
+      read) and both `sync_all_mirrors`. `post_upgrade` now reads neither
+      side's repos: it re-arms timers and resumes what the sides had not
+      yet told each other.
+    - The e2e upgrades only from v0.3.8 or later, the first release to
+      have run all of them.
 
 The two canisters:
 
