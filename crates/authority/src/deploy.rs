@@ -233,25 +233,17 @@ pub fn accept(repo: &str, commit: Oid, job: Job) -> bool {
 }
 
 /// Re-arm the drain timer if jobs are pending. Called from post_upgrade, since
-/// timers do not survive upgrades. A job queued by a release before jobs
-/// carried their artifacts is built here by the git side (`resolve`), from
-/// the configs as they stand;
-/// a payload whose job is gone -- drained by such a release after a rollback
-/// -- is dropped, or nothing would ever free it.
-pub fn resume_pending(resolve: impl Fn(&str, &Oid) -> Job) {
+/// timers do not survive upgrades. A payload whose job is gone -- drained by
+/// a release that does not know the map, after a rollback -- is dropped, or
+/// nothing would ever free it; a job whose payload is gone is left for the
+/// drain, which records it as failed.
+pub fn resume_pending() {
     let jobs = queue_load();
     let queued: std::collections::BTreeSet<String> =
         jobs.iter().map(|j| job_key(&j.repo, &j.commit)).collect();
     for key in crate::records::deploy_job_keys() {
         if !queued.contains(&key) {
             crate::records::deploy_job_take(&key);
-        }
-    }
-    for j in &jobs {
-        if let Ok(commit) = parse_oid(&j.commit) {
-            if !crate::records::deploy_job_has(&job_key(&j.repo, &j.commit)) {
-                job_save(&j.repo, &commit, &resolve(&j.repo, &commit));
-            }
         }
     }
     // A deploy the upgrade interrupted: its job left the queue before it
@@ -323,8 +315,9 @@ async fn drain_one() {
             Some(payload) => {
                 run(&job.repo, commit, payload, false).await;
             }
-            // enqueue writes the payload with the job, so this is one that
-            // no longer decodes.
+            // accept writes the payload with the job, so this is one that
+            // no longer decodes, or one queued by a release before jobs
+            // carried their artifacts (a rollback).
             None => put_status(
                 &job.repo,
                 &DeployStatus {
@@ -984,7 +977,7 @@ mod tests {
     #[test]
     fn an_upgrade_frees_payloads_no_job_names() {
         crate::records::deploy_job_put(&job_key("gone", &"ab".repeat(20)), vec![1, 2, 3]);
-        resume_pending(resolve);
+        resume_pending();
         assert!(crate::records::deploy_job_keys().is_empty());
     }
 
@@ -1109,7 +1102,7 @@ mod tests {
         put_status("still", &status("c2", false, DEPLOYING));
         queue_save(&[DeployJob { repo: "still".into(), commit: "c2".into() }]);
         crate::records::deploy_job_put(&job_key("still", "c2"), vec![1]);
-        resume_pending(resolve);
+        resume_pending();
         assert!(!in_flight("cut", "c1"));
         assert!(get_status("cut").unwrap().message.contains("interrupted"));
         assert!(get_evm_status("cut").unwrap().message.contains("interrupted"));

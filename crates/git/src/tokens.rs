@@ -6,12 +6,13 @@
 //! Every token expires. The minter picks a lifetime in days (default
 //! `DEFAULT_DAYS`, at most `MAX_DAYS`); a leaked token stops working on its
 //! own, without anyone noticing the leak. Tokens minted before expiry
-//! existed are given `LEGACY_GRACE_DAYS` from the upgrade that introduced it
-//! (`migrate`), so nothing breaks at the upgrade and nothing lives forever.
+//! existed were rewritten as records with a grace period, and indexed, by a
+//! one-time migration that mainnet has run; a bare repo name read now could
+//! only have been written by a rolled-back wasm, and authorizes nothing.
 //!
 //! A token lasts only as long as its minter may write: when a writer is
 //! removed, demoted, or hands the repo on, `revoke_unless` drops the tokens
-//! they minted (legacy tokens record no minter and run out their grace).
+//! they minted (a migrated token records no minter and runs out its grace).
 //!
 //! TOKENS is keyed by hash, which is what a push presents. The TOKEN_INDEX
 //! map adds two secondary keys per record, `r\0<repo>\0<key>` and
@@ -24,9 +25,7 @@
 //! single message. A repo holds at most `MAX_LIVE_PER_REPO` live tokens, so
 //! the map is bounded by the number of repos (each paid for); a sweep
 //! removes at most `PURGE_BATCH` expired tokens per mint, which outpaces the
-//! one token a mint adds; and the full scan in `migrate` runs once, on the
-//! upgrade that introduces the record format, over the legacy tokens that
-//! existed then.
+//! one token a mint adds.
 //!
 //! A token's id is the first 16 hex characters of its key. It names the
 //! token without being it -- the key is a hash, and the id a prefix of the
@@ -40,7 +39,6 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DAYS: u32 = 30;
 pub const MAX_DAYS: u32 = 365;
-pub const LEGACY_GRACE_DAYS: u32 = 30;
 const DAY_NS: u64 = 86_400 * 1_000_000_000;
 /// Hex characters of the key that make up a token's id: 64 bits.
 pub const ID_LEN: usize = 16;
@@ -50,16 +48,13 @@ pub const ID_LEN: usize = 16;
 pub const MAX_LIVE_PER_REPO: usize = 20;
 /// Expired tokens one sweep removes at most.
 const PURGE_BATCH: usize = 64;
-/// META key recording that `migrate` has run.
-const MIGRATED_KEY: &str = "tokens:migrated";
 
-/// A TOKENS value. Values written before expiry existed are the bare repo
-/// name; repo names cannot start with '{', so the first byte tells the two
-/// apart.
+/// A TOKENS value: JSON, so its first byte is '{'.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct Stored {
     repo: String,
-    /// `None` for a legacy token: nobody recorded who minted it, or when.
+    /// `None` for a token minted before expiry existed: nobody recorded who
+    /// minted it, or when.
     minted_by: Option<Principal>,
     created_ns: Option<u64>,
     expires_ns: u64,
@@ -71,10 +66,10 @@ struct Stored {
 }
 
 enum Entry {
-    Legacy(String),
     Stored(Stored),
-    /// A record that does not decode. It authorizes nothing, and is never
-    /// mistaken for a legacy repo name (which would authorize forever).
+    /// A record that does not decode, or a bare repo name (the format
+    /// before expiry existed, which only a rolled-back wasm could write
+    /// now). It authorizes nothing.
     Unreadable,
 }
 
@@ -82,16 +77,13 @@ impl Entry {
     /// The repo this entry belongs to, expired or not.
     fn repo(self) -> Option<String> {
         match self {
-            Entry::Legacy(repo) | Entry::Stored(Stored { repo, .. }) => Some(repo),
+            Entry::Stored(Stored { repo, .. }) => Some(repo),
             Entry::Unreadable => None,
         }
     }
 }
 
 fn parse(value: String) -> Entry {
-    if !value.starts_with('{') {
-        return Entry::Legacy(value);
-    }
     serde_json::from_str::<Stored>(&value).map_or(Entry::Unreadable, Entry::Stored)
 }
 
@@ -135,8 +127,8 @@ fn remove_key(key: &str) -> bool {
 /// The index keys a record may have: exactly `index_keys` for a readable
 /// one, and for an unreadable one whatever its `repo` and `expires_ns`
 /// fields name where they are present -- the wasm that wrote it may have
-/// indexed it, and an `r` entry left behind would never be swept. A legacy
-/// value is not JSON and has none.
+/// indexed it, and an `r` entry left behind would never be swept. A bare
+/// repo name is not JSON and has none.
 fn indexed_as(key: &str, value: &str) -> Vec<String> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(value) else {
         return Vec::new();
@@ -236,15 +228,14 @@ pub struct Grant {
 /// token authorizes nothing, and neither does one whose minter fails
 /// `may_write(repo, minter)`: a token lasts only as long as its minter may
 /// write, however that access was lost (a membership change, or an operator
-/// leaving the allowlist). A legacy value is honored only until `migrate`
-/// has run; one written after that (by a rolled-back wasm) would otherwise
-/// authorize forever, unlisted and unswept.
+/// leaving the allowlist). A bare repo name (the format before expiry
+/// existed, written now only by a rolled-back wasm) authorizes nothing: it
+/// would otherwise authorize forever, unlisted and unswept.
 pub fn authorize_if(token: &str, may_write: impl Fn(&str, &Principal) -> bool) -> Option<Grant> {
     match parse(store::token_get(&store::token_key(token))?) {
         Entry::Stored(s) => (now_ns() < s.expires_ns
             && s.minted_by.as_ref().is_none_or(|p| may_write(&s.repo, p)))
         .then_some(Grant { repo: s.repo, key: s.key }),
-        Entry::Legacy(repo) => (!migrated()).then_some(Grant { repo, key: None }),
         Entry::Unreadable => None,
     }
 }
@@ -304,7 +295,7 @@ pub fn list(repo: &str) -> Vec<PushTokenInfo> {
 
 /// Revoke every token of `repo` whose minter fails `keep`: for after a
 /// membership change, with `keep` asking whether the minter may still
-/// write. Legacy tokens have no minter and are left to expire. Returns how
+/// write. Tokens from before expiry have no minter and are left to expire. Returns how
 /// many were revoked.
 pub fn revoke_unless(repo: &str, keep: impl Fn(&Principal) -> bool) -> usize {
     of_repo(repo)
@@ -347,18 +338,11 @@ pub fn revoke_key(key: &str) -> bool {
 }
 
 /// A record that can never authorize again: one that does not decode, or
-/// a bare repo name (the format before expiry existed) once `migrate` has
-/// run -- `authorize_if` honors those only until then, so one written
-/// afterwards (by a rolled-back wasm) is dead on arrival. Neither kind is
-/// indexed, so no listing shows it, and neither revoke can remove it: one
-/// has no repo to check, the other no id anyone can see. A legacy value
-/// before the migration is live and not dead.
+/// a bare repo name (`Entry::Unreadable`). Neither is indexed, so no
+/// listing shows it, and neither revoke can remove it: it has no repo to
+/// check.
 fn is_dead(e: &Entry) -> bool {
-    match e {
-        Entry::Unreadable => true,
-        Entry::Legacy(_) => migrated(),
-        Entry::Stored(_) => false,
-    }
+    matches!(e, Entry::Unreadable)
 }
 
 /// Ids of dead token records (`is_dead`), for an operator to purge. Only a
@@ -396,43 +380,6 @@ pub fn purge_expired() {
         // entry left here would hold a slot of every later sweep.
         store::token_index_remove(&ik);
     }
-}
-
-/// Has `migrate` run on this canister?
-fn migrated() -> bool {
-    crate::kv::get_json::<bool>(MIGRATED_KEY) == Some(true)
-}
-
-/// For post_upgrade: give every token minted before expiry existed
-/// `LEGACY_GRACE_DAYS` from now, and index every record. Runs once: the
-/// scan covers the legacy tokens of the upgrade that introduces the record
-/// format, and every later upgrade finds the marker and returns.
-pub fn migrate() {
-    if migrated() {
-        return;
-    }
-    let expires_ns = now_ns().saturating_add(u64::from(LEGACY_GRACE_DAYS) * DAY_NS);
-    for (key, value) in store::token_entries("") {
-        match parse(value) {
-            Entry::Legacy(repo) => store_record(
-                &key,
-                &Stored {
-                    repo,
-                    minted_by: None,
-                    created_ns: None,
-                    expires_ns,
-                    key: None,
-                },
-            ),
-            Entry::Stored(s) => {
-                for k in index_keys(&key, &s) {
-                    store::token_index_put(k);
-                }
-            }
-            Entry::Unreadable => {}
-        }
-    }
-    crate::kv::set_json(MIGRATED_KEY, &true);
 }
 
 #[cfg(test)]
@@ -530,15 +477,15 @@ mod tests {
     }
 
     /// A membership change revokes the tokens of minters who may no longer
-    /// write; others' tokens, and legacy tokens with no minter, stay.
+    /// write; others' tokens, and tokens from before expiry (no minter), stay.
     #[test]
     fn revoke_unless_drops_only_the_named_minters_tokens() {
         set_test_now(T0);
         mint("mem", "tok-alice", alice(), Some(5), None).unwrap();
         mint("mem", "tok-bob", bob(), Some(5), None).unwrap();
         mint("mem-other", "tok-alice-2", alice(), Some(5), None).unwrap();
-        store::token_put(&store::token_key("tok-old"), "mem".to_string());
-        migrate();
+        let old = Stored { repo: "mem".into(), minted_by: None, created_ns: None, expires_ns: T0 + DAY_NS, key: None };
+        store_record(&store::token_key("tok-old"), &old);
         assert_eq!(revoke_unless("mem", |p| *p != alice()), 1);
         assert_eq!(authorize("tok-alice"), None);
         assert_eq!(authorize("tok-bob").as_deref(), Some("mem"));
@@ -622,18 +569,6 @@ mod tests {
         set_test_now(T0);
     }
 
-    /// The migration's full scan runs once; later upgrades skip it.
-    #[test]
-    fn migrate_runs_once() {
-        set_test_now(T0);
-        migrate();
-        store::token_put(&store::token_key("tok-late"), "late".to_string());
-        migrate();
-        // Not rewritten: still the legacy value, and it authorizes nothing.
-        assert_eq!(store::token_get(&store::token_key("tok-late")).as_deref(), Some("late"));
-        assert_eq!(authorize("tok-late"), None);
-    }
-
     /// A token stops authorizing once its minter may no longer write, even
     /// when no membership change swept it (an operator leaving the allowlist).
     #[test]
@@ -662,26 +597,11 @@ mod tests {
         assert!(authorize("tok-rsa").is_none());
     }
 
-    /// Records written before the index existed are indexed by migrate.
-    #[test]
-    fn migrate_indexes_unindexed_records() {
-        set_test_now(T0);
-        let s = Stored { repo: "unidx".into(), minted_by: Some(alice()), created_ns: Some(T0), expires_ns: T0 + DAY_NS, key: None };
-        store::token_put(&store::token_key("tok-u"), serde_json::to_string(&s).unwrap());
-        assert!(list("unidx").is_empty());
-        migrate();
-        assert_eq!(list("unidx").len(), 1);
-        migrate();
-        assert_eq!(list("unidx").len(), 1);
-    }
-
     #[test]
     fn an_unreadable_record_authorizes_nothing() {
         let key = store::token_key("tok-bad");
         store::token_put(&key, "{\"repo\":\"bad\"}".to_string());
         assert_eq!(authorize("tok-bad"), None);
-        migrate();
-        assert_eq!(store::token_get(&key).as_deref(), Some("{\"repo\":\"bad\"}"));
     }
 
     /// An unreadable record is dead: listed and purged by id; a live one
@@ -706,28 +626,20 @@ mod tests {
         assert_eq!(authorize("tok-good").as_deref(), Some("pur"));
     }
 
-    /// A bare repo name is live until the migration and dead after it:
-    /// listed and purgeable then, and not before.
+    /// A bare repo name (the format before expiry existed, which only a
+    /// rolled-back wasm could write now) authorizes nothing, and is dead:
+    /// listed and purgeable.
     #[test]
-    fn a_legacy_record_written_after_the_migration_is_dead() {
+    fn a_bare_repo_name_is_dead() {
         set_test_now(T0);
-        let early = store::token_key("tok-early");
-        store::token_put(&early, "old".to_string());
-        let id_early = early[..ID_LEN].to_string();
-        assert!(!dead_ids().contains(&id_early), "before migrate it is live");
-        assert!(purge_dead(&id_early).unwrap_err().contains("live"));
-        migrate();
-        // Migrated: now a stored record, live, and not dead either.
-        assert!(!dead_ids().contains(&id_early));
-        // One written after the migration (a rolled-back wasm) is dead.
-        let late = store::token_key("tok-late-legacy");
-        store::token_put(&late, "old".to_string());
-        assert_eq!(authorize("tok-late-legacy"), None);
-        let id_late = late[..ID_LEN].to_string();
-        assert!(dead_ids().contains(&id_late));
-        purge_dead(&id_late).unwrap();
-        assert!(store::token_get(&late).is_none());
-        assert_eq!(authorize("tok-early").as_deref(), Some("old"));
+        let bare = store::token_key("tok-bare");
+        store::token_put(&bare, "old".to_string());
+        assert_eq!(authorize("tok-bare"), None);
+        assert_eq!(repo_of("tok-bare"), None);
+        let id = bare[..ID_LEN].to_string();
+        assert!(dead_ids().contains(&id));
+        purge_dead(&id).unwrap();
+        assert!(store::token_get(&bare).is_none());
     }
 
     /// An unreadable record that another wasm indexed loses its index
@@ -745,24 +657,5 @@ mod tests {
         purge_dead(&key[..ID_LEN]).unwrap();
         assert!(store::token_index_range(&r, "r\0pix\x01", usize::MAX).is_empty());
         assert!(!store::token_index_range("e\0", "e\x01", usize::MAX).contains(&x));
-    }
-
-    #[test]
-    fn legacy_tokens_get_a_grace_period() {
-        set_test_now(T0);
-        store::token_put(&store::token_key("tok-legacy"), "leg".to_string());
-        assert_eq!(authorize("tok-legacy").as_deref(), Some("leg"));
-        migrate();
-        let t = list("leg");
-        assert_eq!(t.len(), 1);
-        assert_eq!((t[0].minted_by, t[0].created_ns), (None, None));
-        assert_eq!(t[0].expires_ns, T0 + u64::from(LEGACY_GRACE_DAYS) * DAY_NS);
-        // Migrating again changes nothing.
-        set_test_now(T0 + DAY_NS);
-        migrate();
-        assert_eq!(list("leg")[0].expires_ns, T0 + u64::from(LEGACY_GRACE_DAYS) * DAY_NS);
-        set_test_now(T0 + u64::from(LEGACY_GRACE_DAYS) * DAY_NS);
-        assert_eq!(authorize("tok-legacy"), None);
-        set_test_now(T0);
     }
 }

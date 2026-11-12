@@ -205,8 +205,8 @@ fn label_key(label: &str) -> String {
     format!("label:{label}")
 }
 
-/// The repo holding a label, if any. Every repo created since labels
-/// existed holds its own; `index_repo_labels` gives the older ones theirs.
+/// The repo holding a label, if any. Every repo holds its own, unless an
+/// older repo holds it.
 pub fn label_holder(label: &str) -> Option<String> {
     crate::kv::get_json(&label_key(label))
 }
@@ -260,25 +260,6 @@ pub fn create_repo(name: &str) -> Result<(), String> {
     REPOS.with(|r| r.borrow_mut().insert(name.to_string(), "refs/heads/main".to_string()));
     crate::kv::set_json(&label_key(&label), &name);
     Ok(())
-}
-
-/// For post_upgrade: give every repo created before labels existed its
-/// label, first by name order where two would share one (none do on
-/// mainnet at the upgrade that introduces this). A repo left without a
-/// label is not announced. Runs once, behind a marker.
-pub fn index_repo_labels() {
-    const MARKER: &str = "labels:indexed";
-    if crate::kv::get_json::<bool>(MARKER) == Some(true) {
-        return;
-    }
-    for name in list_repos() {
-        if let Ok(label) = repo_label(&name) {
-            if label_holder(&label).is_none() {
-                crate::kv::set_json(&label_key(&label), &name);
-            }
-        }
-    }
-    crate::kv::set_json(MARKER, &true);
 }
 
 pub fn repo_exists(name: &str) -> bool {
@@ -484,24 +465,17 @@ mod tests {
         assert_eq!(label_holder("other-thing").as_deref(), Some("Other.Thing"));
     }
 
-    /// Repos from before labels get theirs on upgrade, first by name order.
     /// `held_label`, which the authority adopts repos by, names the label a
-    /// repo holds and nothing for one whose label an older repo took.
+    /// repo holds and nothing for one whose label another repo holds (a
+    /// repo from before labels, which `create_repo` would have refused).
     #[test]
-    fn upgrade_indexes_labels_of_older_repos() {
-        REPOS.with(|r| {
-            let mut r = r.borrow_mut();
-            for n in ["Foo", "foo", "bar_baz"] {
-                r.insert(n.to_string(), "refs/heads/main".to_string());
-            }
-        });
-        assert_eq!(held_label("Foo"), None, "not indexed yet");
-        index_repo_labels();
-        assert_eq!(label_holder("foo").as_deref(), Some("Foo"));
-        assert_eq!(label_holder("bar-baz").as_deref(), Some("bar_baz"));
+    fn held_label_names_only_the_holders_label() {
+        create_repo("Foo").unwrap();
+        create_repo("bar_baz").unwrap();
+        REPOS.with(|r| r.borrow_mut().insert("foo".to_string(), "refs/heads/main".to_string()));
         assert_eq!(held_label("Foo").as_deref(), Some("foo"));
         assert_eq!(held_label("bar_baz").as_deref(), Some("bar-baz"));
-        assert_eq!(held_label("foo"), None, "an older repo holds its label");
+        assert_eq!(held_label("foo"), None, "another repo holds its label");
         assert_eq!(held_label("nowhere"), None);
     }
 

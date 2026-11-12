@@ -69,26 +69,19 @@ fn post_upgrade() {
     configs::sync_all_mirrors();
     // Timers do not survive upgrades; re-arm the drain timer if the queue
     // (which does survive, in stable memory) still holds pending deploys.
-    // A legacy job is rebuilt from the authority's own configs, since the
-    // mirror is filled only once the upgrade is done.
-    deploy::resume_pending(|repo, commit| jobs::resolve_with(&configs::get(repo), commit));
+    deploy::resume_pending();
     tenancy::arm_rent_timer();
-    tokens::migrate();
     // The authority's own record of every repo (phase 3, step 7): a repo
     // created before tenancy gets an ownerless one, and every repo the
-    // label it holds. After the label index, which gives the oldest repos
-    // their labels.
-    store::index_repo_labels();
+    // label it holds.
     tenancy::adopt_repos(store::list_repos().into_iter().map(|name| {
         let label = store::held_label(&name);
         (name, label)
     }));
     // The git side's mirrors of the authority's decisions (mirror.rs): a
     // release before them left them empty, and site serving and push
-    // authorization read nothing else. After the token migration, since
-    // filling the push policy sweeps tokens of non-writers.
+    // authorization read nothing else.
     tenancy::sync_all_mirrors();
-    site::record_gated_repos();
     arm_push_cert_seed();
     feed::arm_governor_timer();
     // What the sides have not yet told each other (phase 3, step 8): the

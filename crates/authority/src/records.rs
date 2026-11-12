@@ -105,10 +105,6 @@ pub fn deploy_job_take(key: &str) -> Option<Vec<u8>> {
     DEPLOY_JOBS.with(|j| j.borrow_mut().remove(&key.to_string()))
 }
 
-pub fn deploy_job_has(key: &str) -> bool {
-    DEPLOY_JOBS.with(|j| j.borrow().contains_key(&key.to_string()))
-}
-
 pub fn deploy_job_keys() -> Vec<String> {
     DEPLOY_JOBS.with(|j| j.borrow().keys().collect())
 }
