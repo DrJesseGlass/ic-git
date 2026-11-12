@@ -96,7 +96,7 @@ if (rust) {
   writeFileSync(file, pages.map(p => hex(p) + ' ' + hex(scan('index.html', Buffer.from(p, 'utf8')) ?? '')).join('\n') + '\n');
   let why = '';
   try {
-    execFileSync('cargo', ['test', '--release', '-p', 'git_canister', '--lib', 'agrees_with_the_js_port_on_random_pages', '--', '--ignored'],
+    execFileSync('cargo', ['test', '--release', '-p', 'combined_canister', '--lib', 'agrees_with_the_js_port_on_random_pages', '--', '--ignored'],
       { cwd: fileURLToPath(new URL('..', import.meta.url)), env: { ...process.env, WALK_FUZZ: file }, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
     why = '\n' + String(e.stdout).split('\n').filter(l => /panicked|assertion|left:|right:/.test(l)).join('\n');

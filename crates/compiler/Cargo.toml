@@ -5,7 +5,7 @@ edition = "2021"
 description = "Builds .wat and .lang sources to wasm for ungoverned repos (docs/CANISTER_SPLIT.md, section 3). Pure: bytes in, wasm out."
 
 [dependencies]
-# Keep candid pinned to the version ic-dev-kit-rs uses (see canisters/git).
+# Keep candid pinned to the version ic-dev-kit-rs uses (see canisters/combined).
 candid = "0.10"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"

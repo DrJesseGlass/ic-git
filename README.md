@@ -35,7 +35,7 @@ sign your tags).
 ## Layout
 
 ```
-canisters/git/          the git canister (Rust)
+canisters/combined/     the canister on umobs: both sides in one module (Rust)
   src/store.rs          stable-memory objects/refs/repos
   src/smart_http.rs     pkt-line codec, services, ref advertisement
   src/pack.rs           closure walk, pack writer, streamed upload-pack

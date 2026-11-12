@@ -3,8 +3,8 @@
   "canisters": {
     "git": {
       "type": "rust",
-      "package": "git_canister",
-      "candid": "canisters/git/git.did"
+      "package": "combined_canister",
+      "candid": "canisters/combined/combined.did"
     },
     "governor": {
       "type": "custom",
@@ -18,23 +18,23 @@
     },
     "wasm_target": {
       "type": "custom",
-      "wasm": "target/wasm32-unknown-unknown/release/git_canister.wasm",
-      "candid": "canisters/git/git.did"
+      "wasm": "target/wasm32-unknown-unknown/release/combined_canister.wasm",
+      "candid": "canisters/combined/combined.did"
     },
     "worker_1": {
       "type": "custom",
-      "wasm": "target/wasm32-unknown-unknown/release/git_canister.wasm",
-      "candid": "canisters/git/git.did"
+      "wasm": "target/wasm32-unknown-unknown/release/combined_canister.wasm",
+      "candid": "canisters/combined/combined.did"
     },
     "worker_2": {
       "type": "custom",
-      "wasm": "target/wasm32-unknown-unknown/release/git_canister.wasm",
-      "candid": "canisters/git/git.did"
+      "wasm": "target/wasm32-unknown-unknown/release/combined_canister.wasm",
+      "candid": "canisters/combined/combined.did"
     },
     "worker_3": {
       "type": "custom",
-      "wasm": "target/wasm32-unknown-unknown/release/git_canister.wasm",
-      "candid": "canisters/git/git.did"
+      "wasm": "target/wasm32-unknown-unknown/release/combined_canister.wasm",
+      "candid": "canisters/combined/combined.did"
     }
   },
   "defaults": {
