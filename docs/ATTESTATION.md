@@ -69,7 +69,8 @@ served entrypoint. Every file that entrypoint *references* is fetched in a
 separate request no record attests, so a client that compares only the
 entrypoint hash can be fully satisfied while running unattested code -- the
 false GREEN this document's doctrine forbids, reached without anyone forging a
-hash. `attest::site_record` closes it at the writing end by refusing to
+hash. The site record (`attest::record_artifact`, the git side of
+`provenance::site_record`) closes it at the writing end by refusing to
 attest an entrypoint that names a subresource the browser will not enforce
 `integrity` on (`site::unverifiable_subresource`).
 

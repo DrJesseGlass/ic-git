@@ -8,7 +8,7 @@
 
 use crate::{mirror, store};
 use candid::Principal;
-use ic_git_types::git_side::{DeployConfigs, GitSide, PushPolicy, Retry};
+use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{ready, Fut, Reply};
 
@@ -65,5 +65,13 @@ impl GitSide for Git {
 
     fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
         ready(Ok(store::has_object(oid)))
+    }
+
+    fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>> {
+        ready(Ok(crate::attest::record_artifact(repo, &kind)))
+    }
+
+    fn release_job<'a>(&'a self, repo: &'a str) -> Fut<'a, Reply<Result<Release, String>>> {
+        ready(Ok(crate::jobs::release(repo)))
     }
 }

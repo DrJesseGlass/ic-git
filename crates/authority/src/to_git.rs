@@ -6,7 +6,7 @@
 //! authority calls; each is awaited and answers a `Reply` (phase 3, step
 //! 8). The mirror writes are made only by mirrors.rs, which numbers them.
 
-use ic_git_types::git_side::{DeployConfigs, GitSide, Retry};
+use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, RecordKind, Release, Retry};
 pub use ic_git_types::git_side::PushPolicy;
 use ic_git_types::oid::Oid;
 use ic_git_types::side::Reply;
@@ -103,6 +103,17 @@ pub async fn has_commit(oid: &Oid) -> Reply<bool> {
     via!(has_commit(oid))
 }
 
+/// The artifact behind a registry record, with its proof (provenance.rs
+/// checks it).
+pub async fn record_artifact(repo: &str, kind: RecordKind) -> Reply<Result<Attested, String>> {
+    via!(record_artifact(repo, kind))
+}
+
+/// The release commit's job, for deploy_now (the queue checks it).
+pub async fn release_job(repo: &str) -> Reply<Result<Release, String>> {
+    via!(release_job(repo))
+}
+
 /// A git side that fails as told, for the tests of each flow's failure
 /// rule: the real one, with the next calls it is told to refuse, not
 /// deliver, or run and lose the answer of.
@@ -196,6 +207,14 @@ pub(crate) mod flaky {
 
         fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
             self.go("has_commit", move || self.real.has_commit(oid), None)
+        }
+
+        fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>> {
+            self.go("record_artifact", move || self.real.record_artifact(repo, kind), Some(Err("refused by the git side".into())))
+        }
+
+        fn release_job<'a>(&'a self, repo: &'a str) -> Fut<'a, Reply<Result<Release, String>>> {
+            self.go("release_job", move || self.real.release_job(repo), Some(Err("refused by the git side".into())))
         }
     }
 }

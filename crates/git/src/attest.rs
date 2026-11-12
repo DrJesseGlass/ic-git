@@ -1,21 +1,42 @@
 //! The git side of attestation (docs/CANISTER_SPLIT.md, section 4):
-//! resolving a repo's state into the records the authority publishes -- the
-//! served site's entrypoint, and the release commit's EVM artifact. Reads
-//! the object store; publishes nothing.
+//! resolving a repo's state into the artifact behind a registry record --
+//! the served site's entrypoint, or the release commit's EVM artifact --
+//! with its proof (phase 3, step 10: `record_artifact`). Reads the object
+//! store; hashes and publishes nothing. The authority checks the proof,
+//! the commit's approval and the hash itself (provenance.rs), so what it
+//! signs is what the commit holds, whatever this side says.
 
-use crate::{jobs, site};
-use ic_git_types::keys::{site_record_key, Record};
-use ic_git_types::oid::commit20;
-use sha2::Digest;
+use crate::{gitproof, jobs, site, store};
+use ic_git_types::git_side::{Attested, RecordKind};
+use ic_git_types::proof::{plain, Artifact};
 
-/// Resolve the served-site record: the served commit (the deploy-branch tip,
-/// or with votes required the newest approved commit) and the sha256 of the
-/// served entrypoint blob (site root + index.html fallback -- byte-identical to
-/// what `/site/<repo>/` returns). Needs no EVM deploy config, because the
+/// The artifact behind a record of `kind`.
+pub fn record_artifact(repo: &str, kind: &RecordKind) -> Result<Attested, String> {
+    match kind {
+        RecordKind::Site => site_artifact(repo),
+        RecordKind::Release { path } => release_artifact(repo, path),
+    }
+}
+
+/// The commit's blob at `path`, proved.
+fn attested(commit: &store::Oid, path: &str) -> Result<Attested, String> {
+    let path = plain(path);
+    let (blob, proof) = gitproof::prove(commit, &path).map_err(|e| format!("resolve {path}: {e}"))?;
+    Ok(Attested {
+        commit: store::oid_hex(commit),
+        path,
+        artifact: Artifact { blob, proof },
+    })
+}
+
+/// The served site's entrypoint: the served commit (the deploy-branch tip,
+/// or with votes required the newest approved commit) and the blob at the
+/// site root, with the index.html fallback -- byte-identical to what
+/// `/site/<repo>/` returns. Needs no EVM deploy config, because the
 /// artifact is a frontend file hashed as raw bytes, matching how the F2
 /// verifier hashes a served non-hex artifact. The authority checks that it
 /// could publish at all (`evm::require_publish_target`) before asking.
-pub fn site_record(repo: &str) -> Result<Record, String> {
+fn site_artifact(repo: &str) -> Result<Attested, String> {
     let (commit, served, body) = site::resolve_entry(repo, "")
         .ok_or("repo serves no site entrypoint (need set_site + a commit with index.html, approved if the repo requires votes)")?;
     // Refuse to attest bytes `site::serve` would answer 413 for. Publishing
@@ -48,38 +69,32 @@ pub fn site_record(repo: &str) -> Result<Record, String> {
              would publish and then be stopped: integrity does not admit it."
         ));
     }
-    Ok(Record {
-        key: site_record_key(repo),
-        commit: commit20(&commit)?,
-        bundle: sha2::Sha256::digest(&body).into(),
-    })
+    attested(&commit, &served)
 }
 
-/// The repo's release commit (`jobs::release_commit`: the tip, or with
-/// votes required the approved commit) as its deploy-artifact record, ready
-/// to publish. The operator entry point, and the only deploy-artifact path
-/// that resolves the hash out of the repo: there is no deploy in flight to
-/// inherit bytes from. Resolved before anything is charged, so every way the
-/// publish can fail short of the transaction itself fails for free; the
-/// authority checks first that it could publish at all.
-pub fn tip_record(repo: &str) -> Result<Record, String> {
-    let cfg =
-        jobs::get_evm_config(repo).ok_or("repo has no EVM deploy config (nothing to hash)")?;
-    let commit_oid = jobs::release_commit(repo)?;
-    let bundle = jobs::evm_artifact_hash(&commit_oid, &cfg.source_path)?;
-    Record::artifact(repo, &commit_oid, bundle)
+/// The release commit (`jobs::release_commit`: the tip, or with votes
+/// required the approved commit) and its blob at `path`, the authority's
+/// EVM source path. The operator entry point, and the only deploy-artifact
+/// path that resolves its bytes out of the repo: there is no deploy in
+/// flight to inherit them from. Resolved before anything is charged, so
+/// every way the publish can fail short of the transaction itself fails
+/// for free.
+fn release_artifact(repo: &str, path: &str) -> Result<Attested, String> {
+    let commit = jobs::release_commit(repo)?;
+    attested(&commit, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{self, ObjectType};
+    use crate::store::ObjectType;
+    use ic_git_types::oid::commit20;
 
-    /// A site record's key is namespaced and its bundle is the raw served
-    /// bytes -- the two properties that keep it from clobbering, or being
-    /// clobbered by, the same repo's deploy-artifact record.
+    /// The site's artifact is the served entrypoint's bytes, under the
+    /// path the index.html fallback found, with a proof the authority's
+    /// checker takes for the served commit and that path.
     #[test]
-    fn site_record_is_namespaced_and_hashes_served_bytes() {
+    fn the_site_artifact_is_the_served_entrypoint_proved() {
         store::create_repo("provrepo").unwrap();
         let body = b"<h1>hello</h1>";
         let index = store::put_object(ObjectType::Blob, body);
@@ -93,11 +108,27 @@ mod tests {
         store::set_ref("provrepo", &branch, commit_oid).unwrap();
         site::set_config("provrepo", String::new()).unwrap();
 
-        let rec = site_record("provrepo").expect("site record resolves");
-        assert_eq!(rec.key, "provrepo#site");
-        let expected: [u8; 32] = sha2::Sha256::digest(body).into();
-        assert_eq!(rec.bundle, expected);
-        assert_eq!(rec.commit, commit20(&commit_oid).unwrap());
+        let a = record_artifact("provrepo", &RecordKind::Site).expect("site artifact resolves");
+        assert_eq!(a.commit, store::oid_hex(&commit_oid));
+        assert_eq!(a.path, "index.html");
+        assert_eq!(a.artifact.blob, body);
+        let blob = a.artifact.verified(&commit20(&commit_oid).unwrap(), "index.html").expect("the proof holds");
+        assert_eq!(blob, body);
+    }
+
+    /// The release artifact is the tip's blob at the path the authority
+    /// names, proved; a path the commit does not hold is refused here.
+    #[test]
+    fn the_release_artifact_is_the_tips_blob_at_the_authoritys_path() {
+        store::create_repo("relrepo").unwrap();
+        let tip = store::commit_file_for_tests("relrepo", "contract.hex", b"0x6001", None);
+        let path = RecordKind::Release { path: "/contract.hex".into() };
+        let a = record_artifact("relrepo", &path).expect("release artifact resolves");
+        assert_eq!(a.commit, store::oid_hex(&tip));
+        assert_eq!(a.path, "contract.hex", "a plain path");
+        assert!(a.artifact.verified(&commit20(&tip).unwrap(), "contract.hex").is_ok());
+        let missing = RecordKind::Release { path: "other.hex".into() };
+        assert!(record_artifact("relrepo", &missing).is_err());
     }
 
     /// A repo with site config but nothing committed reports that, rather than
@@ -105,10 +136,10 @@ mod tests {
     /// purpose, so the failure is the missing entrypoint and not the missing
     /// config.
     #[test]
-    fn site_record_requires_an_entrypoint() {
+    fn the_site_artifact_requires_an_entrypoint() {
         store::create_repo("emptyrepo").unwrap();
         site::set_config("emptyrepo", String::new()).unwrap();
-        assert!(site_record("emptyrepo").is_err());
+        assert!(record_artifact("emptyrepo", &RecordKind::Site).is_err());
     }
 
     /// A site record is refused when the entrypoint references a file the
@@ -116,7 +147,7 @@ mod tests {
     /// Without this the publish succeeds, the verifier's hash comparison
     /// passes, and the verdict says verified while unattested code runs.
     #[test]
-    fn site_record_refuses_an_entrypoint_it_cannot_fully_cover() {
+    fn the_site_artifact_refuses_an_entrypoint_it_cannot_fully_cover() {
         let commit_index = |repo: &str, html: &[u8]| {
             let index = store::put_object(ObjectType::Blob, html);
             let mut root = Vec::new();
@@ -133,7 +164,7 @@ mod tests {
         site::set_config("srirepo", String::new()).unwrap();
 
         commit_index("srirepo", b"<script src=\"app.js\"></script>");
-        let err = site_record("srirepo").expect_err("must refuse an uncovered subresource");
+        let err = record_artifact("srirepo", &RecordKind::Site).err().expect("must refuse an uncovered subresource");
         assert!(err.contains("index.html"), "names the entrypoint: {err}");
         assert!(err.contains("integrity"), "says how to fix it: {err}");
 
@@ -142,6 +173,6 @@ mod tests {
             "srirepo",
             b"<script src=\"app.js\" integrity=\"sha384-x\"></script>",
         );
-        assert!(site_record("srirepo").is_ok());
+        assert!(record_artifact("srirepo", &RecordKind::Site).is_ok());
     }
 }

@@ -88,7 +88,7 @@ The path here, in shippable order:
   gateway cannot forge or suppress.
 - **F1 -- attest on update.** On push, publish `(commit, sha256(bundle))` to
   the ProvenanceRegistry. The machinery exists today
-  (`attest::tip_record`); F1 is wiring it into the deploy queue.
+  (`provenance::tip_record`); F1 is wiring it into the deploy queue.
 - **F2 -- verify at the client.** A verifier in the user's trust domain
   (extension, or the wallet itself) hashes what was served and compares to
   the registry. Section 3's reviewer subsumes this.
@@ -116,8 +116,8 @@ Against the alternatives:
   still pass a verifier's comparison. SRI is the reverse shape: it protects
   sub-resources but not the document that names them. Composed, they close:
   the registry covers the document, the browser enforces the document's
-  `integrity` declarations over everything else. `attest::site_record`
-  therefore refuses to attest an entrypoint that references a subresource
+  `integrity` declarations over everything else. `attest.rs` (the git
+  side of `provenance::site_record`) therefore refuses to attest an entrypoint that references a subresource
   without `integrity` (see `site::unverifiable_subresource`), on the same
   principle as its `MAX_BODY` refusal -- an attestation a verifier can check
   and still be wrong about is worse than none. Self-contained entrypoints

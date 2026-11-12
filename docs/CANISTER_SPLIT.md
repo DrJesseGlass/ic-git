@@ -178,7 +178,8 @@ acts.**
 
     // authority -> git (asked from update calls; phase 3, steps 7 and 10)
     check_new_repo(name) -> label; create_repo(name); has_commit(oid)
-    release_job(repo)                      // deploy_now: the job, by submit_job
+    release_job(repo)                      // deploy_now: the job, in the reply
+                                           // (staged in chunks, step 12)
     record_artifact(repo, kind)            // a registry publish: Artifact + proof
 
 The authority checks a proof by recomputing each object's id (SHA-1 with
@@ -369,6 +370,8 @@ decoding sat on both sides of the future boundary. Now:
 - `decode_bytecode_hex` lives in `ic_git_types::deploy`; the resolver
   (`jobs::evm_artifact_bytecode`, which returns decoded bytes, and
   `jobs::evm_artifact_hash`, the one derivation of the bundle hash) uses it.
+  Since phase 3 step 10 the authority derives it instead, from a proven
+  blob (`bytecode_of` in `provenance::checked`), and those two are gone.
 - `evm::deploy_bytecode` takes `Vec<u8>`. The signer's deploy input is bytes
   and scalars, exactly as section 4 specifies.
 - `lib.rs`'s operator-facing `evm_deploy` decodes on the way in; its candid
@@ -629,9 +632,9 @@ The steps in one canister:
      intake's rule; the retry ask kept through an undelivered write; and
      both sides together, a ballot queuing the served commit's deploy
      once, again after it failed, and not once it runs.
-10. **Attestations carry proofs.**
-    - `evm_registry_publish` and `evm_registry_publish_site` take the
-      record from the git side today (`attest::tip_record`,
+10. **Attestations carry proofs.** DONE 2026-11-11.
+    - `evm_registry_publish` and `evm_registry_publish_site` took the
+      record from the git side (`attest::tip_record`,
       `attest::site_record`). Across the cut, the authority would be
       signing what the git canister says.
     - So the git side returns the artifact with its proof, the same
@@ -641,6 +644,46 @@ The steps in one canister:
     - In section 4's listing these are `record_artifact`, and
       `release_job` for `deploy_now`, which asks the git side for its job
       and runs it once it arrives. Either way, the authority acts on bytes it has checked.
+    What shipped:
+    - `GitSide` gains `record_artifact(repo, RecordKind)` and
+      `release_job(repo)`, answering `Attested { commit, path, artifact }`
+      and `Release { commit, job }` (`ic_git_types::git_side`). Both are
+      read-only, so a lost answer is settled by asking again; the
+      endpoints say so, and nothing is charged before the answer is
+      checked.
+    - The git side (`attest::record_artifact`) picks the commit -- the
+      release commit, which with votes required is the approved commit
+      the site serves -- proves the blob, and keeps the refusals that
+      save a wasted transaction: an entrypoint over the serving limit, or
+      one naming a subresource the record cannot cover. It hashes
+      nothing. `jobs::release` builds `deploy_now`'s job as the push path
+      builds one.
+    - The authority (`provenance::checked`) reads nothing of the git
+      side's state: it checks the proof against the commit and the path
+      -- for a release, the source path of its own EVM config, whatever
+      path the git side names -- requires the commit to be approved when
+      the repo requires votes, and hashes the checked bytes itself (the
+      decoded bytecode for a release, the raw bytes for a site). A forged
+      answer can make a publish fail; it cannot get a record signed for
+      bytes no approved commit holds. `deploy_now` runs the job through
+      `run`, which already checks configs, approval and proofs.
+    - The endpoints check the caller's admin right (and the publish
+      target) again after the wait, before charging.
+    - The reply carries the job or the artifact whole. A module can be
+      megabytes, past the message limit, so step 12's message
+      implementation stages `release_job`'s reply in chunks, as it does
+      `submit_job`.
+    - What remains the git canister's word, by design: which commit is
+      the release (bounded by the approval check when votes are
+      required; decision 6.5.4 when they are not), and which file of
+      that commit is the site's entrypoint, since the site config lives
+      on the git side until step 12 moves `set_site` to the authority,
+      which can then check the path too.
+    - Tests: the git side's artifacts and their proofs; forged answers
+      (another blob, another file's proof, another commit, a malformed
+      id, a short proof) refused; an unapproved commit not attested; an
+      unanswered or lost ask failing the record and `deploy_now`; a
+      forged `deploy_now` job refused by the run.
 11. **Retire the one-time paths.** Some paths exist only for an older
     release's state; once mainnet has run them, they go:
     - `resume_pending`'s `resolve` fallback

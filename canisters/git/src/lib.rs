@@ -10,7 +10,7 @@ use ic_git_compiler::{compile, interp, lang};
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git), likewise.
-use ic_git_git::{api, attest, jobs, mirror, outbox, pack, receive, signed_push, site, smart_http, store, to_authority, tokens};
+use ic_git_git::{api, jobs, mirror, outbox, pack, receive, signed_push, site, smart_http, store, to_authority, tokens};
 // The authority (crates/authority), likewise.
 use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, for_git, icp, ledger, mirrors, names, provenance, sol, tenancy, to_git};
 use ic_git_types::authority_side::Event;
@@ -1118,8 +1118,10 @@ async fn set_deploy_mode(repo: String, mode: String) -> Result<(), String> {
 #[ic_cdk::update]
 async fn deploy_now(repo: String) -> Result<deploy::DeployStatus, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
-    let commit = jobs::release_commit(&repo)?;
-    Ok(deploy::run_now(&repo, commit, jobs::resolve(&repo, &commit)).await)
+    let (commit, job) = deploy::release_job(&repo).await?;
+    // Asked again after the wait: the caller may have lost the repo.
+    tenancy::can_admin(&repo, &caller(), operator())?;
+    Ok(deploy::run_now(&repo, commit, job).await)
 }
 
 #[ic_cdk::query]
@@ -1337,8 +1339,8 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
     // Resolve the record before charging: a publish that cannot happen costs
     // nothing.
     evm::require_publish_target()?;
-    let record = attest::tip_record(&repo)?;
-    publish_charged(&repo, &record).await
+    let record = provenance::tip_record(&repo).await?;
+    publish_checked(&repo, &record).await
 }
 
 /// Write a *site* repo's provenance to the registry under the key
@@ -1353,8 +1355,8 @@ async fn evm_registry_publish(repo: String) -> Result<evm::TxOutcome, String> {
 async fn evm_registry_publish_site(repo: String) -> Result<evm::TxOutcome, String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
     evm::require_publish_target()?;
-    let record = attest::site_record(&repo)?;
-    publish_charged(&repo, &record).await
+    let record = provenance::site_record(&repo).await?;
+    publish_checked(&repo, &record).await
 }
 
 /// Publish `ic-git#canister`: the commit this canister was built from and
@@ -1371,6 +1373,15 @@ async fn registry_publish_canister(
     }
     let record = provenance::canister_record(&commit, &module_sha256)?;
     provenance::publish(&record).await.map_err(|e| e.message)
+}
+
+/// Publish a record asked of the git side, once the checks made before the
+/// ask hold again: the caller may have lost the repo, or the registry been
+/// unset, while it waited.
+async fn publish_checked(repo: &str, record: &provenance::Record) -> Result<evm::TxOutcome, String> {
+    tenancy::can_admin(repo, &caller(), operator())?;
+    evm::require_publish_target()?;
+    publish_charged(repo, record).await
 }
 
 /// Charge the repo for a registry publish, and give back what a failed one

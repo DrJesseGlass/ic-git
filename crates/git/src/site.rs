@@ -693,7 +693,7 @@ fn read_page(text: &str) -> Result<bool, String> {
 /// `None` if they are.
 ///
 /// The registry attests exactly ONE blob -- the entrypoint, since
-/// `attest::site_record` resolves path "" -- so every file the entrypoint
+/// `attest::record_artifact` resolves path "" for the site -- so every file the entrypoint
 /// *names* is fetched in a separate request that no attestation covers. Without
 /// this check a hostile gateway serves the honest, correctly-hashing index.html
 /// next to a malicious app.js, and a verifier comparing only the entrypoint
