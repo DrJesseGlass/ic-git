@@ -24,6 +24,7 @@ governor `7kkwl-baaaa-aaaab-ag6rq-cai` alone (below, "The governor").
 | 2026-10-08 | `a23ee31` | `v0.3.5` | `30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a` (gz) | MATCH, 2026-10-08 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 37803652956](https://github.com/DrJesseGlass/ic-git/actions/runs/37803652956), identical hash |
 | 2026-10-10 | `018bf4d` | `v0.3.6` | `eb61f0e10be0b93c1f4162cf040c6dcc69ed1248ac940fc35b89c008ec9762a2` (gz) | MATCH, 2026-10-10 | deployer (pinned container, macOS arm64 host under emulation, at the branch head, same ic-git crate); GitHub Actions amd64 runner, [run 38019976528](https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528), identical hash |
 | 2026-10-27 | `73ffa5b` | `v0.3.7` | `72e21a4867f671ca6ee1ab3ab6f31f0694e2a75270aa11faf317a1e6c9dbea95` (gz) | MATCH, 2026-10-27 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 40427156571](https://github.com/DrJesseGlass/ic-git/actions/runs/40427156571), identical hash; installed by governor proposal 4 |
+| 2026-11-12 | `2469a17` | `v0.3.8` | `375c7ed6b342ce30ca8e559bed8c111764b1f853edb688b5f08f42d9759fc8f9` (gz) | MATCH, 2026-11-12 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43281752572](https://github.com/DrJesseGlass/ic-git/actions/runs/43281752572), identical hash; installed by governor proposal 5, record published by proposal 6 |
 
 ## The governor -- 2026-10-11 to 14
 
@@ -64,6 +65,43 @@ propose-upgrade`, then `vote`), each recorded in the governor's public
 log and, on execution, as `ic-git#canister` on chain. The operator role
 inside ic-git (registry address, EVM and Solana settings, pricing) is
 unchanged: those are calls the code allows, not changes to it.
+
+## v0.3.8 -- 2026-11-12
+
+The canister split so far, still one canister (docs/CANISTER_SPLIT.md):
+phase 2 (#89 to #95: deploy artifacts travel with proofs that the
+authority checks, governed repos deploy `.wasm` only, the workspace
+crates, the git side's mirrors of the authority's decisions) and phase 3
+steps 6 to 10 (#97 to #101: the authority owns the deploy configs and its
+own record of every repo, both directions become async interfaces,
+following approvals moves to the git side, registry records carry
+proofs). The candid interface is unchanged.
+
+The pinned container built `2469a17`, the merge of #101, to
+`375c7ed6...c8f9` (gz; raw `3b868b7a...0f41`); the same run rebuilt the
+governor to the module it runs, `a71ff65d...641f`. CI built the tag on a
+GitHub Actions x86_64 runner
+([run 43281752572](https://github.com/DrJesseGlass/ic-git/actions/runs/43281752572))
+and agreed byte for byte, for ic-git and for the governor. Same recipe
+and base image digest as v0.3.7.
+
+Proposal 5 staged the module in two chunks and one approval executed
+it. The install succeeded, but the new code's `ic-git#canister` publish
+failed before broadcast: the replicas' answers to `eth_feeHistory` did
+not reach consensus (a transient outcall error). The governor asks for
+the record only after an install, so proposal 6 installed the same
+module again, as proposal 1 did, and that run published `ic-git#canister`
+(commit `2469a17`, this module hash) in Sepolia tx `0x1b288796...c411`,
+block 12120810, which the registry reads back. Between the two, the
+verifiers graded ic-git governed with a warning, since the record still
+named v0.3.7's module.
+
+Gated by `tools/e2e-local.sh`: 179 checks on `9e67f2c`, the head of
+#101, whose tree is the merge's, including the upgrade from v0.3.7.
+Before the upgrade the deploy queue was empty and ic-vote's site and app
+both ran `55ed3b9`; after both upgrades the IC reported module hash
+`375c7ed6...c8f9` and the governor as the only controller, ic-vote's
+site and app still ran `55ed3b9`, and nothing was queued.
 
 ## v0.3.7 -- 2026-10-27
 

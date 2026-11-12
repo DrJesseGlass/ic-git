@@ -560,6 +560,44 @@
         "note": "the first release installed by vote: governor proposal 4, staged in two chunks and approved by 1 of 2, executed in the same call. The new code published ic-git#canister (commit 73ffa5b, this module hash) in Sepolia tx 0x2df9df0e4b8910ea06bec641068c441dcce39b2f7b9168c350ab64f57a48b029, block 12001546, status success. The canister crate changed in #83: activity feeds, GET /feed/<repo> and GET /feed as Atom, and feed_set_governor / feed_governor / feed_poll_governor. Gated by tools/e2e-local.sh 176/176 on 0a5171a, the branch head. After the upgrade feed_set_governor named the governor and the first poll mirrored 11 events, proposals 1 to 4 with their ballots and outcomes"
       },
       "wasm_sha256": "3be18da062cb7b40a51e3107aa3091c7ecca77576d3feb4b95f7b5b55ea2d238"
+    },
+    {
+      "commit": "2469a17a4d46233cfa6fc237e46c3a2319ab6e28",
+      "tag": "v0.3.8",
+      "module_hash": "375c7ed6b342ce30ca8e559bed8c111764b1f853edb688b5f08f42d9759fc8f9",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+          "date": "2026-11-12",
+          "check": "built at 2469a17, the merge of #101; the same run rebuilt the governor to a71ff65d...641f, the module the live governor runs"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/43281752572",
+          "date": "2026-11-12",
+          "check": "identical hash (375c7ed6...c8f9 gz, 3b868b7a...0f41 raw), and the governor's a71ff65d...641f; the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-11-12",
+        "on_chain_match": "match",
+        "checked_by": "dfx canister info against the reproducible build's module sha256: Module hash 0x375c7ed6...c8f9, Controllers 7kkwl-baaaa-aaaab-ag6rq-cai",
+        "note": "installed by governor proposal 5 (staged in two chunks, 1 of 2, executed in the same call). Its ic-git#canister publish failed before broadcast (eth_feeHistory: the replicas' RPC responses did not reach consensus, SysTransient), so proposal 6 installed the same module again, as proposal 1 did, and the new code published ic-git#canister (commit 2469a17, this module hash) in Sepolia tx 0x1b288796f114e1db331a813ed2e2d8e4418317dfafc51627cb1f5e6b4049c411, block 12120810, status success; the registry reads it back. The canister crate changed in #84 to #101: canister split phase 2 (proofs, jobs carry proofs, governed repos .wasm only, the crate split, mirrors) and phase 3 steps 6 to 10; git.did unchanged. Gated by tools/e2e-local.sh 179/179 on 9e67f2c, the branch head of #101, whose tree is the merge's (the upgrade-from-v0.3.7 section included). Before the upgrade the deploy queue was empty and ic-vote's site and app both ran 55ed3b9; after both upgrades they still do, the queue is empty, and no job was queued"
+      },
+      "wasm_sha256": "3b868b7a154f1f64f5163bebe87d2b31407a779a8231c870d9b529f977ae0f41"
     }
   ]
 }
