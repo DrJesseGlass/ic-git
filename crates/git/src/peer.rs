@@ -8,7 +8,7 @@
 //! `AUTHORITY_CANISTER` at init and upgrade and guards each
 //! authority-facing endpoint (the mirror writes, `check_new_repo`,
 //! `create_repo`, `has_commit`, `record_artifact`, `release_job`,
-//! `release_chunk`) with `AUTHORITY.check_caller`.
+//! `reply_chunk`) with `AUTHORITY.check_caller`.
 
 use candid::Principal;
 use ic_git_common::call::Canister;

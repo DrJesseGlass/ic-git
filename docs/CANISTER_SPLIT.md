@@ -735,8 +735,11 @@ The two canisters:
           before it is named, only it after.
         - `ic_git_authority::peer`: the git canister (`GIT`, which an
           operator names), and `Git<T>`, the `GitSide` over messages,
-          installed as `GIT_CANISTER`. `release_job` fetches the head and
-          then each chunk the head names, and decodes the body.
+          installed as `GIT_CANISTER`. `release_job` and
+          `record_artifact` fetch the head and then each chunk the head
+          names (`wire::Staged`, `reply_chunk`), and decode the body: a
+          job is a module and its proof, and an artifact's proof carries
+          whole tree objects, so either can pass the message limit.
         - `ic_git_git::peer`: the authority (`AUTHORITY`, an init
           argument), and `Authority<T>`, the `AuthoritySide` over
           messages, installed as `AUTHORITY_CANISTER`. `submit_job`
@@ -757,10 +760,10 @@ The two canisters:
         - The receivers: the authority's `for_git::stage_job` and
           `submit_staged` (one item's chunks at a time, in heap, capped
           at `MAX_JOB_BYTES`, moved into the body rather than copied);
-          the git side's `for_authority::release_head` and
-          `release_chunk` (the newest `STAGED_REPLIES` jobs' bodies, in
-          heap, each kept once and cut as asked for; one that is gone is
-          a refusal that says to ask again).
+          the git side's `for_authority::staged_release`,
+          `staged_record` and `reply_chunk` (the newest `STAGED_REPLIES`
+          replies' bodies, in heap, each kept once and cut as asked for;
+          one that is gone is a refusal that says to ask again).
         - Tests: each message through the real receivers of the other
           crate as the endpoints will call them, with a chosen call
           refused, not delivered or lost; the chunking from both ends;

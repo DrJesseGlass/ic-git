@@ -1,8 +1,8 @@
 //! The git side as another canister (docs/CANISTER_SPLIT.md, phase 3 step
 //! 12b): its principal (`GIT`), which an operator sets and which alone may
 //! call this side's git-facing endpoints; and the `GitSide` that sends it
-//! messages (`ic_git_types::wire`), one call each, except the release job,
-//! whose reply comes back in chunks. The combined build installs none of
+//! messages (`ic_git_types::wire`), one call each, except the release job
+//! and a record's artifact, whose replies come back in chunks. The combined build installs none of
 //! this: there the git side is `for_authority::Git`, in the same canister.
 //! The two-canister build (step 12c) installs `GIT_CANISTER` at init and
 //! upgrade and guards each git-facing endpoint (`charge_push`,
@@ -11,11 +11,11 @@
 use candid::Principal;
 use ic_git_common::call::Canister;
 use ic_git_common::peer::Peer;
-use ic_git_types::deploy::Job;
 use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{Fut, Reply};
-use ic_git_types::wire::{self, send, Transport};
+use ic_git_types::wire::{self, send, Staged, Transport};
+use serde::Deserialize;
 
 /// The git canister, once an operator has named it. The canister's setter
 /// checks first, through the management canister, that it is governed as
@@ -65,32 +65,41 @@ impl<T: Transport> GitSide for Git<T> {
         Box::pin(send(&self.transport, wire::HasCommit { oid: oid.as_slice().to_vec() }))
     }
 
+    /// A staged reply: the head, then each further chunk under its
+    /// handle, and the artifact is the body they make. A chunk the git
+    /// side no longer holds (it keeps a few, in heap) is its refusal, and
+    /// the endpoint says to ask again; so is a body that does not decode.
     fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>> {
-        Box::pin(send(&self.transport, wire::RecordArtifact { repo: repo.into(), kind }))
+        Box::pin(async move {
+            match send(&self.transport, wire::RecordArtifact { repo: repo.into(), kind }).await? {
+                Ok(head) => self.fetch(head).await,
+                Err(e) => Ok(Err(e)),
+            }
+        })
     }
 
-    /// The head, then each further chunk under the head's handle; the
-    /// job is the body they make. A chunk the git side no longer holds
-    /// (it keeps a few, in heap) is its refusal, and `deploy_now` says to
-    /// ask again; so is a body that does not decode.
+    /// Staged like `record_artifact`'s.
     fn release_job<'a>(&'a self, repo: &'a str) -> Fut<'a, Reply<Result<Release, String>>> {
         Box::pin(async move {
-            let head = match send(&self.transport, wire::ReleaseJob { repo: repo.into() }).await? {
-                Ok(head) => head,
-                Err(e) => return Ok(Err(e)),
-            };
-            let mut body = head.head;
-            for index in 1..=head.more {
-                match send(&self.transport, wire::ReleaseChunk { handle: head.handle, index }).await? {
-                    Ok(chunk) => body.extend_from_slice(&chunk),
-                    Err(e) => return Ok(Err(e)),
-                }
+            match send(&self.transport, wire::ReleaseJob { repo: repo.into() }).await? {
+                Ok(head) => self.fetch(head).await,
+                Err(e) => Ok(Err(e)),
             }
-            Ok(match candid::decode_one::<Job>(&body) {
-                Ok(job) => Ok(Release { commit: head.commit, job }),
-                Err(e) => Err(format!("the release job does not decode: {e}")),
-            })
         })
+    }
+}
+
+impl<T: Transport> Git<T> {
+    /// The rest of a staged reply, chunk by chunk, decoded as `R`.
+    async fn fetch<R: candid::CandidType + for<'de> Deserialize<'de>>(&self, head: Staged) -> Reply<Result<R, String>> {
+        let mut body = head.head;
+        for index in 1..=head.more {
+            match send(&self.transport, wire::ReplyChunk { handle: head.handle, index }).await? {
+                Ok(chunk) => body.extend_from_slice(&chunk),
+                Err(e) => return Ok(Err(e)),
+            }
+        }
+        Ok(candid::decode_one::<R>(&body).map_err(|e| format!("the reply does not decode: {e}")))
     }
 }
 
@@ -102,7 +111,7 @@ mod tests {
     use ic_git_git::for_authority;
     use ic_git_git::store;
     use ic_git_types::authority_side::{AuthoritySide, Event};
-    use ic_git_types::deploy::DeployConfig;
+    use ic_git_types::deploy::{DeployConfig, Job};
     use ic_git_types::oid::parse_oid;
     use ic_git_types::side::Failure;
     use ic_git_types::wire::{Message, MAX_CHUNK};
@@ -162,15 +171,15 @@ mod tests {
             }
             m if m == wire::RecordArtifact::METHOD => {
                 let m: wire::RecordArtifact = dec(arg);
-                enc(GIT.record_artifact(&m.repo, m.kind).await.unwrap())
+                enc(for_authority::staged_record(&m.repo, &m.kind))
             }
             m if m == wire::ReleaseJob::METHOD => {
                 let m: wire::ReleaseJob = dec(arg);
-                enc(for_authority::release_head(&m.repo))
+                enc(for_authority::staged_release(&m.repo))
             }
-            m if m == wire::ReleaseChunk::METHOD => {
-                let m: wire::ReleaseChunk = dec(arg);
-                enc(for_authority::release_chunk(m.handle, m.index))
+            m if m == wire::ReplyChunk::METHOD => {
+                let m: wire::ReplyChunk = dec(arg);
+                enc(for_authority::reply_chunk(m.handle, m.index))
             }
             other => panic!("the git canister has no method {other}"),
         }
@@ -326,11 +335,11 @@ mod tests {
 
     /// A release job larger than a chunk comes back as a head and the
     /// chunks the head names, and decodes to the job the git side built;
-    /// a small one is the head alone. The git side's refusal, a chunk it
-    /// no longer holds, and a call that fails each reach the caller as
-    /// what they are.
+    /// a small one is the head alone. A record's artifact comes back the
+    /// same way. The git side's refusal, a chunk it no longer holds, and
+    /// a call that fails each reach the caller as what they are.
     #[test]
-    fn the_release_job_comes_back_in_chunks() {
+    fn large_replies_come_back_in_chunks() {
         let git = Git { transport: Loopback::new(true) };
         let name = "peer-release";
         store::create_repo(name).unwrap();
@@ -343,23 +352,31 @@ mod tests {
         let release = block_on(git.release_job(name)).unwrap().expect("the release job");
         assert_eq!(release.commit, store::oid_hex(&tip));
         assert_eq!(git.transport.count(wire::ReleaseJob::METHOD), 2);
-        assert_eq!(git.transport.count(wire::ReleaseChunk::METHOD), 2, "a head and two more chunks");
+        assert_eq!(git.transport.count(wire::ReplyChunk::METHOD), 2, "a head and two more chunks");
         let (cfg, artifact) = release.job.wasm.expect("the wasm leg");
         assert_eq!(cfg.source_path, "app.wasm");
         let commit = ic_git_types::oid::commit20(&tip).unwrap();
         assert_eq!(artifact.unwrap().verified(&commit, "app.wasm").unwrap(), big);
 
+        // The record's artifact: the same blob with its proof, in chunks.
+        let attested = block_on(git.record_artifact(name, RecordKind::Release { path: "app.wasm".into() }))
+            .unwrap()
+            .expect("the release artifact");
+        assert_eq!(git.transport.count(wire::ReplyChunk::METHOD), 4);
+        assert_eq!(attested.commit, store::oid_hex(&tip));
+        assert_eq!(attested.artifact.verified(&commit, "app.wasm").unwrap(), big);
+
         let small = store::commit_file_for_tests(name, "app.wasm", b"small", Some(tip));
         store::set_ref(name, &store::head_target(name).unwrap(), small).unwrap();
         let release = block_on(git.release_job(name)).unwrap().expect("the release job");
         assert_eq!(release.commit, store::oid_hex(&small));
-        assert_eq!(git.transport.count(wire::ReleaseChunk::METHOD), 2, "no chunk beyond the head");
+        assert_eq!(git.transport.count(wire::ReplyChunk::METHOD), 4, "no chunk beyond the head");
 
         // The git side forgot the staged rest (an upgrade, or newer asks):
         // the refusal says to ask again.
         store::set_ref(name, &store::head_target(name).unwrap(), tip).unwrap();
         for_authority::forget_staged_replies();
-        git.transport.fail_next(wire::ReleaseChunk::METHOD, Failure::Lost("timed out".into()));
+        git.transport.fail_next(wire::ReplyChunk::METHOD, Failure::Lost("timed out".into()));
         match block_on(git.release_job(name)) {
             Err(Failure::Lost(e)) => assert_eq!(e, "timed out"),
             Err(other) => panic!("{other}"),

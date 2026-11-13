@@ -9,16 +9,17 @@
 //! endpoints take the same structs. A reply that will not decode counts as
 //! lost (`Failure::Lost`): the call ran, and what it answered is gone.
 //!
-//! Two calls can carry more than the 2 MiB message limit: a job, with a
-//! module and its proof, and the release job `deploy_now` asks for. Their
-//! bodies (a candid-encoded `Job`) go in pieces of at most `MAX_CHUNK`
-//! bytes: a job is staged on the authority, chunk by chunk, ahead of the
-//! `submit_job` that names the chunks and carries the last; a release job
-//! comes back as a head with the first chunk and a handle the rest are
-//! fetched by.
+//! Three calls can carry more than the 2 MiB message limit: a job, with a
+//! module and its proof; the release job `deploy_now` asks for; and a
+//! record's artifact with its proof. Their bodies go in pieces of at most
+//! `MAX_CHUNK` bytes: a job (a candid-encoded `Job`) is staged on the
+//! authority, chunk by chunk, ahead of the `submit_job` that names the
+//! chunks and carries the last; a reply (a candid-encoded `Release` or
+//! `Attested`) comes back as a head with the first chunk and a handle the
+//! rest are fetched by (`Staged`, `ReplyChunk`).
 
 use crate::authority_side::Event;
-use crate::git_side::{Attested, DeployConfigs, PushPolicy, RecordKind, Retry};
+use crate::git_side::{DeployConfigs, PushPolicy, RecordKind, Retry};
 use crate::side::{Failure, Fut, Reply};
 use candid::CandidType;
 use serde::Deserialize;
@@ -66,13 +67,11 @@ pub fn pieces(body: &[u8]) -> Vec<&[u8]> {
     body.chunks(MAX_CHUNK).collect()
 }
 
-/// The release job's reply (`release_job`): the release commit, the first
-/// chunk of the encoded job, and how many more chunks `release_chunk`
-/// serves under `handle`, numbered 1 to `more`. `handle` is 0 when there
-/// are none.
+/// A reply too large for one message: the first chunk of its encoded
+/// body, and how many more chunks `reply_chunk` serves under `handle`,
+/// numbered 1 to `more`. `handle` is 0 when there are none.
 #[derive(CandidType, Deserialize)]
-pub struct ReleaseHead {
-    pub commit: String,
+pub struct Staged {
     pub handle: u64,
     pub more: u32,
     pub head: Vec<u8>,
@@ -107,13 +106,13 @@ messages! {
     CreateRepo = "create_repo" -> Result<(), String> { name: String }
     /// `GitSide::has_commit`; `oid` is the 20 bytes.
     HasCommit = "has_commit" -> bool { oid: Vec<u8> }
-    /// `GitSide::record_artifact`.
-    RecordArtifact = "record_artifact" -> Result<Attested, String> { repo: String, kind: RecordKind }
-    /// `GitSide::release_job`, the head of its reply.
-    ReleaseJob = "release_job" -> Result<ReleaseHead, String> { repo: String }
-    /// The rest of a release job's reply: chunk `index` (1 to `more`) of
-    /// the body under `handle`.
-    ReleaseChunk = "release_chunk" -> Result<Vec<u8>, String> { handle: u64, index: u32 }
+    /// `GitSide::record_artifact`; the body is the encoded `Attested`.
+    RecordArtifact = "record_artifact" -> Result<Staged, String> { repo: String, kind: RecordKind }
+    /// `GitSide::release_job`; the body is the encoded `Release`.
+    ReleaseJob = "release_job" -> Result<Staged, String> { repo: String }
+    /// The rest of a staged reply: chunk `index` (1 to `more`) of the
+    /// body under `handle`.
+    ReplyChunk = "reply_chunk" -> Result<Vec<u8>, String> { handle: u64, index: u32 }
 }
 
 // What the git canister sends the authority (AuthoritySide).
