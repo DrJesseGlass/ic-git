@@ -5,6 +5,13 @@
 # (REPRODUCIBLE_BUILD.md) and voted in by the governor (docs/GOVERNOR.md).
 # A Cargo.lock change changes the module hash, so it is released and
 # recorded like any other change.
+#
+# Dependabot pushes its pull requests to branches named dependabot/<...>.
+# Git cannot create those while a branch named plainly `dependabot` exists
+# (a ref cannot be both a file and a directory), and Dependabot then opens
+# nothing, silently from the repo's side. Never name a branch `dependabot`;
+# the job log under Insights > Dependency graph > Dependabot shows the
+# failure when it happens.
 version: 2
 updates:
   # The canister workspace: canisters/combined and canisters/governor share the

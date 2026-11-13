@@ -187,6 +187,12 @@ returns the wasm deploy config, the last attempt, and the provenance log
 (commit, target, wasm sha256 per install), so a deployed app can name the
 commit it actually came from rather than the branch tip (demo/README.md).
 
+## Reporting
+
+A bug: https://github.com/DrJesseGlass/ic-git/issues/new/choose. A security
+problem: privately, through the form SECURITY.md names, never in a public
+issue.
+
 ## Development
 
 ```sh
