@@ -8,7 +8,7 @@ description = "Builds .wat and .lang sources to wasm for ungoverned repos (docs/
 # Keep candid pinned to the version ic-dev-kit-rs uses (see canisters/combined).
 candid = "0.10"
 serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = { version = "0.4", features = ["serde"] }
 
 # Track B, rung R0 (see ROADMAP.md): on-chain WAT -> wasm assembler plus a

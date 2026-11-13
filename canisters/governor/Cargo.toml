@@ -14,5 +14,5 @@ ic-multisig = { version = "0.2", features = ["candid"] }
 ic-cdk = "0.20"
 candid = "0.10"
 serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
