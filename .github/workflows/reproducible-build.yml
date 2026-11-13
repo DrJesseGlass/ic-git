@@ -76,16 +76,20 @@ jobs:
       - name: Extract the built wasm
         run: |
           id=$(docker create ic-git-build)
-          docker cp "$id:/build/git_canister.wasm" "$RUNNER_TEMP/git_canister.wasm"
-          docker cp "$id:/build/git_canister.wasm.gz" "$RUNNER_TEMP/git_canister.wasm.gz" 2>/dev/null || true
-          docker cp "$id:/build/git_canister.wasm.sha256" "$RUNNER_TEMP/git_canister.wasm.sha256"
+          # The canister on umobs is combined_canister.wasm; releases before
+          # the canister split (step 12) named it git_canister.wasm.
+          name=combined_canister
+          docker cp "$id:/build/$name.wasm.sha256" "$RUNNER_TEMP/$name.wasm.sha256" 2>/dev/null \
+            || { name=git_canister; docker cp "$id:/build/$name.wasm.sha256" "$RUNNER_TEMP/$name.wasm.sha256"; }
+          docker cp "$id:/build/$name.wasm" "$RUNNER_TEMP/$name.wasm"
+          docker cp "$id:/build/$name.wasm.gz" "$RUNNER_TEMP/$name.wasm.gz" 2>/dev/null || true
           # Releases before the governor have none; the check below then
           # covers ic-git alone.
           for f in governor.wasm governor.wasm.gz governor.wasm.sha256; do
             docker cp "$id:/build/$f" "$RUNNER_TEMP/$f" 2>/dev/null || true
           done
           docker rm "$id" >/dev/null
-          (cd "$RUNNER_TEMP" && sha256sum -c git_canister.wasm.sha256)
+          (cd "$RUNNER_TEMP" && sha256sum -c $name.wasm.sha256)
           if [ -f "$RUNNER_TEMP/governor.wasm.sha256" ]; then (cd "$RUNNER_TEMP" && sha256sum -c governor.wasm.sha256); fi
 
       - name: Summary
@@ -101,11 +105,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: git_canister-${{ steps.build.outputs.commit }}
+          name: ic-git-${{ steps.build.outputs.commit }}
           path: |
-            ${{ runner.temp }}/git_canister.wasm
-            ${{ runner.temp }}/git_canister.wasm.gz
-            ${{ runner.temp }}/git_canister.wasm.sha256
+            ${{ runner.temp }}/*_canister.wasm
+            ${{ runner.temp }}/*_canister.wasm.gz
+            ${{ runner.temp }}/*_canister.wasm.sha256
             ${{ runner.temp }}/governor.wasm
             ${{ runner.temp }}/governor.wasm.gz
             ${{ runner.temp }}/governor.wasm.sha256

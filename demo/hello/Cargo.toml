@@ -1,5 +1,5 @@
 # Standalone: its own [workspace] table keeps this crate out of the ic-git
-# workspace, so nothing here reaches canisters/git's Cargo.lock or the
+# workspace, so nothing here reaches the root Cargo.lock or the
 # attested module hash (REPRODUCIBLE_BUILD.md).
 [workspace]
 

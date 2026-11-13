@@ -7,7 +7,7 @@
 # recorded like any other change.
 version: 2
 updates:
-  # The canister workspace: canisters/git and canisters/governor share the
+  # The canister workspace: canisters/combined and canisters/governor share the
   # root Cargo.lock, the input to the attested module hash.
   - package-ecosystem: cargo
     directory: /
@@ -23,7 +23,7 @@ updates:
       cargo-minor-patch:
         update-types: [minor, patch]
     ignore:
-      # Kept at the versions ic-dev-kit-rs uses (canisters/git/Cargo.toml):
+      # Kept at the versions ic-dev-kit-rs uses (canisters/combined/Cargo.toml):
       # at 0.x a minor bump is a breaking one, so only patches come on
       # their own. ic-dev-kit-rs and ic-multisig are this project's own
       # crates and move by hand with their releases.

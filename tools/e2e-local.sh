@@ -103,8 +103,9 @@ call() {
 ok_text() { sed -n 's/.*Ok = "\([^"]*\)".*/\1/p'; }
 
 section "build"
-(cd "$ROOT" && cargo build -q --target wasm32-unknown-unknown --release -p git_canister -p governor_canister)
-GIT_WASM=$ROOT/target/wasm32-unknown-unknown/release/git_canister.wasm
+(cd "$ROOT" && cargo build -q --target wasm32-unknown-unknown --release -p combined_canister -p governor_canister)
+GIT_WASM=$ROOT/target/wasm32-unknown-unknown/release/combined_canister.wasm
+DID=$ROOT/canisters/combined/combined.did
 GOV_WASM=$ROOT/target/wasm32-unknown-unknown/release/governor_canister.wasm
 NAMES_WASM=
 if [ -d "$NAMES_REPO/canisters/names" ]; then
@@ -127,8 +128,15 @@ if [ -n "$BASE_REF" ] && [ "$BASE_REF" != none ]; then
     exit 1
   fi
   git -C "$ROOT" worktree add -q --detach "$BASE_SRC" "$BASE_REF"
-  (cd "$BASE_SRC" && CARGO_TARGET_DIR="$ROOT/target/e2e-base" cargo build -q --target wasm32-unknown-unknown --release -p git_canister)
-  BASE_WASM=$ROOT/target/e2e-base/wasm32-unknown-unknown/release/git_canister.wasm
+  # Releases before step 12 of the canister split call the canister
+  # git_canister, in canisters/git.
+  if [ -d "$BASE_SRC/canisters/combined" ]; then
+    BASE_PKG=combined_canister BASE_DID=$BASE_SRC/canisters/combined/combined.did
+  else
+    BASE_PKG=git_canister BASE_DID=$BASE_SRC/canisters/git/git.did
+  fi
+  (cd "$BASE_SRC" && CARGO_TARGET_DIR="$ROOT/target/e2e-base" cargo build -q --target wasm32-unknown-unknown --release -p "$BASE_PKG")
+  BASE_WASM=$ROOT/target/e2e-base/wasm32-unknown-unknown/release/$BASE_PKG.wasm
   echo "base release $BASE_REF: $BASE_WASM"
 fi
 
@@ -142,9 +150,9 @@ cat > "$WORK/dfx.json" <<EOF
 {
   "version": 1,
   "canisters": {
-    "git": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] },
-    "base": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] },
-    "ruled": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$ROOT/canisters/git/git.did", "build": [] },
+    "git": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
+    "base": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
+    "ruled": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
     "governor": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] }$NAMES_ENTRY
   },
   "networks": { "local": { "bind": "127.0.0.1:$PORT", "type": "ephemeral" } }
@@ -331,7 +339,7 @@ expect "/api votes: the objection with its reason" "$VOTES" '"decision":"object"
 expect "  ...and the count" "$VOTES" '"approvals":1,"objections":1,"required":1,"reached":false'
 # The wallet's consent message for an objection names the reason: OISY shows
 # it to the signer. The encoded argument comes from the codec vectors.
-ARG=$(cd "$ROOT" && cargo test -q -p git_canister --test candid_vectors -- --nocapture 2>/dev/null | awk '$1 == "args:cast_ballot_object" { print $2 }' | sed 's/../\\&/g')
+ARG=$(cd "$ROOT" && cargo test -q -p combined_canister --test candid_vectors -- --nocapture 2>/dev/null | awk '$1 == "args:cast_ballot_object" { print $2 }' | sed 's/../\\&/g')
 CONSENT=$(call anonymous git icrc21_canister_call_consent_message "(record { method = \"cast_ballot\"; arg = blob \"$ARG\"; user_preferences = record { metadata = record { language = \"en\"; utc_offset_minutes = null }; device_spec = null } })")
 expect "consent message: an objection, with its reason" "$CONSENT" 'Object to commit 0123456789ab.*Reason: skips the migration'
 OUT=$(call "$V2" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Approve }, null)")
@@ -460,8 +468,8 @@ if [ -n "$BASE_WASM" ]; then
   section "upgrade from $BASE_REF"
   # State written by the release mainnet starts from, through its own API
   # (its candid), then an upgrade to this build and a check that it carries over.
-  OLD_DID=$BASE_SRC/canisters/git/git.did
-  NEW_DID=$ROOT/canisters/git/git.did
+  OLD_DID=$BASE_DID
+  NEW_DID=$DID
   (cd "$WORK" && dfx canister create base --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
   (cd "$WORK" && dfx canister install base --identity "$OP" --wasm "$BASE_WASM" >/dev/null 2>&1)
   BID=$(cd "$WORK" && dfx canister id base)

@@ -115,7 +115,7 @@ to the working tree and marks the printed commit `-dirty`; never attest a
 Install the container's output, never a native build, so the on-chain hash
 equals the reproducible one by construction. `tools/reproducible-build.sh
 --docker` exports that output to
-`target/reproducible/git_canister-<short-commit>.wasm` (checking its sha256
+`target/reproducible/combined_canister-<short-commit>.wasm` (checking its sha256
 against the hash the container reported) and prints the path on its
 `artifact` line:
 
@@ -123,7 +123,7 @@ against the hash the container reported) and prints the path on its
 tools/reproducible-build.sh --docker
 dfx canister --network https://icp-api.io --identity <controller> \
   install umobs-yiaaa-aaaab-agyrq-cai --mode upgrade \
-  --wasm target/reproducible/git_canister-<short-commit>.wasm.gz --yes
+  --wasm target/reproducible/combined_canister-<short-commit>.wasm.gz --yes
 ```
 
 Install the `.gz`: it is what the recorded hash names (about 2 MB against

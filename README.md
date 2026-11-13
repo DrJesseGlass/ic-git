@@ -35,13 +35,18 @@ sign your tags).
 ## Layout
 
 ```
-canisters/git/          the git canister (Rust)
+canisters/combined/     the canister on umobs: both sides in one module (Rust)
+  src/lib.rs            HTTP routing + candid admin API
+crates/git/             the git side (docs/CANISTER_SPLIT.md)
   src/store.rs          stable-memory objects/refs/repos
   src/smart_http.rs     pkt-line codec, services, ref advertisement
   src/pack.rs           closure walk, pack writer, streamed upload-pack
-  src/lib.rs            HTTP routing + candid admin API
   src/site.rs           GET /site/<repo>/<path>: serve a committed static bundle
   src/api.rs            GET /api/...: read-only JSON for the repo browser
+crates/authority/       the authority: tenancy, ballots, deploys, provenance
+crates/common/, crates/types/, crates/compiler/
+                        shared storage helpers, the wire types and proof
+                        checker, the .wat/.lang compiler
 canisters/governor/     the governor: ic-git's only controller once handed
                         over; changes its code only by K-of-N vote
                         (docs/GOVERNOR.md; tools/governor.sh drives it)

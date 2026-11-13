@@ -707,6 +707,22 @@ The steps in one canister:
 The two canisters:
 
 12. **Two builds.**
+    - **In four legs**, each its own release:
+      - 12a. The one-canister build moves out of the way: `canisters/git`
+        becomes `canisters/combined` (`combined_canister`,
+        `combined_canister.wasm`, `combined.did`). It stays on umobs until
+        the cut, carries step 13's freeze and export, and is what a
+        rollback reinstalls. dfx's canister name `git` still means umobs
+        until 12c names the two canisters.
+      - 12b. The message layer, in the crates: both interfaces over
+        inter-canister calls, `submit_job` and `release_job` staged in
+        chunks, each side's caller check, unit-tested. The combined build
+        keeps the in-canister sides.
+      - 12c. The two canister crates below, with the endpoints and HTTP
+        routes split between them, the git canister's id setter, and a
+        local two-canister e2e.
+      - 12d. `publish_git_record`, the cycles top-up, and the
+        reproducible build of both modules.
     - **`canisters/authority` (`authority_canister.wasm`, for umobs).**
       The lifecycle, the authority's endpoints and their consent
       messages. A `GitSide` that sends messages to the git canister,

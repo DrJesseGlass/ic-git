@@ -5,7 +5,7 @@
 #
 #   tools/reproducible-build.sh            build natively (host dfx), print sha256
 #   tools/reproducible-build.sh --docker   build in the pinned container (portable);
-#                                          exports target/reproducible/git_canister-<commit>.wasm
+#                                          exports target/reproducible/combined_canister-<commit>.wasm
 #   tools/reproducible-build.sh --check    also diff the result vs the IC module hash
 #   tools/reproducible-build.sh --allow-dirty  build a tree with uncommitted edits
 #
@@ -64,10 +64,10 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 echo "source commit       : $commit"
 
-# Copy /build/$4 (default git_canister.wasm) out of a built image to $2 and
+# Copy /build/$4 (default combined_canister.wasm) out of a built image to $2 and
 # check that its sha256 is $3 -- the hash the container itself reported.
 export_wasm() {
-  local image=$1 dest=$2 want=$3 name=${4:-git_canister.wasm} id
+  local image=$1 dest=$2 want=$3 name=${4:-combined_canister.wasm} id
   mkdir -p "$(dirname "$dest")"
   id=$(docker create "$image")
   docker cp "$id:/build/$name" "$dest"
@@ -109,15 +109,15 @@ if [ "$use_docker" = 1 ]; then
   # what gets installed (Dockerfile.build explains why), so it is the hash
   # the chain reports; the raw hash is kept for older records and readers.
   hashes=$(docker run --rm ic-git-build 2>/dev/null)
-  built_wasm=$(echo "$hashes" | awk '$2=="git_canister.wasm"{print $1}')
-  built=$(echo "$hashes" | awk '$2=="git_canister.wasm.gz"{print $1}')
+  built_wasm=$(echo "$hashes" | awk '$2=="combined_canister.wasm"{print $1}')
+  built=$(echo "$hashes" | awk '$2=="combined_canister.wasm.gz"{print $1}')
   [ -n "$built" ] || built=$built_wasm   # recipes before the gzip step
   # Export the artifacts: what gets INSTALLED must be the container's output,
   # not a native rebuild, or the on-chain hash is not the reproducible one.
-  out="target/reproducible/git_canister-${commit:0:7}.wasm"
-  export_wasm ic-git-build "$out" "$built_wasm" git_canister.wasm
+  out="target/reproducible/combined_canister-${commit:0:7}.wasm"
+  export_wasm ic-git-build "$out" "$built_wasm" combined_canister.wasm
   if [ "$built" != "$built_wasm" ]; then
-    export_wasm ic-git-build "$out.gz" "$built" git_canister.wasm.gz
+    export_wasm ic-git-build "$out.gz" "$built" combined_canister.wasm.gz
     echo "raw wasm sha256     : $built_wasm"
     echo "artifact            : $out.gz  (install this one)"
   else

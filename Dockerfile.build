@@ -69,9 +69,9 @@ RUN cargo fetch --locked --target wasm32-unknown-unknown \
     && . ./tools/build-env.sh \
     && dfx build --network ic git \
     && sha256sum -c /tmp/Cargo.lock.sha256 \
-    && cp .dfx/ic/canisters/git/git.wasm git_canister.wasm \
-    && gzip -9 -n -c git_canister.wasm > git_canister.wasm.gz \
-    && sha256sum git_canister.wasm git_canister.wasm.gz | tee git_canister.wasm.sha256 \
+    && cp .dfx/ic/canisters/git/git.wasm combined_canister.wasm \
+    && gzip -9 -n -c combined_canister.wasm > combined_canister.wasm.gz \
+    && sha256sum combined_canister.wasm combined_canister.wasm.gz | tee combined_canister.wasm.sha256 \
     && cargo build --locked --release --target wasm32-unknown-unknown -p governor_canister \
     && sha256sum -c /tmp/Cargo.lock.sha256 \
     && cp target/wasm32-unknown-unknown/release/governor_canister.wasm governor.wasm \
@@ -98,4 +98,4 @@ RUN cargo fetch --locked --target wasm32-unknown-unknown \
 ARG SOURCE_COMMIT=unknown
 LABEL org.opencontainers.image.revision=${SOURCE_COMMIT}
 
-CMD ["cat", "/build/git_canister.wasm.sha256", "/build/governor.wasm.sha256"]
+CMD ["cat", "/build/combined_canister.wasm.sha256", "/build/governor.wasm.sha256"]
