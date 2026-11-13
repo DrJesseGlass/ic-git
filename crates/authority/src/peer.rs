@@ -1,45 +1,32 @@
 //! The git side as another canister (docs/CANISTER_SPLIT.md, phase 3 step
-//! 12b): its principal, which an operator sets and which alone may call
-//! this side's git-facing endpoints; and the `GitSide` that sends it
+//! 12b): its principal (`GIT`), which an operator sets and which alone may
+//! call this side's git-facing endpoints; and the `GitSide` that sends it
 //! messages (`ic_git_types::wire`), one call each, except the release job,
 //! whose reply comes back in chunks. The combined build installs none of
 //! this: there the git side is `for_authority::Git`, in the same canister.
 //! The two-canister build (step 12c) installs `GIT_CANISTER` at init and
-//! upgrade and guards each git-facing endpoint with `check_caller`.
+//! upgrade and guards each git-facing endpoint (`charge_push`,
+//! `stage_job`, `submit_job`, `notify`) with `GIT.check_caller`.
 
-use crate::kv;
 use candid::Principal;
 use ic_git_common::call::Canister;
+use ic_git_common::peer::Peer;
 use ic_git_types::deploy::Job;
 use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{Fut, Reply};
 use ic_git_types::wire::{self, send, Transport};
 
-/// The git canister's principal, as text.
-const GIT_KEY: &str = "peer:git_canister";
+/// The git canister, once an operator has named it. The canister's setter
+/// checks first, through the management canister, that it is governed as
+/// this one is (step 12c); `GIT.set` only records the answer.
+pub const GIT: Peer = Peer {
+    key: "peer:git_canister",
+    name: "git canister",
+};
 
-/// The git canister, once an operator has named it.
-pub fn git_canister() -> Option<Principal> {
-    kv::get_json::<String>(GIT_KEY).and_then(|t| Principal::from_text(t).ok())
-}
-
-/// Name the git canister. The canister's setter checks first, through the
-/// management canister, that it is governed as this one is (step 12c);
-/// this only records the answer.
-pub fn set_git_canister(id: Principal) {
-    kv::set_json(GIT_KEY, &id.to_text());
-}
-
-/// Is `caller` the git canister? Every endpoint that takes the git side's
-/// calls (`charge_push`, `stage_job`, `submit_job`, `notify`) asks this
-/// first; before an operator names it, nothing is.
-pub fn check_caller(caller: &Principal) -> Result<(), String> {
-    match git_canister() {
-        Some(git) if git == *caller => Ok(()),
-        Some(_) => Err("only the git canister may call this".into()),
-        None => Err("no git canister is set; only it may call this".into()),
-    }
+fn git_canister() -> Option<Principal> {
+    GIT.get()
 }
 
 /// The git side, reached by messages over `transport`.
@@ -121,18 +108,16 @@ mod tests {
     use ic_git_types::wire::{Message, MAX_CHUNK};
     use std::cell::RefCell;
 
+    /// The transport calls whatever the record names at the time.
     #[test]
-    fn only_the_named_git_canister_may_call() {
+    fn the_transport_follows_the_named_git_canister() {
         let git = Principal::from_slice(&[1; 8]);
-        let other = Principal::from_slice(&[2; 8]);
-        assert!(check_caller(&git).is_err(), "nothing may call before the git canister is named");
-        assert_eq!(git_canister(), None);
-        set_git_canister(git);
-        assert_eq!(git_canister(), Some(git));
-        assert!(check_caller(&git).is_ok());
-        assert!(check_caller(&other).is_err());
-        assert!(check_caller(&Principal::anonymous()).is_err());
-        kv::remove(GIT_KEY);
+        assert_eq!((GIT_CANISTER.transport.id)(), None);
+        assert_eq!(GIT.check_caller(&git), Err("no git canister is set; only it may call this".into()));
+        GIT.set(git);
+        assert_eq!((GIT_CANISTER.transport.id)(), Some(git));
+        assert_eq!(GIT.check_caller(&git), Ok(()));
+        crate::kv::remove(GIT.key);
     }
 
     fn enc<T: candid::CandidType>(v: T) -> Vec<u8> {
@@ -200,7 +185,7 @@ mod tests {
             }
             m if m == wire::StageJob::METHOD => {
                 let m: wire::StageJob = dec(arg);
-                enc(for_git::stage_job(m.seq, m.index, m.bytes))
+                enc(for_git::stage_job(m.seq, &m.repo, &m.commit, m.total, m.index, m.bytes))
             }
             m if m == wire::SubmitJob::METHOD => {
                 let m: wire::SubmitJob = dec(arg);
@@ -419,14 +404,14 @@ mod tests {
         assert_eq!(queued(), before);
 
         // Then it goes through: one staged chunk, then the submit with the tail.
-        assert_eq!(block_on(authority.submit_job(100, name, &hex, job())), Ok(()));
+        assert_eq!(block_on(authority.submit_job(100, name, &hex, job())), Ok(Ok(())));
         assert_eq!(authority.transport.count(wire::StageJob::METHOD), 2);
         assert_eq!(authority.transport.count(wire::SubmitJob::METHOD), 1);
         assert_eq!(queued(), before + 1);
         assert!(for_git::taken(100));
 
         // The answer was lost: sent again, taken once.
-        assert_eq!(block_on(authority.submit_job(100, name, &hex, job())), Ok(()));
+        assert_eq!(block_on(authority.submit_job(100, name, &hex, job())), Ok(Ok(())));
         assert_eq!(queued(), before + 1);
 
         // A later item whose answer is lost on the submit itself: the
@@ -440,8 +425,19 @@ mod tests {
             Err(Failure::Lost("timed out".into()))
         );
         assert_eq!(queued(), before + 2);
-        assert_eq!(block_on(authority.submit_job(101, name, &next_hex, ic_git_git::jobs::resolve(name, &next))), Ok(()));
+        assert_eq!(block_on(authority.submit_job(101, name, &next_hex, ic_git_git::jobs::resolve(name, &next))), Ok(Ok(())));
         assert_eq!(queued(), before + 2);
+
+        // A job that does not decode once whole is taken and refused for
+        // good, and the commit's status says so.
+        let garbage = ic_git_git::peer::Authority { transport: Loopback::new(false) };
+        assert_eq!(
+            block_on(garbage.submit_job(103, name, &next_hex, Job { wasm: None, evm: None })),
+            Ok(Ok(())),
+            "an empty job decodes"
+        );
+        let st = crate::deploy::get_status(name);
+        assert!(st.is_none(), "nothing refused yet");
 
         // The other two calls cross too.
         assert_eq!(block_on(authority.charge_push(name, 10)), Ok(Ok(())), "an ownerless repo pays nothing");

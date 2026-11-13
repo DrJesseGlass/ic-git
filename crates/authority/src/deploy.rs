@@ -232,6 +232,27 @@ pub fn accept(repo: &str, commit: Oid, job: Job) -> bool {
     true
 }
 
+/// A job the git side submitted that this side will never run -- too
+/// large to carry across, or not readable once it arrived -- recorded as
+/// the commit's failed deploy, so the status says why nothing happened.
+/// Not while a deploy runs: the running one's status is what `accept`
+/// reads to queue nothing twice, and it writes its own outcome.
+pub fn refuse_submitted(repo: &str, commit_hex: &str, why: &str) {
+    if get_status(repo).is_some_and(|s| s.message == DEPLOYING) {
+        return;
+    }
+    put_status(
+        repo,
+        &DeployStatus {
+            commit: commit_hex.to_string(),
+            ok: false,
+            message: format!("the submitted job was refused: {why}"),
+            wasm_len: 0,
+            wasm_sha256: String::new(),
+        },
+    );
+}
+
 /// Re-arm the drain timer if jobs are pending. Called from post_upgrade, since
 /// timers do not survive upgrades. A payload whose job is gone -- drained by
 /// a release that does not know the map, after a rollback -- is dropped, or

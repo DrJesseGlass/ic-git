@@ -1,43 +1,32 @@
 //! The authority as another canister (docs/CANISTER_SPLIT.md, phase 3
-//! step 12b): its principal, which this side takes at init and which alone
-//! may write the mirrors and ask what they govern; and the `AuthoritySide`
-//! that sends it messages (`ic_git_types::wire`), one call each, except a
-//! job, which goes in chunks. The combined build installs none of this:
-//! there the authority is `for_git::Authority`, in the same canister. The
-//! two-canister build (step 12c) installs `AUTHORITY_CANISTER` at init and
-//! upgrade and guards each authority-facing endpoint with `check_caller`.
+//! step 12b): its principal (`AUTHORITY`), which this side takes at init
+//! and which alone may write the mirrors and ask what they govern; and the
+//! `AuthoritySide` that sends it messages (`ic_git_types::wire`), one call
+//! each, except a job, which goes in chunks. The combined build installs
+//! none of this: there the authority is `for_git::Authority`, in the same
+//! canister. The two-canister build (step 12c) installs
+//! `AUTHORITY_CANISTER` at init and upgrade and guards each
+//! authority-facing endpoint (the mirror writes, `check_new_repo`,
+//! `create_repo`, `has_commit`, `record_artifact`, `release_job`,
+//! `release_chunk`) with `AUTHORITY.check_caller`.
 
-use crate::kv;
 use candid::Principal;
 use ic_git_common::call::Canister;
+use ic_git_common::peer::Peer;
 use ic_git_types::authority_side::{AuthoritySide, Event};
 use ic_git_types::deploy::Job;
 use ic_git_types::side::{Failure, Fut, Reply};
 use ic_git_types::wire::{self, pieces, send, Transport};
 
-/// The authority's principal, as text.
-const AUTHORITY_KEY: &str = "peer:authority";
+/// The authority, once this canister has been told it: the git canister's
+/// init argument (step 12c).
+pub const AUTHORITY: Peer = Peer {
+    key: "peer:authority",
+    name: "authority",
+};
 
-/// The authority, once this canister has been told it.
-pub fn authority() -> Option<Principal> {
-    kv::get_json::<String>(AUTHORITY_KEY).and_then(|t| Principal::from_text(t).ok())
-}
-
-/// Name the authority: the git canister's init argument (step 12c).
-pub fn set_authority(id: Principal) {
-    kv::set_json(AUTHORITY_KEY, &id.to_text());
-}
-
-/// Is `caller` the authority? Every endpoint that takes the authority's
-/// calls (the mirror writes, `check_new_repo`, `create_repo`,
-/// `has_commit`, `record_artifact`, `release_job`, `release_chunk`) asks
-/// this first; before the authority is named, nothing is.
-pub fn check_caller(caller: &Principal) -> Result<(), String> {
-    match authority() {
-        Some(a) if a == *caller => Ok(()),
-        Some(_) => Err("only the authority may call this".into()),
-        None => Err("no authority is set; only it may call this".into()),
-    }
+fn authority() -> Option<Principal> {
+    AUTHORITY.get()
 }
 
 /// The authority, reached by messages over `transport`.
@@ -61,24 +50,26 @@ impl<T: Transport> AuthoritySide for Authority<T> {
     /// whose call fails fails the whole, and the outbox sends the item
     /// again later; so does a submit the authority refuses, which it does
     /// only when a chunk it was sent is gone (an upgrade between), and
-    /// then it took nothing.
-    fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, job: Job) -> Fut<'a, Reply<()>> {
+    /// then it took nothing. A piece the authority refuses is the job
+    /// refused for good (too large; it recorded why): the answer, and the
+    /// outbox drops the item.
+    fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, job: Job) -> Fut<'a, Reply<Result<(), String>>> {
         Box::pin(async move {
             let body = candid::encode_one(&job).map_err(|e| Failure::NotDelivered(format!("the job does not encode: {e}")))?;
+            let total = body.len() as u64;
             let mut chunks = pieces(&body);
             let tail = chunks.pop().expect("at least one piece").to_vec();
             for (index, chunk) in chunks.iter().enumerate() {
-                let staged = send(
-                    &self.transport,
-                    wire::StageJob {
-                        seq,
-                        index: index as u32,
-                        bytes: chunk.to_vec(),
-                    },
-                )
-                .await?;
-                if let Err(e) = staged {
-                    return Err(Failure::NotDelivered(format!("the authority refused chunk {index}: {e}")));
+                let stage = wire::StageJob {
+                    seq,
+                    repo: repo.into(),
+                    commit: commit_hex.into(),
+                    total,
+                    index: index as u32,
+                    bytes: chunk.to_vec(),
+                };
+                if let Err(e) = send(&self.transport, stage).await? {
+                    return Ok(Err(e));
                 }
             }
             let submit = wire::SubmitJob {
@@ -89,7 +80,7 @@ impl<T: Transport> AuthoritySide for Authority<T> {
                 tail,
             };
             match send(&self.transport, submit).await? {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(Ok(())),
                 Err(e) => Err(Failure::NotDelivered(format!("the authority did not take the job: {e}"))),
             }
         })
@@ -108,27 +99,26 @@ mod tests {
     use ic_git_types::wire::{Message, MAX_CHUNK};
     use std::cell::RefCell;
 
+    /// The transport calls whatever the record names at the time.
     #[test]
-    fn only_the_named_authority_may_call() {
+    fn the_transport_follows_the_named_authority() {
         let authority = Principal::from_slice(&[1; 8]);
-        let other = Principal::from_slice(&[2; 8]);
-        assert!(check_caller(&authority).is_err(), "nothing may call before the authority is named");
-        assert_eq!(super::authority(), None);
-        set_authority(authority);
-        assert_eq!(super::authority(), Some(authority));
-        assert!(check_caller(&authority).is_ok());
-        assert!(check_caller(&other).is_err());
-        assert!(check_caller(&Principal::anonymous()).is_err());
-        kv::remove(AUTHORITY_KEY);
+        assert_eq!((AUTHORITY_CANISTER.transport.id)(), None);
+        assert_eq!(AUTHORITY.check_caller(&authority), Err("no authority is set; only it may call this".into()));
+        AUTHORITY.set(authority);
+        assert_eq!((AUTHORITY_CANISTER.transport.id)(), Some(authority));
+        assert_eq!(AUTHORITY.check_caller(&authority), Ok(()));
+        crate::kv::remove(AUTHORITY.key);
     }
 
-    /// A transport that records each call's method and argument size and
-    /// answers as told: the authority's refusal of the next submit, or
-    /// nothing at all for the next call of a method.
+    /// A transport that records each call's method and argument and
+    /// answers as told: the authority's refusal of the next submit or the
+    /// next piece, or nothing at all for the next call of a method.
     #[derive(Default)]
     struct Recorder {
         calls: RefCell<Vec<(&'static str, Vec<u8>)>>,
         refuse_submit: RefCell<bool>,
+        refuse_stage: RefCell<bool>,
         drop_next: RefCell<Option<&'static str>>,
     }
 
@@ -147,7 +137,13 @@ mod tests {
                 return ic_git_types::side::ready(Err(Failure::NotDelivered("stopped".into())));
             }
             let reply = match method {
-                m if m == wire::StageJob::METHOD => candid::encode_one(Ok::<(), String>(())),
+                m if m == wire::StageJob::METHOD => {
+                    if self.refuse_stage.replace(false) {
+                        candid::encode_one(Err::<(), String>("too large".into()))
+                    } else {
+                        candid::encode_one(Ok::<(), String>(()))
+                    }
+                }
                 m if m == wire::SubmitJob::METHOD => {
                     if self.refuse_submit.replace(false) {
                         candid::encode_one(Err::<(), String>("chunk 0 of item 1 is not staged".into()))
@@ -178,23 +174,26 @@ mod tests {
     }
 
     /// A job over a chunk goes as staged pieces of at most a chunk, in
-    /// order, then the submit that names them and carries the rest, and
-    /// the pieces make the encoded job again; one under a chunk is the
-    /// submit alone. The authority's refusal is not delivered, and so is
-    /// a piece whose call failed, after which nothing more is sent.
+    /// order, each naming the commit and the body's length, then the
+    /// submit that names them and carries the rest, and the pieces make
+    /// the encoded job again; one under a chunk is the submit alone. The
+    /// submit refused (the chunks gone) is not delivered, and so is a
+    /// piece whose call failed, after which nothing more is sent; a piece
+    /// refused is the job refused for good.
     #[test]
     fn a_job_goes_in_staged_chunks_then_the_submit() {
         let authority = Authority { transport: Recorder::default() };
         let big = job(2 * MAX_CHUNK + 5);
         let encoded = candid::encode_one(&big).unwrap();
-        assert_eq!(block_on(authority.submit_job(7, "r", "c", big)), Ok(()));
+        assert_eq!(block_on(authority.submit_job(7, "r", "c", big)), Ok(Ok(())));
         let calls = authority.transport.calls.borrow().clone();
         assert_eq!(calls.len(), 3);
         let mut body = Vec::new();
         for (i, (method, arg)) in calls.iter().enumerate().take(2) {
             assert_eq!(*method, wire::StageJob::METHOD);
             let m: wire::StageJob = candid::decode_one(arg).unwrap();
-            assert_eq!((m.seq, m.index), (7, i as u32));
+            assert_eq!((m.seq, m.repo.as_str(), m.commit.as_str(), m.index), (7, "r", "c", i as u32));
+            assert_eq!(m.total, encoded.len() as u64);
             assert_eq!(m.bytes.len(), MAX_CHUNK);
             body.extend(m.bytes);
         }
@@ -206,7 +205,7 @@ mod tests {
         assert_eq!(body, encoded);
 
         authority.transport.calls.borrow_mut().clear();
-        assert_eq!(block_on(authority.submit_job(8, "r", "c", job(10))), Ok(()));
+        assert_eq!(block_on(authority.submit_job(8, "r", "c", job(10))), Ok(Ok(())));
         let calls = authority.transport.calls.borrow().clone();
         assert_eq!(calls.len(), 1);
         let m: wire::SubmitJob = candid::decode_one(&calls[0].1).unwrap();
@@ -225,5 +224,13 @@ mod tests {
             Err(Failure::NotDelivered("stopped".into()))
         );
         assert_eq!(authority.transport.calls.borrow().len(), 1, "nothing after the failed piece");
+
+        authority.transport.calls.borrow_mut().clear();
+        *authority.transport.refuse_stage.borrow_mut() = true;
+        assert_eq!(
+            block_on(authority.submit_job(11, "r", "c", job(MAX_CHUNK + 1))),
+            Ok(Err("too large".into()))
+        );
+        assert_eq!(authority.transport.calls.borrow().len(), 1, "nothing after the refused piece");
     }
 }

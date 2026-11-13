@@ -57,8 +57,9 @@ pub async fn charge_push(repo: &str, bytes: u64) -> Reply<Result<(), String>> {
     via!(charge_push(repo, bytes))
 }
 
-/// Hand the authority a commit's deploy job (outbox item `seq`).
-pub async fn submit_job(seq: u64, repo: &str, commit_hex: &str, job: Job) -> Reply<()> {
+/// Hand the authority a commit's deploy job (outbox item `seq`). Its
+/// `Err` is a job it will never take, which it has recorded.
+pub async fn submit_job(seq: u64, repo: &str, commit_hex: &str, job: Job) -> Reply<Result<(), String>> {
     via!(submit_job(seq, repo, commit_hex, job))
 }
 

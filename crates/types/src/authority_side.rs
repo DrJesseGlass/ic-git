@@ -41,8 +41,11 @@ pub trait AuthoritySide {
     /// Hand the authority a commit's deploy job (outbox item `seq`): the
     /// repo's configs as the git side mirrors them and each leg's proven
     /// artifact. The authority queues it unless it took `seq` already or a
-    /// job for the same (repo, commit) is waiting.
-    fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, job: Job) -> Fut<'a, Reply<()>>;
+    /// job for the same (repo, commit) is waiting. Its `Err` is a job it
+    /// will never take (too large to carry across), which it has recorded
+    /// as the commit's failed deploy: the outbox drops the item instead of
+    /// sending it again.
+    fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, job: Job) -> Fut<'a, Reply<Result<(), String>>>;
 
     /// Tell the authority what happened (outbox item `seq`).
     fn notify<'a>(&'a self, seq: u64, event: Event) -> Fut<'a, Reply<()>>;

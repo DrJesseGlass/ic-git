@@ -9,3 +9,4 @@ pub mod clock;
 pub mod httpjson;
 pub mod kv;
 pub mod memory;
+pub mod peer;

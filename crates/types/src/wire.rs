@@ -28,6 +28,12 @@ use serde::Deserialize;
 /// to spare.
 pub const MAX_CHUNK: usize = 1 << 20;
 
+/// The most bytes an encoded job may come to, which both sides hold to:
+/// what the governor takes for a module, which is the most of a job. The
+/// authority refuses a larger one for good, and the git side's outbox
+/// drops it.
+pub const MAX_JOB_BYTES: usize = 32 << 20;
+
 /// One call across the boundary: its argument, where it goes, what comes
 /// back.
 pub trait Message: CandidType {
@@ -114,13 +120,17 @@ messages! {
 messages! {
     /// `AuthoritySide::charge_push`.
     ChargePush = "charge_push" -> Result<(), String> { repo: String, bytes: u64 }
-    /// Chunk `index` (from 0) of the job outbox item `seq` submits, ahead
-    /// of the `submit_job` that names it. Staging the same chunk again is
-    /// fine, as a retry does.
-    StageJob = "stage_job" -> Result<(), String> { seq: u64, index: u32, bytes: Vec<u8> }
+    /// Chunk `index` (from 0) of the job outbox item `seq` submits for
+    /// `commit` of `repo`, ahead of the `submit_job` that names it; `total`
+    /// is the whole body's length. Staging the same chunk again is fine,
+    /// as a retry does. The authority's `Err` is final: a job over
+    /// `MAX_JOB_BYTES`, or one whose chunks outrun `total`, is recorded as
+    /// the commit's failed deploy, and the git side drops the item.
+    StageJob = "stage_job" -> Result<(), String> { seq: u64, repo: String, commit: String, total: u64, index: u32, bytes: Vec<u8> }
     /// `AuthoritySide::submit_job`: the job's body is the `staged` chunks
-    /// staged before, in index order, then `tail`. The authority refuses
-    /// one whose chunks it does not hold, and takes nothing then.
+    /// staged before, in index order, then `tail`. The authority's `Err`
+    /// says it does not hold the chunks (an upgrade dropped them) and took
+    /// nothing: the git side stages them again, later.
     SubmitJob = "submit_job" -> Result<(), String> { seq: u64, repo: String, commit: String, staged: u32, tail: Vec<u8> }
     /// `AuthoritySide::notify`.
     Notify = "notify" -> () { seq: u64, event: Event }

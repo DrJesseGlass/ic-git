@@ -17,55 +17,58 @@ use candid::Principal;
 use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{ready, Fut, Reply};
-use ic_git_types::wire::{pieces, ReleaseHead};
+use ic_git_types::wire::{pieces, ReleaseHead, MAX_CHUNK};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-/// How many release jobs' remaining chunks wait to be fetched.
+/// How many release jobs' bodies wait to be fetched.
 pub const STAGED_REPLIES: usize = 4;
 
 thread_local! {
-    /// Handle -> the chunks after the head, oldest first.
-    static STAGED: RefCell<VecDeque<(u64, Vec<Vec<u8>>)>> = const { RefCell::new(VecDeque::new()) };
+    /// Handle -> the whole encoded job, oldest first. The body is kept
+    /// once, and each chunk is cut from it as it is asked for.
+    static STAGED: RefCell<VecDeque<(u64, Vec<u8>)>> = const { RefCell::new(VecDeque::new()) };
     static NEXT_HANDLE: Cell<u64> = const { Cell::new(1) };
 }
 
 /// The release job over messages: its head. A job that fits in one piece
-/// is the head alone; the rest of a larger one waits under the handle.
+/// is the head alone; a larger one's body waits under the handle.
 pub fn release_head(repo: &str) -> Result<ReleaseHead, String> {
     let Release { commit, job } = crate::jobs::release(repo)?;
     let body = candid::encode_one(&job).map_err(|e| format!("the job does not encode: {e}"))?;
-    let mut chunks = pieces(&body).into_iter().map(<[u8]>::to_vec);
-    let head = chunks.next().unwrap_or_default();
-    let rest: Vec<Vec<u8>> = chunks.collect();
-    let more = rest.len() as u32;
-    let handle = if rest.is_empty() {
-        0
-    } else {
-        let handle = NEXT_HANDLE.with(|h| h.replace(h.get() + 1));
-        STAGED.with(|s| {
-            let mut s = s.borrow_mut();
-            while s.len() >= STAGED_REPLIES {
-                s.pop_front();
-            }
-            s.push_back((handle, rest));
-        });
-        handle
-    };
+    let more = (pieces(&body).len() - 1) as u32;
+    if more == 0 {
+        return Ok(ReleaseHead { commit, handle: 0, more, head: body });
+    }
+    let head = body[..MAX_CHUNK].to_vec();
+    let handle = NEXT_HANDLE.with(|h| h.replace(h.get() + 1));
+    STAGED.with(|s| {
+        let mut s = s.borrow_mut();
+        while s.len() >= STAGED_REPLIES {
+            s.pop_front();
+        }
+        s.push_back((handle, body));
+    });
     Ok(ReleaseHead { commit, handle, more, head })
 }
 
 /// Chunk `index` (1 to the head's `more`) of the release job under
-/// `handle`. Refused once the chunks are gone: the authority asks again.
+/// `handle`. Refused once the body is gone: the authority asks again.
 pub fn release_chunk(handle: u64, index: u32) -> Result<Vec<u8>, String> {
     STAGED.with(|s| {
         let s = s.borrow();
-        let (_, rest) = s
+        let (_, body) = s
             .iter()
             .find(|(h, _)| *h == handle)
             .ok_or("the release job's chunks are gone; ask again")?;
-        let i = (index as usize).checked_sub(1).ok_or("chunk 0 is the head")?;
-        rest.get(i).cloned().ok_or_else(|| format!("no chunk {index}; the job has {}", rest.len()))
+        if index == 0 {
+            return Err("chunk 0 is the head".into());
+        }
+        let start = index as usize * MAX_CHUNK;
+        if start >= body.len() {
+            return Err(format!("no chunk {index}; the job has {}", pieces(body).len() - 1));
+        }
+        Ok(body[start..body.len().min(start + MAX_CHUNK)].to_vec())
     })
 }
 

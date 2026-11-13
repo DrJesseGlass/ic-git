@@ -729,26 +729,38 @@ The two canisters:
           the time. A call the system gave up waiting on (`SysUnknown`)
           is `Lost`; anything else -- the id not set, the other canister
           stopped or trapped -- is `NotDelivered`.
-        - `ic_git_authority::peer`: the git canister's id (an operator
-          names it; `check_caller` is what its git-facing endpoints ask),
-          and `Git<T>`, the `GitSide` over messages, installed as
-          `GIT_CANISTER`. `release_job` fetches the head and then each
-          chunk the head names, and decodes the body.
-        - `ic_git_git::peer`: the authority's id (an init argument;
-          `check_caller` likewise), and `Authority<T>`, the
-          `AuthoritySide` over messages, installed as
-          `AUTHORITY_CANISTER`. `submit_job` stages every piece of the
-          encoded job but the last (`stage_job`, at most `MAX_CHUNK`
-          each) and sends the last with the submit that names them.
+        - `ic_git_common::peer::Peer`: where each side keeps the other
+          canister's principal and the one rule for who may call the
+          endpoints that take its messages (`check_caller`): nothing
+          before it is named, only it after.
+        - `ic_git_authority::peer`: the git canister (`GIT`, which an
+          operator names), and `Git<T>`, the `GitSide` over messages,
+          installed as `GIT_CANISTER`. `release_job` fetches the head and
+          then each chunk the head names, and decodes the body.
+        - `ic_git_git::peer`: the authority (`AUTHORITY`, an init
+          argument), and `Authority<T>`, the `AuthoritySide` over
+          messages, installed as `AUTHORITY_CANISTER`. `submit_job`
+          stages every piece of the encoded job but the last
+          (`stage_job`, at most `MAX_CHUNK` each, each naming the commit
+          and the body's length) and sends the last with the submit that
+          names them.
+        - A job the authority will never run is refused for good, not
+          retried: `AuthoritySide::submit_job` answers the callee's
+          `Result`, its `Err` is a job the authority has recorded as the
+          commit's failed deploy (`deploy::refuse_submitted`), and the
+          outbox drops the item instead of holding every item behind it.
+          That is a body over `wire::MAX_JOB_BYTES` (refused at its first
+          chunk, before the rest is sent), chunks that outrun the length
+          named, or a whole body that does not decode. A submit the
+          authority cannot assemble (an upgrade dropped the chunks) is
+          not delivered, and the outbox stages them again later.
         - The receivers: the authority's `for_git::stage_job` and
           `submit_staged` (one item's chunks at a time, in heap, capped
-          at `MAX_JOB_BYTES`; an item is taken once its body is whole,
-          whether or not it decodes, so a bad one cannot hold the outbox;
-          a submit missing a chunk is refused and nothing is taken, and
-          the git side's retry stages them all again); the git side's
-          `for_authority::release_head` and `release_chunk` (the newest
-          `STAGED_REPLIES` jobs' remaining chunks, in heap; one that is
-          gone is a refusal that says to ask again).
+          at `MAX_JOB_BYTES`, moved into the body rather than copied);
+          the git side's `for_authority::release_head` and
+          `release_chunk` (the newest `STAGED_REPLIES` jobs' bodies, in
+          heap, each kept once and cut as asked for; one that is gone is
+          a refusal that says to ask again).
         - Tests: each message through the real receivers of the other
           crate as the endpoints will call them, with a chosen call
           refused, not delivered or lost; the chunking from both ends;

@@ -8,7 +8,9 @@
 //! however often it arrives: a lost answer is settled by sending again.
 //! Delivery stops at the first item the authority does not answer, so the
 //! authority sees the items in order and one high-water mark is enough
-//! there. In one canister every item is answered at once and nothing waits.
+//! there. A job the authority refuses for good (too large to carry across;
+//! it records why) is dropped, or it would hold every item behind it. In
+//! one canister every item is answered at once and nothing waits.
 //!
 //! A job is indexed by (repo, commit), so a commit whose job waits is not
 //! built again, and a deploy-config change rebuilds the repo's waiting
@@ -179,10 +181,11 @@ pub async fn drain() {
                 let key = job_key(&repo, &commit);
                 (crate::to_authority::submit_job(seq, &repo, &commit, job).await, Some(key))
             }
-            Outgoing::Notify { event } => (crate::to_authority::notify(seq, event).await, None),
+            Outgoing::Notify { event } => (crate::to_authority::notify(seq, event).await.map(Ok), None),
         };
         match reply {
-            Ok(()) => {
+            // Answered: taken, or refused for good. Either way it is done.
+            Ok(_) => {
                 remove(seq);
                 // The index names this item unless a rebuild replaced it
                 // while the authority answered.
@@ -241,6 +244,8 @@ mod tests {
     struct Recorder {
         taken: RefCell<Vec<(u64, String)>>,
         fail: Cell<Option<Failure>>,
+        /// Refuse the next job for good.
+        refuse: Cell<bool>,
     }
 
     impl AuthoritySide for Recorder {
@@ -248,13 +253,16 @@ mod tests {
             ready(Ok(Ok(())))
         }
 
-        fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, _job: Job) -> Fut<'a, Reply<()>> {
+        fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, _job: Job) -> Fut<'a, Reply<Result<(), String>>> {
             if let Some(f) = self.fail.take() {
                 self.fail.set(Some(f.clone()));
                 return ready(Err(f));
             }
+            if self.refuse.replace(false) {
+                return ready(Ok(Err("too large".into())));
+            }
             self.taken.borrow_mut().push((seq, format!("job {repo}@{commit_hex}")));
-            ready(Ok(()))
+            ready(Ok(Ok(())))
         }
 
         fn notify<'a>(&'a self, seq: u64, event: Event) -> Fut<'a, Reply<()>> {
@@ -328,6 +336,19 @@ mod tests {
             vec![(1, "pushed r@c1".into()), (2, "pushed r@c2".into()), (4, "job r@c3".into())],
             "in sequence, each once"
         );
+
+        // A job refused for good is dropped, and what follows it is
+        // delivered.
+        authority.refuse.set(true);
+        block_on(send(Outgoing::SubmitJob {
+            repo: "r".into(),
+            commit: "c4".into(),
+            job: Job { wasm: None, evm: None },
+        }));
+        block_on(send(pushed("r", "c5")));
+        assert_eq!(len(), 0);
+        assert!(!job_waiting("r", "c4"));
+        assert_eq!(authority.taken.borrow().last().unwrap().1, "pushed r@c5");
         set_test_side(None);
     }
 }
