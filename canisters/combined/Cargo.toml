@@ -20,7 +20,7 @@ serde_json = "1"
 # Track B, rung R4: concurrent fan-out of compile jobs across worker canisters.
 futures = "0.3"
 hex = { version = "0.4", features = ["serde"] }
-base64 = "0.22"
+base64 = "0.23"
 
 # The workspace crates of docs/CANISTER_SPLIT.md, phase 2 step 4: linked
 # into this one canister until phase 3 cuts the boundary.
