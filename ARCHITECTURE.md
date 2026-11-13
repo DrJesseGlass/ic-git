@@ -42,7 +42,7 @@ all the clever work on the read path and keeping the write path dumb.
 
 ```mermaid
 flowchart LR
-    dev[git client] -->|smart HTTP over raw gateway| G[git_canister]
+    dev[git client] -->|smart HTTP over raw gateway| G[combined_canister]
     subgraph IC
         G -->|"objects, refs (stable memory)"| S[(StableBTreeMap store)]
         G -->|"post-receive: chunked upload<br/>create_batch / create_chunk / commit_batch"| A[asset canister]
@@ -50,7 +50,7 @@ flowchart LR
     A -->|serves site| users[browsers]
 ```
 
-- **`git_canister`** (Rust, `ic-cdk` + `ic-stable-structures` +
+- **`combined_canister`** (`canisters/combined`; Rust, `ic-cdk` + `ic-stable-structures` +
   [`ic-dev-kit-rs`](https://github.com/DrJesseGlass/ic-dev-kit-rs)): HTTP
   endpoints, pkt-line codec,
   packfile reader/writer, object store, refs, push auth, deploy trigger.
@@ -62,7 +62,7 @@ flowchart LR
   responses use the dev kit's `StreamingStrategy`/`StreamingCallbackToken`
   types (in the dev kit since v0.3.0).
 - **asset canister**: the stock certified-assets canister from the SDK
-  (`dfx`'s frontend canister). `git_canister`'s principal is granted `Commit`
+  (`dfx`'s frontend canister). the canister's principal is granted `Commit`
   permission so it can upload. Zero custom code here.
 - **(v2) `git-remote-ic`**: a git remote-helper binary that talks to the
   canister with agent calls (chunked, identity-signed) instead of HTTP -

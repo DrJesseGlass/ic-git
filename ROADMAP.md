@@ -165,8 +165,9 @@ the language is a subset we control, not stock Rust.
 
 Status as of this writing: R0 through R4 are DONE and verified on a live
 replica. Each rung's entry below records what was actually built and measured.
-Code lives in canisters/git/src: compile.rs (R0), lang.rs (R1/R2/R3),
-deploy.rs (deploy path), fleet.rs (R4).
+Code lives in crates/compiler/src: compile.rs (R0), lang.rs (R1/R2/R3);
+crates/authority/src/deploy.rs (deploy path); canisters/combined/src/fleet.rs
+(R4).
 
 R0 -- wat2wasm on-chain. DONE.
 compile_wat(text) -> wasm via the pure-Rust `wat` crate, plus a wasmparser
