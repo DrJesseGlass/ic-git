@@ -113,7 +113,7 @@ language-specific object in the system:
 
     rust:   { "lang": "rust", "rustc": "1.94.1", "dfx": "0.31.0",
               "target": "wasm32-unknown-unknown",
-              "cargoLockSha256": "<hex>", "entry": "canisters/git",
+              "cargoLockSha256": "<hex>", "entry": "canisters/combined",
               "baseImage": "rust:1.94.1-slim-bookworm@sha256:<hex>",
               "platform": "linux/amd64", "buildPath": "/build" }
 
