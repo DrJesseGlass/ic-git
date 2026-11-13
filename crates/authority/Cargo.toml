@@ -27,7 +27,7 @@ serde_json = "1"
 futures = "0.3"
 sha2 = "0.10"
 hex = { version = "0.4", features = ["serde"] }
-base64 = "0.22"
+base64 = "0.23"
 # Track A (see ROADMAP.md): sign EVM transactions with threshold ECDSA.
 # sha3 for keccak256; k256 (pure Rust, no getrandom without the rand feature)
 # to decompress the SEC1 pubkey into an EOA and to find the recovery id by
