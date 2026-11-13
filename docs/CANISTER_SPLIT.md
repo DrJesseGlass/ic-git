@@ -678,8 +678,8 @@ The steps in one canister:
       the release (bounded by the approval check when votes are
       required; decision 6.5.4 when they are not), and which file of
       that commit is the site's entrypoint, since the site config lives
-      on the git side until step 12 moves `set_site` to the authority,
-      which can then check the path too.
+      on the git side (step 12c moves the decision -- who may set it --
+      to the authority, and the config stays where the serving is).
     - Tests: the git side's artifacts and their proofs; forged answers
       (another blob, another file's proof, another commit, a malformed
       id, a short proof) refused; an unapproved commit not attested; an
@@ -714,7 +714,8 @@ The two canisters:
         `combined_canister.wasm`, `combined.did`). It stays on umobs until
         the cut, carries step 13's freeze and export, and is what a
         rollback reinstalls. dfx's canister name `git` still means umobs
-        until 12c names the two canisters.
+        until the cut (12c names the two canisters `authority` and
+        `git_canister`).
       - 12b. The message layer, in the crates: both interfaces over
         inter-canister calls, `submit_job` and `release_job` staged in
         chunks, each side's caller check, unit-tested. The combined build
@@ -772,7 +773,65 @@ The two canisters:
           `canister_info` check, `publish_git_record`, all of 12c and 12d.
       - 12c. The two canister crates below, with the endpoints and HTTP
         routes split between them, the git canister's id setter, and a
-        local two-canister e2e.
+        local two-canister e2e. DONE 2026-11-13. What shipped:
+        - `canisters/authority` (`authority_canister`) and `canisters/git`
+          (`git_canister`): each endpoint is the combined canister's, body
+          for body, on the side the listing below puts it; the combined
+          build keeps them all and stays what umobs runs. The authority
+          installs `peer::GIT_CANISTER` as its git side, the git canister
+          `peer::AUTHORITY_CANISTER` as its authority, each in `init` and
+          `post_upgrade` before anything can ask. `post_upgrade` resumes
+          only its own side: the mirrors on the authority, the outbox on
+          the git canister.
+        - The git canister takes the authority's principal as its init
+          argument (`InitArg { authority }`) and says it back
+          (`get_authority`). The authority's `set_git_canister`
+          (operators) names the git canister once: `peer::name_git`
+          reads `canister_info` of the canister and of its one controller
+          and refuses one that runs no code, has any number of
+          controllers but one, controls itself, or whose controller has
+          controllers of its own; the same id again is fine, another is
+          refused for good (`peer::governed`, unit-tested against each
+          refusal). `get_git_canister` says what is named. Until it is,
+          every call across is not delivered, so no repo can be created.
+        - The messages' endpoints take the `wire` structs and are guarded
+          by the other side's principal: on the authority `charge_push`,
+          `stage_job`, `submit_job` and `notify` (`peer::GIT.check_caller`);
+          on the git canister the three mirror writes, `set_site`,
+          `check_new_repo`, `create_repo`, `has_commit`,
+          `record_artifact`, `release_job` and `reply_chunk`
+          (`peer::AUTHORITY.check_caller`). A stranger gets "only the
+          authority may call this", or "only the git canister".
+        - `set_site` crosses: `GitSide::set_site(repo, root)` is the
+          whole config, so a lost answer is settled by asking again. The
+          authority's endpoint checks `can_admin` and sends it; the git
+          side keeps the config and serves by it, as before. It is a
+          direct call, not a mirror: there is no state on the authority
+          for a timer to resend, and the caller is told to try again.
+        - HTTP: the git canister serves git, `/site/` and the git half of
+          `/api`; the authority its half of `/api` and `/feed`. Each
+          answers 404 for the other's routes; clients learn both hosts in
+          step 14. The consent messages split the same way
+          (`ic_git_common::consent` holds the ICRC-21 types and the
+          answer; each side's `consent.rs` describes its own methods; the
+          combined build asks both). `fleet.rs` moves to the authority
+          crate with the compile endpoints.
+        - dfx names: `authority` and `git_canister` are the two builds.
+          `git` stays the combined build, since the reproducible-build
+          recipe, README and `canister_ids.json` name it and umobs runs
+          it until the cut; step 16 renames.
+        - `E2E_SPLIT=1 tools/e2e-local.sh` runs the user flows across
+          the two canisters: the git canister is governed before the
+          authority names it (an ungoverned one is refused, and no repo
+          can be created until then), each side refuses the other's
+          messages from anyone else, every flow of the combined pass
+          crosses (repos, tokens, signed pushes, the gated site, deploys
+          and ballots, the governed backend), a module past the message
+          limit crosses in chunks and is installed, `deploy_now` gets its
+          job back staged, and each canister is upgraded in place, the
+          git canister by its governor. The upgrade from the last release
+          and the governor's own section run on the combined pass only.
+          Both passes are green.
       - 12d. `publish_git_record`, the cycles top-up, and the
         reproducible build of both modules.
     - **`canisters/authority` (`authority_canister.wasm`, for umobs).**

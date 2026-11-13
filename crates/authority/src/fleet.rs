@@ -1,5 +1,6 @@
 //! R4 (see ROADMAP.md): distribute compilation across a fleet of worker
-//! canisters.
+//! canisters. With the authority until the compiler canister
+//! (docs/CANISTER_SPLIT.md, section 3).
 //!
 //! The coordinator (this canister) fans `compile_module` out to registered
 //! workers -- concurrently, round-robin -- then links the returned objects into

@@ -8,7 +8,9 @@
 # through the local gateway. Every check prints PASS or FAIL; the script
 # exits non-zero if any failed.
 #
-#   tools/e2e-local.sh                 # the whole pass
+#   tools/e2e-local.sh                 # the whole pass, on the combined canister
+#   E2E_SPLIT=1 tools/e2e-local.sh     # the same flows across the two canisters
+#                                      # (docs/CANISTER_SPLIT.md, phase 3 step 12c)
 #   KEEP=1 tools/e2e-local.sh          # leave the network running after
 #   E2E_PORT=4960 tools/e2e-local.sh   # another port (default 4950)
 #   NAMES_REPO=../ic-name-service ...  # where ic-name-service is (optional)
@@ -37,6 +39,15 @@
 # console's query-backed reads
 # through the page's own code, and the /api reads.
 #
+# E2E_SPLIT=1 runs the user flows against the authority and git canisters
+# instead: the git canister is governed before the authority names it (the
+# setter's rule), each side refuses the other's messages from anyone else,
+# a job larger than a message crosses in chunks, deploy_now's job comes back
+# staged, and each canister is upgraded in place (the git canister by its
+# governor). The upgrade from BASE_REF and the governor's own section run
+# only on the combined canister: the first is step 13's rehearsal, the
+# second the governor's, and neither changes with the split.
+#
 # Not covered: wallet writes (OISY signs mainnet only), the EVM leg (no EVM
 # RPC locally), ICP recovery paths (lost reply, refund), expiry by time.
 
@@ -45,6 +56,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${E2E_PORT:-4950}
 KEEP=${KEEP:-0}
+SPLIT=${E2E_SPLIT:-0}
 # The release a mainnet upgrade starts from: by default the newest tag. Set
 # it to what mainnet actually runs (tools/check-module-hash.sh says whether
 # that is a recorded release).
@@ -101,11 +113,29 @@ call() {
     | grep -v -e '^WARNING' -e '"metadata"' -e '^   {$' -e '"name": "candid:service"' -e '^   }$' -e '^]$' || true
 }
 ok_text() { sed -n 's/.*Ok = "\([^"]*\)".*/\1/p'; }
+# ic WHO METHOD ARGS...: the call, to whichever canister has the method.
+# One canister has them all; with E2E_SPLIT the git canister has these and
+# the authority the rest (docs/CANISTER_SPLIT.md, step 12, "Where the
+# endpoints land").
+GIT_METHODS=" put_object get_object set_ref list_refs list_repos create_push_token list_push_tokens revoke_push_token revoke_push_token_id dead_push_tokens purge_dead_push_token get_site get_authority "
+ic() {
+  local who=$1 m=$2; shift 2
+  if [ "$SPLIT" = 1 ] && [[ "$GIT_METHODS" != *" $m "* ]]; then
+    call "$who" authority "$m" "$@"
+  else
+    call "$who" git "$m" "$@"
+  fi
+}
 
 section "build"
-(cd "$ROOT" && cargo build -q --target wasm32-unknown-unknown --release -p combined_canister -p governor_canister)
+(cd "$ROOT" && cargo build -q --target wasm32-unknown-unknown --release -p combined_canister -p authority_canister -p git_canister -p governor_canister)
+# The combined canister (umobs until the cut), and the two it splits into.
 GIT_WASM=$ROOT/target/wasm32-unknown-unknown/release/combined_canister.wasm
 DID=$ROOT/canisters/combined/combined.did
+AUTH_WASM=$ROOT/target/wasm32-unknown-unknown/release/authority_canister.wasm
+AUTH_DID=$ROOT/canisters/authority/authority.did
+GITC_WASM=$ROOT/target/wasm32-unknown-unknown/release/git_canister.wasm
+GITC_DID=$ROOT/canisters/git/git.did
 GOV_WASM=$ROOT/target/wasm32-unknown-unknown/release/governor_canister.wasm
 NAMES_WASM=
 if [ -d "$NAMES_REPO/canisters/names" ]; then
@@ -114,7 +144,9 @@ if [ -d "$NAMES_REPO/canisters/names" ]; then
 fi
 echo "ic-git wasm: $GIT_WASM${NAMES_WASM:+; ic-name-service wasm: $NAMES_WASM}"
 BASE_WASM=
-if [ -n "$BASE_REF" ] && [ "$BASE_REF" != none ]; then
+if [ "$SPLIT" = 1 ]; then
+  echo "two canisters: $AUTH_WASM and $GITC_WASM"
+elif [ -n "$BASE_REF" ] && [ "$BASE_REF" != none ]; then
   # Built from a worktree of the release, into its own target dir so later
   # runs reuse it.
   BASE_SRC=$WORK/base-src
@@ -146,11 +178,22 @@ if [ -n "$NAMES_WASM" ]; then
   NAMES_ENTRY=",
     \"names\": { \"type\": \"custom\", \"wasm\": \"$NAMES_WASM\", \"candid\": \"$NAMES_REPO/canisters/names/names.did\", \"build\": [] }"
 fi
+# With E2E_SPLIT, "git" is the git canister and "authority" the authority;
+# "gitgov" is the git canister's governor (the authority is left to the
+# operator, as "git" is on the combined run). Otherwise "git" is the
+# combined canister and the rest go unused.
+if [ "$SPLIT" = 1 ]; then
+  GIT_ENTRY="\"git\": { \"type\": \"custom\", \"wasm\": \"$GITC_WASM\", \"candid\": \"$GITC_DID\", \"build\": [] }"
+else
+  GIT_ENTRY="\"git\": { \"type\": \"custom\", \"wasm\": \"$GIT_WASM\", \"candid\": \"$DID\", \"build\": [] }"
+fi
 cat > "$WORK/dfx.json" <<EOF
 {
   "version": 1,
   "canisters": {
-    "git": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
+    $GIT_ENTRY,
+    "authority": { "type": "custom", "wasm": "$AUTH_WASM", "candid": "$AUTH_DID", "build": [] },
+    "gitgov": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] },
     "base": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
     "ruled": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
     "governor": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] }$NAMES_ENTRY
@@ -159,28 +202,72 @@ cat > "$WORK/dfx.json" <<EOF
 }
 EOF
 (cd "$WORK" && dfx start --background --clean --system-canisters >"$WORK/replica.log" 2>&1)
-(cd "$WORK" && dfx canister create git --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
-(cd "$WORK" && dfx canister install git --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
-G=$(cd "$WORK" && dfx canister id git)
 T=$(dfx identity get-principal --identity "$TEN")
+OPP=$(dfx identity get-principal --identity "$OP")
+# The dfx name of the canister that holds accounts and repos: what the
+# controller checks below are made against.
+AUTH=git
+if [ "$SPLIT" = 1 ]; then
+  AUTH=authority
+  (cd "$WORK" && dfx canister create authority --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister install authority --identity "$OP" --wasm "$AUTH_WASM" >/dev/null 2>&1)
+  A=$(cd "$WORK" && dfx canister id authority)
+  (cd "$WORK" && dfx canister create git --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister install git --identity "$OP" --wasm "$GITC_WASM" --argument "(record { authority = principal \"$A\" })" >/dev/null 2>&1)
+  G=$(cd "$WORK" && dfx canister id git)
+  section "the git canister is named once it is governed"
+  # docs/CANISTER_SPLIT.md, step 12: the setter checks, through canister_info,
+  # that one canister alone controls the git canister and that it has no
+  # controllers itself -- a governor. Until then nothing crosses.
+  expect "a git canister controlled by a person is refused" "$(call "$OP" authority set_git_canister "(principal \"$G\")")" 'controller|canister_info'
+  expect "  ...and nothing is named" "$(call "$OP" authority get_git_canister --query)" '^\(null\)$'
+  expect "  ...so a repo cannot be created yet" "$(call "$OP" authority create_repo '("too-early")')" 'not set|not delivered'
+  (cd "$WORK" && dfx canister create gitgov --identity "$OP" --no-wallet --with-cycles 20000000000000 >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister install gitgov --identity "$OP" --wasm "$GOV_WASM" \
+    --argument "(record { target = principal \"$G\"; approvers = vec { principal \"$OPP\" }; threshold = 1 : nat32 })" >/dev/null 2>&1)
+  GITGOV=$(cd "$WORK" && dfx canister id gitgov)
+  (cd "$WORK" && dfx canister update-settings gitgov --remove-controller "$OPP" --yes --identity "$OP" >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister update-settings git --set-controller "$GITGOV" --yes --identity "$OP" >/dev/null 2>&1)
+  expect "governed by a governor with no controllers: named" "$(call "$OP" authority set_git_canister "(principal \"$G\")")" 'Ok'
+  expect "  ...the same again is fine" "$(call "$OP" authority set_git_canister "(principal \"$G\")")" 'Ok'
+  expect "  ...another is refused: named once" "$(call "$OP" authority set_git_canister "(principal \"$A\")")" 'named once'
+  expect "  ...a tenant cannot name it" "$(call "$TEN" authority set_git_canister "(principal \"$G\")")" 'is not an operator'
+  expect "the authority knows its git canister" "$(call "$OP" authority get_git_canister --query)" "principal \"$G\""
+  expect "the git canister knows its authority" "$(ic "$OP" get_authority --query)" "principal \"$A\""
+  # Called on the git canister by name: the router would send these to the
+  # authority, which has create_repo for people and no set_approved.
+  expect "the authority's messages are refused from anyone else" "$(call "$OP" git set_approved '(record { repo = "x"; seq = 1 : nat64; approved = null; retry = null })')" 'only the authority may call this'
+  expect "  ...create_repo on the git canister too" "$(call "$OP" git create_repo '(record { name = "x" })')" 'only the authority may call this'
+  expect "the git canister's messages likewise" "$(call "$OP" authority charge_push '(record { repo = "x"; bytes = 1 : nat64 })')" 'only the git canister may call this'
+  expect "  ...submit_job too" "$(call "$OP" authority submit_job '(record { seq = 1 : nat64; repo = "x"; commit = "0"; staged = 0 : nat32; tail = blob "" })')" 'only the git canister may call this'
+  expect "the git host has no feed" "$(curl -s -o /dev/null -w '%{http_code}' "http://$G.raw.localhost:$PORT/feed")" '^404$'
+else
+  (cd "$WORK" && dfx canister create git --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister install git --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
+  G=$(cd "$WORK" && dfx canister id git)
+  A=$G
+fi
+# HTTP: git, /site/ and the git half of /api on the git canister; the
+# authority's half of /api and the feeds on the authority.
 HOST="$G.raw.localhost:$PORT"
-echo "ic-git $G on 127.0.0.1:$PORT; tenant $T"
+AHOST="$A.raw.localhost:$PORT"
+echo "ic-git $G on 127.0.0.1:$PORT${A:+; authority $A}; tenant $T"
 
 section "ICP deposit"
 call anonymous "$ICP_LEDGER" icrc1_transfer "(record { to = record { owner = principal \"$T\"; subaccount = null }; amount = 10_000_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" >/dev/null
-call "$TEN" "$ICP_LEDGER" icrc2_approve "(record { spender = record { owner = principal \"$G\"; subaccount = null }; amount = 100_010_000 : nat; expected_allowance = null; expires_at = null; fee = null; memo = null; from_subaccount = null; created_at_time = null })" >/dev/null
+call "$TEN" "$ICP_LEDGER" icrc2_approve "(record { spender = record { owner = principal \"$A\"; subaccount = null }; amount = 100_010_000 : nat; expected_allowance = null; expires_at = null; fee = null; memo = null; from_subaccount = null; created_at_time = null })" >/dev/null
 RATE=$(call "$OP" "$CMC" get_icp_xdr_conversion_rate '()' --query | sed -n 's/.*xdr_permyriad_per_icp = \([0-9_]*\).*/\1/p' | tr -d _)
-OUT=$(call "$TEN" git deposit_from_icp '(100_000_000 : nat64)')
+OUT=$(ic "$TEN" deposit_from_icp '(100_000_000 : nat64)')
 expect "deposit_from_icp credits exactly the CMC's cycles for 1 ICP" "$(echo "$OUT" | tr -d _)" "Ok = $((RATE * 100000000)) "
-expect "nothing left pending" "$(call "$TEN" git pending_icp_deposits)" '^\(vec \{\}\)$'
+expect "nothing left pending" "$(ic "$TEN" pending_icp_deposits)" '^\(vec \{\}\)$'
 
 section "push certificates"
 KEY=$WORK/key
 ssh-keygen -q -t ed25519 -N "" -C e2e@local -f "$KEY"
 ssh-keygen -q -t ed25519 -N "" -C other@local -f "$WORK/otherkey"
-call "$TEN" git create_repo '("e2e-app")' >/dev/null
-BOUND=$(call "$TEN" git create_push_token "(\"e2e-app\", opt (7 : nat32), opt \"$(cat "$KEY.pub")\")" | ok_text)
-PLAIN=$(call "$TEN" git create_push_token '("e2e-app", null, null)' | ok_text)
+ic "$TEN" create_repo '("e2e-app")' >/dev/null
+BOUND=$(ic "$TEN" create_push_token "(\"e2e-app\", opt (7 : nat32), opt \"$(cat "$KEY.pub")\")" | ok_text)
+PLAIN=$(ic "$TEN" create_push_token '("e2e-app", null, null)' | ok_text)
 URL="http://ic:$BOUND@$HOST/e2e-app.git"
 PURL="http://ic:$PLAIN@$HOST/e2e-app.git"
 expect "receive-pack advertises push-cert=<nonce>" "$(curl -s "http://ic:$BOUND@$HOST/e2e-app.git/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert=[0-9]+-[0-9a-f]{32}'
@@ -200,7 +287,7 @@ expect "signed by another key: refused, naming both keys" "$(signed "$URL" "$WOR
 OUT=$(git -C "$W" push "$PURL" main 2>&1 || true)
 expect "unbound token, not required: accepted" "$OUT" 'main -> main'
 refuse "  ...and not rejected" "$OUT" 'rejected'
-call "$TEN" git set_require_signed_push '("e2e-app", true)' >/dev/null
+ic "$TEN" set_require_signed_push '("e2e-app", true)' >/dev/null
 commit site/c.txt c v3
 expect "unbound token, signing required: refused" "$(git -C "$W" push "$PURL" main 2>&1)" 'remote rejected.*requires signed pushes'
 OUT=$(signed "$URL" || true)
@@ -208,16 +295,16 @@ expect "bound token, signed, signing required: accepted" "$OUT" 'main -> main'
 refuse "  ...and not rejected" "$OUT" 'rejected'
 
 section "tokens"
-LIST=$(call "$TEN" git list_push_tokens '("e2e-app")')
+LIST=$(ic "$TEN" list_push_tokens '("e2e-app")')
 expect "list shows both tokens, one with its key" "$(echo "$LIST" | grep -c 'id =')" '^2$'
 expect "  ...the bound key" "$LIST" 'key = opt "ssh-ed25519 '
 # The id of the record that carries a key.
 ID=$(echo "$LIST" | awk '/record \{/{id=""; k=0} /id = "/{match($0,/"[0-9a-f]+"/); id=substr($0,RSTART+1,RLENGTH-2)} /key = opt/{k=1} k && id!=""{print id; exit}')
-expect "revoke by id" "$(call "$TEN" git revoke_push_token_id "(\"$ID\")")" 'Ok'
+expect "revoke by id" "$(ic "$TEN" revoke_push_token_id "(\"$ID\")")" 'Ok'
 commit site/d.txt d v4
 expect "revoked token: authentication fails" "$(GIT_TERMINAL_PROMPT=0 signed "$URL")" 'Authentication failed|401'
 git -C "$W" reset -q --hard HEAD~1
-BOUND=$(call "$TEN" git create_push_token "(\"e2e-app\", null, opt \"$(cat "$KEY.pub")\")" | ok_text)
+BOUND=$(ic "$TEN" create_push_token "(\"e2e-app\", null, opt \"$(cat "$KEY.pub")\")" | ok_text)
 URL="http://ic:$BOUND@$HOST/e2e-app.git"
 
 if command -v gpg >/dev/null; then
@@ -227,8 +314,8 @@ if command -v gpg >/dev/null; then
   GNUPGHOME=$(mktemp -d /tmp/g.XXXXXX)
   gpg --batch --quiet --passphrase '' --quick-gen-key "E2E <gpg@local>" ed25519 sign never >/dev/null 2>&1
   GKEY=$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '/^sec/{print $5; exit}')
-  call "$TEN" git create_repo '("e2e-gpg")' >/dev/null
-  GT=$(call "$TEN" git create_push_token '("e2e-gpg", null, null)' | ok_text)
+  ic "$TEN" create_repo '("e2e-gpg")' >/dev/null
+  GT=$(ic "$TEN" create_push_token '("e2e-gpg", null, null)' | ok_text)
   GW=$WORK/gw
   git init -q -b main "$GW"
   git -C "$GW" config user.name E2E
@@ -241,21 +328,21 @@ if command -v gpg >/dev/null; then
 fi
 
 section "operator guard"
-expect "tenant: evm_set_config refused" "$(call "$TEN" git evm_set_config '("x", "dfx_test_key", 11155111 : nat64, vec {})')" 'is not an operator'
-expect "tenant: sol_send refused" "$(call "$TEN" git sol_send '("x", 1 : nat64)')" 'is not an operator'
-expect "tenant: put_object refused" "$(call "$TEN" git put_object '("blob", blob "x")')" 'is not an operator'
-refuse "operator: evm_reset_nonce passes the guard" "$(call "$OP" git evm_reset_nonce)" 'rror|not an operator'
+expect "tenant: evm_set_config refused" "$(ic "$TEN" evm_set_config '("x", "dfx_test_key", 11155111 : nat64, vec {})')" 'is not an operator'
+expect "tenant: sol_send refused" "$(ic "$TEN" sol_send '("x", 1 : nat64)')" 'is not an operator'
+expect "tenant: put_object refused" "$(ic "$TEN" put_object '("blob", blob "x")')" 'is not an operator'
+refuse "operator: evm_reset_nonce passes the guard" "$(ic "$OP" evm_reset_nonce)" 'rror|not an operator'
 # The change itself: a controller that is not on the allowlist is an operator
 # here too (these calls used to check the allowlist alone). $OP is both, so
 # make the tenant a controller for one call.
-(cd "$WORK" && dfx canister update-settings git --add-controller "$T" --identity "$OP" >/dev/null)
-refuse "controller not on the allowlist: evm_reset_nonce passes the guard" "$(call "$TEN" git evm_reset_nonce)" 'rror|not an operator'
+(cd "$WORK" && dfx canister update-settings "$AUTH" --add-controller "$T" --identity "$OP" >/dev/null)
+refuse "controller not on the allowlist: evm_reset_nonce passes the guard" "$(ic "$TEN" evm_reset_nonce)" 'rror|not an operator'
 # Billing follows the same rule: the tenant's repo is exempt while it is a
 # controller, and pays again once it is not.
-expect "  ...and its repo is exempt from charges" "$(call "$OP" git get_repo_info '("e2e-app")')" 'exempt = true'
-(cd "$WORK" && dfx canister update-settings git --remove-controller "$T" --identity "$OP" >/dev/null)
-expect "  ...and refused again once it is not a controller" "$(call "$TEN" git evm_reset_nonce)" 'is not an operator'
-expect "  ...and its repo pays again" "$(call "$OP" git get_repo_info '("e2e-app")')" 'exempt = false'
+expect "  ...and its repo is exempt from charges" "$(ic "$OP" get_repo_info '("e2e-app")')" 'exempt = true'
+(cd "$WORK" && dfx canister update-settings "$AUTH" --remove-controller "$T" --identity "$OP" >/dev/null)
+expect "  ...and refused again once it is not a controller" "$(ic "$TEN" evm_reset_nonce)" 'is not an operator'
+expect "  ...and its repo pays again" "$(ic "$OP" get_repo_info '("e2e-app")')" 'exempt = false'
 
 section "approval-gated site"
 SITE="http://$HOST/site/e2e-app/"
@@ -265,42 +352,42 @@ served_at() {
   tr -d '\r' <"$WORK/h" | grep -i '^x-ic-git-commit:' | cut -d' ' -f2 || true
 }
 served() { served_at "$SITE"; }
-call "$TEN" git set_site '("e2e-app", "site")' >/dev/null
+ic "$TEN" set_site '("e2e-app", "site")' >/dev/null
 TIP=$(git -C "$W" rev-parse HEAD)
 expect "served at the tip without votes" "$(served)" "^200 $TIP"
-call "$TEN" git set_required_votes '("e2e-app", 1 : nat32)' >/dev/null
+ic "$TEN" set_required_votes '("e2e-app", 1 : nat32)' >/dev/null
 expect "votes required, nothing approved: 404" "$(served)" '^404'
-call "$TEN" git vote "(\"e2e-app\", \"$TIP\", true)" >/dev/null
+ic "$TEN" vote "(\"e2e-app\", \"$TIP\", true)" >/dev/null
 expect "approved: served" "$(served)" "^200 $TIP"
 commit site/index.html '<!doctype html><title>v2</title><h1>two</h1>' site-v2
 signed "$URL" >/dev/null || true
 NEW=$(git -C "$W" rev-parse HEAD)
 expect "new push, unapproved: the approved commit stays up" "$(served)" "^200 $TIP"
-call "$TEN" git vote "(\"e2e-app\", \"$NEW\", true)" >/dev/null
+ic "$TEN" vote "(\"e2e-app\", \"$NEW\", true)" >/dev/null
 expect "new push approved: served" "$(served)" "^200 $NEW"
-call "$TEN" git vote "(\"e2e-app\", \"$NEW\", false)" >/dev/null
+ic "$TEN" vote "(\"e2e-app\", \"$NEW\", false)" >/dev/null
 expect "approval withdrawn: rolled back" "$(served)" "^200 $TIP"
-call "$TEN" git vote "(\"e2e-app\", \"$NEW\", true)" >/dev/null
+ic "$TEN" vote "(\"e2e-app\", \"$NEW\", true)" >/dev/null
 
 section "approval-gated deploy and announce"
 if [ -n "$NAMES_WASM" ]; then
   (cd "$WORK" && dfx canister create names --identity "$OP" --no-wallet --with-cycles 20000000000000 >/dev/null 2>&1)
   (cd "$WORK" && dfx canister install names --identity "$OP" --wasm "$NAMES_WASM" >/dev/null 2>&1)
   N=$(cd "$WORK" && dfx canister id names)
-  call "$OP" names add_deployer "(principal \"$G\")" >/dev/null
-  expect "names hook configured" "$(call "$OP" git names_set_config "(\"$N\", \"solo\")")" 'Ok'
+  call "$OP" names add_deployer "(principal \"$A\")" >/dev/null
+  expect "names hook configured" "$(ic "$OP" names_set_config "(\"$N\", \"solo\")")" 'Ok'
 fi
-APP=$(call "$TEN" git create_app_canister '("e2e-app", 1_000_000_000_000 : nat64)' | sed -n 's/.*principal "\([^"]*\)".*/\1/p')
+APP=$(ic "$TEN" create_app_canister '("e2e-app", 1_000_000_000_000 : nat64)' | sed -n 's/.*principal "\([^"]*\)".*/\1/p')
 expect "app canister created" "$APP" '-cai$'
-call "$TEN" git set_wasm_deploy '("e2e-app", "app", "app.wat")' >/dev/null
+ic "$TEN" set_wasm_deploy '("e2e-app", "app", "app.wat")' >/dev/null
 commit app.wat '(module (func (export "canister_query hello")))' app-v1
 signed "$URL" >/dev/null || true
 A1=$(git -C "$W" rev-parse HEAD)
-expect "push held for approval" "$(call "$TEN" git get_deploy_status '("e2e-app")')" 'awaiting voter approval'
-call "$TEN" git vote "(\"e2e-app\", \"$A1\", true)" >/dev/null
+expect "push held for approval" "$(ic "$TEN" get_deploy_status '("e2e-app")')" 'awaiting voter approval'
+ic "$TEN" vote "(\"e2e-app\", \"$A1\", true)" >/dev/null
 STATUS=
 for _ in $(seq 1 30); do
-  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  STATUS=$(ic "$TEN" get_deploy_status '("e2e-app")')
   echo "$STATUS" | grep -q 'ok = true' && break
   sleep 1
 done
@@ -320,32 +407,32 @@ section "objections"
 # app are on $A1; the tenant is the only voter so far, with 1 required.
 P1=$(dfx identity get-principal --identity "$V1")
 P2=$(dfx identity get-principal --identity "$V2")
-call "$TEN" git add_member "(\"e2e-app\", principal \"$P1\", \"voter\")" >/dev/null
-call "$TEN" git add_member "(\"e2e-app\", principal \"$P2\", \"voter\")" >/dev/null
+ic "$TEN" add_member "(\"e2e-app\", principal \"$P1\", \"voter\")" >/dev/null
+ic "$TEN" add_member "(\"e2e-app\", principal \"$P2\", \"voter\")" >/dev/null
 commit app.wat '(module (func (export "canister_query hello")) (func (export "canister_query hi")))' app-v2
 signed "$URL" >/dev/null || true
 A2=$(git -C "$W" rev-parse HEAD)
-expect "an objection without a reason is refused" "$(call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, null)")" 'needs a reason'
-expect "  ...and a blank one" "$(call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"  \")")" 'needs a reason'
-OUT=$(call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"the second export is untested\")")
+expect "an objection without a reason is refused" "$(ic "$V1" cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, null)")" 'needs a reason'
+expect "  ...and a blank one" "$(ic "$V1" cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"  \")")" 'needs a reason'
+OUT=$(ic "$V1" cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"the second export is untested\")")
 expect "objection recorded" "$OUT" 'objections = 1'
 expect "  ...nothing approved" "$OUT" 'approvals = 0'
-OUT=$(call "$TEN" git vote "(\"e2e-app\", \"$A2\", true)")
+OUT=$(ic "$TEN" vote "(\"e2e-app\", \"$A2\", true)")
 expect "one approval over one objection: 1 of 1 by the old count" "$OUT" 'Ok = record \{ 1 : nat32; 1 : nat32 \}'
-expect "  ...but held: net 0" "$(call "$TEN" git get_deploy_status '("e2e-app")')" 'awaiting voter approval'
+expect "  ...but held: net 0" "$(ic "$TEN" get_deploy_status '("e2e-app")')" 'awaiting voter approval'
 expect "  ...and the site stays on the commit before it" "$(served)" "^200 $A1"
-VOTES=$(curl -s "http://$HOST/api/e2e-app/votes/$A2")
+VOTES=$(curl -s "http://$AHOST/api/e2e-app/votes/$A2")
 expect "/api votes: the objection with its reason" "$VOTES" '"decision":"object","approve":false,"reason":"the second export is untested"'
 expect "  ...and the count" "$VOTES" '"approvals":1,"objections":1,"required":1,"reached":false'
 # The wallet's consent message for an objection names the reason: OISY shows
 # it to the signer. The encoded argument comes from the codec vectors.
 ARG=$(cd "$ROOT" && cargo test -q -p combined_canister --test candid_vectors -- --nocapture 2>/dev/null | awk '$1 == "args:cast_ballot_object" { print $2 }' | sed 's/../\\&/g')
-CONSENT=$(call anonymous git icrc21_canister_call_consent_message "(record { method = \"cast_ballot\"; arg = blob \"$ARG\"; user_preferences = record { metadata = record { language = \"en\"; utc_offset_minutes = null }; device_spec = null } })")
+CONSENT=$(ic anonymous icrc21_canister_call_consent_message "(record { method = \"cast_ballot\"; arg = blob \"$ARG\"; user_preferences = record { metadata = record { language = \"en\"; utc_offset_minutes = null }; device_spec = null } })")
 expect "consent message: an objection, with its reason" "$CONSENT" 'Object to commit 0123456789ab.*Reason: skips the migration'
-OUT=$(call "$V2" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Approve }, null)")
+OUT=$(ic "$V2" cast_ballot "(\"e2e-app\", \"$A2\", variant { Approve }, null)")
 expect "a second approval outweighs the objection" "$OUT" 'reached = true'
 for _ in $(seq 1 30); do
-  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  STATUS=$(ic "$TEN" get_deploy_status '("e2e-app")')
   echo "$STATUS" | grep -q "$A2" && echo "$STATUS" | grep -q 'ok = true' && break
   sleep 1
 done
@@ -354,30 +441,30 @@ expect "  ...and is served" "$(served)" "^200 $A2"
 # An objection after the deploy drops the commit below the threshold: the
 # site rolls back to the approved commit before it, and so does the app,
 # the same way a withdrawn approval does.
-call "$V2" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"regressed in production\")" >/dev/null
+ic "$V2" cast_ballot "(\"e2e-app\", \"$A2\", variant { Object }, opt \"regressed in production\")" >/dev/null
 expect "an objection after the deploy rolls the site back" "$(served)" "^200 $A1"
 for _ in $(seq 1 30); do
-  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  STATUS=$(ic "$TEN" get_deploy_status '("e2e-app")')
   echo "$STATUS" | grep -q "$A1" && echo "$STATUS" | grep -q 'ok = true' && break
   sleep 1
 done
 expect "  ...and the app" "$(printf '%s' "$STATUS" | tr '\n' ' ')" "ok = true.*commit = \"$A1\""
-expect "  ...two objections on record" "$(curl -s "http://$HOST/api/e2e-app/votes/$A2")" '"objections":2'
-FEED=$(curl -s -D "$WORK/feed.h" "http://$HOST/feed/e2e-app")
+expect "  ...two objections on record" "$(curl -s "http://$AHOST/api/e2e-app/votes/$A2")" '"objections":2'
+FEED=$(curl -s -D "$WORK/feed.h" "http://$AHOST/feed/e2e-app")
 expect "the repo's feed is Atom" "$(cat "$WORK/feed.h")" 'application/atom\+xml'
 expect "  ...with the push awaiting votes" "$(flat "$FEED")" "<category term=\"awaiting\"/>.*$A2 on refs/heads/main needs"
 expect "  ...the objection with its reason" "$(flat "$FEED")" 'object commit.*Reason: regressed in production'
 expect "  ...the threshold reached" "$FEED" '<category term="reached"/>'
 expect "  ...and the deploy" "$(flat "$FEED")" "deployed to.*<category term=\"deployed\"/>"
 expect "  ...newest first: the rollback deploy" "$(printf '%s' "$FEED" | grep -n '<category' | head -1)" 'deployed'
-expect "a feed for a repo that does not exist is a 404" "$(curl -s -o /dev/null -w '%{http_code}' "http://$HOST/feed/no-such-repo")" '^404$'
+expect "a feed for a repo that does not exist is a 404" "$(curl -s -o /dev/null -w '%{http_code}' "http://$AHOST/feed/no-such-repo")" '^404$'
 # Withdrawing both (a rejection weighs nothing) approves it again.
-call "$V1" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Reject }, null)" >/dev/null
-call "$V2" git cast_ballot "(\"e2e-app\", \"$A2\", variant { Reject }, null)" >/dev/null
+ic "$V1" cast_ballot "(\"e2e-app\", \"$A2\", variant { Reject }, null)" >/dev/null
+ic "$V2" cast_ballot "(\"e2e-app\", \"$A2\", variant { Reject }, null)" >/dev/null
 expect "objections withdrawn: served again" "$(served)" "^200 $A2"
 # Let the app's re-deploy finish before the canister is upgraded underneath it.
 for _ in $(seq 1 30); do
-  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  STATUS=$(ic "$TEN" get_deploy_status '("e2e-app")')
   echo "$STATUS" | grep -q "$A2" && echo "$STATUS" | grep -q 'ok = true' && break
   sleep 1
 done
@@ -389,41 +476,41 @@ section "governed backend"
 # and every such change is a ballot under the current K of N.
 INFO=$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)
 expect "before: the owner and ic-git control the app canister" "$(flat "$INFO")" "Controllers:.*$T"
-expect "a voter cannot govern" "$(call "$V1" git govern_app_canister '("e2e-app")')" 'only the owner'
+expect "a voter cannot govern" "$(ic "$V1" govern_app_canister '("e2e-app")')" 'only the owner'
 # A governed repo deploys committed .wasm only (docs/CANISTER_SPLIT.md,
 # phase 2 step 3): nothing compiled here reaches a governed backend.
-expect "governing while the config compiles app.wat is refused" "$(call "$TEN" git govern_app_canister '("e2e-app")')" '.wasm only.*app.wat'
+expect "governing while the config compiles app.wat is refused" "$(ic "$TEN" govern_app_canister '("e2e-app")')" '.wasm only.*app.wat'
 expect "  ...the canister is untouched" "$(flat "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)")" "Controllers:.*$T"
-call "$TEN" git set_wasm_deploy '("e2e-app", "app", "app.wasm")' >/dev/null
-expect "the owner governs" "$(call "$TEN" git govern_app_canister '("e2e-app")')" "Ok = principal \"$APP\""
+ic "$TEN" set_wasm_deploy '("e2e-app", "app", "app.wasm")' >/dev/null
+expect "the owner governs" "$(ic "$TEN" govern_app_canister '("e2e-app")')" "Ok = principal \"$APP\""
 INFO=$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)
-expect "after: ic-git is the only controller" "$(flat "$INFO")" "Controllers: $G *Module"
+expect "after: ic-git is the only controller" "$(flat "$INFO")" "Controllers: $A *Module"
 refuse "  ...the owner is gone" "$INFO" "$T"
-expect "governing twice is refused" "$(call "$TEN" git govern_app_canister '("e2e-app")')" 'already governed'
-expect "/api info says governed" "$(curl -s "http://$HOST/api/e2e-app/info")" '"governed":true'
-expect "owner: required votes locked" "$(call "$TEN" git set_required_votes '("e2e-app", 0 : nat32)')" 'propose_policy_change'
-expect "owner: voters locked" "$(call "$TEN" git add_member "(\"e2e-app\", principal \"$P1\", \"writer\")")" 'propose_policy_change'
-expect "owner: removing a voter locked" "$(call "$TEN" git remove_member "(\"e2e-app\", principal \"$P1\")")" 'propose_policy_change'
-expect "owner: transfer locked" "$(call "$TEN" git transfer_repo "(\"e2e-app\", principal \"$P1\")")" 'propose_policy_change'
-expect "owner: deploy config locked" "$(call "$TEN" git set_wasm_deploy '("e2e-app", "app", "other.wat")')" 'propose_policy_change'
-expect "owner: install mode locked" "$(call "$TEN" git set_deploy_mode '("e2e-app", "reinstall")')" 'propose_policy_change'
+expect "governing twice is refused" "$(ic "$TEN" govern_app_canister '("e2e-app")')" 'already governed'
+expect "/api info says governed" "$(curl -s "http://$AHOST/api/e2e-app/info")" '"governed":true'
+expect "owner: required votes locked" "$(ic "$TEN" set_required_votes '("e2e-app", 0 : nat32)')" 'propose_policy_change'
+expect "owner: voters locked" "$(ic "$TEN" add_member "(\"e2e-app\", principal \"$P1\", \"writer\")")" 'propose_policy_change'
+expect "owner: removing a voter locked" "$(ic "$TEN" remove_member "(\"e2e-app\", principal \"$P1\")")" 'propose_policy_change'
+expect "owner: transfer locked" "$(ic "$TEN" transfer_repo "(\"e2e-app\", principal \"$P1\")")" 'propose_policy_change'
+expect "owner: deploy config locked" "$(ic "$TEN" set_wasm_deploy '("e2e-app", "app", "other.wat")')" 'propose_policy_change'
+expect "owner: install mode locked" "$(ic "$TEN" set_deploy_mode '("e2e-app", "reinstall")')" 'propose_policy_change'
 OPP=$(dfx identity get-principal --identity "$OP")
-expect "writers are still the owner's to manage" "$(call "$TEN" git add_member "(\"e2e-app\", principal \"$OPP\", \"writer\")")" 'Ok'
-call "$TEN" git remove_member "(\"e2e-app\", principal \"$OPP\")" >/dev/null
+expect "writers are still the owner's to manage" "$(ic "$TEN" add_member "(\"e2e-app\", principal \"$OPP\", \"writer\")")" 'Ok'
+ic "$TEN" remove_member "(\"e2e-app\", principal \"$OPP\")" >/dev/null
 # Policy changes by vote. K is 1 of 3, so the proposer's approval applies.
-expect "required votes 1 -> 2 by vote: applied at once under K = 1" "$(flat "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 2 : nat32 } }, variant { Approve }, null)')")" 'reached = true'
-expect "  ...and in effect" "$(curl -s "http://$HOST/api/e2e-app/info")" '"required_votes":2'
-expect "a compiled source is refused before any ballot" "$(call "$TEN" git propose_policy_change "(\"e2e-app\", variant { WasmDeploy = record { target = \"$APP\"; source_path = \"app.wat\" } }, variant { Approve }, null)")" '.wasm only'
-expect "k = 0 is refused before any ballot" "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 0 : nat32 } }, variant { Approve }, null)')" 'at least one required vote'
+expect "required votes 1 -> 2 by vote: applied at once under K = 1" "$(flat "$(ic "$TEN" propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 2 : nat32 } }, variant { Approve }, null)')")" 'reached = true'
+expect "  ...and in effect" "$(curl -s "http://$AHOST/api/e2e-app/info")" '"required_votes":2'
+expect "a compiled source is refused before any ballot" "$(ic "$TEN" propose_policy_change "(\"e2e-app\", variant { WasmDeploy = record { target = \"$APP\"; source_path = \"app.wat\" } }, variant { Approve }, null)")" '.wasm only'
+expect "k = 0 is refused before any ballot" "$(ic "$TEN" propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 0 : nat32 } }, variant { Approve }, null)')" 'at least one required vote'
 # Under K = 2 a change waits, is listed with its count, and an objection holds it.
-expect "lowering back to 1 waits for a second approval" "$(flat "$(call "$V1" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Approve }, null)')")" 'reached = false'
-PROPS=$(curl -s "http://$HOST/api/e2e-app/proposals")
+expect "lowering back to 1 waits for a second approval" "$(flat "$(ic "$V1" propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Approve }, null)')")" 'reached = false'
+PROPS=$(curl -s "http://$AHOST/api/e2e-app/proposals")
 expect "/api proposals lists it" "$PROPS" '"change":\{"RequiredVotes":\{"k":1\}\}'
 expect "  ...with the count" "$PROPS" '"approvals":1,"objections":0,"required":2,"reached":false'
-expect "an objection with a reason holds it" "$(flat "$(call "$V2" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Object }, opt "two sets of eyes on the backend")')")" 'objections = 1'
-expect "  ...the reason is in the API" "$(curl -s "http://$HOST/api/e2e-app/proposals")" '"reason":"two sets of eyes on the backend"'
-expect "  ...and the owner's approval does not outweigh it (2 - 1 < 2)" "$(flat "$(call "$TEN" git propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Approve }, null)')")" 'reached = false'
-expect "still 2 required" "$(curl -s "http://$HOST/api/e2e-app/info")" '"required_votes":2'
+expect "an objection with a reason holds it" "$(flat "$(ic "$V2" propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Object }, opt "two sets of eyes on the backend")')")" 'objections = 1'
+expect "  ...the reason is in the API" "$(curl -s "http://$AHOST/api/e2e-app/proposals")" '"reason":"two sets of eyes on the backend"'
+expect "  ...and the owner's approval does not outweigh it (2 - 1 < 2)" "$(flat "$(ic "$TEN" propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 1 : nat32 } }, variant { Approve }, null)')")" 'reached = false'
+expect "still 2 required" "$(curl -s "http://$AHOST/api/e2e-app/info")" '"required_votes":2'
 # The governed canister still deploys approved commits, and only those.
 # A committed module, (module (func (export "canister_query hey"))), as bytes.
 printf '\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00\x07\x16\x01\x12canister_query hey\x00\x00\x0a\x04\x01\x02\x00\x0b' >"$W/app.wasm"
@@ -431,11 +518,11 @@ git -C "$W" add -A
 git -C "$W" commit -qm app-v3
 signed "$URL" >/dev/null || true
 A3=$(git -C "$W" rev-parse HEAD)
-call "$TEN" git cast_ballot "(\"e2e-app\", \"$A3\", variant { Approve }, null)" >/dev/null
-expect "one of two approvals: held" "$(call "$TEN" git get_deploy_status '("e2e-app")')" 'awaiting voter approval'
-call "$V1" git cast_ballot "(\"e2e-app\", \"$A3\", variant { Approve }, null)" >/dev/null
+ic "$TEN" cast_ballot "(\"e2e-app\", \"$A3\", variant { Approve }, null)" >/dev/null
+expect "one of two approvals: held" "$(ic "$TEN" get_deploy_status '("e2e-app")')" 'awaiting voter approval'
+ic "$V1" cast_ballot "(\"e2e-app\", \"$A3\", variant { Approve }, null)" >/dev/null
 for _ in $(seq 1 30); do
-  STATUS=$(call "$TEN" git get_deploy_status '("e2e-app")')
+  STATUS=$(ic "$TEN" get_deploy_status '("e2e-app")')
   echo "$STATUS" | grep -q "$A3" && echo "$STATUS" | grep -q 'ok = true' && break
   sleep 1
 done
@@ -444,22 +531,82 @@ WASM_SHA=$(echo "$STATUS" | sed -n 's/.*wasm_sha256 = "\([0-9a-f]*\)".*/\1/p')
 expect "  ...to the module the status names" "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)" "Module hash: 0x$WASM_SHA"
 refuse "  ...no app record here: no registry on this network" "$STATUS" 'app record'
 expect "  ...and served" "$(served)" "^200 $A3"
+# A module larger than a message (docs/CANISTER_SPLIT.md, step 12b): the
+# job crosses to the authority in chunks, and deploy_now's job comes back
+# the same way. A valid module: the header and one custom section of
+# 1,200,000 zero bytes (section size 1,200,004 as LEB128: 84 9f 49).
+{ printf '\x00\x61\x73\x6d\x01\x00\x00\x00\x00\x84\x9f\x49\x03pad'; head -c 1200000 /dev/zero; } >"$W/app.wasm"
+git -C "$W" add -A
+git -C "$W" commit -qm app-v4
+signed "$URL" >/dev/null || true
+A4=$(git -C "$W" rev-parse HEAD)
+expect "a module past the message limit: pushed, held" "$(ic "$TEN" get_deploy_status '("e2e-app")')" 'awaiting voter approval'
+ic "$TEN" cast_ballot "(\"e2e-app\", \"$A4\", variant { Approve }, null)" >/dev/null
+ic "$V1" cast_ballot "(\"e2e-app\", \"$A4\", variant { Approve }, null)" >/dev/null
+# The job crosses in chunks and the drain runs on a timer, so the status
+# passes through "awaiting voter approval" and "deploying" on its way to
+# an outcome: wait for one.
+for _ in $(seq 1 30); do
+  STATUS=$(flat "$(ic "$TEN" get_deploy_status '("e2e-app")')")
+  echo "$STATUS" | grep -q "$A4" && ! echo "$STATUS" | grep -qE 'message = "(deploying|awaiting voter approval)' && break
+  sleep 1
+done
+expect "  ...approved: its job crossed and it is installed" "$STATUS" "ok = true.*commit = \"$A4\""
+WASM_SHA=$(echo "$STATUS" | sed -n 's/.*wasm_sha256 = "\([0-9a-f]*\)".*/\1/p')
+expect "  ...the IC reports it" "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)" "Module hash: 0x${WASM_SHA:-none}"
+expect "deploy_now installs the release commit again (its job in a staged reply)" "$(flat "$(ic "$TEN" deploy_now '("e2e-app")')")" "ok = true.*commit = \"$A4\""
+expect "  ...a voter cannot" "$(ic "$V1" deploy_now '("e2e-app")')" 'does not own'
 # A deploy config change by vote (K = 2): applied when the second approval lands.
-call "$V1" git propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "reinstall" } }, variant { Approve }, null)' >/dev/null
-expect "install mode unchanged after one approval" "$(call "$TEN" git get_deploy_config '("e2e-app")')" 'upgrade'
-expect "second approval applies the deploy config change" "$(flat "$(call "$V2" git propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "reinstall" } }, variant { Approve }, null)')")" 'reached = true'
-expect "  ...install mode is now reinstall" "$(call "$TEN" git get_deploy_config '("e2e-app")')" 'reinstall'
+ic "$V1" propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "reinstall" } }, variant { Approve }, null)' >/dev/null
+expect "install mode unchanged after one approval" "$(ic "$TEN" get_deploy_config '("e2e-app")')" 'upgrade'
+expect "second approval applies the deploy config change" "$(flat "$(ic "$V2" propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "reinstall" } }, variant { Approve }, null)')")" 'reached = true'
+expect "  ...install mode is now reinstall" "$(ic "$TEN" get_deploy_config '("e2e-app")')" 'reinstall'
 # Back to upgrade the same way, so the rest of the run keeps its state.
-call "$V1" git propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "upgrade" } }, variant { Approve }, null)' >/dev/null
-call "$V2" git propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "upgrade" } }, variant { Approve }, null)' >/dev/null
-expect "  ...and back to upgrade" "$(call "$TEN" git get_deploy_config '("e2e-app")')" 'upgrade'
+ic "$V1" propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "upgrade" } }, variant { Approve }, null)' >/dev/null
+ic "$V2" propose_policy_change '("e2e-app", variant { DeployMode = record { mode = "upgrade" } }, variant { Approve }, null)' >/dev/null
+expect "  ...and back to upgrade" "$(ic "$TEN" get_deploy_config '("e2e-app")')" 'upgrade'
+
+# The governor's calls, to the governor $GOVN names (a dfx name).
+gov() { local who=$1; shift; call "$who" "$GOVN" "$@"; }
+# Stage MODULE for proposal ID in 512 KiB chunks, as blob arguments in files,
+# each at its offset; a call that fails is retried (a resent chunk is a no-op).
+stage() {
+  local who=$1 id=$2 file=$3 part last= off=0 try
+  rm -rf "$WORK/chunks"; mkdir "$WORK/chunks"
+  split -b 524288 "$file" "$WORK/chunks/c."
+  for part in "$WORK/chunks"/c.*; do
+    printf '(%s : nat64, %s : nat64, blob "%s")' "$id" "$off" "$(od -An -v -tx1 "$part" | tr -d ' \n' | sed 's/../\\&/g')" >"$part.arg"
+    for try in 1 2 3; do
+      last=$(gov "$who" stage --argument-file "$part.arg")
+      printf '%s' "$last" | grep -q 'Ok = record' && break
+    done
+    off=$((off + $(wc -c <"$part")))
+  done
+  printf '%s' "$last"
+}
+sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+COMMIT=$(git -C "$ROOT" rev-parse HEAD)
+upgrade_to() { printf '(variant { Upgrade = record { commit = "%s"; module_sha256 = "%s"; arg = blob "" } })' "$COMMIT" "$1"; }
+id_of() { sed -n 's/.*Ok = \([0-9_]*\) : nat64.*/\1/p' | tr -d _; }
 
 section "upgrade in place (same build)"
 BEFORE=$(served)
-(cd "$WORK" && dfx canister install git --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
+if [ "$SPLIT" = 1 ]; then
+  (cd "$WORK" && dfx canister install authority --mode upgrade --yes --identity "$OP" --wasm "$AUTH_WASM" >/dev/null 2>&1)
+  # The git canister is governed: its upgrade is a proposal (docs/GOVERNOR.md).
+  GOVN=gitgov
+  GITC_SHA=$(sha "$GITC_WASM")
+  UG=$(gov "$OP" propose "$(upgrade_to "$GITC_SHA")" | id_of)
+  expect "the git canister's upgrade is proposed to its governor" "$UG" '^[0-9]+$'
+  stage "$OP" "$UG" "$GITC_WASM" >/dev/null
+  expect "  ...and executed" "$(flat "$(gov "$OP" vote "($UG : nat64, variant { Approve }, null)")")" "upgraded $G to $GITC_SHA"
+  GOVN=governor
+else
+  (cd "$WORK" && dfx canister install git --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
+fi
 expect "site unchanged" "$(served)" "^${BEFORE%% *} ${BEFORE#* }"
-expect "tokens kept" "$(call "$TEN" git list_push_tokens '("e2e-app")' | grep -c 'id =')" '^[1-9]'
-expect "balance kept" "$(call "$TEN" git get_account "(principal \"$T\")")" 'deposited = [1-9]'
+expect "tokens kept" "$(ic "$TEN" list_push_tokens '("e2e-app")' | grep -c 'id =')" '^[1-9]'
+expect "balance kept" "$(ic "$TEN" get_account "(principal \"$T\")")" 'deposited = [1-9]'
 expect "push-cert still offered (the seed survived)" "$(curl -s "http://ic:$BOUND@$HOST/e2e-app.git/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert='
 commit site/e.txt e after-upgrade
 expect "signed push after upgrade" "$(signed "$URL")" 'main -> main'
@@ -527,7 +674,12 @@ if [ -n "$BASE_WASM" ]; then
   expect "required votes kept" "$INFO" 'required_votes = 1'
 fi
 
+if [ "$SPLIT" != 1 ]; then
 section "governor"
+GZ=$WORK/git.wasm.gz
+gzip -9 -n -c "$GIT_WASM" >"$GZ"
+GZ_SHA=$(sha "$GZ")
+RAW_SHA=$(sha "$GIT_WASM")
 # docs/GOVERNANCE.md, section 5, rehearsed on a second ic-git: the governor
 # becomes its only controller and has none itself; an upgrade is a proposal
 # whose module is staged in chunks and voted on by hash; the policy grows
@@ -538,11 +690,10 @@ section "governor"
 R=$(cd "$WORK" && dfx canister id ruled)
 call "$OP" ruled create_repo '("kept")' >/dev/null
 (cd "$WORK" && dfx canister create governor --identity "$OP" --no-wallet --with-cycles 20000000000000 >/dev/null 2>&1)
-OPP=$(dfx identity get-principal --identity "$OP")
 (cd "$WORK" && dfx canister install governor --identity "$OP" --wasm "$GOV_WASM" \
   --argument "(record { target = principal \"$R\"; approvers = vec { principal \"$OPP\" }; threshold = 1 : nat32 })" >/dev/null 2>&1)
 GOV=$(cd "$WORK" && dfx canister id governor)
-gov() { local who=$1; shift; call "$who" governor "$@"; }
+GOVN=governor
 expect "governor installed, 1 of 1" "$(flat "$(gov "$OP" info --query)")" "threshold = 1 : nat32.*target = principal \"$R\""
 # Immutable: the governor drops its last controller. Then the target goes to it alone.
 (cd "$WORK" && dfx canister update-settings governor --remove-controller "$OPP" --yes --identity "$OP" >/dev/null 2>&1)
@@ -560,30 +711,6 @@ expect "  ...and a tenant cannot set it" "$(call "$TEN" ruled feed_set_governor 
 expect "  ...so its old controller cannot upgrade it" "$(cd "$WORK" && dfx canister install ruled --mode upgrade --yes --identity "$OP" --wasm "$GOV_WASM" 2>&1 || true)" 'controller'
 expect "only a controller may publish the target's record" "$(call "$OP" ruled registry_publish_canister "(\"$(printf 'a%.0s' $(seq 40))\", \"$(printf 'b%.0s' $(seq 64))\")")" 'only a controller'
 
-# Stage MODULE for proposal ID in 512 KiB chunks, as blob arguments in files,
-# each at its offset; a call that fails is retried (a resent chunk is a no-op).
-stage() {
-  local who=$1 id=$2 file=$3 part last= off=0 try
-  rm -rf "$WORK/chunks"; mkdir "$WORK/chunks"
-  split -b 524288 "$file" "$WORK/chunks/c."
-  for part in "$WORK/chunks"/c.*; do
-    printf '(%s : nat64, %s : nat64, blob "%s")' "$id" "$off" "$(od -An -v -tx1 "$part" | tr -d ' \n' | sed 's/../\\&/g')" >"$part.arg"
-    for try in 1 2 3; do
-      last=$(gov "$who" stage --argument-file "$part.arg")
-      printf '%s' "$last" | grep -q 'Ok = record' && break
-    done
-    off=$((off + $(wc -c <"$part")))
-  done
-  printf '%s' "$last"
-}
-sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
-GZ=$WORK/git.wasm.gz
-gzip -9 -n -c "$GIT_WASM" >"$GZ"
-GZ_SHA=$(sha "$GZ")
-RAW_SHA=$(sha "$GIT_WASM")
-COMMIT=$(git -C "$ROOT" rev-parse HEAD)
-upgrade_to() { printf '(variant { Upgrade = record { commit = "%s"; module_sha256 = "%s"; arg = blob "" } })' "$COMMIT" "$1"; }
-id_of() { sed -n 's/.*Ok = \([0-9_]*\) : nat64.*/\1/p' | tr -d _; }
 expect "a non-approver cannot propose" "$(gov "$TEN" propose "$(upgrade_to "$GZ_SHA")")" 'only an approver'
 U1=$(gov "$OP" propose "$(upgrade_to "$GZ_SHA")" | id_of)
 expect "an upgrade is proposed" "$U1" '^[0-9]+$'
@@ -655,17 +782,18 @@ expect "  ...the target's only controller is the successor" "$(flat "$(cd "$WORK
 expect "  ...the governor says so" "$(flat "$(gov "$OP" info --query)")" "handed_over_to = opt principal \"$OPP\""
 expect "  ...and refuses anything further" "$(gov "$OP" propose "$(upgrade_to "$GZ_SHA")")" 'inert'
 expect "the successor can upgrade the target again" "$( (cd "$WORK" && dfx canister install ruled --mode upgrade --yes --identity "$OP" --wasm "$GZ" 2>&1) || true)" 'Upgraded|Installed|Module hash'
+fi
 
 section "console reads"
 for p in pricing e2e-app/info "account/$T" e2e-app/deploys; do
-  expect "/api/$p" "$(curl -s "http://$HOST/api/$p")" '^\{'
+  expect "/api/$p" "$(curl -s "http://$AHOST/api/$p")" '^\{'
 done
 if command -v node >/dev/null; then
   cat >"$WORK/reads.mjs" <<'EOF'
 import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 globalThis.crypto ??= webcrypto;
-const [page, port, G, T] = process.argv.slice(2);
+const [page, port, G, A, T] = process.argv.slice(2);
 // As if the page were served by the local gateway.
 globalThis.location = { hostname: 'localhost', origin: 'http://localhost:' + port };
 const html = readFileSync(page, 'utf8');
@@ -675,15 +803,15 @@ const reads = {
   ledger: () => IC.query('ryjl3-tyaaa-aaaaa-aaaba-cai', 'icrc1_balance_of', [ACCOUNT], [{ owner: T, subaccount: null }]),
   cmc_rate: () => IC.query('rkp4c-7iaaa-aaaaa-aaaca-cai', 'get_icp_xdr_conversion_rate', [], []),
   get_site: () => IC.query(G, 'get_site', ['text'], ['e2e-app']),
-  get_deploy_config: () => IC.query(G, 'get_deploy_config', ['text'], ['e2e-app']),
+  get_deploy_config: () => IC.query(A, 'get_deploy_config', ['text'], ['e2e-app']),
   list_push_tokens: () => IC.query(G, 'list_push_tokens', ['text'], ['e2e-app']),
-  pending_icp_deposits: () => IC.query(G, 'pending_icp_deposits', [], []),
+  pending_icp_deposits: () => IC.query(A, 'pending_icp_deposits', [], []),
 };
 for (const [name, f] of Object.entries(reads)) {
   try { await f(); console.log('ok ' + name); } catch (e) { console.log('err ' + name + ': ' + e.message); }
 }
 EOF
-  OUT=$(node "$WORK/reads.mjs" "$ROOT/browser/index.html" "$PORT" "$G" "$T" 2>&1 || true)
+  OUT=$(node "$WORK/reads.mjs" "$ROOT/browser/index.html" "$PORT" "$G" "$A" "$T" 2>&1 || true)
   for r in ledger cmc_rate get_site get_deploy_config list_push_tokens pending_icp_deposits; do
     expect "console query $r (page code, local origin)" "$OUT" "ok $r"
   done

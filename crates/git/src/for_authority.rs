@@ -127,6 +127,10 @@ impl GitSide for Git {
         })
     }
 
+    fn set_site<'a>(&'a self, repo: &'a str, root: String) -> Fut<'a, Reply<Result<(), String>>> {
+        ready(Ok(crate::site::set_config(repo, root)))
+    }
+
     fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {
         ready(Ok(store::check_new_repo(name)))
     }

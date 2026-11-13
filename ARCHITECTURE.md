@@ -60,7 +60,10 @@ flowchart LR
   guards the candid admin API; persisted across upgrades), and later `large_objects` (chunked
   uploads, see the "Push size" section) and `telemetry`. Streamed clone
   responses use the dev kit's `StreamingStrategy`/`StreamingCallbackToken`
-  types (in the dev kit since v0.3.0).
+  types (in the dev kit since v0.3.0). The same code also builds as two
+  canisters, `canisters/authority` and `canisters/git`, for the cut of
+  docs/CANISTER_SPLIT.md (phase 3, step 12c): the combined build is what
+  umobs runs until then.
 - **asset canister**: the stock certified-assets canister from the SDK
   (`dfx`'s frontend canister). the canister's principal is granted `Commit`
   permission so it can upload. Zero custom code here.

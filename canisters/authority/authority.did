@@ -1,0 +1,448 @@
+// The authority canister (docs/CANISTER_SPLIT.md, phase 3 step 12c): the
+// combined canister's interface less the git side's, plus the git canister's
+// messages. Builds from canisters/authority.
+
+type HeaderField = record { text; text };
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec HeaderField;
+  body : blob;
+};
+
+type StreamingCallbackToken = record {
+  key : text;
+  content_encoding : text;
+  index : nat;
+  sha256 : opt blob;
+};
+
+type StreamingCallbackHttpResponse = record {
+  body : blob;
+  token : opt StreamingCallbackToken;
+};
+
+type StreamingStrategy = variant {
+  Callback : record {
+    callback : func (StreamingCallbackToken) -> (StreamingCallbackHttpResponse) query;
+    token : StreamingCallbackToken;
+  };
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec HeaderField;
+  body : blob;
+  upgrade : opt bool;
+  streaming_strategy : opt StreamingStrategy;
+};
+
+type Result = variant { Ok; Err : text };
+type ResultText = variant { Ok : text; Err : text };
+
+// tenancy (docs/TENANCY.md)
+type Account = record { balance : nat64; deposited : nat64; spent : nat64; created_ns : nat64 };
+type Role = variant { Writer; Voter };
+type Member = record { "principal" : principal; role : Role };
+type RepoInfo = record {
+  owner : opt principal;
+  members : vec Member;
+  storage_bytes : nat64;
+  delinquent : bool;
+  required_votes : nat32;
+  app_canister : opt principal;
+  exempt : bool;
+  require_signed_push : bool;
+  governed : bool;
+};
+type Vote = variant { Approve; Reject; Object };
+type Ballot = record {
+  "principal" : principal;
+  approve : bool;
+  decision : Vote;
+  reason : opt text;
+  at_ns : nat64;
+  counts : bool;
+};
+type BallotTally = record { approvals : nat32; objections : nat32; required : nat32; reached : bool };
+// A change to a governed repo's policy or deploy config, decided by a vote
+// (docs/GOVERNANCE.md).
+type PolicyChange = variant {
+  RequiredVotes : record { k : nat32 };
+  AddVoter : record { "principal" : principal };
+  RemoveVoter : record { "principal" : principal };
+  Transfer : record { new_owner : principal };
+  WasmDeploy : record { target : text; source_path : text };
+  DeployMode : record { mode : text };
+};
+type Proposal = record {
+  change : PolicyChange;
+  ballots : vec Ballot;
+  approvals : nat32;
+  objections : nat32;
+  required : nat32;
+  reached : bool;
+};
+type Pricing = record {
+  create_repo : nat64;
+  push_base : nat64;
+  push_per_byte : nat64;
+  rent_per_byte_year : nat64;
+  evm_action : nat64;
+  ic_deploy : nat64;
+};
+type Stranded = record { who : principal; amount : nat64; error : text; at_ns : nat64 };
+type PendingIcpDeposit = record {
+  id : nat64;
+  block_index : opt nat64;
+  who : principal;
+  e8s : nat64;
+  at_ns : nat64;
+  last_error : opt text;
+  ledger : principal;
+  cmc : principal;
+};
+type FailedIcpDeposit = record {
+  id : nat64;
+  block_index : opt nat64;
+  who : principal;
+  e8s : nat64;
+  error : text;
+  at_ns : nat64;
+  ledger : principal;
+  cmc : principal;
+};
+type ResultAccount = variant { Ok : Account; Err : text };
+type ResultMembers = variant { Ok : vec Member; Err : text };
+type ResultVote = variant { Ok : record { nat32; nat32 }; Err : text };
+type ResultBallot = variant { Ok : BallotTally; Err : text };
+type ResultPrincipal = variant { Ok : principal; Err : text };
+type ResultBlob = variant { Ok : blob; Err : text };
+
+type CompileInfo = record { wasm_len : nat64; sha256_hex : text };
+type ResultCompileInfo = variant { Ok : CompileInfo; Err : text };
+
+type MeteredCompile = record {
+  wasm_len : nat64;
+  sha256_hex : text;
+  instructions : nat64;
+};
+type ResultMetered = variant { Ok : MeteredCompile; Err : text };
+type MeasureResult = record { funcs : nat32; wasm_len : nat64; instructions : nat64 };
+type ResultMeasure = variant { Ok : MeasureResult; Err : text };
+type JobProgress = record {
+  done : bool;
+  done_funcs : nat32;
+  total_funcs : nat32;
+  instructions : nat64;
+};
+type ResultJob = variant { Ok : JobProgress; Err : text };
+type ResultNat64 = variant { Ok : nat64; Err : text };
+
+type DistributeReport = record {
+  wasm_len : nat64;
+  sha256_hex : text;
+  module_count : nat32;
+  worker_count : nat32;
+};
+type ResultDistribute = variant { Ok : DistributeReport; Err : text };
+
+type RunReport = record {
+  output : text;
+  output_len : nat64;
+  exit_code : int32;
+  instructions : nat64;
+};
+type ResultRun = variant { Ok : RunReport; Err : text };
+
+type DeployMode = variant { upgrade; reinstall };
+type DeployConfig = record {
+  target : text;
+  source_path : text;
+  mode : DeployMode;
+};
+type DeployStatus = record {
+  commit : text;
+  ok : bool;
+  message : text;
+  wasm_len : nat64;
+  wasm_sha256 : text;
+};
+type ResultDeployStatus = variant { Ok : DeployStatus; Err : text };
+
+type DeployRecord = record {
+  commit : text;
+  source_path : text;
+  wasm_sha256 : text;
+  wasm_len : nat64;
+  ok : bool;
+  message : text;
+  at_ns : nat64;
+};
+
+type EvmDeployConfig = record {
+  source_path : text;
+  gas_limit : nat64;
+};
+
+// The git canister's messages (ic_git_types::wire), taken from its
+// principal alone: a push to charge, a job in chunks, and what happened.
+type ChargePush = record { repo : text; bytes : nat64 };
+type StageJob = record {
+  seq : nat64;
+  repo : text;
+  commit : text;
+  total : nat64;
+  index : nat32;
+  bytes : blob;
+};
+type SubmitJob = record {
+  seq : nat64;
+  repo : text;
+  commit : text;
+  staged : nat32;
+  tail : blob;
+};
+type Event = variant {
+  Pushed : record { repo : text; branch : text; tip_before : opt text; tip : text };
+};
+type Notify = record { seq : nat64; event : Event };
+type EvmDeployStatus = record {
+  commit : text;
+  ok : bool;
+  message : text;
+  contract_address : text;
+  tx_hash : text;
+};
+// ic-name-service hook: announce each successful install under
+// <handle>/<repo> to the named canister. Off until set.
+type NamesConfig = record {
+  canister : text;
+  handle : text;
+};
+
+type EvmConfig = record {
+  evm_rpc : text;
+  key_name : text;
+  chain_id : nat64;
+  rpc_urls : vec text;
+};
+type TxOutcome = record {
+  tx_hash : text;
+  nonce : nat64;
+  from : text;
+  contract_address : opt text;
+};
+type ResultTxOutcome = variant { Ok : TxOutcome; Err : text };
+type ReceiptSummary = record {
+  status : text;
+  block_number : nat64;
+  gas_used : text;
+  effective_gas_price : text;
+  contract_address : opt text;
+};
+type ResultReceipt = variant { Ok : opt ReceiptSummary; Err : text };
+type EvmDeployRecord = record {
+  repo : text;
+  commit : text;
+  chain_id : nat64;
+  contract_address : text;
+  tx_hash : text;
+  nonce : nat64;
+  bytecode_sha256 : text;
+  bytecode_len : nat64;
+  ok : bool;
+  message : text;
+  receipt_status : text;
+  at_ns : nat64;
+};
+type SolConfig = record {
+  sol_rpc : text;
+  key_name : text;
+  cluster : text;
+  rpc_urls : vec text;
+};
+type SolTxOutcome = record {
+  signature : text;
+  from : text;
+  blockhash : text;
+  blockhash_slot : nat64;
+};
+type ResultSolTxOutcome = variant { Ok : SolTxOutcome; Err : text };
+type SolSigStatus = record {
+  level : text;
+  slot : nat64;
+  ok : bool;
+};
+type ResultSolSigStatus = variant { Ok : opt SolSigStatus; Err : text };
+
+// ICRC-21 consent messages: what a wallet shows its user before signing a
+// call to this canister. Field and variant names are the standard's.
+type icrc21_consent_message_metadata = record { language : text; utc_offset_minutes : opt int16 };
+type icrc21_device_spec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+type icrc21_consent_message_spec = record { metadata : icrc21_consent_message_metadata; device_spec : opt icrc21_device_spec };
+type icrc21_consent_message_request = record { method : text; arg : blob; user_preferences : icrc21_consent_message_spec };
+type icrc21_consent_message = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record { pages : vec record { lines : vec text } };
+};
+type icrc21_consent_info = record { consent_message : icrc21_consent_message; metadata : icrc21_consent_message_metadata };
+type icrc21_error_info = record { description : text };
+type icrc21_error = variant {
+  UnsupportedCanisterCall : icrc21_error_info;
+  ConsentMessageUnavailable : icrc21_error_info;
+  InsufficientPayment : icrc21_error_info;
+  GenericError : record { error_code : nat; description : text };
+};
+type icrc21_consent_message_response = variant { Ok : icrc21_consent_info; Err : icrc21_error };
+type icrc10_standard = record { name : text; url : text };
+service : {
+  // wallet standards (ICRC-10, ICRC-21): a signer asks for a readable
+  // description of a call before signing it; unlisted methods are refused
+  icrc10_supported_standards : () -> (vec icrc10_standard) query;
+  icrc21_canister_call_consent_message : (icrc21_consent_message_request) -> (icrc21_consent_message_response);
+
+  // HTTP: the authority's half of /api, and the Atom feeds (/feed,
+  // /feed/<repo>); the git canister serves the rest
+  http_request : (HttpRequest) -> (HttpResponse) query;
+
+  // the git canister (docs/CANISTER_SPLIT.md, phase 3 step 12c): named
+  // once by an operator, after a check that a governor alone controls it
+  set_git_canister : (principal) -> (Result);
+  get_git_canister : () -> (opt principal) query;
+  // its messages, from its principal alone
+  charge_push : (ChargePush) -> (Result);
+  stage_job : (StageJob) -> (Result);
+  submit_job : (SubmitJob) -> (Result);
+  notify : (Notify) -> ();
+
+  // repos: created here, charged to the caller's account
+  create_repo : (text) -> (Result);
+  set_require_signed_push : (text, bool) -> (Result);
+
+  // tenancy: accounts, ownership, membership, votes (docs/TENANCY.md)
+  deposit : () -> (ResultAccount);
+  deposit_for : (principal) -> (ResultAccount);
+  deposit_from_cycles_ledger : (nat64) -> (ResultNat64);
+  deposit_from_icp : (nat64) -> (ResultNat64);
+  finish_icp_deposit : (nat64) -> (ResultNat64);
+  pending_icp_deposits : () -> (vec PendingIcpDeposit) query;
+  failed_icp_deposits : () -> (vec FailedIcpDeposit) query;
+  get_account : (principal) -> (Account) query;
+  my_repos : (principal) -> (vec text) query;
+  get_repo_info : (text) -> (opt RepoInfo) query;
+  add_member : (text, principal, text) -> (ResultMembers);
+  remove_member : (text, principal) -> (ResultMembers);
+  transfer_repo : (text, principal) -> (Result);
+  set_required_votes : (text, nat32) -> (Result);
+  vote : (text, text, bool) -> (ResultVote);
+  cast_ballot : (text, text, Vote, opt text) -> (ResultBallot);
+  get_votes : (text, text) -> (vec Ballot) query;
+  get_pricing : () -> (Pricing) query;
+  set_pricing : (Pricing) -> (Result);
+  charge_rent_now : () -> (nat32, nat64);
+  set_cycles_ledger : (principal) -> (Result);
+  set_icp_ledgers : (principal, principal) -> (Result);
+  stranded_deposits : () -> (vec Stranded) query;
+  create_app_canister : (text, nat64) -> (ResultPrincipal);
+  top_up_app_canister : (text, nat64) -> (Result);
+  // governance (docs/GOVERNANCE.md): one-way; then policy changes are votes
+  govern_app_canister : (text) -> (ResultPrincipal);
+  propose_policy_change : (text, PolicyChange, Vote, opt text) -> (ResultBallot);
+  get_policy_proposals : (text) -> (vec Proposal) query;
+
+  // admin allowlist (callable by controllers or authorized principals)
+  authorize : (principal) -> (Result);
+  deauthorize : (principal) -> (Result);
+  list_authorized : () -> (vec principal) query;
+
+  // public reads
+
+  // on-chain build: R0 WAT assembler
+  compile_wat : (text) -> (ResultBlob) query;
+  compile_wat_info : (text) -> (ResultCompileInfo) query;
+
+  // on-chain build: R1 minimal language compiler
+  compile_lang : (text) -> (ResultBlob) query;
+  compile_lang_info : (text) -> (ResultCompileInfo) query;
+
+  // R2: metering, ceiling measurement, resumable compile
+  compile_lang_metered : (text) -> (ResultMetered);
+  measure_compile : (nat32) -> (ResultMeasure);
+  compile_job_start : (text) -> (ResultNat64);
+  compile_job_step : (nat64, nat32) -> (ResultJob);
+  compile_job_take : (nat64) -> (ResultBlob);
+
+  // R3: separate compilation across modules
+  compile_module : (text) -> (ResultBlob) query;
+  link_module_objects : (vec blob) -> (ResultBlob) query;
+  compile_and_link_info : (vec text) -> (ResultCompileInfo) query;
+
+  // deploy-on-push (m4)
+  set_wasm_deploy : (text, text, text) -> (Result);
+  set_deploy_mode : (text, text) -> (Result);
+  deploy_now : (text) -> (ResultDeployStatus);
+  get_deploy_config : (text) -> (opt DeployConfig) query;
+  get_deploy_status : (text) -> (opt DeployStatus) query;
+  get_deploy_history : (text) -> (vec DeployRecord) query;
+  deploy_queue_len : () -> (nat64) query;
+
+  // E2: push-to-EVM deploy config per repo
+  set_evm_deploy : (text, text, nat64) -> (Result);
+  get_evm_deploy_config : (text) -> (opt EvmDeployConfig) query;
+  get_evm_deploy_status : (text) -> (opt EvmDeployStatus) query;
+
+  // F0: verifiable frontend serving (GET /site/<repo>/<path> on the git
+  // canister, which keeps the config this sends it)
+  set_site : (text, text) -> (Result);
+
+  // Track A: EVM deployment (E0 signing spine, E1 CREATE)
+  evm_set_config : (text, text, nat64, vec text) -> (Result);
+  evm_get_config : () -> (opt EvmConfig) query;
+  names_set_config : (text, text) -> (Result);
+  names_clear_config : () -> ();
+  names_get_config : () -> (opt NamesConfig) query;
+  // activity feeds (docs/GOVERNANCE.md, section 6): GET /feed/<repo> and
+  // GET /feed are Atom; the governor is mirrored into /feed on a timer
+  feed_set_governor : (opt principal) -> (Result);
+  feed_governor : () -> (opt principal) query;
+  feed_poll_governor : () -> (ResultNat64);
+  evm_address : () -> (ResultText);
+  evm_send : (text, text) -> (ResultTxOutcome);
+  evm_deploy : (text, nat64) -> (ResultTxOutcome);
+  evm_receipt : (text) -> (ResultReceipt);
+  evm_deploy_history : () -> (vec EvmDeployRecord) query;
+  evm_next_nonce : () -> (opt nat64) query;
+  evm_reset_nonce : () -> ();
+
+  // ProvenanceRegistry: canister-attested repo -> (commit, bundleHash) on-chain
+  evm_set_registry : (text) -> (Result);
+  evm_get_registry : () -> (opt text) query;
+  evm_registry_publish : (text) -> (ResultTxOutcome);
+  evm_registry_publish_site : (text) -> (ResultTxOutcome);
+  // ic-git#canister (commit, module sha256), by a controller: the governor
+  // after an upgrade (docs/GOVERNANCE.md, section 5)
+  registry_publish_canister : (text, text) -> (ResultTxOutcome);
+
+  // Track S: Solana signing spine (S0)
+  sol_set_config : (text, text, text, vec text) -> (Result);
+  sol_get_config : () -> (opt SolConfig) query;
+  sol_address : () -> (ResultText);
+  sol_balance : () -> (ResultNat64);
+  sol_send : (text, nat64) -> (ResultSolTxOutcome);
+  sol_signature_status : (text) -> (ResultSolSigStatus);
+
+  // R4: distribute compilation across a worker fleet
+  set_compiler_workers : (vec principal) -> (Result);
+  get_compiler_workers : () -> (vec principal) query;
+  compile_distributed : (vec text) -> (ResultBlob);
+  compile_distributed_info : (vec text) -> (ResultDistribute);
+
+  // R6 spike: interpret a wasm32-wasip1 module in-canister (the rustc.wasm host)
+  run_wasm : (blob) -> (ResultRun);
+  run_wat : (text) -> (ResultRun);
+}
