@@ -34,7 +34,7 @@ base64 = "0.23"
 # sha3 for keccak256; k256 (pure Rust, no getrandom without the rand feature)
 # to decompress the SEC1 pubkey into an EOA and to find the recovery id by
 # trial recovery. Both build cleanly to wasm32-unknown-unknown.
-sha3 = "0.10"
+sha3 = "0.12"
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
 ic-git-common = { path = "../common" }
 ic-git-compiler = { path = "../compiler" }
