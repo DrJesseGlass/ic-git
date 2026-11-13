@@ -22,7 +22,7 @@ wasmparser = "0.263"
 wasm-encoder = "0.263"
 # Track B, rung R6: interpret a wasm32-wasip1 module (eventually rustc.wasm)
 # held as data in stable memory. Pure Rust, builds to wasm32-unknown-unknown.
-wasmi = "1"
+wasmi = "2"
 
 [dev-dependencies]
 serde_json = "1"
