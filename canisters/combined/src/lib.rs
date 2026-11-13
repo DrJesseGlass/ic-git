@@ -538,8 +538,8 @@ fn revoke_push_token(token: String) -> bool {
 
 /// Ids of dead push-token records (operators): ones that can never
 /// authorize again and that no listing shows or revoke can remove -- a
-/// record that does not decode, or an old-format one written after the
-/// migration. Only a bug or a rollback leaves one; see tokens.rs.
+/// record that does not decode, or an old-format bare repo name. Only a
+/// bug or a rollback leaves one; see tokens.rs.
 #[ic_cdk::query(guard = "is_admin")]
 fn dead_push_tokens() -> Vec<String> {
     tokens::dead_ids()

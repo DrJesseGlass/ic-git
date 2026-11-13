@@ -278,9 +278,10 @@ canister does what:
    configs nor the object store; a refused proof is the deploy's failure
    message. `deploy_now` resolves and runs the same kind of job. A config
    edit cannot change a queued job (since phase 3 step 6 the queue
-   refuses one whose configs are no longer the repo's). A job queued by an older release is
-   resolved in `post_upgrade`, which also frees any payload whose job is
-   gone (drained by an older release after a rollback).
+   refuses one whose configs are no longer the repo's). A job queued
+   without its payload, which only a rollback could leave, is recorded as
+   failed by the drain; `post_upgrade` frees any payload whose job is gone
+   (step 11).
 3. **Governed repos deploy `.wasm` only.** DONE. One rule,
    `SourceKind::for_repo`: `set_config` (behind `set_wasm_deploy` and an
    applied `WasmDeploy`), a `WasmDeploy` proposal, and `govern_app_canister`

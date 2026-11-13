@@ -31,7 +31,8 @@ mints one for a writer of the repo, returns it once, and stores only its
 sha256. Every token expires: `days` defaults to 30 and is capped at 365, so
 a token that leaks stops working on its own even if nobody notices the
 leak. Tokens minted before expiry existed were given 30 days from the
-upgrade that introduced it. `list_push_tokens(repo)` shows the live ones
+upgrade that introduced it (September 2026) and have since run out.
+`list_push_tokens(repo)` shows the live ones
 by id -- the first 16 hex characters of the hash, which names a token
 without being usable as one, so the list is public -- with who minted
 each and when it expires, and `revoke_push_token_id(id)` revokes one
@@ -46,13 +47,13 @@ mint says when the new token expires.
 A token lasts only as long as its minter may write. Removing a writer,
 re-adding one as a voter, or transferring the repo revokes the tokens
 minted by whoever lost write access (a previous owner keeps theirs only
-if they are an operator). Tokens from before expiry existed record no
-minter, so they run out their 30 days instead.
+if they are an operator). A token that records no minter is left to
+expire instead.
 
 A dead token record can never authorize again, and no listing shows it
 or revoke can remove it: one that does not decode (only a bug leaves one),
-or an old-format bare repo name written after the migration (a rolled-back
-wasm). Operators list them with `dead_push_tokens` and remove one by id
+or an old-format bare repo name, which only a rolled-back wasm could write
+now. Operators list them with `dead_push_tokens` and remove one by id
 with `purge_dead_push_token`, which refuses any live record.
 
 ### Signed pushes
