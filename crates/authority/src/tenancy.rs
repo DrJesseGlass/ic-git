@@ -47,6 +47,15 @@ pub struct Pricing {
     pub evm_action: u64,
     /// One wasm install into a target canister from the deploy queue.
     pub ic_deploy: u64,
+    /// The git canister's floor (crate::funding): under it, the rent
+    /// timer sends the floor's worth from what tenants paid for git-side
+    /// work. A table written before the field reads the default.
+    #[serde(default = "default_git_canister_floor")]
+    pub git_canister_floor: u64,
+}
+
+fn default_git_canister_floor() -> u64 {
+    1_000_000_000_000
 }
 
 impl Default for Pricing {
@@ -58,6 +67,7 @@ impl Default for Pricing {
             rent_per_byte_year: 5_000,
             evm_action: 50_000_000_000,
             ic_deploy: 5_000_000_000,
+            git_canister_floor: default_git_canister_floor(),
         }
     }
 }
@@ -73,12 +83,14 @@ pub fn set_pricing(p: Pricing) {
     crate::kv::set_json(PRICING_KEY, &p);
 }
 
-/// Settle rent every hour. Timers do not survive upgrades, so init and
-/// post_upgrade both call this.
+/// Settle rent every hour, then fund the git canister from what was
+/// collected (crate::funding). Timers do not survive upgrades, so init
+/// and post_upgrade both call this.
 #[cfg(not(any(test, feature = "testing")))]
 pub fn arm_rent_timer() {
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(3600), || async {
         let _ = charge_rent_all();
+        let _ = crate::funding::top_up_git().await;
     });
 }
 
@@ -1244,6 +1256,8 @@ pub fn charge_push(repo: &str, bytes: usize) -> Result<(), String> {
         .saturating_add(p.push_per_byte.saturating_mul(bytes as u64));
     let owner = m.owner.expect("non-exempt repo has an owner");
     debit(&owner, fee, "push")?;
+    // The push is git-side work: its fee funds the git canister.
+    crate::funding::earn(fee);
     m.storage_bytes = m.storage_bytes.saturating_add(bytes as u64);
     save_meta(repo, &m);
     Ok(())
@@ -1325,6 +1339,9 @@ pub fn charge_rent_all() -> (u32, u64) {
         m.rent_paid_to_ns = now;
         save_meta(&name, &m);
     }
+    // Rent is for the bytes the git canister holds: it funds the git
+    // canister.
+    crate::funding::earn(collected);
     (charged, collected)
 }
 
@@ -1513,12 +1530,17 @@ mod tests {
         let pr = pricing();
         credit(&alice, pr.create_repo + pr.push_base + pr.push_per_byte * 1000 + 1);
         create_repo("t-rent", &alice, false).unwrap();
+        let pool_before = crate::funding::pool();
         // A push charges base + per byte and attributes the bytes.
         charge_push("t-rent", 1000).unwrap();
         assert_eq!(balance(&alice), 1);
         assert_eq!(meta("t-rent").unwrap().storage_bytes, 1000);
+        // The fee is git-side work: it funds the git canister.
+        let fee = pr.push_base + pr.push_per_byte * 1000;
+        assert_eq!(crate::funding::pool(), pool_before + fee);
         // Cannot afford another push.
         assert!(charge_push("t-rent", 1).unwrap_err().contains("insufficient"));
+        assert_eq!(crate::funding::pool(), pool_before + fee, "a refused push earns nothing");
         // One year of rent on 1000 bytes.
         let start = now_ns();
         set_test_now(start + YEAR_NS as u64);
@@ -1526,6 +1548,7 @@ mod tests {
         assert_eq!(charged, 1);
         // Owner had 1 cycle: pays it, goes delinquent.
         assert_eq!(collected, 1);
+        assert_eq!(crate::funding::pool(), pool_before + fee + 1, "rent funds the git canister too");
         assert!(meta("t-rent").unwrap().delinquent);
         assert!(charge_push("t-rent", 1).unwrap_err().contains("rent"));
         assert!(charge_action("t-rent", 5, "evm").unwrap_err().contains("rent"));

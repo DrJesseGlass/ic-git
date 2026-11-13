@@ -13,7 +13,7 @@
 use candid::Principal;
 use ic_git_common::call::Canister;
 use ic_git_common::peer::Peer;
-use ic_git_types::authority_side::{AuthoritySide, Event};
+use ic_git_types::authority_side::{AuthoritySide, Event, Published};
 use ic_git_types::deploy::Job;
 use ic_git_types::side::{Failure, Fut, Reply};
 use ic_git_types::wire::{self, pieces, send, Transport};
@@ -88,6 +88,16 @@ impl<T: Transport> AuthoritySide for Authority<T> {
 
     fn notify<'a>(&'a self, seq: u64, event: Event) -> Fut<'a, Reply<()>> {
         Box::pin(send(&self.transport, wire::Notify { seq, event }))
+    }
+
+    fn publish_git_record<'a>(&'a self, commit_hex: &'a str, module_sha256_hex: &'a str) -> Fut<'a, Reply<Result<Published, String>>> {
+        Box::pin(send(
+            &self.transport,
+            wire::PublishGitRecord {
+                commit: commit_hex.into(),
+                module_sha256: module_sha256_hex.into(),
+            },
+        ))
     }
 }
 

@@ -182,6 +182,15 @@ impl<T: Transport> GitSide for Git<T> {
 }
 
 impl<T: Transport> Git<T> {
+    /// What the git canister holds in cycles (its public `cycle_balance`
+    /// query, which takes no argument), for the top-up (crate::funding).
+    /// Not part of `GitSide`: in one canister there is nothing to ask.
+    pub async fn cycle_balance(&self) -> Reply<u64> {
+        let arg = candid::encode_args(()).map_err(|e| ic_git_types::side::Failure::NotDelivered(format!("cycle_balance not encodable: {e}")))?;
+        let reply = self.transport.call("cycle_balance", arg).await?;
+        candid::decode_one::<u64>(&reply).map_err(|e| ic_git_types::side::Failure::Lost(format!("cycle_balance's reply undecodable: {e}")))
+    }
+
     /// The rest of a staged reply, chunk by chunk, decoded as `R`.
     async fn fetch<R: candid::CandidType + for<'de> Deserialize<'de>>(&self, head: Staged) -> Reply<Result<R, String>> {
         let mut body = head.head;
@@ -375,6 +384,12 @@ mod tests {
             m if m == wire::Notify::METHOD => {
                 let m: wire::Notify = dec(arg);
                 enc(for_git::Authority.notify(m.seq, m.event).await.unwrap())
+            }
+            m if m == wire::PublishGitRecord::METHOD => {
+                // The real receiver asks the management canister; what
+                // crosses is tested here, the check in for_git's tests.
+                let m: wire::PublishGitRecord = dec(arg);
+                enc(Err::<ic_git_types::authority_side::Published, String>(format!("stated {}@{}", m.commit, m.module_sha256)))
             }
             other => panic!("the authority has no method {other}"),
         }
@@ -642,5 +657,25 @@ mod tests {
         };
         assert_eq!(block_on(authority.notify(102, event)), Ok(()));
         assert!(for_git::taken(102));
+        assert_eq!(
+            block_on(authority.publish_git_record("c", "m")),
+            Ok(Err("stated c@m".into())),
+            "the git record's ask crosses, and the answer comes back as it was"
+        );
+    }
+
+    /// The git canister's balance is asked as a plain call with no
+    /// argument, which its public query takes, and the number comes back.
+    #[test]
+    fn the_balance_is_asked_with_no_argument() {
+        struct Balance;
+        impl Transport for Balance {
+            fn call<'a>(&'a self, method: &'static str, arg: Vec<u8>) -> Fut<'a, Reply<Vec<u8>>> {
+                assert_eq!(method, "cycle_balance");
+                let () = candid::decode_args(&arg).expect("no argument");
+                ic_git_types::side::ready(Ok(candid::encode_one(42u64).unwrap()))
+            }
+        }
+        assert_eq!(block_on(Git { transport: Balance }.cycle_balance()), Ok(42));
     }
 }

@@ -16,8 +16,8 @@ use ic_git_compiler::{compile, interp, lang};
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{httpjson, kv};
 // The authority (crates/authority).
-use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, icp, ledger, mirrors, names, peer, provenance, sol, tenancy, to_git};
-use ic_git_types::authority_side::AuthoritySide;
+use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, funding, icp, ledger, mirrors, names, peer, provenance, sol, tenancy, to_git};
+use ic_git_types::authority_side::{AuthoritySide, Published};
 use ic_git_types::side::Reply;
 use ic_git_types::wire;
 
@@ -156,6 +156,32 @@ fn submit_job(m: wire::SubmitJob) -> Result<(), String> {
 #[ic_cdk::update(guard = "from_git")]
 async fn notify(m: wire::Notify) {
     answered(for_git::Authority.notify(m.seq, m.event).await)
+}
+
+/// `AuthoritySide::publish_git_record`: the git canister's own record,
+/// `ic-git#git`, which its governor asks it to publish after an upgrade
+/// and it asks of this side, holding no keys. This side reads the module
+/// hash the IC holds for it (`canister_info`) and publishes only a record
+/// that names it (for_git::publish_git_record). Paid by this canister, as
+/// `ic-git#canister` is.
+#[ic_cdk::update(guard = "from_git")]
+async fn publish_git_record(m: wire::PublishGitRecord) -> Result<Published, String> {
+    for_git::publish_git_record(&m.commit, &m.module_sha256, canister_info).await
+}
+
+/// Send `cycles` of this canister's own to the git canister (operators):
+/// what an operator's repos, which pay nothing, cost it. The timer funds
+/// it from what tenants pay (`get_git_funding`).
+#[ic_cdk::update(guard = "is_admin")]
+async fn top_up_git_canister(cycles: u64) -> Result<(), String> {
+    funding::top_up_by_operator(cycles, funding::deposit).await
+}
+
+/// The git canister's funding: the pool charged for git-side work and
+/// not yet sent, the floor the timer keeps it above, what has been sent.
+#[ic_cdk::query]
+fn get_git_funding() -> funding::Funding {
+    funding::funding()
 }
 
 // --- HTTP: the authority's half of /api, and the feeds -----------------------
@@ -467,11 +493,14 @@ fn set_pricing(p: tenancy::Pricing) -> Result<(), String> {
     Ok(())
 }
 
-/// Operator only: settle rent now instead of waiting for the hourly timer.
-/// Returns (repos charged, cycles collected).
+/// Operator only: settle rent now instead of waiting for the hourly timer,
+/// and fund the git canister as the timer would (`get_git_funding` says
+/// what was sent). Returns (repos charged, cycles collected).
 #[ic_cdk::update(guard = "is_admin")]
-fn charge_rent_now() -> (u32, u64) {
-    tenancy::charge_rent_all()
+async fn charge_rent_now() -> (u32, u64) {
+    let rent = tenancy::charge_rent_all();
+    let _ = funding::top_up_git().await;
+    rent
 }
 
 #[ic_cdk::update(guard = "is_admin")]

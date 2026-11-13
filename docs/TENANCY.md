@@ -118,6 +118,7 @@ margin:
 | storage rent | 5K per byte-year of ingested pack data | hourly timer, pro rata |
 | EVM action | 50B | each deploy or registry publish (a t-ECDSA signature plus RPC outcalls) |
 | IC deploy | 5B | each install from the deploy queue |
+| git canister floor | 1T | not a charge: under it, the rent timer tops the git canister up (below) |
 
 An EVM action is charged up front, and a failed one gives back what it did
 not use:
@@ -140,6 +141,21 @@ charged for it: attribution, not a measure of unique storage. An owner who
 cannot cover rent pays what they have and the repo goes **delinquent**:
 pushes and deploys are refused, serving continues, and the next deposit and
 rent tick clear it.
+
+The push fee and the rent pay for git-side work, which after the canister
+split (docs/CANISTER_SPLIT.md, step 12d) the git canister does. Both go
+into a **pool** the authority keeps apart from the accounts: revenue, not
+balances, so nothing a tenant could still spend leaves. After each rent
+tick (the hourly timer, or `charge_rent_now`) the authority asks the git
+canister what it holds and, when that is under the **git canister floor**
+in the pricing table, sends the floor's worth from the pool, as far as the
+pool goes and never what would leave itself under the floor.
+`get_git_funding` reports the pool, the floor, what has been sent and the
+last top-up; `top_up_git_canister(cycles)` lets an operator send the
+canister's own cycles, since an operator's repos pay nothing and cost the
+git canister all the same. The pool fills in the one-canister build
+already, so what tenants paid before the cut funds the git canister from
+it.
 
 ### Funding
 

@@ -141,7 +141,7 @@ mod tests {
     use crate::for_authority::Git;
     use crate::{mirror, site, to_authority};
     use futures::executor::block_on;
-    use ic_git_types::authority_side::{AuthoritySide, Event};
+    use ic_git_types::authority_side::{AuthoritySide, Event, Published};
     use ic_git_types::git_side::GitSide;
     use ic_git_types::side::{ready, Fut, Reply};
     use std::cell::RefCell;
@@ -165,6 +165,10 @@ mod tests {
 
         fn notify<'a>(&'a self, _seq: u64, _event: Event) -> Fut<'a, Reply<()>> {
             ready(Ok(()))
+        }
+
+        fn publish_git_record<'a>(&'a self, _commit_hex: &'a str, _module_sha256_hex: &'a str) -> Fut<'a, Reply<Result<Published, String>>> {
+            ready(Ok(Err("not here".into())))
         }
     }
 

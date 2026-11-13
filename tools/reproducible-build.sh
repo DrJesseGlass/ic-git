@@ -6,6 +6,8 @@
 #   tools/reproducible-build.sh            build natively (host dfx), print sha256
 #   tools/reproducible-build.sh --docker   build in the pinned container (portable);
 #                                          exports target/reproducible/combined_canister-<commit>.wasm
+#                                          and, since the canister split (step 12), the
+#                                          authority and git canister modules beside it
 #   tools/reproducible-build.sh --check    also diff the result vs the IC module hash
 #   tools/reproducible-build.sh --allow-dirty  build a tree with uncommitted edits
 #
@@ -123,6 +125,21 @@ if [ "$use_docker" = 1 ]; then
   else
     echo "artifact            : $out"
   fi
+  # The two modules the combined canister splits into (docs/CANISTER_SPLIT.md,
+  # step 12), built in the same run: the authority, for umobs after the cut,
+  # and the git canister. Recipes before step 12d have neither.
+  for split in authority_canister git_canister; do
+    split_wasm=$(echo "$hashes" | awk -v n="$split.wasm" '$2==n{print $1}')
+    split_gz=$(echo "$hashes" | awk -v n="$split.wasm.gz" '$2==n{print $1}')
+    [ -n "$split_gz" ] || continue
+    split_out="target/reproducible/$split-${commit:0:7}.wasm"
+    export_wasm ic-git-build "$split_out" "$split_wasm" "$split.wasm"
+    export_wasm ic-git-build "$split_out.gz" "$split_gz" "$split.wasm.gz"
+    label=${split%_canister}
+    printf '%-20s: %s\n' "$label raw sha256" "$split_wasm"
+    printf '%-20s: %s\n' "$label sha256" "$split_gz"
+    printf '%-20s: %s\n' "$label artifact" "$split_out.gz"
+  done
   # The governor, built in the same container run (Dockerfile.build).
   gov_wasm=$(echo "$hashes" | awk '$2=="governor.wasm"{print $1}')
   gov_gz=$(echo "$hashes" | awk '$2=="governor.wasm.gz"{print $1}')
@@ -164,6 +181,17 @@ else
   wasm=.dfx/ic/canisters/git/git.wasm
   [ -f "$wasm" ] || wasm=$(ls .dfx/*/canisters/git/git.wasm | head -1)
   built=$(shasum -a 256 "$wasm" | awk '{print $1}')
+  # The two modules of the split, built as the container builds them
+  # (Dockerfile.build: --check, since neither has an id here).
+  for split in authority:authority git_canister:git; do
+    name=${split%%:*}
+    dfx build --check "$name" >/dev/null
+    printf '%-20s: %s\n' "${split#*:} raw sha256" "$(shasum -a 256 ".dfx/local/canisters/$name/$name.wasm" | awk '{print $1}')"
+  done
+  if [ "$(shasum -a 256 Cargo.lock | awk '{print $1}')" != "$lock_before" ]; then
+    echo "Cargo.lock changed during the build; see above." >&2
+    exit 1
+  fi
 fi
 echo "built module sha256 : $built"  # sha256 of the artifact to install
 

@@ -83,6 +83,9 @@ type ReleaseJob = record { repo : text };
 type Staged = record { handle : nat64; more : nat32; head : blob };
 type ResultStaged = variant { Ok : Staged; Err : text };
 type ReplyChunk = record { handle : nat64; index : nat32 };
+// A record the authority broadcast: the transaction's hash.
+type Published = record { tx_hash : text };
+type ResultPublished = variant { Ok : Published; Err : text };
 
 // ICRC-21 consent messages: what a wallet shows its user before signing a
 // call to this canister. Field and variant names are the standard's.
@@ -123,6 +126,13 @@ service : (InitArg) -> {
 
   // the authority
   get_authority : () -> (opt principal) query;
+  // this canister's own record, ic-git#git: a controller (its governor,
+  // after an upgrade) states the commit and module hash, the authority
+  // publishes once the IC holds that module for this canister
+  registry_publish_canister : (text, text) -> (ResultPublished);
+  // what this canister holds in cycles (public: its controller is a
+  // governor, and the authority asks before a top-up)
+  cycle_balance : () -> (nat64) query;
   // its messages, from its principal alone
   set_deploy_configs : (SetDeployConfigs) -> ();
   set_push_policy : (SetPushPolicy) -> ();

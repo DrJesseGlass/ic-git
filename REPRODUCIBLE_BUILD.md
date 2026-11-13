@@ -137,6 +137,30 @@ boundary node (`https://icp-api.io`) takes the same calls without the
 gateway's buffering and measured about three times faster from the same
 machine; dfx accepts the URL directly as the network name.
 
+## The split's two modules
+
+Since the canister split's step 12 (docs/CANISTER_SPLIT.md) the same
+container run also builds the two modules the combined canister splits
+into: `authority_canister.wasm`, for umobs after the cut, and
+`git_canister.wasm`, for the new git canister. Each is built by the same
+dfx pipeline, copied out and hashed (raw and `.gz`) before the next build
+starts, and printed by the container beside the combined module's hashes.
+`tools/reproducible-build.sh --docker` exports them as
+`target/reproducible/authority_canister-<short-commit>.wasm.gz` and
+`target/reproducible/git_canister-<short-commit>.wasm.gz` and prints their
+hashes on its `authority` and `git` lines; the CI rebuilder checks
+and keeps them with the rest.
+
+They are built with `dfx build --check`, which builds without a canister
+id: the git canister has none until it is created, and the authority's is
+umobs'. The id reaches no byte of the module: a `--check` build of the
+combined canister hashes the same as its `--network ic` build (measured at
+dfx 0.31.0, the pinned version), so these hashes are what the two canisters
+will report once installed. Until the cut, `verified.json` and the watch
+name the combined module umobs runs; from the cut its entries name
+`authority_canister`, and the git canister gets a section of its own when
+it is created.
+
 ## The record: `verified.json`
 
 A MATCH that only scrolled past in one terminal is not evidence anyone else

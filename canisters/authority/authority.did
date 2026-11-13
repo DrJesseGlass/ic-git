@@ -91,6 +91,18 @@ type Pricing = record {
   rent_per_byte_year : nat64;
   evm_action : nat64;
   ic_deploy : nat64;
+  // the git canister's floor: under it the rent timer tops it up from
+  // what tenants paid for git-side work (get_git_funding)
+  git_canister_floor : nat64;
+};
+// The git canister's funding (docs/CANISTER_SPLIT.md, phase 3 step 12d).
+type TopUp = record { at_ns : nat64; cycles : nat64; balance_before : opt nat64 };
+type Funding = record {
+  git_canister : opt principal;
+  pool : nat64;
+  floor : nat64;
+  sent : nat64;
+  last : opt TopUp;
 };
 type Stranded = record { who : principal; amount : nat64; error : text; at_ns : nat64 };
 type PendingIcpDeposit = record {
@@ -208,6 +220,10 @@ type Event = variant {
   Pushed : record { repo : text; branch : text; tip_before : opt text; tip : text };
 };
 type Notify = record { seq : nat64; event : Event };
+type PublishGitRecord = record { commit : text; module_sha256 : text };
+// A record this side broadcast for the git canister: the transaction's hash.
+type Published = record { tx_hash : text };
+type ResultPublished = variant { Ok : Published; Err : text };
 type EvmDeployStatus = record {
   commit : text;
   ok : bool;
@@ -319,6 +335,13 @@ service : {
   stage_job : (StageJob) -> (Result);
   submit_job : (SubmitJob) -> (Result);
   notify : (Notify) -> ();
+  // its own record, ic-git#git, which its governor asks it to publish and
+  // it asks of this side; published only if the IC holds that module for it
+  publish_git_record : (PublishGitRecord) -> (ResultPublished);
+  // its cycles: the rent timer funds it from what tenants paid for
+  // git-side work, above the floor in Pricing; operators may send more
+  get_git_funding : () -> (Funding) query;
+  top_up_git_canister : (nat64) -> (Result);
 
   // repos: created here, charged to the caller's account
   create_repo : (text) -> (Result);

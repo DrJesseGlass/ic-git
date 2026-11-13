@@ -231,7 +231,7 @@ mod push {
     use crate::{for_git, smart_http, to_authority};
     use base64::Engine;
     use ic_dev_kit_rs::http::{HttpRequest, HttpResponse};
-    use ic_git_types::authority_side::{AuthoritySide, Event};
+    use ic_git_types::authority_side::{AuthoritySide, Event, Published};
     use ic_git_types::deploy::Job;
     use ic_git_types::side::{ready, Failure, Fut, Reply};
     use std::cell::Cell;
@@ -265,6 +265,10 @@ mod push {
 
         fn notify<'a>(&'a self, seq: u64, event: Event) -> Fut<'a, Reply<()>> {
             for_git::Authority.notify(seq, event)
+        }
+
+        fn publish_git_record<'a>(&'a self, commit_hex: &'a str, module_sha256_hex: &'a str) -> Fut<'a, Reply<Result<Published, String>>> {
+            for_git::Authority.publish_git_record(commit_hex, module_sha256_hex)
         }
     }
 

@@ -26,6 +26,14 @@ pub const APP_KEY_SUFFIX: &str = "#app";
 /// ic-git itself the way it checks a governed backend.
 pub const CANISTER_KEY: &str = "ic-git#canister";
 
+/// Key of the git canister's record (docs/CANISTER_SPLIT.md, phase 3 step
+/// 12d): the ic-git commit it was built from and the sha256 of the module
+/// installed into it. Its governor asks it to publish after each upgrade,
+/// as ic-git's does; it holds no keys, so it asks the authority, which
+/// reads the git canister's module hash itself and signs only a record
+/// that names it. Beside `CANISTER_KEY`, which stays the authority's own.
+pub const GIT_CANISTER_KEY: &str = "ic-git#git";
+
 /// A registry record: the key, the commit it attests, and the artifact hash
 /// bound to it -- what the authority publishes
 /// (`evm::registry_publish_record`), however it was resolved.
@@ -76,6 +84,8 @@ mod tests {
         assert_eq!(artifact_record_key("app"), "app");
         assert_eq!(site_record_key("app"), "app#site");
         assert_eq!(app_record_key("app"), "app#app");
+        assert_ne!(GIT_CANISTER_KEY, CANISTER_KEY, "each canister has its own record");
+        assert!(GIT_CANISTER_KEY.starts_with("ic-git#"), "ic-git's own, like the authority's");
     }
 
     /// The verifiers are JavaScript and cannot import these constants, so

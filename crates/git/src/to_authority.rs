@@ -6,7 +6,7 @@
 //! The free functions here are what the rest of this crate calls; the
 //! outbox (outbox.rs) is the one caller of `submit_job` and `notify`.
 
-use ic_git_types::authority_side::{AuthoritySide, Event};
+use ic_git_types::authority_side::{AuthoritySide, Event, Published};
 use ic_git_types::deploy::Job;
 use ic_git_types::side::Reply;
 use std::sync::OnceLock;
@@ -66,4 +66,11 @@ pub async fn submit_job(seq: u64, repo: &str, commit_hex: &str, job: Job) -> Rep
 /// Tell the authority what happened (outbox item `seq`).
 pub async fn notify(seq: u64, event: Event) -> Reply<()> {
     via!(notify(seq, event))
+}
+
+/// Ask the authority to publish this canister's record, from what its
+/// controller stated (the canister's `registry_publish_canister`). Waited
+/// for: the governor keeps the answer in its log.
+pub async fn publish_git_record(commit_hex: &str, module_sha256_hex: &str) -> Reply<Result<Published, String>> {
+    via!(publish_git_record(commit_hex, module_sha256_hex))
 }

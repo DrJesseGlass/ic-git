@@ -215,7 +215,10 @@ OPP=$(dfx identity get-principal --identity "$OP")
 AUTH=git
 if [ "$SPLIT" = 1 ]; then
   AUTH=authority
-  (cd "$WORK" && dfx canister create authority --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
+  # More than the git canister: the funding section below raises the
+  # floor past what the git canister holds, and the authority never sends
+  # what would leave itself under the floor.
+  (cd "$WORK" && dfx canister create authority --identity "$OP" --no-wallet --with-cycles 400000000000000 >/dev/null 2>&1)
   (cd "$WORK" && dfx canister install authority --identity "$OP" --wasm "$AUTH_WASM" >/dev/null 2>&1)
   A=$(cd "$WORK" && dfx canister id authority)
   (cd "$WORK" && dfx canister create git --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
@@ -248,6 +251,11 @@ if [ "$SPLIT" = 1 ]; then
   expect "the git canister's messages likewise" "$(call "$OP" authority charge_push '(record { repo = "x"; bytes = 1 : nat64 })')" 'only the git canister may call this'
   expect "  ...submit_job too" "$(call "$OP" authority submit_job '(record { seq = 1 : nat64; repo = "x"; commit = "0"; staged = 0 : nat32; tail = blob "" })')" 'only the git canister may call this'
   expect "the git host has no feed" "$(curl -s -o /dev/null -w '%{http_code}' "http://$G.raw.localhost:$PORT/feed")" '^404$'
+  # The git canister's record (step 12d): its controller asks it, it asks
+  # the authority, and nobody else may ask either.
+  expect "only a controller may ask the git canister for its record" "$(call "$OP" git registry_publish_canister "(\"$(printf 'a%.0s' $(seq 40))\", \"$(printf 'b%.0s' $(seq 64))\")")" 'only a controller'
+  expect "  ...and only the git canister may ask the authority to publish it" "$(call "$OP" authority publish_git_record "(record { commit = \"$(printf 'a%.0s' $(seq 40))\"; module_sha256 = \"$(printf 'b%.0s' $(seq 64))\" })")" 'only the git canister may call this'
+  expect "the git canister says what it holds" "$(call "$OP" git cycle_balance --query)" '^\([0-9_]+ : nat64\)$'
 else
   (cd "$WORK" && dfx canister create git --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
   (cd "$WORK" && dfx canister install git --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
@@ -596,6 +604,53 @@ COMMIT=$(git -C "$ROOT" rev-parse HEAD)
 upgrade_to() { printf '(variant { Upgrade = record { commit = "%s"; module_sha256 = "%s"; arg = blob "" } })' "$COMMIT" "$1"; }
 id_of() { sed -n 's/.*Ok = \([0-9_]*\) : nat64.*/\1/p' | tr -d _; }
 
+section "pricing"
+expect "the table names the git canister's floor" "$(ic "$OP" get_pricing --query)" 'git_canister_floor = 1_000_000_000_000 : nat64'
+expect "  ...and /api/pricing reports it" "$(curl -s "http://$AHOST/api/pricing")" '"git_canister_floor":1000000000000'
+# The whole table, with the git canister's floor as given.
+pricing() { printf '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64; git_canister_floor = %s : nat64 })' "$1"; }
+expect "a tenant cannot retune it" "$(ic "$TEN" set_pricing "$(pricing 1)")" 'is not an operator'
+
+if [ "$SPLIT" = 1 ]; then
+section "funding the git canister"
+# docs/CANISTER_SPLIT.md, step 12d: what tenants paid for git-side work
+# (pushes, rent) is the pool, and the rent timer sends the floor's worth
+# across when the git canister is under the floor. The floor is raised past
+# what the git canister holds and the tick run by hand.
+bal() { call "$OP" git cycle_balance --query | sed -n 's/^(\([0-9_]*\) : nat64)$/\1/p' | tr -d _; }
+# The funding record on one line, with the digit groups' underscores gone.
+funding() { flat "$(call "$OP" authority get_git_funding --query)" | perl -pe 's/(?<=\d)_(?=\d)//g'; }
+field() { printf '%s' "$1" | sed -n "s/.*$2 = \([0-9]*\) : nat64.*/\1/p"; }
+FUND=$(funding)
+expect "the pool holds the tenant's push fees" "$FUND" 'pool = [1-9][0-9]* : nat64'
+expect "  ...nothing sent yet" "$FUND" 'sent = 0 : nat64.*last = null|last = null.*sent = 0 : nat64'
+expect "  ...and it names the git canister" "$FUND" "git_canister = opt principal \"$G\""
+POOL=$(field "$FUND" pool)
+B0=$(bal)
+expect "the git canister holds what it was created with" "$B0" '^[1-9][0-9]*$'
+call "$OP" authority set_pricing "$(pricing 100000000000000)" >/dev/null
+ic "$OP" charge_rent_now >/dev/null
+FUND=$(funding)
+SENT=$(field "$FUND" sent)
+# The tick collects rent first, so a few cycles more than the pool read above.
+expect "under the floor: the tick sent the whole pool" "$(( SENT >= POOL && SENT - POOL < 1000000 ))" '^1$'
+expect "  ...the pool is empty" "$FUND" 'pool = 0 : nat64'
+expect "  ...and the top-up is on record with what the git canister held" "$FUND" "last = opt record \{.*balance_before = opt \([0-9]+ : nat64\)"
+B1=$(bal)
+expect "  ...and the git canister holds more" "$(( B1 > B0 ))" '^1$'
+ic "$OP" charge_rent_now >/dev/null
+SENT2=$(field "$(funding)" sent)
+expect "a second tick sends only the rent it just collected" "$(( SENT2 >= SENT && SENT2 - SENT < 1000000 ))" '^1$'
+expect "a tenant cannot send the authority's own cycles" "$(ic "$TEN" top_up_git_canister '(1000000000000 : nat64)')" 'is not an operator'
+expect "an operator can" "$(ic "$OP" top_up_git_canister '(1000000000000 : nat64)')" '^\(variant \{ Ok \}\)$'
+B2=$(bal)
+expect "  ...and the git canister holds about a T more" "$(( B2 - B1 > 900000000000 ))" '^1$'
+FUND=$(funding)
+expect "  ...on record, not from the pool" "$FUND" "sent = $(( SENT2 + 1000000000000 )) : nat64"
+expect "  ...and not asked what it held" "$FUND" 'balance_before = null'
+call "$OP" authority set_pricing "$(pricing 1000000000000)" >/dev/null
+fi
+
 section "upgrade in place (same build)"
 BEFORE=$(served)
 if [ "$SPLIT" = 1 ]; then
@@ -606,7 +661,12 @@ if [ "$SPLIT" = 1 ]; then
   UG=$(gov "$OP" propose "$(upgrade_to "$GITC_SHA")" | id_of)
   expect "the git canister's upgrade is proposed to its governor" "$UG" '^[0-9]+$'
   stage "$OP" "$UG" "$GITC_WASM" >/dev/null
-  expect "  ...and executed" "$(flat "$(gov "$OP" vote "($UG : nat64, variant { Approve }, null)")")" "upgraded $G to $GITC_SHA"
+  UGOUT=$(flat "$(gov "$OP" vote "($UG : nat64, variant { Approve }, null)")")
+  expect "  ...and executed" "$UGOUT" "upgraded $G to $GITC_SHA"
+  # The new code asked the authority to publish ic-git#git: the authority
+  # read the module hash the IC holds for the git canister and found it the
+  # stated one (a mismatch would say so), and had no registry to publish to.
+  expect "  ...and the git canister's record went to the authority, which checked its module (no registry here)" "$UGOUT" 'record not published: no (EVM config|registry)'
   GOVN=governor
 else
   (cd "$WORK" && dfx canister install git --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
