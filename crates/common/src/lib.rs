@@ -6,6 +6,7 @@
 
 pub mod call;
 pub mod clock;
+pub mod consent;
 pub mod httpjson;
 pub mod kv;
 pub mod memory;

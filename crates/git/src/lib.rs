@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod attest;
+pub mod consent;
 pub mod for_authority;
 pub mod gitproof;
 pub mod jobs;

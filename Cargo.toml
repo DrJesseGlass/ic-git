@@ -1,5 +1,5 @@
 [workspace]
-members = ["canisters/combined", "canisters/governor", "crates/authority", "crates/common", "crates/compiler", "crates/git", "crates/types"]
+members = ["canisters/authority", "canisters/combined", "canisters/git", "canisters/governor", "crates/authority", "crates/common", "crates/compiler", "crates/git", "crates/types"]
 resolver = "2"
 
 [profile.release]

@@ -100,6 +100,8 @@ messages! {
     SetPushPolicy = "set_push_policy" -> () { repo: String, seq: u64, policy: PushPolicy }
     /// `GitSide::set_approved`.
     SetApproved = "set_approved" -> () { repo: String, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry> }
+    /// `GitSide::set_site`.
+    SetSite = "set_site" -> Result<(), String> { repo: String, root: String }
     /// `GitSide::check_new_repo`.
     CheckNewRepo = "check_new_repo" -> Result<String, String> { name: String }
     /// `GitSide::create_repo`.

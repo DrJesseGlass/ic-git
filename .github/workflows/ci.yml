@@ -27,9 +27,9 @@ jobs:
       # rather than passing on a dependency graph nobody committed
       # (REPRODUCIBLE_BUILD.md, "The lockfile pin needs a real --locked").
       - name: Unit tests
-        run: cargo test --locked -q -p combined_canister -p governor_canister -p ic-git-authority -p ic-git-git -p ic-git-common -p ic-git-types -p ic-git-compiler
+        run: cargo test --locked -q -p combined_canister -p authority_canister -p git_canister -p governor_canister -p ic-git-authority -p ic-git-git -p ic-git-common -p ic-git-types -p ic-git-compiler
       - name: Wasm build
-        run: cargo build --locked -q --target wasm32-unknown-unknown --release -p combined_canister -p governor_canister
+        run: cargo build --locked -q --target wasm32-unknown-unknown --release -p combined_canister -p authority_canister -p git_canister -p governor_canister
 
   # The dependency gate: RustSec advisories, one version of each crate,
   # licences, crates.io only. deny.toml says why each check is there and

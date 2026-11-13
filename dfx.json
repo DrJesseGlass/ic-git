@@ -6,6 +6,16 @@
       "package": "combined_canister",
       "candid": "canisters/combined/combined.did"
     },
+    "authority": {
+      "type": "rust",
+      "package": "authority_canister",
+      "candid": "canisters/authority/authority.did"
+    },
+    "git_canister": {
+      "type": "rust",
+      "package": "git_canister",
+      "candid": "canisters/git/git.did"
+    },
     "governor": {
       "type": "custom",
       "build": "cargo build --target wasm32-unknown-unknown --release -p governor_canister",
@@ -14,7 +24,9 @@
     },
     "www": {
       "type": "assets",
-      "source": ["site"]
+      "source": [
+        "site"
+      ]
     },
     "wasm_target": {
       "type": "custom",

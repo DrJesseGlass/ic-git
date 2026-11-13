@@ -1,0 +1,160 @@
+// The git canister (docs/CANISTER_SPLIT.md, phase 3 step 12c): the
+// combined canister's interface less the authority's, plus the authority's
+// messages. Builds from canisters/git; installed with the authority's
+// principal, which alone may send them.
+
+type HeaderField = record { text; text };
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec HeaderField;
+  body : blob;
+};
+
+type StreamingCallbackToken = record {
+  key : text;
+  content_encoding : text;
+  index : nat;
+  sha256 : opt blob;
+};
+
+type StreamingCallbackHttpResponse = record {
+  body : blob;
+  token : opt StreamingCallbackToken;
+};
+
+type StreamingStrategy = variant {
+  Callback : record {
+    callback : func (StreamingCallbackToken) -> (StreamingCallbackHttpResponse) query;
+    token : StreamingCallbackToken;
+  };
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec HeaderField;
+  body : blob;
+  upgrade : opt bool;
+  streaming_strategy : opt StreamingStrategy;
+};
+
+type Result = variant { Ok; Err : text };
+type ResultText = variant { Ok : text; Err : text };
+type ResultBlob = variant { Ok : blob; Err : text };
+type PushTokenInfo = record {
+  id : text;
+  repo : text;
+  minted_by : opt principal;
+  created_ns : opt nat64;
+  expires_ns : nat64;
+  key : opt text;
+};
+type SiteConfig = record { root : text };
+
+// The authority's messages (ic_git_types::wire), taken from its principal
+// alone: the mirrors of what it decides about a repo, the site config, and
+// the asks it makes from its update calls.
+type DeployMode = variant { upgrade; reinstall };
+type DeployConfig = record {
+  target : text;
+  source_path : text;
+  mode : DeployMode;
+};
+type EvmDeployConfig = record {
+  source_path : text;
+  gas_limit : nat64;
+};
+type DeployConfigs = record { wasm : opt DeployConfig; evm : opt EvmDeployConfig };
+type PushPolicy = record { writers : vec principal; require_signed_push : bool };
+type Retry = record { running : opt text };
+type SetDeployConfigs = record { repo : text; seq : nat64; configs : DeployConfigs };
+type SetPushPolicy = record { repo : text; seq : nat64; policy : PushPolicy };
+type SetApproved = record { repo : text; seq : nat64; approved : opt vec text; retry : opt Retry };
+type SetSite = record { repo : text; root : text };
+type CheckNewRepo = record { name : text };
+type CreateRepo = record { name : text };
+type HasCommit = record { oid : blob };
+type RecordKind = variant { Site; Release : record { path : text } };
+type RecordArtifact = record { repo : text; kind : RecordKind };
+type ReleaseJob = record { repo : text };
+// A reply larger than a message: its first chunk, and how many more
+// reply_chunk serves under the handle (1 to more).
+type Staged = record { handle : nat64; more : nat32; head : blob };
+type ResultStaged = variant { Ok : Staged; Err : text };
+type ReplyChunk = record { handle : nat64; index : nat32 };
+
+// ICRC-21 consent messages: what a wallet shows its user before signing a
+// call to this canister. Field and variant names are the standard's.
+type icrc21_consent_message_metadata = record { language : text; utc_offset_minutes : opt int16 };
+type icrc21_device_spec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+type icrc21_consent_message_spec = record { metadata : icrc21_consent_message_metadata; device_spec : opt icrc21_device_spec };
+type icrc21_consent_message_request = record { method : text; arg : blob; user_preferences : icrc21_consent_message_spec };
+type icrc21_consent_message = variant {
+  GenericDisplayMessage : text;
+  LineDisplayMessage : record { pages : vec record { lines : vec text } };
+};
+type icrc21_consent_info = record { consent_message : icrc21_consent_message; metadata : icrc21_consent_message_metadata };
+type icrc21_error_info = record { description : text };
+type icrc21_error = variant {
+  UnsupportedCanisterCall : icrc21_error_info;
+  ConsentMessageUnavailable : icrc21_error_info;
+  InsufficientPayment : icrc21_error_info;
+  GenericError : record { error_code : nat; description : text };
+};
+type icrc21_consent_message_response = variant { Ok : icrc21_consent_info; Err : icrc21_error };
+type icrc10_standard = record { name : text; url : text };
+// What the canister is told once, at install: the authority it answers to.
+type InitArg = record { authority : principal };
+service : (InitArg) -> {
+  // wallet standards (ICRC-10, ICRC-21): a signer asks for a readable
+  // description of a call before signing it; unlisted methods are refused
+  icrc10_supported_standards : () -> (vec icrc10_standard) query;
+  icrc21_canister_call_consent_message : (icrc21_consent_message_request) -> (icrc21_consent_message_response);
+
+  // git smart-HTTP surface (called by the HTTP gateway), /site/<repo>/, and
+  // the git side's half of /api
+  http_request : (HttpRequest) -> (HttpResponse) query;
+  http_request_update : (HttpRequest) -> (HttpResponse);
+  http_request_streaming_callback : (StreamingCallbackToken) -> (StreamingCallbackHttpResponse) query;
+
+  // the authority
+  get_authority : () -> (opt principal) query;
+  // its messages, from its principal alone
+  set_deploy_configs : (SetDeployConfigs) -> ();
+  set_push_policy : (SetPushPolicy) -> ();
+  set_approved : (SetApproved) -> ();
+  set_site : (SetSite) -> (Result);
+  check_new_repo : (CheckNewRepo) -> (ResultText);
+  create_repo : (CreateRepo) -> (Result);
+  has_commit : (HasCommit) -> (bool);
+  record_artifact : (RecordArtifact) -> (ResultStaged);
+  release_job : (ReleaseJob) -> (ResultStaged);
+  reply_chunk : (ReplyChunk) -> (ResultBlob);
+
+  // admin API (authorized principals only)
+  put_object : (text, blob) -> (ResultText);
+  set_ref : (text, text, text) -> (Result);
+  dead_push_tokens : () -> (vec text) query;
+  purge_dead_push_token : (text) -> (Result);
+
+  // push tokens: writers of the repo, by the authority's push policy
+  create_push_token : (text, opt nat32, opt text) -> (ResultText);
+  list_push_tokens : (text) -> (vec PushTokenInfo) query;
+  revoke_push_token : (text) -> (bool);
+  revoke_push_token_id : (text) -> (Result);
+
+  // admin allowlist (callable by controllers or authorized principals)
+  authorize : (principal) -> (Result);
+  deauthorize : (principal) -> (Result);
+  list_authorized : () -> (vec principal) query;
+
+  // public reads
+  get_object : (text) -> (opt blob) query;
+  list_refs : (text) -> (vec record { text; text }) query;
+  list_repos : () -> (vec text) query;
+  get_site : (text) -> (opt SiteConfig) query;
+}
