@@ -63,7 +63,7 @@ skip = [
     { crate = "syn@2", reason = "proc-macro input: candid_derive, ic-cdk-macros, binrw_derive and darling are on syn 2, serde_derive and futures-macro on syn 3. Build-time only, not in the module." },
     { crate = "thiserror@1", reason = "candid and ic_principal are on thiserror 1, ic-cdk and ic-dev-kit-rs on 2. Goes when candid moves." },
     { crate = "thiserror-impl@1", reason = "the proc-macro half of thiserror 1, see above." },
-    { crate = "wasmparser@0.228", reason = "wasmi 2.0 pins it; the compiler and wast are on 0.263. Goes when wasmi catches up." },
+    { crate = "wasmparser@0.239", reason = "wasmi 1.1 pins it; the compiler and wast are on 0.263. wasmi 2.0 compiles its Op encoder into one function past the IC's complexity limit (IC0505), so the module cannot be installed; stay on 1.1 until a wasmi release fits." },
 ]
 skip-tree = []
 

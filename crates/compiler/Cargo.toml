@@ -22,7 +22,12 @@ wasmparser = "0.263"
 wasm-encoder = "0.263"
 # Track B, rung R6: interpret a wasm32-wasip1 module (eventually rustc.wasm)
 # held as data in stable memory. Pure Rust, builds to wasm32-unknown-unknown.
-wasmi = "2"
+# Not 2.0: its instruction encoder (wasmi_ir::Op::encode) compiles into one
+# function of complexity ~1.55M under this profile, past the IC's 1M limit
+# (IC0505, "function complexity too high"), so the replica refuses to
+# install the module at all. Checked 2026-11-13; CI does not install, so
+# only the local e2e catches it. Bump again only after an install succeeds.
+wasmi = "1"
 
 [dev-dependencies]
 serde_json = "1"
