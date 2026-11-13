@@ -33,7 +33,12 @@ jobs:
           echo "$HOME/.local/share/dfx/bin" >> "$GITHUB_PATH"
 
       - name: Compare live module hash with verified.json
-        run: tools/check-module-hash.sh 2>&1 | tee "$RUNNER_TEMP/check.log"
+        run: |
+          # A bare `run:` is `bash -e {0}` with no pipefail: the step would
+          # take tee's exit status, and a mismatch would pass green and never
+          # email anyone. The pipe must fail when the check fails.
+          set -o pipefail
+          tools/check-module-hash.sh 2>&1 | tee "$RUNNER_TEMP/check.log"
         env:
           DFX_IDENTITY: anonymous
 
