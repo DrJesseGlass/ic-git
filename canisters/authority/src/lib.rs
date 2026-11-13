@@ -65,12 +65,27 @@ fn post_upgrade() {
 
 /// Name the git canister (operators). Checked first, through the
 /// management canister: it runs code, one canister alone controls it, and
-/// that one has no controllers -- a governor, as this canister's is -- so
-/// nothing but its approvers' votes can change what answers this side.
-/// Named once: a second id is refused, the same one again is fine.
+/// that one runs code and has no controllers -- a governor, as this
+/// canister's is -- so nothing but its approvers' votes can change what
+/// answers this side; then that it is a git canister answering to this
+/// one (its `get_authority`). Named once: a second id is refused, the
+/// same one again is fine.
 #[ic_cdk::update(guard = "is_admin")]
 async fn set_git_canister(git: candid::Principal) -> Result<(), String> {
-    peer::name_git(git, canister_info).await
+    peer::name_git(git, ic_cdk::api::canister_self(), canister_info, authority_of).await
+}
+
+/// The git canister's `get_authority`: which authority it answers to.
+/// A canister without the method answers with the call's rejection.
+/// Bounded wait, as the id is whatever the operator typed: an unbounded
+/// call to a canister that never answers would hold this one open.
+async fn authority_of(id: candid::Principal) -> Result<Option<candid::Principal>, String> {
+    let fail = |e: String| format!("get_authority of {id}: {e}");
+    ic_cdk::call::Call::bounded_wait(id, "get_authority")
+        .await
+        .map_err(|e| fail(e.to_string()))?
+        .candid::<Option<candid::Principal>>()
+        .map_err(|e| fail(e.to_string()))
 }
 
 #[ic_cdk::query]

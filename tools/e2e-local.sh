@@ -114,10 +114,11 @@ call() {
 }
 ok_text() { sed -n 's/.*Ok = "\([^"]*\)".*/\1/p'; }
 # ic WHO METHOD ARGS...: the call, to whichever canister has the method.
-# One canister has them all; with E2E_SPLIT the git canister has these and
-# the authority the rest (docs/CANISTER_SPLIT.md, step 12, "Where the
-# endpoints land").
-GIT_METHODS=" put_object get_object set_ref list_refs list_repos create_push_token list_push_tokens revoke_push_token revoke_push_token_id dead_push_tokens purge_dead_push_token get_site get_authority "
+# One canister has them all; with E2E_SPLIT the git canister has the
+# methods of GIT_METHODS (read from the two candid files once they are
+# known, below) and the authority the rest (docs/CANISTER_SPLIT.md, step
+# 12, "Where the endpoints land").
+GIT_METHODS=
 ic() {
   local who=$1 m=$2; shift 2
   if [ "$SPLIT" = 1 ] && [[ "$GIT_METHODS" != *" $m "* ]]; then
@@ -126,6 +127,8 @@ ic() {
     call "$who" git "$m" "$@"
   fi
 }
+# The method names a candid service declares, one per line.
+did_methods() { awk '/^service/ { s = 1 } s' "$1" | sed -n 's/^  \([a-z_0-9]*\) *:.*/\1/p' | sort; }
 
 section "build"
 (cd "$ROOT" && cargo build -q --target wasm32-unknown-unknown --release -p combined_canister -p authority_canister -p git_canister -p governor_canister)
@@ -136,6 +139,9 @@ AUTH_WASM=$ROOT/target/wasm32-unknown-unknown/release/authority_canister.wasm
 AUTH_DID=$ROOT/canisters/authority/authority.did
 GITC_WASM=$ROOT/target/wasm32-unknown-unknown/release/git_canister.wasm
 GITC_DID=$ROOT/canisters/git/git.did
+# What only the git canister answers: the rest a call for either reaches
+# on the authority (create_repo, the allowlist, the ICRC methods).
+GIT_METHODS=" $(comm -23 <(did_methods "$GITC_DID") <(did_methods "$AUTH_DID") | tr '\n' ' ')"
 GOV_WASM=$ROOT/target/wasm32-unknown-unknown/release/governor_canister.wasm
 NAMES_WASM=
 if [ -d "$NAMES_REPO/canisters/names" ]; then
@@ -219,6 +225,7 @@ if [ "$SPLIT" = 1 ]; then
   # docs/CANISTER_SPLIT.md, step 12: the setter checks, through canister_info,
   # that one canister alone controls the git canister and that it has no
   # controllers itself -- a governor. Until then nothing crosses.
+  expect "the authority is not its own git canister" "$(call "$OP" authority set_git_canister "(principal \"$A\")")" 'its own git canister'
   expect "a git canister controlled by a person is refused" "$(call "$OP" authority set_git_canister "(principal \"$G\")")" 'controller|canister_info'
   expect "  ...and nothing is named" "$(call "$OP" authority get_git_canister --query)" '^\(null\)$'
   expect "  ...so a repo cannot be created yet" "$(call "$OP" authority create_repo '("too-early")')" 'not set|not delivered'

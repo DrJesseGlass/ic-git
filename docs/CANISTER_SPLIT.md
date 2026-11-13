@@ -784,16 +784,20 @@ The two canisters:
           only its own side: the mirrors on the authority, the outbox on
           the git canister.
         - The git canister takes the authority's principal as its init
-          argument (`InitArg { authority }`) and says it back
-          (`get_authority`). The authority's `set_git_canister`
-          (operators) names the git canister once: `peer::name_git`
-          reads `canister_info` of the canister and of its one controller
-          and refuses one that runs no code, has any number of
-          controllers but one, controls itself, or whose controller has
-          controllers of its own; the same id again is fine, another is
-          refused for good (`peer::governed`, unit-tested against each
-          refusal). `get_git_canister` says what is named. Until it is,
-          every call across is not delivered, so no repo can be created.
+          argument (`InitArg { authority }`; anonymous or itself is
+          refused) and says it back (`get_authority`). The authority's
+          `set_git_canister` (operators) names the git canister once:
+          `peer::name_git` reads `canister_info` of the canister and of
+          its one controller and refuses one that runs no code, has any
+          number of controllers but one, controls itself, or whose
+          controller runs no code or has controllers of its own
+          (`peer::governor_of`, `peer::ungoverned`); then asks the
+          canister its `get_authority`, which must name this one, so
+          the authority itself, an app canister or someone else's git
+          canister cannot be named; the same id again is fine, another
+          is refused for good (unit-tested against each refusal).
+          `get_git_canister` says what is named. Until it is, every call
+          across is not delivered, so no repo can be created.
         - The messages' endpoints take the `wire` structs and are guarded
           by the other side's principal: on the authority `charge_push`,
           `stage_job`, `submit_job` and `notify` (`peer::GIT.check_caller`);
@@ -839,7 +843,9 @@ The two canisters:
       messages. A `GitSide` that sends messages to the git canister,
       whose id is set once by an operator: the setter checks, through the
       management canister's `canister_info`, that the canister has one
-      controller and that the controller itself has none (a governor).
+      controller and that the controller runs code and itself has no
+      controllers (a governor), and through the canister's own
+      `get_authority` that it answers to this one.
     - **`canisters/git` (`git_canister.wasm`, for the new canister).**
       HTTP, both git services, `/site/`, the git half of `/api`, push
       tokens, the object admin calls and their consent messages. An

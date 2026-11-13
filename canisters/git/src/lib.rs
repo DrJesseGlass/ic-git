@@ -52,6 +52,14 @@ static GIT: for_authority::Git = for_authority::Git { is_operator };
 
 #[ic_cdk::init]
 fn init(arg: InitArg) {
+    // The authority's principal alone passes `from_authority`: anonymous
+    // would let anyone through, and this canister never calls itself.
+    if arg.authority == candid::Principal::anonymous() {
+        ic_cdk::trap("the authority cannot be the anonymous principal");
+    }
+    if arg.authority == ic_cdk::api::canister_self() {
+        ic_cdk::trap("the authority cannot be this canister");
+    }
     peer::AUTHORITY.set(arg.authority);
     install_sides();
     auth::init_with_caller();
