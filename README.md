@@ -187,6 +187,11 @@ returns the wasm deploy config, the last attempt, and the provenance log
 (commit, target, wasm sha256 per install), so a deployed app can name the
 commit it actually came from rather than the branch tip (demo/README.md).
 
+## License
+
+Apache-2.0: LICENSE. The same for every crate in the workspace and for
+the demo.
+
 ## Reporting
 
 A bug: https://github.com/DrJesseGlass/ic-git/issues/new/choose. A security

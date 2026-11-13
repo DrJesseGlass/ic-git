@@ -2,6 +2,8 @@
 name = "ic-git-common"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+publish = false
 description = "What both sides of ic-git share while they are one canister (docs/CANISTER_SPLIT.md, phase 2 step 4): the stable-memory layout, the META map, the clock, the /api JSON helpers."
 
 [features]

@@ -1,8 +1,9 @@
 # Tests every pull request, Dependabot's included: the canister crates'
-# unit tests and the wasm build. The reproducible build and its hash are
-# reproducible-build.yml's job, at release time; this only says the change
-# compiles and passes. The local end-to-end pass (tools/e2e-local.sh) is
-# run by hand before a release.
+# unit tests, the wasm build, and the dependency gate (deny.toml). The
+# reproducible build and its hash are reproducible-build.yml's job, at
+# release time; this only says the change compiles, passes, and brings in
+# nothing the gate refuses. The local end-to-end pass (tools/e2e-local.sh)
+# is run by hand before a release.
 name: ci
 
 on:
@@ -29,3 +30,17 @@ jobs:
         run: cargo test --locked -q -p combined_canister -p governor_canister -p ic-git-authority -p ic-git-git -p ic-git-common -p ic-git-types -p ic-git-compiler
       - name: Wasm build
         run: cargo build --locked -q --target wasm32-unknown-unknown --release -p combined_canister -p governor_canister
+
+  # The dependency gate: RustSec advisories, one version of each crate,
+  # licences, crates.io only. deny.toml says why each check is there and
+  # carries every exception with its reason. Fails the pull request on a
+  # new advisory even when the code did not change, so a red main here
+  # means the advisory database moved, not the code.
+  deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --locked
