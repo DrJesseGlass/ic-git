@@ -176,6 +176,12 @@ before deploy. Wired into the deploy path: a git push of a .wat file compiles,
 validates, and install_code's the result into a target canister -- verified by
 the deployed canister's module hash matching the on-chain sha256. Finding: the
 `wat` crate is an assembler, not a validator; wasmparser::validate is the gate.
+The gate validates against the proposals the IC accepts at install
+(`compile::IC_FEATURES`: the 2.0 specification plus memory64 and tail calls,
+the set the replica's wasmtime validation config produces over wasmtime 48's
+defaults and build features), not wasmparser's default, which
+widens with each release and by 0.263 accepted GC, exceptions and wide
+arithmetic that install_code refuses.
 
 R1 -- a real language compiler in one canister. DONE.
 A small i32 language (functions, + - * /, precedence, unary minus, parens,
