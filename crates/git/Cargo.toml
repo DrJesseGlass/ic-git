@@ -29,7 +29,7 @@ base64 = "0.22"
 # Key-bound pushes (tokens.rs, signed_push.rs): verify the Ed25519 SSH
 # signature on a git push certificate. Verification only: no default
 # features, so no rand/getrandom and nothing that needs the OS.
-ed25519-dalek = { version = "2", default-features = false }
+ed25519-dalek = { version = "3", default-features = false }
 ic-git-common = { path = "../common" }
 ic-git-types = { path = "../types" }
 
