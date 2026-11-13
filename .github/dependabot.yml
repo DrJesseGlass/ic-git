@@ -44,6 +44,18 @@ updates:
         update-types: [version-update:semver-major, version-update:semver-minor]
       - dependency-name: ic-dev-kit-rs
       - dependency-name: ic-multisig
+      # The digest 0.11 generation (sha2 0.11, ed25519-dalek 3, k256 0.14)
+      # would sit beside digest 0.10 in the module, which sha1, sha1-checked,
+      # ic_principal (candid) and ic-multisig still use: two SHA-2s in the
+      # attested wasm, and deny.toml refuses that. Lift these together when
+      # candid, ic-cdk and ic-multisig are on digest 0.11, and move sha2,
+      # sha1, ed25519-dalek and k256 in one pull request.
+      - dependency-name: sha2
+        update-types: [version-update:semver-minor]
+      - dependency-name: ed25519-dalek
+        update-types: [version-update:semver-major]
+      - dependency-name: k256
+        update-types: [version-update:semver-minor]
 
   # The demo app: its own workspace and lock, outside the attested module.
   - package-ecosystem: cargo

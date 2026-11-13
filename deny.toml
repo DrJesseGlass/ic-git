@@ -1,0 +1,71 @@
+# cargo-deny: the dependency gate. ci.yml runs `cargo deny check` on every
+# pull request, Dependabot's included, so a bump that compiles can still be
+# refused for what it brings in. It looks at the graph the attested module
+# is built from: the wasm32 target, without dev-dependencies.
+#
+# Why each check is here:
+#   advisories   RustSec, fetched at check time and independent of GitHub's
+#                alert pipeline. The first run (2026-11-13) found
+#                RUSTSEC-2026-0387 in crypto-bigint, which GitHub's advisory
+#                database did not carry, so Dependabot showed no alert.
+#   bans         one version of each crate. Two copies of a hash or curve
+#                implementation in the module is twice the code to audit and
+#                a bigger wasm; the sha2 0.11 and ed25519-dalek 3 bumps of
+#                2026-11-13 would have done exactly that while sha1, k256,
+#                ic_principal and ic-multisig stay on digest 0.10. Every
+#                duplicate the graph carries today is listed below with the
+#                crate that pins it.
+#   licenses     the allow list is what the graph carries now; a new licence
+#                is a decision, not a surprise.
+#   sources      crates.io only. A git or path dependency from outside the
+#                workspace cannot be reproduced from a Cargo.lock alone.
+#
+# Locally: `cargo deny check` (brew install cargo-deny, or cargo install).
+
+[graph]
+targets = ["wasm32-unknown-unknown"]
+all-features = false
+exclude-dev = true
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Every entry needs its id and the reason the module is not exposed, so the
+# exception is reviewed with the code. Remove the entry when the fix lands.
+ignore = [
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 timing variability, via k256 0.13 in the authority. The canister never holds a secp256k1 private key: signatures come from the IC's threshold ECDSA, and k256 only parses public keys and recovers them from signatures (evm.rs). The fix is k256 0.14, which moves to digest 0.11 and would split sha2 until candid, ic-cdk and ic-multisig move too." },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; a proc-macro ic-cdk uses at build time, nothing of it is in the module. Goes when ic-cdk drops it." },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "0BSD",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+# The workspace crates are publish = false and carry no license field.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# The workspace crates depend on one another by path, without a version.
+allow-wildcard-paths = true
+skip = [
+    { crate = "syn@2", reason = "proc-macro input: candid_derive, ic-cdk-macros, binrw_derive and darling are on syn 2, serde_derive and futures-macro on syn 3. Build-time only, not in the module." },
+    { crate = "thiserror@1", reason = "candid and ic_principal are on thiserror 1, ic-cdk and ic-dev-kit-rs on 2. Goes when candid moves." },
+    { crate = "thiserror-impl@1", reason = "the proc-macro half of thiserror 1, see above." },
+    { crate = "wasmparser@0.239", reason = "wasmi 1.1 pins it; the compiler and wast are on 0.263. Goes with the next wasmi." },
+]
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

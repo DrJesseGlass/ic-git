@@ -2,6 +2,7 @@
 name = "ic-git-authority"
 version = "0.1.0"
 edition = "2021"
+publish = false
 description = "ic-git's authority (docs/CANISTER_SPLIT.md, phase 2 step 4): tenancy, ballots and governance, accounts and payments, names, the EVM and Solana signers, the deploy queue and provenance publishing. Reaches the git side only through ic_git_types::git_side."
 
 [features]

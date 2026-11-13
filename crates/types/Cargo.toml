@@ -2,6 +2,7 @@
 name = "ic-git-types"
 version = "0.1.0"
 edition = "2021"
+publish = false
 description = "What both sides of ic-git's canister boundary agree on (docs/CANISTER_SPLIT.md, section 4): the proof format and its checker, the wire structs, the registry record keys."
 
 [dependencies]

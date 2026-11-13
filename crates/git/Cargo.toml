@@ -2,6 +2,7 @@
 name = "ic-git-git"
 version = "0.1.0"
 edition = "2021"
+publish = false
 description = "ic-git's git side (docs/CANISTER_SPLIT.md, phase 2 step 4): objects, refs, repos, the smart-HTTP protocol, push tokens, site serving, the deploy configs and the proofs a deploy job carries. Knows nothing of the authority: what the authority decides reaches it through the mirrors."
 
 [features]
