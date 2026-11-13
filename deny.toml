@@ -50,7 +50,8 @@ allow = [
     "Unicode-3.0",
 ]
 confidence-threshold = 0.8
-# The workspace crates are publish = false and carry no license field.
+# The workspace crates are publish = false; they are Apache-2.0 like the
+# repository (LICENSE), and the check skips them as private either way.
 private = { ignore = true }
 
 [bans]
