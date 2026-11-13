@@ -4,6 +4,7 @@
 //! clock, and the JSON helpers both halves of /api answer with. Phase 3
 //! gives each canister its own copy.
 
+pub mod call;
 pub mod clock;
 pub mod httpjson;
 pub mod kv;

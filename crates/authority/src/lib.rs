@@ -21,6 +21,7 @@ pub mod icp;
 pub mod ledger;
 pub mod mirrors;
 pub mod names;
+pub mod peer;
 pub mod provenance;
 pub mod records;
 pub mod rpc_common;

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 /// Who may push to a repo: its owner and its writers. Operators may too,
 /// by each canister's own rule.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct PushPolicy {
     pub writers: Vec<Principal>,
     pub require_signed_push: bool,
@@ -28,7 +28,7 @@ pub struct PushPolicy {
 
 /// A repo's deploy configs, as the authority holds them (phase 3, step 6):
 /// the git side mirrors them to know which paths a job proves.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct DeployConfigs {
     pub wasm: Option<DeployConfig>,
     pub evm: Option<EvmDeployConfig>,
@@ -42,7 +42,7 @@ pub struct DeployConfigs {
 /// ran, or the legs disagree, and then whatever is served is retried.
 /// Which commit is served only the git side knows, so it makes the
 /// comparison; the authority still checks the job it is handed.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Retry {
     pub running: Option<String>,
 }

@@ -718,7 +718,43 @@ The two canisters:
       - 12b. The message layer, in the crates: both interfaces over
         inter-canister calls, `submit_job` and `release_job` staged in
         chunks, each side's caller check, unit-tested. The combined build
-        keeps the in-canister sides.
+        keeps the in-canister sides. DONE 2026-11-13. What shipped:
+        - `ic_git_types::wire`: one struct per call across the boundary,
+          each naming the update method it goes to and the reply it gets
+          (`Message`), and the `Transport` that carries the encoded
+          bytes. A reply that does not decode is a lost answer. Both
+          sides' endpoints (step 12c) take these same structs.
+        - `ic_git_common::call::Canister`: the one transport, a
+          bounded-wait call to whatever principal a function names at
+          the time. A call the system gave up waiting on (`SysUnknown`)
+          is `Lost`; anything else -- the id not set, the other canister
+          stopped or trapped -- is `NotDelivered`.
+        - `ic_git_authority::peer`: the git canister's id (an operator
+          names it; `check_caller` is what its git-facing endpoints ask),
+          and `Git<T>`, the `GitSide` over messages, installed as
+          `GIT_CANISTER`. `release_job` fetches the head and then each
+          chunk the head names, and decodes the body.
+        - `ic_git_git::peer`: the authority's id (an init argument;
+          `check_caller` likewise), and `Authority<T>`, the
+          `AuthoritySide` over messages, installed as
+          `AUTHORITY_CANISTER`. `submit_job` stages every piece of the
+          encoded job but the last (`stage_job`, at most `MAX_CHUNK`
+          each) and sends the last with the submit that names them.
+        - The receivers: the authority's `for_git::stage_job` and
+          `submit_staged` (one item's chunks at a time, in heap, capped
+          at `MAX_JOB_BYTES`; an item is taken once its body is whole,
+          whether or not it decodes, so a bad one cannot hold the outbox;
+          a submit missing a chunk is refused and nothing is taken, and
+          the git side's retry stages them all again); the git side's
+          `for_authority::release_head` and `release_chunk` (the newest
+          `STAGED_REPLIES` jobs' remaining chunks, in heap; one that is
+          gone is a refusal that says to ask again).
+        - Tests: each message through the real receivers of the other
+          crate as the endpoints will call them, with a chosen call
+          refused, not delivered or lost; the chunking from both ends;
+          the caller checks. What is not here: the endpoints and the
+          `.did` files, `set_site` across the boundary, the id setter's
+          `canister_info` check, `publish_git_record`, all of 12c and 12d.
       - 12c. The two canister crates below, with the endpoints and HTTP
         routes split between them, the git canister's id setter, and a
         local two-canister e2e.

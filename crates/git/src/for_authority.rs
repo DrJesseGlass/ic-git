@@ -5,12 +5,75 @@
 //! canister nothing is lost, so every reply is `Ok`. One of them,
 //! `set_approved`, tells the authority something back on the way (a job,
 //! through the outbox), which in one canister is answered at once too.
+//!
+//! Over messages (phase 3, step 12b) the release job's reply can be
+//! larger than a message, so it goes back as a head (`release_head`) and
+//! the chunks the head names (`release_chunk`), kept in heap under a
+//! handle while the authority fetches them: the newest `STAGED_REPLIES`
+//! of them, since an ask that was never finished is asked again.
 
 use crate::{mirror, store};
 use candid::Principal;
 use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{ready, Fut, Reply};
+use ic_git_types::wire::{pieces, ReleaseHead};
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+
+/// How many release jobs' remaining chunks wait to be fetched.
+pub const STAGED_REPLIES: usize = 4;
+
+thread_local! {
+    /// Handle -> the chunks after the head, oldest first.
+    static STAGED: RefCell<VecDeque<(u64, Vec<Vec<u8>>)>> = const { RefCell::new(VecDeque::new()) };
+    static NEXT_HANDLE: Cell<u64> = const { Cell::new(1) };
+}
+
+/// The release job over messages: its head. A job that fits in one piece
+/// is the head alone; the rest of a larger one waits under the handle.
+pub fn release_head(repo: &str) -> Result<ReleaseHead, String> {
+    let Release { commit, job } = crate::jobs::release(repo)?;
+    let body = candid::encode_one(&job).map_err(|e| format!("the job does not encode: {e}"))?;
+    let mut chunks = pieces(&body).into_iter().map(<[u8]>::to_vec);
+    let head = chunks.next().unwrap_or_default();
+    let rest: Vec<Vec<u8>> = chunks.collect();
+    let more = rest.len() as u32;
+    let handle = if rest.is_empty() {
+        0
+    } else {
+        let handle = NEXT_HANDLE.with(|h| h.replace(h.get() + 1));
+        STAGED.with(|s| {
+            let mut s = s.borrow_mut();
+            while s.len() >= STAGED_REPLIES {
+                s.pop_front();
+            }
+            s.push_back((handle, rest));
+        });
+        handle
+    };
+    Ok(ReleaseHead { commit, handle, more, head })
+}
+
+/// Chunk `index` (1 to the head's `more`) of the release job under
+/// `handle`. Refused once the chunks are gone: the authority asks again.
+pub fn release_chunk(handle: u64, index: u32) -> Result<Vec<u8>, String> {
+    STAGED.with(|s| {
+        let s = s.borrow();
+        let (_, rest) = s
+            .iter()
+            .find(|(h, _)| *h == handle)
+            .ok_or("the release job's chunks are gone; ask again")?;
+        let i = (index as usize).checked_sub(1).ok_or("chunk 0 is the head")?;
+        rest.get(i).cloned().ok_or_else(|| format!("no chunk {index}; the job has {}", rest.len()))
+    })
+}
+
+/// For tests: what an upgrade does to the staged replies.
+#[cfg(any(test, feature = "testing"))]
+pub fn forget_staged_replies() {
+    STAGED.with(|s| s.borrow_mut().clear());
+}
 
 /// This crate, as the authority sees it. `is_operator` is this side's own
 /// operator rule (operators are not mirrored), which spares an operator's
@@ -73,5 +136,62 @@ impl GitSide for Git {
 
     fn release_job<'a>(&'a self, repo: &'a str) -> Fut<'a, Reply<Result<Release, String>>> {
         ready(Ok(crate::jobs::release(repo)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store;
+    use ic_git_types::deploy::{DeployConfig, Job};
+    use ic_git_types::git_side::DeployConfigs;
+    use ic_git_types::wire::MAX_CHUNK;
+
+    /// A release job's chunks are served under its handle until newer
+    /// asks push it out; the head is chunk 0 and not served again; a
+    /// small job stages nothing.
+    #[test]
+    fn a_release_job_is_staged_past_its_head() {
+        let repo = "stage-release";
+        store::create_repo(repo).unwrap();
+        let configs = DeployConfigs {
+            wasm: Some(DeployConfig {
+                target: "aaaaa-aa".into(),
+                source_path: "app.wasm".into(),
+                mode: Default::default(),
+            }),
+            evm: None,
+        };
+        assert!(crate::mirror::set_deploy_configs(repo, 1, configs));
+        let tip = store::commit_file_for_tests(repo, "app.wasm", &vec![1u8; MAX_CHUNK + 100], None);
+        store::set_ref(repo, &store::head_target(repo).unwrap(), tip).unwrap();
+
+        let head = release_head(repo).unwrap();
+        assert_eq!(head.commit, store::oid_hex(&tip));
+        assert_eq!(head.more, 1);
+        assert_eq!(head.head.len(), MAX_CHUNK);
+        assert!(release_chunk(head.handle, 0).is_err());
+        assert!(release_chunk(head.handle, 2).is_err());
+        let mut body = head.head.clone();
+        body.extend(release_chunk(head.handle, 1).unwrap());
+        let job: Job = candid::decode_one(&body).unwrap();
+        let (_, artifact) = job.wasm.unwrap();
+        assert_eq!(artifact.unwrap().blob.len(), MAX_CHUNK + 100);
+
+        // Newer asks push the oldest out.
+        let handles: Vec<u64> = (0..STAGED_REPLIES).map(|_| release_head(repo).unwrap().handle).collect();
+        assert!(release_chunk(head.handle, 1).is_err(), "pushed out");
+        for h in &handles {
+            assert!(release_chunk(*h, 1).is_ok());
+        }
+        forget_staged_replies();
+        assert!(release_chunk(handles[0], 1).is_err());
+
+        let small = store::commit_file_for_tests(repo, "app.wasm", b"small", Some(tip));
+        store::set_ref(repo, &store::head_target(repo).unwrap(), small).unwrap();
+        let head = release_head(repo).unwrap();
+        assert_eq!((head.handle, head.more), (0, 0));
+        let job: Job = candid::decode_one(&head.head).unwrap();
+        assert_eq!(job.wasm.unwrap().1.unwrap().blob, b"small");
     }
 }

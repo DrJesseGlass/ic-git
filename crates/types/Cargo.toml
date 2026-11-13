@@ -15,3 +15,7 @@ ic-stable-structures = "0.7"
 # object cannot pass for one the voters approved. No default features: the
 # check needs neither std nor OIDs.
 sha1-checked = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+# Drives the futures the transport answers with (wire.rs), in tests.
+futures = "0.3"

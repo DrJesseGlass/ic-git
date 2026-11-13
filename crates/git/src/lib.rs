@@ -18,6 +18,7 @@ pub mod mirror;
 pub mod object;
 pub mod outbox;
 pub mod pack;
+pub mod peer;
 pub mod receive;
 pub mod signed_push;
 pub mod site;
