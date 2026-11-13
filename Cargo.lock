@@ -700,6 +700,7 @@ dependencies = [
 name = "ic-git-common"
 version = "0.1.0"
 dependencies = [
+ "candid",
  "ic-cdk",
  "ic-dev-kit-rs",
  "ic-git-types",
@@ -751,6 +752,7 @@ name = "ic-git-types"
 version = "0.1.0"
 dependencies = [
  "candid",
+ "futures",
  "hex",
  "ic-stable-structures",
  "serde",

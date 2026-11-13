@@ -158,9 +158,9 @@ mod tests {
             ready(Ok(Ok(())))
         }
 
-        fn submit_job<'a>(&'a self, _seq: u64, repo: &'a str, commit_hex: &'a str, _job: Job) -> Fut<'a, Reply<()>> {
+        fn submit_job<'a>(&'a self, _seq: u64, repo: &'a str, commit_hex: &'a str, _job: Job) -> Fut<'a, Reply<Result<(), String>>> {
             self.jobs.borrow_mut().push(format!("{repo}@{commit_hex}"));
-            ready(Ok(()))
+            ready(Ok(Ok(())))
         }
 
         fn notify<'a>(&'a self, _seq: u64, _event: Event) -> Fut<'a, Reply<()>> {

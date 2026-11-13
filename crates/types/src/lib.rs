@@ -11,3 +11,4 @@ pub mod labels;
 pub mod oid;
 pub mod proof;
 pub mod side;
+pub mod wire;

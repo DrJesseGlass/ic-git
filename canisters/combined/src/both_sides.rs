@@ -259,7 +259,7 @@ mod push {
             reply
         }
 
-        fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, job: Job) -> Fut<'a, Reply<()>> {
+        fn submit_job<'a>(&'a self, seq: u64, repo: &'a str, commit_hex: &'a str, job: Job) -> Fut<'a, Reply<Result<(), String>>> {
             for_git::Authority.submit_job(seq, repo, commit_hex, job)
         }
 
