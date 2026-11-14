@@ -199,6 +199,7 @@ pub fn mint(
     days: Option<u32>,
     key: Option<&str>,
 ) -> Result<PushTokenInfo, String> {
+    crate::transfer::check_unfrozen()?;
     let days = lifetime(days)?;
     let key = bindable_key(key)?;
     purge_expired();
@@ -303,6 +304,16 @@ pub fn revoke_unless(repo: &str, keep: impl Fn(&Principal) -> bool) -> usize {
         .filter(|(_, s)| s.minted_by.as_ref().is_some_and(|p| !keep(p)))
         .filter(|(key, _)| remove_key(key))
         .count()
+}
+
+/// A record as another canister exported it (transfer.rs), indexed as it
+/// was there: `indexed_as` is `index_keys` for a readable record and the
+/// keys a dead one may have had.
+pub fn import_record(key: &str, value: String) {
+    for k in indexed_as(key, &value) {
+        store::token_index_put(k);
+    }
+    store::token_put(key, value);
 }
 
 /// Refused unless `id` has the shape of a token id.

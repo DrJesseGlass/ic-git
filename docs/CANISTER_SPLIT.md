@@ -967,6 +967,82 @@ The two canisters:
       only when the two match.
     - **The rehearsal.** The local e2e runs this whole sequence, from the
       last one-canister release.
+    - DONE 2026-11-13 (`ic_git_git::transfer`; the endpoints on both the
+      combined and the git canister, the import on the git canister
+      alone). What shipped:
+      - **The freeze.** `freeze` and `unfreeze` (operators), `frozen`
+        (a query). Frozen, the canister endpoints refuse pushes (before
+        the charge, in the report-status git shows), `create_push_token`,
+        `put_object` and `set_ref`, and the git side's `GitSide` refuses
+        the authority's `check_new_repo`, `create_repo` (a repo that
+        exists is still its earlier call) and `set_site`, each with
+        `transfer::FROZEN`, which names step 16; so a refused creation is
+        refunded by the authority as any refusal is. Behind the endpoints,
+        `store::set_ref`, `store::create_repo` and `tokens::mint` refuse
+        too, so a write path the endpoints do not gate cannot move a
+        store being exported. Reads, revokes and the mirrors go on.
+      - **The export.** `export_page(opt Cursor)`, an update call, walks
+        repos, refs, objects, tokens, labels and site configs
+        (`transfer::Kind`, in that order, keys in order within each), a
+        page of at most `PAGE_BYTES` (1 MiB) of keys and values, or one
+        record when that is larger, each
+        page naming where the next starts; values go as their maps hold
+        them (an object's type code, length and zlib stream), so the copy
+        is byte for byte the original. Operators read it, and the one
+        importer an operator names (`set_importer`, `get_importer`); only
+        a frozen store is exported. A record over `MAX_RECORD` (1.5 MiB)
+        is refused by name rather than lost in a reply the system drops.
+      - **The import.** On the git canister, `import_start(source)`
+        (operators; the canister frozen, the source not itself) pulls the
+        pages on a chain of zero-delay timers, one page a tick, each tick
+        a message of its own, and applies each record: an object only if
+        its bytes inflate to the stated length (read one byte past it,
+        no further) and hash to its id, a label or site config only under
+        its own META prefix, so a wrong page can write nothing else.
+        Every kind but tokens only grows on a frozen exporter, so the
+        copy is add-only and can be pulled again; tokens can still go (a
+        revoke, or a membership change through the mirrors), so an import
+        that starts over drops the tokens it holds first and rebuilds
+        their index from the records. A first import drops nothing: what
+        the canister holds of its own stays, and the digest says whether
+        the copy is the original alone.
+        `import_status` reports pages, records, bytes, whether every page
+        is in, the copy's digest once it is, and the error a page failed
+        with; a failed page stops the chain, and `import_start` again
+        resumes from it. An import with every page starts over;
+        `import_reset` forgets it (not the copy).
+      - **The digest.** `digest_step` (operators and the importer; frozen
+        only) folds the same walk, `DIGEST_BYTES` (4 MiB) a step, into
+        `acc = sha256(acc, kind, len(key), key, len(value), value)` per
+        record, with the count and bytes beside it, until it says done;
+        `get_digest` is a query of it. The importer digests its copy as
+        the chain's last steps, afresh from the last page in (one stepped
+        earlier was of less), and shows it in `import_status`; an
+        operator steps the exporter's. A thaw forgets the digest.
+      - **Tests.** The crate: the freeze's refusals through `GitSide`;
+        the walk the same whatever the page size, kinds and keys in
+        order, a cursor that is not a key of its kind refused; the digest
+        the same in one step or many and changed by one more record; an
+        import into a fresh store (another thread) that digests as the
+        original, lists the same tokens and holds the same labels and
+        site configs, stopped by a failed page and resumed from it,
+        started over once finished with its tokens dropped first;
+        records the importer cannot trust refused (a mis-hashed object, a
+        META key outside the prefix, a short oid); an oversize record
+        refused by name. The combined e2e pass runs the rehearsal: the
+        freeze's refusals, uncharged, with reads and membership open; a
+        git canister installed against the combined canister, refused
+        the export until named, then importing it, both digests
+        agreeing, the copy listing the same repos, refs, objects, tokens
+        and site config and serving the site from the same commit; the
+        thaw, and a push again.
+      - **Not here.** Steps 16.3 to 16.6: the upgrade of umobs to the
+        authority build over this state, the rewrite of every mirror, the
+        git canister's thaw at the cut and the redirects. Until the
+        mirrors are rewritten, a repo's site on the git canister serves
+        its tip, as an ungated repo's does, so the rewrite comes before
+        anything points at it. The e2e's rehearsal of the cut itself
+        grows with step 16.
 14. **Clients, before the cut** (as this phase always required):
     - the console talks to both canisters
     - `tools/verify.mjs` takes the site's canister and the registry

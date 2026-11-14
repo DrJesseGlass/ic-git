@@ -13,7 +13,7 @@
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git).
-use ic_git_git::{api, for_authority, jobs, mirror, outbox, pack, peer, receive, signed_push, site, smart_http, store, to_authority, tokens};
+use ic_git_git::{api, for_authority, jobs, mirror, outbox, pack, peer, receive, signed_push, site, smart_http, store, to_authority, tokens, transfer};
 use ic_git_types::authority_side::{Event, Published};
 use ic_git_types::git_side::GitSide;
 use ic_git_types::oid::Oid;
@@ -412,6 +412,11 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
                 Ok(r) => r,
                 Err(e) => return git_response(200, RESULT, receive::refuse(&request, e)),
             };
+            // Frozen for the move (transfer.rs): refused before anything
+            // is charged, naming the cut.
+            if let Err(e) = transfer::check_unfrozen() {
+                return git_response(200, RESULT, receive::refuse(&request, &e));
+            }
             // The clock the advertisement's nonce was issued by.
             let now_s = crate::clock::now_ns() / 1_000_000_000;
             let required = mirror::requires_signed_push(&repo);
@@ -492,6 +497,7 @@ fn api_route(url: &str) -> HttpResponse {
 /// Store an object from (type, content); returns the hex oid.
 #[ic_cdk::update(guard = "is_admin")]
 fn put_object(object_type: String, content: Vec<u8>) -> Result<String, String> {
+    transfer::check_unfrozen()?;
     let object_type = ObjectType::parse(&object_type)?;
     Ok(store::oid_hex(&store::put_object(object_type, &content)))
 }
@@ -504,7 +510,93 @@ fn get_object(oid_hex: String) -> Option<Vec<u8>> {
 
 #[ic_cdk::update(guard = "is_admin")]
 fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String> {
+    transfer::check_unfrozen()?;
     store::set_ref(&repo, &refname, store::parse_oid(&oid_hex)?)
+}
+
+// --- the move to the git canister (docs/CANISTER_SPLIT.md, step 13) ---------
+//
+// The freeze, the paged export and its digest, as the combined canister
+// has them (ic_git_git::transfer), and the import, which only this build
+// runs: at the cut this canister, frozen, pulls every git-side record
+// from umobs, digests its copy, and thaws once the digests agree.
+
+/// Freeze the git side (operators): pushes, push tokens, new repos, site
+/// configs and the object admin calls are refused, naming the cut; reads
+/// and the authority's own decisions go on.
+#[ic_cdk::update(guard = "is_admin")]
+fn freeze() -> Result<(), String> {
+    transfer::freeze()
+}
+
+/// Thaw it (operators). The digest, if one was taken, is forgotten; an
+/// import that is running finishes frozen.
+#[ic_cdk::update(guard = "is_admin")]
+fn unfreeze() -> Result<(), String> {
+    transfer::unfreeze()
+}
+
+#[ic_cdk::query]
+fn frozen() -> bool {
+    transfer::frozen()
+}
+
+/// Name the one canister that may read the export besides operators
+/// (operators).
+#[ic_cdk::update(guard = "is_admin")]
+fn set_importer(importer: candid::Principal) -> Result<(), String> {
+    transfer::set_importer(importer, ic_cdk::api::canister_self())
+}
+
+#[ic_cdk::query]
+fn get_importer() -> Option<candid::Principal> {
+    transfer::importer()
+}
+
+/// A page of every git-side record, in a fixed order (operators and the
+/// importer; frozen only): from the beginning with no cursor, else from
+/// where the last page said.
+#[ic_cdk::update]
+fn export_page(cursor: Option<transfer::Cursor>) -> Result<transfer::Page, String> {
+    transfer::may_export(&caller(), operator())?;
+    transfer::export_page(cursor)
+}
+
+/// One step of the digest over the same records (operators and the
+/// importer; frozen only): called until it says done.
+#[ic_cdk::update]
+fn digest_step() -> Result<transfer::Digest, String> {
+    transfer::may_export(&caller(), operator())?;
+    transfer::digest_step()
+}
+
+/// The digest so far, if one was started since the freeze: on an
+/// importer, its copy's, once every page is taken.
+#[ic_cdk::query]
+fn get_digest() -> Option<transfer::Digest> {
+    transfer::digest()
+}
+
+/// Pull every git-side record from `source` (operators), a page a tick,
+/// then digest the copy. This canister must be frozen, and `source` must
+/// have named it as the importer. An import that stopped short resumes
+/// from the page it stopped at; one with every page starts over.
+#[ic_cdk::update(guard = "is_admin")]
+fn import_start(source: candid::Principal) -> Result<(), String> {
+    transfer::import_start(source, ic_cdk::api::canister_self())
+}
+
+/// How far the import is: pages, records and bytes taken, whether every
+/// page is in, the copy's digest once it is, and why it stopped if it did.
+#[ic_cdk::query]
+fn import_status() -> Option<transfer::ImportStatus> {
+    transfer::import_status()
+}
+
+/// Forget the import on record, not what it copied (operators).
+#[ic_cdk::update(guard = "is_admin")]
+fn import_reset() -> Result<(), String> {
+    transfer::import_reset()
 }
 
 // --- admin allowlist management ---------------------------------------------
@@ -583,6 +675,7 @@ fn list_authorized() -> Vec<candid::Principal> {
 #[ic_cdk::update]
 async fn create_push_token(repo: String, days: Option<u32>, key: Option<String>) -> Result<String, String> {
     mirror::may_write(&repo, &caller(), operator())?;
+    transfer::check_unfrozen()?;
     // Refuse a bad lifetime, a key that cannot be bound, or a repo at its
     // token cap, before paying for randomness; mint checks the cap again
     // after the await.

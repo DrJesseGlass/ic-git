@@ -27,6 +27,7 @@ pub mod smart_http;
 pub mod store;
 pub mod to_authority;
 pub mod tokens;
+pub mod transfer;
 
 // The shared crate, at the paths every module already names (crate::kv, ...).
 use ic_git_common::httpjson::git_response;
