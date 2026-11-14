@@ -132,7 +132,11 @@ no emergency path, and the operator's key as the first 1 of 1 approver;
 ic-git publishes `ic-git#canister` when the governor asks after an
 upgrade. docs/GOVERNOR.md has the rules, the approver's checklist, the
 rehearsal (`tools/e2e-local.sh`, section "governor") and the staged
-mainnet rollout, whose last step is the only irreversible one.
+mainnet rollout, whose last step is the only irreversible one. The git
+canister of the split (docs/CANISTER_SPLIT.md, step 12d) is governed the
+same way by a second instance; its record is `ic-git#git`, which it asks
+the authority to publish, holding no keys, and which the authority signs
+only after reading the module hash the IC holds for it.
 
 ## 6. Notifications
 

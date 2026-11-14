@@ -12,7 +12,7 @@
 use crate::evm::{self, TxOutcome};
 use ic_git_types::deploy::bytecode_of;
 use ic_git_types::git_side::{Attested, RecordKind};
-pub use ic_git_types::keys::{Record, CANISTER_KEY};
+pub use ic_git_types::keys::{Record, CANISTER_KEY, GIT_CANISTER_KEY};
 use ic_git_types::keys::{app_record_key, site_record_key};
 use ic_git_types::oid::{commit20, parse_oid, Oid};
 use sha2::Digest as _;
@@ -98,6 +98,34 @@ pub fn app_record(repo: &str, commit_oid: &Oid, wasm_sha256_hex: &str) -> Result
 /// word; a wrong one only makes the record disagree with the hash the IC
 /// certifies, which every reader of the record checks.
 pub fn canister_record(commit_hex: &str, module_sha256_hex: &str) -> Result<Record, String> {
+    stated(CANISTER_KEY, commit_hex, module_sha256_hex)
+}
+
+/// The git canister's record (phase 3, step 12d), from the values its
+/// controller states. The commit is taken on the controller's word, as
+/// for this canister's own record; the module hash is checked against
+/// what the IC holds for the git canister (`running`) before anything is
+/// published.
+pub fn git_record(commit_hex: &str, module_sha256_hex: &str) -> Result<Record, String> {
+    stated(GIT_CANISTER_KEY, commit_hex, module_sha256_hex)
+}
+
+/// Does the git canister run the module `rec` names? `running` is the
+/// module hash the management canister's `canister_info` reports for it.
+pub fn running(rec: &Record, module_hash: Option<&[u8]>) -> Result<(), String> {
+    match module_hash {
+        None => Err("the git canister runs no code; nothing to attest".into()),
+        Some(h) if h != rec.bundle => Err(format!(
+            "the git canister runs module {}, not {}; nothing published",
+            hex::encode(h),
+            hex::encode(rec.bundle)
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// A record from a stated commit (40 hex digits) and module hash (64).
+fn stated(key: &str, commit_hex: &str, module_sha256_hex: &str) -> Result<Record, String> {
     let commit: [u8; 20] = hex::decode(commit_hex)
         .ok()
         .and_then(|b| b.try_into().ok())
@@ -107,7 +135,7 @@ pub fn canister_record(commit_hex: &str, module_sha256_hex: &str) -> Result<Reco
         .and_then(|b| b.try_into().ok())
         .ok_or("module hash must be 64 hex digits")?;
     Ok(Record {
-        key: CANISTER_KEY.to_string(),
+        key: key.to_string(),
         commit,
         bundle,
     })
@@ -168,6 +196,29 @@ mod tests {
         assert!(canister_record(&commit[..39], hash).is_err(), "a short commit");
         assert!(canister_record(commit, &hash[..62]).is_err(), "a short hash");
         assert!(canister_record("zz", hash).is_err(), "not hex");
+    }
+
+    /// The git canister's record names the module the IC holds for it, or
+    /// nothing is published: a canister running no code, or another
+    /// module, is refused; the stated values are checked as the
+    /// authority's own are.
+    #[test]
+    fn git_record_must_name_the_running_module() {
+        let commit = "a23ee3157b7837eaa205cdc9f7f5dbadd243b1ce";
+        let hash = "30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a";
+        let rec = git_record(commit, hash).expect("record");
+        assert_eq!(rec.key, "ic-git#git");
+        assert_eq!(hex::encode(rec.commit), commit);
+        assert_eq!(hex::encode(rec.bundle), hash);
+        assert_eq!(running(&rec, Some(&hex::decode(hash).unwrap())), Ok(()));
+
+        let e = running(&rec, None).unwrap_err();
+        assert!(e.contains("runs no code"), "{e}");
+        let other = vec![0xabu8; 32];
+        let e = running(&rec, Some(&other)).unwrap_err();
+        assert!(e.contains(&hex::encode(&other)) && e.contains(hash), "{e}");
+        assert!(git_record(&commit[..39], hash).is_err(), "a short commit");
+        assert!(git_record(commit, &hash[..62]).is_err(), "a short hash");
     }
 
     /// A repo with an EVM config at `contract.hex` and `files` committed

@@ -837,7 +837,74 @@ The two canisters:
           and the governor's own section run on the combined pass only.
           Both passes are green.
       - 12d. `publish_git_record`, the cycles top-up, and the
-        reproducible build of both modules.
+        reproducible build of both modules. DONE 2026-11-13. What
+        shipped:
+        - **The git canister's record**, `ic-git#git`
+          (`ic_git_types::keys::GIT_CANISTER_KEY`, beside
+          `CANISTER_KEY`). The git canister's `registry_publish_canister`
+          takes what its controller states (the commit, the module's
+          sha256), as umobs' does, and asks the authority
+          (`AuthoritySide::publish_git_record`, the message
+          `wire::PublishGitRecord`, waited for: the answer is the
+          governor's log line). The authority's receiver
+          (`for_git::publish_git_record`, from the git canister's
+          principal alone) parses the stated values, reads the module
+          hash the IC holds for the git canister through `canister_info`,
+          refuses a record that names another module or a canister
+          running none (`provenance::running`), then publishes as it
+          publishes its own record, paid by itself. A controller's word
+          about the commit is taken, as for `ic-git#canister`: a wrong
+          one disagrees with the build anyone reproduces from it. The
+          feed files it under ic-git's own, with `ic-git#canister`. In
+          one canister the call is refused: its record is
+          `ic-git#canister`.
+        - **The cycles** (`ic_git_authority::funding`). What tenants pay
+          for git-side work -- the push fee and the rent -- goes into a
+          pool, kept in stable memory beside the accounts, which fills in
+          the combined build already and so funds the git canister from
+          the cut. Revenue only: a deposit is a liability until a charge
+          spends it, so nothing a tenant could still spend crosses. The
+          rent timer, after each tick (and `charge_rent_now`), asks the
+          git canister what it holds (its public `cycle_balance` query,
+          which the authority asks with no argument, outside `GitSide`:
+          in one canister there is nothing to ask) and, under the floor
+          (`Pricing::git_canister_floor`, default 1 T, in `/api/pricing`
+          and `get_pricing`; optional on the way in, so a table stored or
+          sent before the field still reads, and always given on the way
+          out), sends the floor's worth by `deposit_cycles`, as far as
+          the pool goes and never what would leave the authority's liquid
+          balance (above its freezing threshold) under the floor itself.
+          One tick runs at a time, and nothing is asked when nothing
+          could be sent; the pool is debited before the deposit and
+          credited back if it fails, and a tick that could not send is
+          on record. `get_git_funding` reports the pool, the floor, what
+          was sent, the last top-up and the last failure;
+          `top_up_git_canister` (operators) sends the authority's own
+          cycles, as an operator's repos pay nothing and cost the git
+          canister all the same.
+        - **The reproducible build.** `Dockerfile.build` builds
+          `authority_canister.wasm` and `git_canister.wasm` (and their
+          `.gz`) in the same run as the combined module, each copied out
+          and hashed before the next build, with `dfx build --check`:
+          neither has a canister id (the git canister does not exist
+          yet; the authority's is umobs'), and the id reaches no byte of
+          the module -- a `--check` build of the combined canister
+          hashes the same as its `--network ic` build.
+          `tools/reproducible-build.sh --docker` exports both to
+          `target/reproducible/` and prints their hashes; the workflow
+          checks and keeps them with the rest. `verified.json` keeps
+          naming the combined module for umobs until the cut (step 16),
+          when its entries name `authority_canister` and a section for
+          the git canister is added (step 15).
+        - The two-canister e2e covers the guards on both ends, the
+          governed upgrade's record ask (the authority checks the module
+          and has no registry to publish to: the module is checked
+          before the registry on purpose, so a mismatch is reported even
+          where there is no registry, at the price of one management
+          call per upgrade; on the git canister a lost answer is told
+          apart from a call that never ran, since the authority may have
+          published), the pool, the tick under a
+          raised floor, and the operator's top-up.
     - **`canisters/authority` (`authority_canister.wasm`, for umobs).**
       The lifecycle, the authority's endpoints and their consent
       messages. A `GitSide` that sends messages to the git canister,

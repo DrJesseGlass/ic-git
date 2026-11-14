@@ -18,7 +18,7 @@
 //! `Attested`) comes back as a head with the first chunk and a handle the
 //! rest are fetched by (`Staged`, `ReplyChunk`).
 
-use crate::authority_side::Event;
+use crate::authority_side::{Event, Published};
 use crate::git_side::{DeployConfigs, PushPolicy, RecordKind, Retry};
 use crate::side::{Failure, Fut, Reply};
 use candid::CandidType;
@@ -135,6 +135,8 @@ messages! {
     SubmitJob = "submit_job" -> Result<(), String> { seq: u64, repo: String, commit: String, staged: u32, tail: Vec<u8> }
     /// `AuthoritySide::notify`.
     Notify = "notify" -> () { seq: u64, event: Event }
+    /// `AuthoritySide::publish_git_record`.
+    PublishGitRecord = "publish_git_record" -> Result<Published, String> { commit: String, module_sha256: String }
 }
 
 #[cfg(test)]

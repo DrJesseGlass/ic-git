@@ -319,10 +319,10 @@ pub fn evm_deployed(repo: &str, commit: &str, ok: bool, message: &str) {
 
 /// A registry record was broadcast. The key says whose feed: a repo's
 /// (`<repo>`, `<repo>#site`, `<repo>#app`) or ic-git's own
-/// (`ic-git#canister`). Broadcast, not mined: the record exists once the
-/// chain includes the transaction.
+/// (`ic-git#canister`, and the git canister's `ic-git#git`). Broadcast,
+/// not mined: the record exists once the chain includes the transaction.
 pub fn published(key: &str, commit: &str, tx_hash: &str) {
-    let feed = if key == crate::provenance::CANISTER_KEY {
+    let feed = if key == crate::provenance::CANISTER_KEY || key == crate::provenance::GIT_CANISTER_KEY {
         Feed::Canister
     } else {
         Feed::Repo(key.split('#').next().unwrap_or(key).to_string())
@@ -881,19 +881,21 @@ mod tests {
         assert_eq!(mirror().generation, 5);
     }
 
-    /// The canister's own feed takes the canister record; a repo's record
-    /// goes to the repo, whatever its suffix.
+    /// The canister's own feed takes the canister record and the git
+    /// canister's; a repo's record goes to the repo, whatever its suffix.
     #[test]
     fn published_records_land_in_the_right_feed() {
         crate::tenancy::test_repo("feed-b");
         published("feed-b#site", &"c".repeat(40), "0xtx1");
         published("feed-b", &"d".repeat(40), "0xtx2");
         published(crate::provenance::CANISTER_KEY, &"e".repeat(40), "0xtx3");
+        published(crate::provenance::GIT_CANISTER_KEY, &"f".repeat(40), "0xtx4");
         let repo = events(&Feed::Repo("feed-b".into()));
         assert_eq!(repo.len(), 2);
         assert!(repo[0].title.starts_with("record feed-b#site published"));
         let own = events(&Feed::Canister);
         assert!(own.iter().any(|e| e.detail.contains("0xtx3")));
+        assert!(own.iter().any(|e| e.detail.contains("0xtx4") && e.title.contains("ic-git#git")));
         assert!(String::from_utf8(serve(None, None).body).unwrap().contains("<title>ic-git</title>"));
     }
 

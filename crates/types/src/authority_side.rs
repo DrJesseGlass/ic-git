@@ -12,13 +12,22 @@
 //! submitted twice by different pushes.) `charge_push` is asked from the
 //! push itself, which waits for the answer.
 //!
-//! `publish_git_record`, the git canister's own module record, comes with
-//! the two builds (step 12).
+//! `publish_git_record` is asked from the git canister's own
+//! `registry_publish_canister`, which its governor calls after an upgrade
+//! (step 12d): the git canister holds no keys, so the authority publishes
+//! the record, and the caller waits for the answer.
 
 use crate::deploy::Job;
 use crate::side::{Fut, Reply};
 use candid::CandidType;
 use serde::Deserialize;
+
+/// A record the authority broadcast: the transaction's hash, which is what
+/// a governor keeps in its log.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub struct Published {
+    pub tx_hash: String,
+}
 
 /// Something that happened on the git side and the authority's feed tells
 /// of. Commits are hex object ids.
@@ -49,4 +58,11 @@ pub trait AuthoritySide {
 
     /// Tell the authority what happened (outbox item `seq`).
     fn notify<'a>(&'a self, seq: u64, event: Event) -> Fut<'a, Reply<()>>;
+
+    /// Publish the git canister's own record (`keys::GIT_CANISTER_KEY`):
+    /// the commit it was built from and the sha256 of its installed
+    /// module, as its controller states them. The authority reads the
+    /// module hash the IC holds for the git canister and refuses a record
+    /// that names another; its `Err` says why nothing was published.
+    fn publish_git_record<'a>(&'a self, commit_hex: &'a str, module_sha256_hex: &'a str) -> Fut<'a, Reply<Result<Published, String>>>;
 }

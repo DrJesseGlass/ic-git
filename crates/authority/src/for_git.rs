@@ -18,8 +18,15 @@
 //! side's retry stages them again. A job this side will never run -- over
 //! the cap, or unreadable once whole -- is taken and refused for good,
 //! and the refusal is the commit's deploy status.
+//!
+//! The git canister's own record (step 12d) is asked and waited for, by
+//! the git canister's `registry_publish_canister`, which its governor
+//! calls after an upgrade; `publish_git_record` is the receiver. One
+//! canister has no git canister to record: `Authority` refuses the call.
 
-use ic_git_types::authority_side::{AuthoritySide, Event};
+use crate::peer::CanisterInfo;
+use candid::Principal;
+use ic_git_types::authority_side::{AuthoritySide, Event, Published};
 use ic_git_types::deploy::Job;
 use ic_git_types::oid::parse_oid;
 use ic_git_types::side::{ready, Fut, Reply};
@@ -29,6 +36,28 @@ use std::collections::BTreeMap;
 
 /// This crate, as the git side sees it.
 pub struct Authority;
+
+/// `AuthoritySide::publish_git_record` over messages: the git canister's
+/// record, `ic-git#git`, from the commit and module hash its governor
+/// stated. This side reads the module hash the IC holds for the git
+/// canister (`canister_info`, the management canister's) and publishes
+/// only a record that names it; a stated value that does not parse is
+/// refused before anything is asked, and a canister this side cannot
+/// publish to (no registry) is refused before the chain is touched. Paid
+/// by this canister, as its own record is: no repo is being served.
+pub async fn publish_git_record(
+    commit_hex: &str,
+    module_sha256_hex: &str,
+    canister_info: impl AsyncFn(Principal) -> Result<CanisterInfo, String>,
+) -> Result<Published, String> {
+    let git = crate::peer::GIT.get().ok_or("no git canister is named")?;
+    let record = crate::provenance::git_record(commit_hex, module_sha256_hex)?;
+    let info = canister_info(git).await?;
+    crate::provenance::running(&record, info.module_hash.as_deref())?;
+    crate::evm::require_publish_target()?;
+    let out = crate::provenance::publish(&record).await.map_err(|e| e.message)?;
+    Ok(Published { tx_hash: out.tx_hash })
+}
 
 /// The newest outbox item taken.
 const INBOX_KEY: &str = "inbox:last";
@@ -181,6 +210,12 @@ impl AuthoritySide for Authority {
         }
         ready(Ok(()))
     }
+
+    /// One canister is both sides: its record is `ic-git#canister`,
+    /// which its controller publishes through `registry_publish_canister`.
+    fn publish_git_record<'a>(&'a self, _commit_hex: &'a str, _module_sha256_hex: &'a str) -> Fut<'a, Reply<Result<Published, String>>> {
+        ready(Ok(Err("this canister is its own git side; its record is ic-git#canister, which a controller publishes".into())))
+    }
 }
 
 #[cfg(test)]
@@ -264,5 +299,53 @@ mod tests {
 
         // Taken and refused is final: the same item again is answered.
         assert_eq!(stage_job(21, repo, commit, 10, 1, vec![0u8; 8]), Ok(()));
+    }
+
+    /// The git canister's record: nothing is asked of the management
+    /// canister for a stated value that does not parse, or before a git
+    /// canister is named; a module hash that is not the one the IC holds
+    /// is refused; one that is goes on to the publish, which here has no
+    /// registry to go to. In one canister the call is refused outright.
+    #[test]
+    fn the_git_record_is_checked_against_the_running_module() {
+        use futures::executor::block_on;
+        let commit = "a23ee3157b7837eaa205cdc9f7f5dbadd243b1ce";
+        let hash = "30e76748ddb1487e41ca2718c30aa469c2ffa35f21f4c1936e67509771066d6a";
+        let git = Principal::from_slice(&[6; 8]);
+        let asks = std::cell::Cell::new(0);
+        let running = std::cell::RefCell::new(Some(hex::decode(hash).unwrap()));
+        let info = async |p: Principal| {
+            asks.set(asks.get() + 1);
+            assert_eq!(p, git, "the named git canister is asked about");
+            Ok(CanisterInfo {
+                controllers: vec![],
+                module_hash: running.borrow().clone(),
+            })
+        };
+        crate::kv::remove(crate::peer::GIT.key);
+        let e = block_on(publish_git_record(commit, hash, info)).unwrap_err();
+        assert!(e.contains("no git canister"), "{e}");
+        crate::peer::GIT.set(git);
+        let e = block_on(publish_git_record("zz", hash, info)).unwrap_err();
+        assert!(e.contains("40 hex"), "{e}");
+        assert_eq!(asks.get(), 0, "nothing asked for a value that does not parse");
+
+        *running.borrow_mut() = Some(vec![0xcd; 32]);
+        let e = block_on(publish_git_record(commit, hash, info)).unwrap_err();
+        assert!(e.contains("runs module cdcd"), "{e}");
+        *running.borrow_mut() = None;
+        let e = block_on(publish_git_record(commit, hash, info)).unwrap_err();
+        assert!(e.contains("runs no code"), "{e}");
+        assert_eq!(asks.get(), 2);
+
+        *running.borrow_mut() = Some(hex::decode(hash).unwrap());
+        crate::kv::remove("evm:config");
+        let e = block_on(publish_git_record(commit, hash, info)).unwrap_err();
+        assert!(e.contains("evm_set_config") || e.contains("registry"), "past the check, to the publish: {e}");
+        assert_eq!(asks.get(), 3);
+        crate::kv::remove(crate::peer::GIT.key);
+
+        let one = block_on(Authority.publish_git_record(commit, hash)).unwrap().unwrap_err();
+        assert!(one.contains("ic-git#canister"), "{one}");
     }
 }

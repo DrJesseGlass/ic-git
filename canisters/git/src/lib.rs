@@ -14,7 +14,7 @@ use ic_git_common::httpjson::git_response;
 use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git).
 use ic_git_git::{api, for_authority, jobs, mirror, outbox, pack, peer, receive, signed_push, site, smart_http, store, to_authority, tokens};
-use ic_git_types::authority_side::Event;
+use ic_git_types::authority_side::{Event, Published};
 use ic_git_types::git_side::GitSide;
 use ic_git_types::oid::Oid;
 use ic_git_types::side::Reply;
@@ -86,6 +86,38 @@ fn post_upgrade() {
 #[ic_cdk::query]
 fn get_authority() -> Option<candid::Principal> {
     peer::AUTHORITY.get()
+}
+
+/// Publish this canister's record, `ic-git#git`: the commit it was built
+/// from and the sha256 of its installed module. A controller only -- its
+/// governor calls it right after it installs an upgrade (docs/GOVERNOR.md),
+/// as ic-git's does with `registry_publish_canister` there. This canister
+/// holds no keys: the authority publishes, after reading the module hash
+/// the IC holds for this canister and refusing a record that names
+/// another. The answer is the governor's log line.
+#[ic_cdk::update]
+async fn registry_publish_canister(commit: String, module_sha256: String) -> Result<Published, String> {
+    if !ic_cdk::api::is_controller(&caller()) {
+        return Err("only a controller of this canister can publish its record".to_string());
+    }
+    use ic_git_types::side::Failure;
+    match to_authority::publish_git_record(&commit, &module_sha256).await {
+        Ok(answer) => answer,
+        // The call never ran there: nothing was published. Its answer was
+        // lost: the authority may have gone on to publish, and its feed
+        // says; a second ask would pay for a second record.
+        Err(Failure::NotDelivered(e)) => Err(format!("the authority was not reached ({e}); nothing published")),
+        Err(Failure::Lost(e)) => Err(format!("the authority's answer was lost ({e}); the record may have been published, see the authority's feed before asking again")),
+    }
+}
+
+/// What this canister holds in cycles. Public, as its controller is a
+/// governor and `canister_status` answers controllers alone: the
+/// authority asks it before a top-up (docs/CANISTER_SPLIT.md, step 12d),
+/// and so can anyone watching the canister.
+#[ic_cdk::query]
+fn cycle_balance() -> u64 {
+    u64::try_from(ic_cdk::api::canister_cycle_balance()).unwrap_or(u64::MAX)
 }
 
 // --- the authority's messages -----------------------------------------------

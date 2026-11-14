@@ -19,6 +19,7 @@ pub mod evm;
 pub mod feed;
 pub mod fleet;
 pub mod for_git;
+pub mod funding;
 pub mod icp;
 pub mod ledger;
 pub mod mirrors;

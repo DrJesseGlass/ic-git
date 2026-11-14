@@ -233,6 +233,7 @@ fn arm_retry(_delay: std::time::Duration) {
 mod tests {
     use super::*;
     use crate::to_authority::set_test_side;
+    use ic_git_types::authority_side::Published;
     use futures::executor::block_on;
     use ic_git_types::authority_side::AuthoritySide;
     use ic_git_types::side::{ready, Failure, Fut, Reply};
@@ -273,6 +274,10 @@ mod tests {
             let Event::Pushed { repo, tip, .. } = event;
             self.taken.borrow_mut().push((seq, format!("pushed {repo}@{tip}")));
             ready(Ok(()))
+        }
+
+        fn publish_git_record<'a>(&'a self, _commit_hex: &'a str, _module_sha256_hex: &'a str) -> Fut<'a, Reply<Result<Published, String>>> {
+            ready(Ok(Err("not here".into())))
         }
     }
 

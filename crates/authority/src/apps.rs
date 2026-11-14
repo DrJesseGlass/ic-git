@@ -36,9 +36,11 @@ struct CreateCanisterReply {
     canister_id: Principal,
 }
 
+/// The management canister's `{ canister_id }` argument (`deposit_cycles`
+/// here and in funding.rs).
 #[derive(CandidType)]
-struct CanisterIdArg {
-    canister_id: Principal,
+pub(crate) struct CanisterIdArg {
+    pub(crate) canister_id: Principal,
 }
 
 #[derive(CandidType)]
