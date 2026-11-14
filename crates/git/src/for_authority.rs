@@ -127,12 +127,16 @@ impl GitSide for Git {
         })
     }
 
+    // The three writes the authority asks for are refused while this side
+    // is frozen for its move (transfer.rs): the authority refunds a refused
+    // creation, and tells the caller why the site config did not change.
+
     fn set_site<'a>(&'a self, repo: &'a str, root: String) -> Fut<'a, Reply<Result<(), String>>> {
-        ready(Ok(crate::site::set_config(repo, root)))
+        ready(Ok(crate::transfer::check_unfrozen().and_then(|()| crate::site::set_config(repo, root))))
     }
 
     fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {
-        ready(Ok(store::check_new_repo(name)))
+        ready(Ok(crate::transfer::check_unfrozen().and_then(|()| store::check_new_repo(name))))
     }
 
     /// Idempotent, as the interface requires: the authority holds the name
@@ -142,7 +146,7 @@ impl GitSide for Git {
         if store::repo_exists(name) {
             return ready(Ok(Ok(())));
         }
-        ready(Ok(store::create_repo(name)))
+        ready(Ok(crate::transfer::check_unfrozen().and_then(|()| store::create_repo(name))))
     }
 
     fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>> {

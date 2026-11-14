@@ -36,17 +36,20 @@
 # and membership, votes and a name that only maps to a label; the governor's whole life against a
 # second ic-git (docs/GOVERNOR.md: made immutable, an upgrade staged and
 # voted, the policy grown, an objection, a withdrawal, the handover); the
-# console's query-backed reads
-# through the page's own code, and the /api reads.
+# freeze and the copy (docs/CANISTER_SPLIT.md, step 13: the git side
+# frozen, its writes refused naming the cut, a git canister pulling every
+# record in pages, and both digests agreeing); the console's query-backed
+# reads through the page's own code, and the /api reads.
 #
 # E2E_SPLIT=1 runs the user flows against the authority and git canisters
 # instead: the git canister is governed before the authority names it (the
 # setter's rule), each side refuses the other's messages from anyone else,
 # a job larger than a message crosses in chunks, deploy_now's job comes back
 # staged, and each canister is upgraded in place (the git canister by its
-# governor). The upgrade from BASE_REF and the governor's own section run
-# only on the combined canister: the first is step 13's rehearsal, the
-# second the governor's, and neither changes with the split.
+# governor). The freeze and the copy, the upgrade from BASE_REF and the
+# governor's own section run only on the combined canister: the first two
+# are the cut's rehearsal, the third the governor's, and none changes
+# with the split.
 #
 # Not covered: wallet writes (OISY signs mainnet only), the EVM leg (no EVM
 # RPC locally), ICP recovery paths (lost reply, refund), expiry by time.
@@ -202,6 +205,7 @@ cat > "$WORK/dfx.json" <<EOF
     "gitgov": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] },
     "base": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
     "ruled": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
+    "copy": { "type": "custom", "wasm": "$GITC_WASM", "candid": "$GITC_DID", "build": [] },
     "governor": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] }$NAMES_ENTRY
   },
   "networks": { "local": { "bind": "127.0.0.1:$PORT", "type": "ephemeral" } }
@@ -652,6 +656,92 @@ FUND=$(funding)
 expect "  ...on record, not from the pool" "$FUND" "sent = $(( SENT2 + 1000000000000 )) : nat64"
 expect "  ...and not asked what it held" "$FUND" 'balance_before = null'
 call "$OP" authority set_pricing "$(pricing 1000000000000)" >/dev/null
+fi
+
+if [ "$SPLIT" != 1 ]; then
+section "the freeze and the copy (step 13)"
+# docs/CANISTER_SPLIT.md, step 13: an operator freezes the git side, and
+# what writes it is refused with a message naming the cut, uncharged;
+# reads go on, and so do the authority's own decisions. A git canister
+# that answers to this one is named as the importer, pulls every git-side
+# record in pages, and digests its copy; the exporter's digest, stepped
+# by hand, agrees. Then the thaw, and pushes again.
+expect "not frozen" "$(ic "$OP" frozen --query)" '^\(false\)$'
+expect "no export before the freeze" "$(ic "$OP" export_page '(null)')" 'freeze first'
+expect "a tenant cannot freeze" "$(ic "$TEN" freeze)" 'is not an operator'
+expect "an operator can" "$(ic "$OP" freeze)" 'Ok'
+expect "  ...and the canister says so" "$(ic "$OP" frozen --query)" '^\(true\)$'
+FROZEN_SITE=$(served)
+SPENT0=$(ic "$TEN" get_account "(principal \"$T\")" | sed -n 's/.*spent = \([0-9_]*\).*/\1/p')
+commit site/f.txt f while-frozen
+expect "a push is refused, naming the cut" "$(signed "$URL")" 'remote rejected.*frozen.*step 16'
+git -C "$W" reset -q --hard HEAD~1
+expect "a token cannot be minted" "$(ic "$TEN" create_push_token '("e2e-app", null, null)')" 'frozen'
+expect "a repo cannot be created" "$(ic "$TEN" create_repo '("while-frozen")')" 'frozen'
+expect "a site config cannot change" "$(ic "$TEN" set_site '("e2e-app", "site")')" 'frozen'
+expect "an operator cannot write an object" "$(ic "$OP" put_object '("blob", blob "x")')" 'frozen'
+expect "  ...nor a ref" "$(ic "$OP" set_ref "(\"e2e-app\", \"refs/heads/x\", \"$A4\")")" 'frozen'
+expect "nothing was charged" "$(ic "$TEN" get_account "(principal \"$T\")")" "spent = $SPENT0 "
+expect "the site still serves" "$(served)" "^${FROZEN_SITE%% *} ${FROZEN_SITE#* }"
+expect "a fetch still works" "$(git ls-remote "http://$HOST/e2e-app.git" 2>&1)" 'refs/heads/main'
+expect "the tokens are still listed" "$(ic "$TEN" list_push_tokens '("e2e-app")' | grep -c 'id =')" '^[1-9]'
+expect "membership changes stay open" "$(ic "$TEN" add_member "(\"e2e-app\", principal \"$OPP\", \"writer\")")" 'Ok'
+ic "$TEN" remove_member "(\"e2e-app\", principal \"$OPP\")" >/dev/null
+# The copy: a git canister answering to this one, named as the importer.
+(cd "$WORK" && dfx canister create copy --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
+(cd "$WORK" && dfx canister install copy --identity "$OP" --wasm "$GITC_WASM" --argument "(record { authority = principal \"$G\" })" >/dev/null 2>&1)
+C=$(cd "$WORK" && dfx canister id copy)
+expect "a stranger cannot read the export" "$(ic "$TEN" export_page '(null)')" 'operator or the named importer'
+expect "the exporter cannot be its own importer" "$(ic "$OP" set_importer "(principal \"$G\")")" 'own importer'
+expect "the copy must be frozen before it imports" "$(call "$OP" copy import_start "(principal \"$G\")")" 'freeze this canister first'
+call "$OP" copy freeze >/dev/null
+expect "  ...and cannot import from itself" "$(call "$OP" copy import_start "(principal \"$C\")")" 'itself'
+# Not yet named: the first page is refused, and the import stops there.
+call "$OP" copy import_start "(principal \"$G\")" >/dev/null
+for _ in $(seq 1 30); do
+  ST=$(flat "$(call "$OP" copy import_status --query)")
+  echo "$ST" | grep -q 'running = false' && break
+  sleep 1
+done
+expect "unnamed, the copy is refused the export, on record" "$ST" 'error = opt ".*operator or the named importer'
+expect "the copy is named as the importer" "$(ic "$OP" set_importer "(principal \"$C\")")" 'Ok'
+expect "  ...and the exporter says so" "$(ic "$OP" get_importer --query)" "principal \"$C\""
+expect "the import resumes" "$(call "$OP" copy import_start "(principal \"$G\")")" 'Ok'
+for _ in $(seq 1 120); do
+  ST=$(flat "$(call "$OP" copy import_status --query)")
+  echo "$ST" | grep -q 'running = false' && break
+  sleep 1
+done
+expect "every page taken" "$ST" 'copied = true'
+expect "  ...with no error" "$ST" 'error = null'
+expect "  ...in pages" "$ST" 'pages = [1-9][0-9_]* : nat64'
+expect "  ...and the copy's digest done" "$ST" 'done = true'
+COPY_SHA=$(printf '%s' "$ST" | sed -n 's/.*sha256 = opt "\([0-9a-f]*\)".*/\1/p')
+expect "  ...a sha256" "$COPY_SHA" '^[0-9a-f]{64}$'
+D=
+for _ in $(seq 1 200); do
+  D=$(flat "$(ic "$OP" digest_step)")
+  echo "$D" | grep -q 'done = true' && break
+done
+expect "the exporter's digest, stepped by an operator, is done" "$D" 'done = true'
+expect "  ...and the two agree" "$D" "sha256 = opt \"$COPY_SHA\""
+expect "  ...over the same count of records" "$(printf '%s' "$D" | sed -n 's/.*records = \([0-9_]*\).*/\1/p')" "^$(printf '%s' "$ST" | sed -n 's/.*records = \([0-9_]*\).*/\1/p')\$"
+expect "  ...and the query says the same" "$(flat "$(ic "$OP" get_digest --query)")" "sha256 = opt \"$COPY_SHA\""
+same() { if [ "$1" = "$2" ]; then echo same; else printf 'differ: %s | %s' "$1" "$2"; fi; }
+expect "the copy lists the same repos" "$(same "$(call "$OP" copy list_repos --query)" "$(ic "$OP" list_repos --query)")" '^same$'
+expect "  ...the same refs" "$(same "$(call "$OP" copy list_refs '("e2e-app")' --query)" "$(ic "$OP" list_refs '("e2e-app")' --query)")" '^same$'
+expect "  ...the same objects" "$(same "$(call "$OP" copy get_object "(\"$A4\")" --query)" "$(ic "$OP" get_object "(\"$A4\")" --query)")" '^same$'
+expect "  ...the same push tokens" "$(same "$(call "$OP" copy list_push_tokens '("e2e-app")' --query)" "$(ic "$OP" list_push_tokens '("e2e-app")' --query)")" '^same$'
+expect "  ...and the same site config" "$(same "$(call "$OP" copy get_site '("e2e-app")' --query)" "$(ic "$OP" get_site '("e2e-app")' --query)")" '^same$'
+# The copy serves the site: with no approvals mirror yet, the tip, which
+# is the approved commit here. The mirrors are rewritten at the cut.
+expect "the copy serves the site from the same commit" "$(served_at "http://$C.raw.localhost:$PORT/site/e2e-app/")" "^${FROZEN_SITE%% *} ${FROZEN_SITE#* }"
+expect "the thaw" "$(ic "$OP" unfreeze)" 'Ok'
+expect "  ...forgets the digest" "$(ic "$OP" get_digest --query)" '^\(null\)$'
+commit site/f.txt f after-thaw
+expect "  ...and pushes are taken again" "$(signed "$URL")" 'main -> main'
+# The pushed commit awaits votes (K = 2); the upgrade below takes the site
+# as it finds it. The copy stays frozen, as it would until the cut.
 fi
 
 section "upgrade in place (same build)"

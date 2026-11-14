@@ -52,6 +52,27 @@ type PushTokenInfo = record {
 };
 type SiteConfig = record { root : text };
 
+// The move to the git canister (docs/CANISTER_SPLIT.md, step 13): every
+// git-side record, in a fixed order, a page at a time, and the digest
+// each side computes over its copy.
+type Kind = variant { Repos; Refs; Objects; Tokens; Labels; Sites };
+type Cursor = record { kind : Kind; after : opt blob };
+type Record = record { kind : Kind; key : blob; value : blob };
+type Page = record { records : vec Record; next : opt Cursor };
+type ResultPage = variant { Ok : Page; Err : text };
+type Digest = record { done : bool; records : nat64; bytes : nat64; sha256 : opt text };
+type ResultDigest = variant { Ok : Digest; Err : text };
+type ImportStatus = record {
+  source : principal;
+  running : bool;
+  pages : nat64;
+  records : nat64;
+  bytes : nat64;
+  copied : bool;
+  error : opt text;
+  digest : opt Digest;
+};
+
 // The authority's messages (ic_git_types::wire), taken from its principal
 // alone: the mirrors of what it decides about a repo, the site config, and
 // the asks it makes from its update calls.
@@ -150,6 +171,23 @@ service : (InitArg) -> {
   set_ref : (text, text, text) -> (Result);
   dead_push_tokens : () -> (vec text) query;
   purge_dead_push_token : (text) -> (Result);
+
+  // the move to the git canister (docs/CANISTER_SPLIT.md, step 13): the
+  // freeze (operators), the paged export and its digest (operators and
+  // the named importer, of a frozen store)
+  freeze : () -> (Result);
+  unfreeze : () -> (Result);
+  frozen : () -> (bool) query;
+  set_importer : (principal) -> (Result);
+  get_importer : () -> (opt principal) query;
+  export_page : (opt Cursor) -> (ResultPage);
+  digest_step : () -> (ResultDigest);
+  get_digest : () -> (opt Digest) query;
+  // the import (operators): this canister, frozen, pulls the pages from
+  // the canister named, then digests its copy
+  import_start : (principal) -> (Result);
+  import_status : () -> (opt ImportStatus) query;
+  import_reset : () -> (Result);
 
   // push tokens: writers of the repo, by the authority's push policy
   create_push_token : (text, opt nat32, opt text) -> (ResultText);
