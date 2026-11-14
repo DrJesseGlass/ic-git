@@ -100,9 +100,14 @@ async fn registry_publish_canister(commit: String, module_sha256: String) -> Res
     if !ic_cdk::api::is_controller(&caller()) {
         return Err("only a controller of this canister can publish its record".to_string());
     }
+    use ic_git_types::side::Failure;
     match to_authority::publish_git_record(&commit, &module_sha256).await {
         Ok(answer) => answer,
-        Err(f) => Err(format!("the authority did not answer ({f}); nothing published")),
+        // The call never ran there: nothing was published. Its answer was
+        // lost: the authority may have gone on to publish, and its feed
+        // says; a second ask would pay for a second record.
+        Err(Failure::NotDelivered(e)) => Err(format!("the authority was not reached ({e}); nothing published")),
+        Err(Failure::Lost(e)) => Err(format!("the authority's answer was lost ({e}); the record may have been published, see the authority's feed before asking again")),
     }
 }
 

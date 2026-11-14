@@ -7,11 +7,13 @@
 //! the authority sends it across on the rent timer: when the git canister
 //! is under the **floor** (`Pricing::git_canister_floor`, which
 //! `/api/pricing` reports), it gets the floor's worth, as far as the pool
-//! goes and never so much that this canister is left under the floor
-//! itself. The pool is revenue, not tenants' balances: a deposit is a
-//! liability until a charge spends it, and only charges feed the pool, so
-//! the git canister can never be funded with cycles a tenant could still
-//! spend.
+//! goes and never so much that this canister's liquid balance (what it
+//! holds above its freezing threshold) is left under the floor itself.
+//! The pool is revenue, not tenants' balances: a deposit is a liability
+//! until a charge spends it, and only charges feed the pool, so the git
+//! canister can never be funded with cycles a tenant could still spend.
+//! One tick runs at a time; a tick that could not send is on record
+//! (`Funding::last_failure`), with the pool kept.
 //!
 //! An operator can send more from this canister's own cycles
 //! (`top_up_git_canister`), as an operator's repos pay nothing and cost
@@ -40,6 +42,15 @@ pub struct Funding {
     pub sent: u64,
     /// The last top-up.
     pub last: Option<TopUp>,
+    /// The last tick that could not send: the git canister did not say
+    /// what it holds, or the deposit failed. The pool kept what it had.
+    pub last_failure: Option<TopUpFailure>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TopUpFailure {
+    pub at_ns: u64,
+    pub error: String,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -55,6 +66,29 @@ pub struct TopUp {
 struct Sent {
     total: u64,
     last: Option<TopUp>,
+    #[serde(default)]
+    failed: Option<TopUpFailure>,
+}
+
+thread_local! {
+    /// A tick is between its asks: the next one waits for the next
+    /// timer. Heap: an upgrade clears it with the tick it belonged to.
+    static IN_FLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds `IN_FLIGHT` for a tick, however it ends.
+struct Tick;
+
+impl Tick {
+    fn begin() -> Option<Tick> {
+        IN_FLIGHT.with(|f| (!f.replace(true)).then_some(Tick))
+    }
+}
+
+impl Drop for Tick {
+    fn drop(&mut self) {
+        IN_FLIGHT.with(|f| f.set(false));
+    }
 }
 
 pub fn pool() -> u64 {
@@ -87,20 +121,32 @@ fn record_sent(cycles: u64, balance_before: Option<u64>) {
     crate::kv::set_json(SENT_KEY, &s);
 }
 
+fn record_failure(error: String) -> String {
+    let mut s = sent();
+    s.failed = Some(TopUpFailure {
+        at_ns: now_ns(),
+        error: error.clone(),
+    });
+    crate::kv::set_json(SENT_KEY, &s);
+    error
+}
+
 pub fn funding() -> Funding {
     let s = sent();
     Funding {
         git_canister: crate::peer::GIT.get(),
         pool: pool(),
-        floor: crate::tenancy::pricing().git_canister_floor,
+        floor: crate::tenancy::git_canister_floor(),
         sent: s.total,
         last: s.last,
+        last_failure: s.failed,
     }
 }
 
 /// What the timer sends: nothing while the git canister holds the floor;
 /// otherwise the floor's worth, as far as the pool goes, and never more
-/// than would leave this canister (`own`) under the floor itself.
+/// than would leave this canister's liquid balance (`own`) under the
+/// floor itself.
 pub fn due(git_balance: u64, floor: u64, pool: u64, own: u64) -> u64 {
     if git_balance >= floor {
         return 0;
@@ -109,10 +155,13 @@ pub fn due(git_balance: u64, floor: u64, pool: u64, own: u64) -> u64 {
 }
 
 /// The timer's top-up: ask the git canister what it holds, send what is
-/// due from the pool. The pool is debited before the deposit and credited
-/// back if the deposit fails, so a tick that overlaps another cannot send
-/// the same cycles twice. `balance_of` asks the git canister, `own` is
-/// this canister's balance, `deposit` sends. Answers what was sent.
+/// due from the pool. One at a time: a tick that finds another between
+/// its asks sends nothing, so two cannot both judge the same balance.
+/// Nothing is asked when there is nothing to send (no git canister, an
+/// empty pool, or `own`, this canister's liquid balance, not above the
+/// floor). The pool is debited before the deposit and credited back if
+/// the deposit fails; a tick that could not send is on record. Answers
+/// what was sent.
 pub async fn top_up(
     balance_of: impl AsyncFn() -> Reply<u64>,
     own: u64,
@@ -121,11 +170,17 @@ pub async fn top_up(
     if crate::peer::GIT.get().is_none() {
         return Ok(0);
     }
-    let floor = crate::tenancy::pricing().git_canister_floor;
-    if pool() == 0 {
+    let floor = crate::tenancy::git_canister_floor();
+    if pool() == 0 || own <= floor {
         return Ok(0);
     }
-    let balance = balance_of().await.map_err(|f| format!("the git canister did not say what it holds ({f})"))?;
+    let Some(_tick) = Tick::begin() else {
+        return Ok(0);
+    };
+    let balance = match balance_of().await {
+        Ok(b) => b,
+        Err(f) => return Err(record_failure(format!("the git canister did not say what it holds ({f})"))),
+    };
     let cycles = due(balance, floor, pool(), own);
     if cycles == 0 {
         return Ok(0);
@@ -133,7 +188,7 @@ pub async fn top_up(
     set_pool(pool().saturating_sub(cycles));
     if let Err(e) = deposit(cycles).await {
         earn(cycles);
-        return Err(format!("deposit_cycles: {e}"));
+        return Err(record_failure(format!("deposit_cycles: {e}")));
     }
     record_sent(cycles, Some(balance));
     Ok(cycles)
@@ -152,11 +207,6 @@ pub async fn top_up_by_operator(cycles: u64, deposit: impl AsyncFn(u64) -> Resul
     Ok(())
 }
 
-#[derive(CandidType)]
-struct CanisterIdArg {
-    canister_id: Principal,
-}
-
 /// `deposit_cycles` on the management canister, with `cycles` attached,
 /// to the named git canister.
 pub async fn deposit(cycles: u64) -> Result<(), String> {
@@ -164,16 +214,18 @@ pub async fn deposit(cycles: u64) -> Result<(), String> {
     ic_dev_kit_rs::intercanister::call_with_payment(
         Principal::management_canister(),
         "deposit_cycles",
-        (CanisterIdArg { canister_id: git },),
+        (crate::apps::CanisterIdArg { canister_id: git },),
         cycles as u128,
     )
     .await
 }
 
 /// The timer's top-up with the canister's own calls: the git canister
-/// asked over messages, this canister's balance, the deposit above.
+/// asked over messages, this canister's liquid balance (what it may
+/// attach to a call: its balance less its freezing threshold), the
+/// deposit above.
 pub async fn top_up_git() -> Result<u64, String> {
-    let own = u64::try_from(ic_cdk::api::canister_cycle_balance()).unwrap_or(u64::MAX);
+    let own = u64::try_from(ic_cdk::api::canister_liquid_cycle_balance()).unwrap_or(u64::MAX);
     top_up(async || crate::peer::GIT_CANISTER.cycle_balance().await, own, deposit).await
 }
 
@@ -213,7 +265,7 @@ mod tests {
         assert_eq!(pool(), 7);
         assert_eq!(funding().pool, 7);
         assert_eq!(funding().git_canister, None);
-        assert_eq!(funding().floor, crate::tenancy::Pricing::default().git_canister_floor);
+        assert_eq!(funding().floor, crate::tenancy::DEFAULT_GIT_CANISTER_FLOOR);
         crate::kv::remove(POOL_KEY);
     }
 
@@ -227,7 +279,7 @@ mod tests {
         crate::kv::remove(SENT_KEY);
         crate::kv::remove(crate::peer::GIT.key);
         let mut pricing = crate::tenancy::Pricing::default();
-        pricing.git_canister_floor = T;
+        pricing.git_canister_floor = Some(T);
         crate::tenancy::set_pricing(pricing);
         let balance: RefCell<Reply<u64>> = RefCell::new(Ok(0));
         let asked = Cell::new(0);
@@ -260,11 +312,15 @@ mod tests {
         assert_eq!(pool(), T / 4);
 
         *balance.borrow_mut() = Ok(T / 2);
+        assert_eq!(block_on(top_up(balance_of, T, deposit)), Ok(0), "this canister has no more than the floor");
+        assert_eq!(asked.get(), 1, "not asked");
         refuse.set(true);
         let e = block_on(top_up(balance_of, 10 * T, deposit)).unwrap_err();
         assert!(e.contains("stopped"), "{e}");
         assert_eq!(pool(), T / 4, "refunded");
         assert_eq!(funding().sent, 0);
+        assert_eq!(funding().last_failure.map(|f| f.error), Some(e), "on record");
+        assert!(!IN_FLIGHT.with(|f| f.get()), "the tick is over");
 
         refuse.set(false);
         assert_eq!(block_on(top_up(balance_of, 10 * T, deposit)), Ok(T / 4));
@@ -279,12 +335,25 @@ mod tests {
         let e = block_on(top_up(balance_of, 10 * T, deposit)).unwrap_err();
         assert!(e.contains("did not say"), "{e}");
         assert_eq!(pool(), T, "nothing moved");
+        assert!(funding().last_failure.is_some_and(|f| f.error.contains("did not say")));
+
+        // Two ticks at once: the second finds the first between its asks
+        // and sends nothing, so both cannot both judge the same balance.
+        *balance.borrow_mut() = Ok(0);
+        let first = Tick::begin().expect("no tick in flight");
+        assert_eq!(block_on(top_up(balance_of, 10 * T, deposit)), Ok(0));
+        assert_eq!(pool(), T, "the pool is the first tick's to spend");
+        drop(first);
+        assert_eq!(block_on(top_up(balance_of, 10 * T, deposit)), Ok(T), "the floor's worth, once the first is over");
+
+        assert_eq!(pool(), 0);
 
         // An operator's top-up is not the pool's.
+        earn(T);
         assert_eq!(block_on(top_up_by_operator(5, deposit)), Ok(()));
         assert_eq!(pool(), T);
-        assert_eq!(*deposited.borrow(), vec![T / 4, 5]);
-        assert_eq!(funding().sent, T / 4 + 5);
+        assert_eq!(*deposited.borrow(), vec![T / 4, T, 5]);
+        assert_eq!(funding().sent, T / 4 + T + 5);
         assert!(block_on(top_up_by_operator(0, deposit)).is_err());
         crate::kv::remove(crate::peer::GIT.key);
         assert!(block_on(top_up_by_operator(5, deposit)).unwrap_err().contains("no git canister"));

@@ -135,7 +135,7 @@ if [ "$use_docker" = 1 ]; then
     split_out="target/reproducible/$split-${commit:0:7}.wasm"
     export_wasm ic-git-build "$split_out" "$split_wasm" "$split.wasm"
     export_wasm ic-git-build "$split_out.gz" "$split_gz" "$split.wasm.gz"
-    label=${split%_canister}
+    label=${split%_canister}  # authority, git: the labels the native path prints
     printf '%-20s: %s\n' "$label raw sha256" "$split_wasm"
     printf '%-20s: %s\n' "$label sha256" "$split_gz"
     printf '%-20s: %s\n' "$label artifact" "$split_out.gz"
@@ -183,10 +183,12 @@ else
   built=$(shasum -a 256 "$wasm" | awk '{print $1}')
   # The two modules of the split, built as the container builds them
   # (Dockerfile.build: --check, since neither has an id here).
-  for split in authority:authority git_canister:git; do
-    name=${split%%:*}
+  for name in authority git_canister; do
     dfx build --check "$name" >/dev/null
-    printf '%-20s: %s\n' "${split#*:} raw sha256" "$(shasum -a 256 ".dfx/local/canisters/$name/$name.wasm" | awk '{print $1}')"
+    label=${name%_canister}
+    split_wasm=.dfx/local/canisters/$name/$name.wasm
+    printf '%-20s: %s\n' "$label raw sha256" "$(shasum -a 256 "$split_wasm" | awk '{print $1}')"
+    printf '%-20s: %s\n' "$label sha256" "$(gzip -9 -n -c "$split_wasm" | shasum -a 256 | awk '{print $1}')"
   done
   if [ "$(shasum -a 256 Cargo.lock | awk '{print $1}')" != "$lock_before" ]; then
     echo "Cargo.lock changed during the build; see above." >&2

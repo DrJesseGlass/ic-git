@@ -112,8 +112,8 @@ pub fn git_record(commit_hex: &str, module_sha256_hex: &str) -> Result<Record, S
 
 /// Does the git canister run the module `rec` names? `running` is the
 /// module hash the management canister's `canister_info` reports for it.
-pub fn running(rec: &Record, running: Option<&[u8]>) -> Result<(), String> {
-    match running {
+pub fn running(rec: &Record, module_hash: Option<&[u8]>) -> Result<(), String> {
+    match module_hash {
         None => Err("the git canister runs no code; nothing to attest".into()),
         Some(h) if h != rec.bundle => Err(format!(
             "the git canister runs module {}, not {}; nothing published",

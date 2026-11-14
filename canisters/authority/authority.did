@@ -92,17 +92,22 @@ type Pricing = record {
   evm_action : nat64;
   ic_deploy : nat64;
   // the git canister's floor: under it the rent timer tops it up from
-  // what tenants paid for git-side work (get_git_funding)
-  git_canister_floor : nat64;
+  // what tenants paid for git-side work (get_git_funding). Optional on
+  // the way in (null keeps the default), always given on the way out
+  git_canister_floor : opt nat64;
 };
 // The git canister's funding (docs/CANISTER_SPLIT.md, phase 3 step 12d).
 type TopUp = record { at_ns : nat64; cycles : nat64; balance_before : opt nat64 };
+type TopUpFailure = record { at_ns : nat64; error : text };
 type Funding = record {
   git_canister : opt principal;
   pool : nat64;
   floor : nat64;
   sent : nat64;
   last : opt TopUp;
+  // the last tick that could not send: the git canister did not say what
+  // it holds, or the deposit failed; the pool kept what it had
+  last_failure : opt TopUpFailure;
 };
 type Stranded = record { who : principal; amount : nat64; error : text; at_ns : nat64 };
 type PendingIcpDeposit = record {

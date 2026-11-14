@@ -605,11 +605,14 @@ upgrade_to() { printf '(variant { Upgrade = record { commit = "%s"; module_sha25
 id_of() { sed -n 's/.*Ok = \([0-9_]*\) : nat64.*/\1/p' | tr -d _; }
 
 section "pricing"
-expect "the table names the git canister's floor" "$(ic "$OP" get_pricing --query)" 'git_canister_floor = 1_000_000_000_000 : nat64'
+expect "the table names the git canister's floor" "$(ic "$OP" get_pricing --query)" 'git_canister_floor = opt \(1_000_000_000_000 : nat64\)'
 expect "  ...and /api/pricing reports it" "$(curl -s "http://$AHOST/api/pricing")" '"git_canister_floor":1000000000000'
 # The whole table, with the git canister's floor as given.
-pricing() { printf '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64; git_canister_floor = %s : nat64 })' "$1"; }
+pricing() { printf '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64; git_canister_floor = opt (%s : nat64) })' "$1"; }
 expect "a tenant cannot retune it" "$(ic "$TEN" set_pricing "$(pricing 1)")" 'is not an operator'
+# The table as it was before the floor: still taken, the floor the default.
+ic "$OP" set_pricing '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64 })' >/dev/null
+expect "a table without the floor keeps the default" "$(ic "$OP" get_pricing --query)" 'git_canister_floor = opt \(1_000_000_000_000 : nat64\)'
 
 if [ "$SPLIT" = 1 ]; then
 section "funding the git canister"

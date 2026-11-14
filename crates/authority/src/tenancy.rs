@@ -49,13 +49,18 @@ pub struct Pricing {
     pub ic_deploy: u64,
     /// The git canister's floor (crate::funding): under it, the rent
     /// timer sends the floor's worth from what tenants paid for git-side
-    /// work. A table written before the field reads the default.
-    #[serde(default = "default_git_canister_floor")]
-    pub git_canister_floor: u64,
+    /// work. Optional, so a table written or sent before the field still
+    /// reads and decodes: `None` is the default, and `pricing()` fills it
+    /// in, so the table served always says the floor in force.
+    #[serde(default)]
+    pub git_canister_floor: Option<u64>,
 }
 
-fn default_git_canister_floor() -> u64 {
-    1_000_000_000_000
+pub const DEFAULT_GIT_CANISTER_FLOOR: u64 = 1_000_000_000_000;
+
+/// The git canister's floor in force.
+pub fn git_canister_floor() -> u64 {
+    pricing().git_canister_floor.unwrap_or(DEFAULT_GIT_CANISTER_FLOOR)
 }
 
 impl Default for Pricing {
@@ -67,7 +72,7 @@ impl Default for Pricing {
             rent_per_byte_year: 5_000,
             evm_action: 50_000_000_000,
             ic_deploy: 5_000_000_000,
-            git_canister_floor: default_git_canister_floor(),
+            git_canister_floor: Some(DEFAULT_GIT_CANISTER_FLOOR),
         }
     }
 }
@@ -76,7 +81,9 @@ const PRICING_KEY: &str = "tenancy:pricing";
 const YEAR_NS: u128 = 365 * 24 * 3600 * 1_000_000_000;
 
 pub fn pricing() -> Pricing {
-    crate::kv::get_json(PRICING_KEY).unwrap_or_default()
+    let mut p: Pricing = crate::kv::get_json(PRICING_KEY).unwrap_or_default();
+    p.git_canister_floor = Some(p.git_canister_floor.unwrap_or(DEFAULT_GIT_CANISTER_FLOOR));
+    p
 }
 
 pub fn set_pricing(p: Pricing) {

@@ -97,7 +97,7 @@ type Pricing = record {
   ic_deploy : nat64;
   // the git canister's floor, once there is one (docs/CANISTER_SPLIT.md,
   // step 12d); the pool it is funded from fills here already
-  git_canister_floor : nat64;
+  git_canister_floor : opt nat64;
 };
 type Stranded = record { who : principal; amount : nat64; error : text; at_ns : nat64 };
 type PendingIcpDeposit = record {

@@ -869,13 +869,16 @@ The two canisters:
           which the authority asks with no argument, outside `GitSide`:
           in one canister there is nothing to ask) and, under the floor
           (`Pricing::git_canister_floor`, default 1 T, in `/api/pricing`
-          and `get_pricing`; a table stored before the field reads the
-          default), sends the floor's worth by `deposit_cycles`, as far
-          as the pool goes and never what would leave the authority
-          under the floor itself. The pool is debited before the deposit
-          and credited back if it fails, so overlapping ticks cannot
-          send the same cycles twice. `get_git_funding` reports the
-          pool, the floor, what was sent and the last top-up;
+          and `get_pricing`; optional on the way in, so a table stored or
+          sent before the field still reads, and always given on the way
+          out), sends the floor's worth by `deposit_cycles`, as far as
+          the pool goes and never what would leave the authority's liquid
+          balance (above its freezing threshold) under the floor itself.
+          One tick runs at a time, and nothing is asked when nothing
+          could be sent; the pool is debited before the deposit and
+          credited back if it fails, and a tick that could not send is
+          on record. `get_git_funding` reports the pool, the floor, what
+          was sent, the last top-up and the last failure;
           `top_up_git_canister` (operators) sends the authority's own
           cycles, as an operator's repos pay nothing and cost the git
           canister all the same.
@@ -895,7 +898,12 @@ The two canisters:
           the git canister is added (step 15).
         - The two-canister e2e covers the guards on both ends, the
           governed upgrade's record ask (the authority checks the module
-          and has no registry to publish to), the pool, the tick under a
+          and has no registry to publish to: the module is checked
+          before the registry on purpose, so a mismatch is reported even
+          where there is no registry, at the price of one management
+          call per upgrade; on the git canister a lost answer is told
+          apart from a call that never ran, since the authority may have
+          published), the pool, the tick under a
           raised floor, and the operator's top-up.
     - **`canisters/authority` (`authority_canister.wasm`, for umobs).**
       The lifecycle, the authority's endpoints and their consent
