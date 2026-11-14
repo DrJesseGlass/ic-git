@@ -310,8 +310,11 @@ pub fn token_key(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+// A token record that changes changes the export: the digest of it
+// (transfer.rs) starts again.
 pub fn token_put(key: &str, value: String) {
     TOKENS.with(|t| t.borrow_mut().insert(key.to_string(), value));
+    crate::transfer::forget_digest();
 }
 
 pub fn token_get(key: &str) -> Option<String> {
@@ -319,7 +322,11 @@ pub fn token_get(key: &str) -> Option<String> {
 }
 
 pub fn token_remove(key: &str) -> bool {
-    TOKENS.with(|t| t.borrow_mut().remove(&key.to_string()).is_some())
+    let removed = TOKENS.with(|t| t.borrow_mut().remove(&key.to_string()).is_some());
+    if removed {
+        crate::transfer::forget_digest();
+    }
+    removed
 }
 
 pub fn token_index_put(key: String) {
@@ -447,6 +454,7 @@ pub fn import_object(oid: Oid, value: Vec<u8>) -> Result<(), String> {
 pub fn clear_tokens() {
     TOKENS.with(|t| t.borrow_mut().clear_new());
     TOKEN_INDEX.with(|t| t.borrow_mut().clear_new());
+    crate::transfer::forget_digest();
 }
 
 // --- schema version ----------------------------------------------------------

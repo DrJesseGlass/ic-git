@@ -323,6 +323,11 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
                     return git_response(200, RESULT, receive::refuse(&request, &e));
                 }
             }
+            // An operator may have frozen the git side while the authority
+            // answered: the push must not move the store being exported.
+            if let Err(e) = transfer::check_unfrozen() {
+                return git_response(200, RESULT, receive::refuse(&request, &e));
+            }
             // The writers, and whether pushes must be signed, may have
             // changed while the authority answered: both are read again.
             let Some(grant) = push_authorized(&repo, &req.headers) else {

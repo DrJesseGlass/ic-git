@@ -43,7 +43,8 @@
 //! order, with the record count and bytes beside it. The importer digests
 //! its copy once every page is taken; an operator steps the exporter's.
 //! The cut proceeds when the two agree, and only then. A thaw clears the
-//! digest, since what it was of has moved on.
+//! digest, since what it was of has moved on, and so does any change to
+//! a token record, the one kind that can still change while frozen.
 //!
 //! What is not copied: the push-certificate seed (a secret; the git
 //! canister makes its own, and a nonce lives for minutes), the mirrors
@@ -286,7 +287,14 @@ fn walk(cursor: Option<Cursor>, budget: usize) -> Result<Page, String> {
     let mut records = Vec::new();
     let mut used = 0;
     loop {
-        let entries = kind.page(after.as_deref(), budget.saturating_sub(used).max(1))?;
+        let room = budget.saturating_sub(used).max(1);
+        let entries = kind.page(after.as_deref(), room)?;
+        // A kind's page always carries one record, so the one that did not
+        // fit the last batch comes back here alone: it waits for the next
+        // page unless this one is empty.
+        if !records.is_empty() && entries.first().is_some_and(|(k, v)| k.len() + v.len() > room) {
+            return Ok(Page { records, next: Some(Cursor { kind, after }) });
+        }
         let Some((last, _)) = entries.last() else {
             match kind.next() {
                 Some(k) => {
@@ -370,6 +378,14 @@ pub struct Digest {
     pub records: u64,
     pub bytes: u64,
     pub sha256: Option<String>,
+}
+
+/// Forget the digest, finished or not: what it was of has changed. Tokens
+/// can still go while frozen (a revoke, or a membership change through the
+/// mirrors), so every token write calls this (store.rs), and the digest
+/// starts again from the first record.
+pub fn forget_digest() {
+    kv::remove(DIGEST_KEY);
 }
 
 fn digest_state() -> Option<DigestState> {
@@ -1083,5 +1099,71 @@ mod tests {
         freeze().unwrap();
         let err = export_page(None).unwrap_err();
         assert!(err.contains(&store::oid_hex(&big)) && err.contains("over the"), "{err}");
+    }
+
+    /// Bytes zlib cannot shrink, so a blob's stored value is as large as
+    /// its content.
+    fn noise(n: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (x >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// A record that does not fit what is left of a page waits for the
+    /// next one: a page is within its budget, or one record alone.
+    #[test]
+    fn a_page_is_within_its_budget_or_one_record() {
+        seed();
+        store::put_object(ObjectType::Blob, &noise(900, 1));
+        store::put_object(ObjectType::Blob, &noise(1400, 2));
+        store::put_object(ObjectType::Blob, &noise(600, 3));
+        freeze().unwrap();
+        let budget = 1000;
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            let page = walk(cursor, budget).unwrap();
+            let bytes: usize = page.records.iter().map(|r| r.key.len() + r.value.len()).sum();
+            assert!(bytes <= budget || page.records.len() == 1, "a page of {bytes} bytes in {} records", page.records.len());
+            pages += 1;
+            match page.next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert!(pages > 3);
+        assert_eq!(all(budget), all(usize::MAX), "paged or not, the same records");
+    }
+
+    /// A token revoked while frozen starts the digest again, whether it
+    /// was finished or halfway: it is of the records as they are now.
+    #[test]
+    fn a_revoke_while_frozen_starts_the_digest_again() {
+        seed();
+        freeze().unwrap();
+        let before = digest_step_with(usize::MAX).unwrap();
+        assert!(before.done);
+        assert!(tokens::revoke("tok-mover"));
+        assert_eq!(digest(), None, "a finished digest is forgotten");
+        let after = digest_step_with(usize::MAX).unwrap();
+        assert_eq!(after.records, before.records - 1);
+        assert_ne!(after.sha256, before.sha256);
+        // Halfway: a step, a revoke, then the rest.
+        kv::remove(DIGEST_KEY);
+        let first = digest_step_with(100).unwrap();
+        assert!(!first.done);
+        assert!(tokens::revoke("tok-other"));
+        let halfway = loop {
+            let d = digest_step_with(100).unwrap();
+            if d.done {
+                break d;
+            }
+        };
+        kv::remove(DIGEST_KEY);
+        assert_eq!(halfway, digest_step_with(usize::MAX).unwrap(), "the digest of what is left, from the start");
     }
 }
