@@ -199,6 +199,7 @@ pub fn mint(
     days: Option<u32>,
     key: Option<&str>,
 ) -> Result<PushTokenInfo, String> {
+    crate::transfer::check_unfrozen()?;
     let days = lifetime(days)?;
     let key = bindable_key(key)?;
     purge_expired();

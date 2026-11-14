@@ -79,10 +79,12 @@ pub fn keys_with_prefix(prefix: &str) -> Vec<String> {
 
 /// One page of a map, for a walk that visits every entry across several
 /// messages (the git side's export, docs/CANISTER_SPLIT.md step 13): the
-/// entries from `start`, in key order, while `keep` holds of the key,
-/// until `budget` bytes of keys and values (by `size`) are taken. At least
-/// one entry when any remains, so a caller always advances; the last key
-/// is where the next page starts, excluded.
+/// entries from `start`, in key order, while `keep` holds of the key, as
+/// many as fit in `budget` bytes of keys and values (by `size`). At least
+/// one entry when any remains, so a caller always advances, and never a
+/// second that would take the page over the budget, so a page is at most
+/// the budget or one entry, whichever is larger; the last key is where
+/// the next page starts, excluded.
 pub fn page<K, V, M>(
     map: &StableBTreeMap<K, V, M>,
     start: Bound<K>,
@@ -102,7 +104,11 @@ where
         if !keep(&k) {
             break;
         }
-        used += size(&k, &v);
+        let n = size(&k, &v);
+        if !out.is_empty() && used + n > budget {
+            break;
+        }
+        used += n;
         out.push((k, v));
         if used >= budget {
             break;

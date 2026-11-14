@@ -977,12 +977,15 @@ The two canisters:
         the authority's `check_new_repo`, `create_repo` (a repo that
         exists is still its earlier call) and `set_site`, each with
         `transfer::FROZEN`, which names step 16; so a refused creation is
-        refunded by the authority as any refusal is. Reads, revokes and
-        the mirrors go on.
+        refunded by the authority as any refusal is. Behind the endpoints,
+        `store::set_ref`, `store::create_repo` and `tokens::mint` refuse
+        too, so a write path the endpoints do not gate cannot move a
+        store being exported. Reads, revokes and the mirrors go on.
       - **The export.** `export_page(opt Cursor)`, an update call, walks
         repos, refs, objects, tokens, labels and site configs
         (`transfer::Kind`, in that order, keys in order within each), a
-        page of at most `PAGE_BYTES` (1 MiB) of keys and values, each
+        page of at most `PAGE_BYTES` (1 MiB) of keys and values, or one
+        record when that is larger, each
         page naming where the next starts; values go as their maps hold
         them (an object's type code, length and zlib stream), so the copy
         is byte for byte the original. Operators read it, and the one
@@ -993,13 +996,16 @@ The two canisters:
         (operators; the canister frozen, the source not itself) pulls the
         pages on a chain of zero-delay timers, one page a tick, each tick
         a message of its own, and applies each record: an object only if
-        its bytes inflate to the stated length and hash to its id, a
-        label or site config only under its own META prefix, so a wrong
-        page can write nothing else. Every kind but tokens only grows on
-        a frozen exporter, so the copy is add-only and can be pulled
-        again; tokens can still go (a revoke, or a membership change
-        through the mirrors), so an import that starts over drops the
-        tokens it holds first and rebuilds their index from the records.
+        its bytes inflate to the stated length (read one byte past it,
+        no further) and hash to its id, a label or site config only under
+        its own META prefix, so a wrong page can write nothing else.
+        Every kind but tokens only grows on a frozen exporter, so the
+        copy is add-only and can be pulled again; tokens can still go (a
+        revoke, or a membership change through the mirrors), so an import
+        that starts over drops the tokens it holds first and rebuilds
+        their index from the records. A first import drops nothing: what
+        the canister holds of its own stays, and the digest says whether
+        the copy is the original alone.
         `import_status` reports pages, records, bytes, whether every page
         is in, the copy's digest once it is, and the error a page failed
         with; a failed page stops the chain, and `import_start` again
@@ -1010,7 +1016,8 @@ The two canisters:
         `acc = sha256(acc, kind, len(key), key, len(value), value)` per
         record, with the count and bytes beside it, until it says done;
         `get_digest` is a query of it. The importer digests its copy as
-        the chain's last steps and shows it in `import_status`; an
+        the chain's last steps, afresh from the last page in (one stepped
+        earlier was of less), and shows it in `import_status`; an
         operator steps the exporter's. A thaw forgets the digest.
       - **Tests.** The crate: the freeze's refusals through `GitSide`;
         the walk the same whatever the page size, kinds and keys in

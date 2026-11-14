@@ -6,8 +6,11 @@
 //! **The freeze.** An operator switch (`freeze`) puts the git side in
 //! read-only mode. What writes it from outside is refused with `FROZEN`,
 //! which names the cut: pushes, token minting, `create_repo`, `set_site`
-//! and the object admin calls (the canister endpoints check, and this
-//! side's `GitSide` refuses the authority's asks). Reads go on: fetches,
+//! and the object admin calls (the canister endpoints check, so the
+//! refusal comes before any charge; this side's `GitSide` refuses the
+//! authority's asks; and `store::set_ref`, `store::create_repo` and
+//! `tokens::mint` refuse too, the backstop behind a write path the
+//! endpoints do not gate). Reads go on: fetches,
 //! `/site/`, `/api`, the token listings. What the authority decides
 //! (membership, ballots, signing policy) stays open, since it reaches this
 //! side only through the mirrors, which the authority rewrites at the cut
@@ -224,10 +227,19 @@ impl Kind {
                 .into_iter()
                 .map(|(k, v)| (k.into_bytes(), v.into_bytes()))
                 .collect(),
-            Kind::Labels | Kind::Sites => kv::export_prefix(self.prefix().unwrap(), text()?.as_deref(), budget)
-                .into_iter()
-                .map(|(k, v)| (k.into_bytes(), v))
-                .collect(),
+            Kind::Labels | Kind::Sites => {
+                // A cursor outside the prefix would start the range
+                // elsewhere and end the kind with records left.
+                let prefix = self.prefix().unwrap();
+                let after = text()?;
+                if after.as_deref().is_some_and(|a| !a.starts_with(prefix)) {
+                    return Err(format!("the cursor is not a {self:?} key: it does not start with {prefix:?}"));
+                }
+                kv::export_prefix(prefix, after.as_deref(), budget)
+                    .into_iter()
+                    .map(|(k, v)| (k.into_bytes(), v))
+                    .collect()
+            }
         };
         if let Some((k, v)) = out.iter().find(|(k, v)| k.len() + v.len() > MAX_RECORD) {
             return Err(format!(
@@ -525,11 +537,16 @@ pub fn import_start(source: Principal, me: Principal) -> Result<(), String> {
             return Err(format!("an import from {} is on record; import_reset before importing from {source}", st.source));
         }
         Some(st) if !st.copied => ImportState { error: None, ..st },
-        _ => {
+        // Every page in: start over, the tokens of the last pull dropped
+        // first. A first import clears nothing: what this canister holds
+        // of its own, tokens included, is its own, and the digest will
+        // say whether the copy is the original alone.
+        Some(_) => {
             store::clear_tokens();
             kv::remove(DIGEST_KEY);
             fresh
         }
+        None => fresh,
     };
     save_import(&st);
     arm_import();
@@ -573,6 +590,11 @@ async fn import_step(fetch: impl AsyncFn(Principal, Option<Cursor>) -> Result<Pa
     st.bytes += page.records.iter().map(|r| (r.key.len() + r.value.len()) as u64).sum::<u64>();
     st.copied = page.next.is_none();
     st.next = page.next;
+    if st.copied {
+        // The copy's digest starts now: one an operator stepped while the
+        // pages were still coming was of less than the copy.
+        kv::remove(DIGEST_KEY);
+    }
     save_import(&st);
     Ok(true)
 }
@@ -636,9 +658,14 @@ fn arm_import() {
 }
 
 /// Tests drive the ticks themselves; a timer cannot fire outside a
-/// canister.
+/// canister. The running flag is theirs to set (`set_running_for_tests`).
 #[cfg(any(test, feature = "testing"))]
 fn arm_import() {}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn set_running_for_tests(running: bool) {
+    IMPORTING.with(|f| f.set(running));
+}
 
 #[cfg(test)]
 mod tests {
@@ -765,6 +792,95 @@ mod tests {
         assert_eq!(small.next, Some(Cursor { kind: Kind::Repos, after: Some(b"Other.App".to_vec()) }));
         assert!(walk(Some(Cursor { kind: Kind::Objects, after: Some(vec![1, 2, 3]) }), 1).unwrap_err().contains("not an oid"));
         assert!(walk(Some(Cursor { kind: Kind::Repos, after: Some(vec![0xff]) }), 1).unwrap_err().contains("not a key"));
+        assert!(walk(Some(Cursor { kind: Kind::Labels, after: Some(b"a".to_vec()) }), 1).unwrap_err().contains("label:"));
+        assert!(walk(Some(Cursor { kind: Kind::Sites, after: Some(b"label:x".to_vec()) }), 1).unwrap_err().contains("site:"));
+        // A page never takes a second record that would put it over the
+        // budget: with the 3000-byte blob among records of a few dozen
+        // bytes, no page of 3100 holds more than that blob and what fit
+        // before it.
+        let mut cursor = None;
+        loop {
+            let page = walk(cursor, 3100).unwrap();
+            let bytes: usize = page.records.iter().map(|r| r.key.len() + r.value.len()).sum();
+            assert!(bytes <= 3100 || page.records.len() == 1, "{bytes} bytes in {} records", page.records.len());
+            match page.next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+    }
+
+    /// While a chain of ticks runs, nothing that would pull the store from
+    /// under it goes through: the thaw, another start, the reset.
+    #[test]
+    fn a_running_import_refuses_the_thaw_another_start_and_the_reset() {
+        freeze().unwrap();
+        import_start(other(), me()).unwrap();
+        set_running_for_tests(true);
+        assert!(import_status().unwrap().running);
+        assert!(unfreeze().unwrap_err().contains("running"));
+        assert!(import_start(other(), me()).unwrap_err().contains("running"));
+        assert!(import_reset().unwrap_err().contains("running"));
+        assert!(frozen());
+        set_running_for_tests(false);
+        assert!(!import_status().unwrap().running);
+        import_reset().unwrap();
+        unfreeze().unwrap();
+    }
+
+    /// A canister's own tokens survive its first import; a pull that
+    /// starts over drops only what the last pull brought.
+    #[test]
+    fn a_first_import_keeps_the_canisters_own_tokens() {
+        store::create_repo("mine").unwrap();
+        tokens::mint("mine", "tok-mine", alice(), Some(5), None).unwrap();
+        freeze().unwrap();
+        import_start(other(), me()).unwrap();
+        assert_eq!(tokens::list("mine").len(), 1, "a first import clears nothing");
+        let empty = Page { records: vec![], next: None };
+        assert!(block_on(import_tick(async |_, _| Ok(empty.clone()))));
+        assert!(import_status().unwrap().copied);
+        import_start(other(), me()).unwrap();
+        assert!(tokens::list("mine").is_empty(), "starting over drops the tokens");
+    }
+
+    /// A digest stepped on the importer before the copy is whole is not
+    /// the copy's: the chain starts the digest afresh when the last page
+    /// is in.
+    #[test]
+    fn the_copys_digest_starts_when_the_copy_is_whole() {
+        freeze().unwrap();
+        let early = digest_step().unwrap();
+        assert!(early.done && early.records == 0);
+        import_start(other(), me()).unwrap();
+        let one = Page {
+            records: vec![Record { kind: Kind::Repos, key: b"r".to_vec(), value: b"refs/heads/main".to_vec() }],
+            next: None,
+        };
+        while block_on(import_tick(async |_, _| Ok(one.clone()))) {}
+        let st = import_status().unwrap();
+        assert_eq!(st.error, None);
+        let d = st.digest.unwrap();
+        assert!(d.done);
+        assert_eq!(d.records, 1, "the early digest of nothing was not kept");
+    }
+
+    /// An object whose stream inflates past its stated length is refused
+    /// after one byte too many, not after the whole stream.
+    #[test]
+    fn an_object_that_inflates_past_its_length_is_refused_early() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&vec![0u8; 50 << 20]).unwrap();
+        let stream = enc.finish().unwrap();
+        assert!(stream.len() < 100_000, "zeros compress");
+        let mut value = vec![ObjectType::Blob as u8];
+        value.extend_from_slice(&1000u32.to_le_bytes());
+        value.extend_from_slice(&stream);
+        let key = [3u8; 20];
+        let err = apply(&Record { kind: Kind::Objects, key: key.to_vec(), value }).unwrap_err();
+        assert!(err.contains("1001 bytes, 1000 stated"), "{err}");
     }
 
     /// The digest is the same in one step or many, follows the records

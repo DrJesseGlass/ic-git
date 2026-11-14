@@ -738,6 +738,7 @@ expect "  ...and the same site config" "$(same "$(call "$OP" copy get_site '("e2
 expect "the copy serves the site from the same commit" "$(served_at "http://$C.raw.localhost:$PORT/site/e2e-app/")" "^${FROZEN_SITE%% *} ${FROZEN_SITE#* }"
 expect "the thaw" "$(ic "$OP" unfreeze)" 'Ok'
 expect "  ...forgets the digest" "$(ic "$OP" get_digest --query)" '^\(null\)$'
+commit site/f.txt f after-thaw
 expect "  ...and pushes are taken again" "$(signed "$URL")" 'main -> main'
 # The pushed commit awaits votes (K = 2); the upgrade below takes the site
 # as it finds it. The copy stays frozen, as it would until the cut.

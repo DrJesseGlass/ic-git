@@ -251,6 +251,7 @@ pub fn check_new_repo(name: &str) -> Result<String, String> {
 /// "my-app" exists, "My_App" and "my.app" are refused, so every repo maps
 /// to a label no other repo can take.
 pub fn create_repo(name: &str) -> Result<(), String> {
+    crate::transfer::check_unfrozen()?;
     let label = check_new_repo(name)?;
     REPOS.with(|r| r.borrow_mut().insert(name.to_string(), "refs/heads/main".to_string()));
     crate::kv::set_json(&label_key(&label), &name);
@@ -273,7 +274,12 @@ fn ref_key(repo: &str, refname: &str) -> String {
     format!("{repo}\0{refname}")
 }
 
+/// Refused while the git side is frozen for its move (transfer.rs), as
+/// `create_repo` and `tokens::mint` are: the backstop behind the
+/// endpoints' own refusals, so a write path they do not gate cannot move
+/// a store being exported.
 pub fn set_ref(repo: &str, refname: &str, oid: Oid) -> Result<(), String> {
+    crate::transfer::check_unfrozen()?;
     if !repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
@@ -419,7 +425,10 @@ pub fn import_object(oid: Oid, value: Vec<u8>) -> Result<(), String> {
     let object_type = ObjectType::from_pack_code(value[0]).ok_or_else(|| format!("object {hex}: unknown type code {}", value[0]))?;
     let len = u32::from_le_bytes(value[1..5].try_into().unwrap()) as usize;
     let mut content = Vec::with_capacity(len);
+    // One byte past the stated length is enough to know the stream lies;
+    // a stream of zeros would otherwise inflate without bound.
     ZlibDecoder::new(&value[5..])
+        .take(len as u64 + 1)
         .read_to_end(&mut content)
         .map_err(|e| format!("object {hex}: the stream does not inflate: {e}"))?;
     if content.len() != len {
