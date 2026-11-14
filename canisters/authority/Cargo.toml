@@ -1,0 +1,29 @@
+[package]
+name = "authority_canister"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "ic-git's authority canister (docs/CANISTER_SPLIT.md, phase 3 step 12c): the build for umobs after the cut. Reaches the git canister by messages."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# From crates.io since 0.4.0 (was a git tag). 0.x: minor bumps are breaking.
+ic-dev-kit-rs = { version = "0.4", features = ["storage"] }
+
+# Keep these pinned to the versions ic-dev-kit-rs uses.
+ic-cdk = "0.20"
+ic-cdk-timers = "1"
+candid = "0.10"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The workspace crates of docs/CANISTER_SPLIT.md: the authority, and what
+# both sides share. Never the git side.
+ic-git-authority = { path = "../../crates/authority" }
+ic-git-common = { path = "../../crates/common" }
+ic-git-compiler = { path = "../../crates/compiler" }
+ic-git-types = { path = "../../crates/types" }

@@ -12,14 +12,13 @@ use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git), likewise.
 use ic_git_git::{api, jobs, mirror, outbox, pack, receive, signed_push, site, smart_http, store, to_authority, tokens};
 // The authority (crates/authority), likewise.
-use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, for_git, icp, ledger, mirrors, names, provenance, sol, tenancy, to_git};
+use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, icp, ledger, mirrors, names, provenance, sol, tenancy, to_git};
 use ic_git_types::authority_side::Event;
 #[cfg(test)]
 mod both_sides;
 mod consent;
 #[cfg(test)]
 mod fixtures;
-mod fleet;
 
 use base64::Engine;
 use ic_dev_kit_rs::auth;
@@ -1156,11 +1155,15 @@ fn get_evm_deploy_status(repo: String) -> Option<deploy::EvmDeployStatus> {
 /// Turn on bundle serving for a repo: GET /site/<repo>/<path> serves blobs
 /// from `root` (a directory in the repo tree; "" = repo root) at the served
 /// commit (the deploy-branch tip, or with votes required the newest approved
-/// commit), each response bound to its commit via X-Ic-Git-Commit.
+/// commit), each response bound to its commit via X-Ic-Git-Commit. The
+/// authority decides; the git side keeps the config (phase 3, step 12c).
 #[ic_cdk::update]
-fn set_site(repo: String, root: String) -> Result<(), String> {
+async fn set_site(repo: String, root: String) -> Result<(), String> {
     tenancy::can_admin(&repo, &caller(), operator())?;
-    site::set_config(&repo, root)
+    match to_git::set_site(&repo, root).await {
+        Ok(r) => r,
+        Err(f) => Err(format!("the site config could not be set ({f}); try again")),
+    }
 }
 
 #[ic_cdk::query]

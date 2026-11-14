@@ -10,12 +10,14 @@
 pub mod api_authority;
 pub mod apps;
 pub mod configs;
+pub mod consent;
 pub mod deploy;
 pub mod evm;
 // The testing feature swaps the governor poll for a stub, which leaves the
 // real poll's types unused in those builds only.
 #[cfg_attr(all(feature = "testing", not(test)), allow(dead_code))]
 pub mod feed;
+pub mod fleet;
 pub mod for_git;
 pub mod icp;
 pub mod ledger;

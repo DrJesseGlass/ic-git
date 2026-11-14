@@ -2078,6 +2078,9 @@ mod tests {
         fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: Option<ic_git_types::git_side::Retry>) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<()>> {
             self.real.set_approved(repo, seq, approved, retry)
         }
+        fn set_site<'a>(&'a self, repo: &'a str, root: String) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<(), String>>> {
+            self.real.set_site(repo, root)
+        }
         fn check_new_repo<'a>(&'a self, name: &'a str) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<String, String>>> {
             self.real.check_new_repo(name)
         }

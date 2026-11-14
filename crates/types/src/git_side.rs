@@ -101,6 +101,12 @@ pub trait GitSide {
     /// deploy of which is queued.
     fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry>) -> Fut<'a, Reply<()>>;
 
+    /// Turn on site serving for the repo from `root` (phase 3, step 12c:
+    /// the authority decides who may, the git side holds the config and
+    /// serves). The whole config, so a lost answer is settled by asking
+    /// again; the git side refuses a repo it does not hold.
+    fn set_site<'a>(&'a self, repo: &'a str, root: String) -> Fut<'a, Reply<Result<(), String>>>;
+
     /// Would a repo of this name be created? Returns its label. The
     /// authority asks before it charges the creation fee.
     fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>>;

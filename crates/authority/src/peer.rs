@@ -17,13 +17,101 @@ use ic_git_types::side::{Fut, Reply};
 use ic_git_types::wire::{self, send, Staged, Transport};
 use serde::Deserialize;
 
-/// The git canister, once an operator has named it. The canister's setter
-/// checks first, through the management canister, that it is governed as
-/// this one is (step 12c); `GIT.set` only records the answer.
+/// The git canister, once an operator has named it (`name_git`), which
+/// checks first that it is governed as this one is.
 pub const GIT: Peer = Peer {
     key: "peer:git_canister",
     name: "git canister",
 };
+
+/// What the management canister says of a canister, as far as the rule
+/// below reads it: who controls it, and whether it runs code.
+#[derive(candid::CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub struct CanisterInfo {
+    pub controllers: Vec<Principal>,
+    pub module_hash: Option<Vec<u8>>,
+}
+
+/// The rule a git canister must meet before this side names it (phase 3,
+/// step 12c): it runs code, one canister alone controls it, and that
+/// canister runs code and has no controllers -- a governor
+/// (docs/GOVERNOR.md), which only installs what its approvers vote for.
+/// Anything else could be re-installed out from under the authority by
+/// whoever controls it, and what it answered -- proofs, records, which
+/// commit a site serves -- would be that party's word. The governor's
+/// build is not pinned here: which module a governor runs is what its
+/// record says, and clients judge that (docs/GOVERNANCE.md).
+///
+/// The first half: the git canister's one controller, by its own info.
+pub fn governor_of(git: Principal, info: &CanisterInfo) -> Result<Principal, String> {
+    if info.module_hash.is_none() {
+        return Err(format!("{git} runs no code"));
+    }
+    let [governor] = info.controllers[..] else {
+        return Err(format!(
+            "{git} has {} controllers; a git canister is controlled by a governor alone",
+            info.controllers.len()
+        ));
+    };
+    if governor == git {
+        return Err(format!("{git} controls itself; a git canister is controlled by a governor alone"));
+    }
+    Ok(governor)
+}
+
+/// The second half: the controller is a governor, by its info.
+pub fn ungoverned(git: Principal, governor: Principal, ctl: &CanisterInfo) -> Result<(), String> {
+    if ctl.module_hash.is_none() {
+        return Err(format!("{git} is controlled by {governor}, which runs no code; a governor does"));
+    }
+    if !ctl.controllers.is_empty() {
+        return Err(format!(
+            "{git} is controlled by {governor}, which has {} controllers; a governor has none",
+            ctl.controllers.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Name the git canister, once: the rule above, read through
+/// `canister_info` (the management canister's), then that the canister
+/// is a git canister answering to this one (`authority_of`: its
+/// `get_authority`, which must name `me`; this canister itself, an app
+/// canister or the governor has no such answer), then the record. An id
+/// already named is kept; the same one again is fine. The record is read
+/// again after the calls, since two operators may be naming at once.
+pub async fn name_git(
+    git: Principal,
+    me: Principal,
+    canister_info: impl AsyncFn(Principal) -> Result<CanisterInfo, String>,
+    authority_of: impl AsyncFn(Principal) -> Result<Option<Principal>, String>,
+) -> Result<(), String> {
+    let named = |cur: Principal| {
+        if cur == git {
+            Ok(())
+        } else {
+            Err(format!("the git canister is {cur}, named once; this canister's code decides what it talks to"))
+        }
+    };
+    if let Some(cur) = GIT.get() {
+        return named(cur);
+    }
+    if git == me {
+        return Err("this canister is the authority; it cannot be its own git canister".into());
+    }
+    let governor = governor_of(git, &canister_info(git).await?)?;
+    ungoverned(git, governor, &canister_info(governor).await?)?;
+    match authority_of(git).await? {
+        Some(a) if a == me => {}
+        Some(a) => return Err(format!("{git} answers to {a}, not to this canister")),
+        None => return Err(format!("{git} answers to no authority yet")),
+    }
+    if let Some(cur) = GIT.get() {
+        return named(cur);
+    }
+    GIT.set(git);
+    Ok(())
+}
 
 fn git_canister() -> Option<Principal> {
     GIT.get()
@@ -51,6 +139,10 @@ impl<T: Transport> GitSide for Git<T> {
 
     fn set_approved<'a>(&'a self, repo: &'a str, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry>) -> Fut<'a, Reply<()>> {
         Box::pin(send(&self.transport, wire::SetApproved { repo: repo.into(), seq, approved, retry }))
+    }
+
+    fn set_site<'a>(&'a self, repo: &'a str, root: String) -> Fut<'a, Reply<Result<(), String>>> {
+        Box::pin(send(&self.transport, wire::SetSite { repo: repo.into(), root }))
     }
 
     fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {
@@ -117,6 +209,82 @@ mod tests {
     use ic_git_types::wire::{Message, MAX_CHUNK};
     use std::cell::RefCell;
 
+    fn info(controllers: &[Principal], code: bool) -> CanisterInfo {
+        CanisterInfo {
+            controllers: controllers.to_vec(),
+            module_hash: code.then(|| vec![0u8; 32]),
+        }
+    }
+
+    /// A git canister is named only if a governor alone controls it: not
+    /// one with no code, two controllers, a controller that is itself
+    /// controlled, or that controls itself; nor one that is no git canister
+    /// of this authority. Named once: another id is refused, the same one
+    /// is fine.
+    #[test]
+    fn a_git_canister_is_named_once_and_only_governed() {
+        let me = Principal::from_slice(&[0; 8]);
+        let git = Principal::from_slice(&[1; 8]);
+        let gov = Principal::from_slice(&[2; 8]);
+        let person = Principal::from_slice(&[3; 8]);
+        let app = Principal::from_slice(&[4; 8]);
+        let other = Principal::from_slice(&[5; 8]);
+        let world: std::collections::BTreeMap<Principal, CanisterInfo> = [
+            (git, info(&[gov], true)),
+            (gov, info(&[], true)),
+            (person, info(&[person], true)),
+            (app, info(&[gov], true)),
+            (other, info(&[gov], true)),
+        ]
+        .into_iter()
+        .collect();
+        let ask = |w: &std::collections::BTreeMap<Principal, CanisterInfo>, p: Principal| w.get(&p).cloned().ok_or(format!("no canister {p}"));
+
+        let refused = |i: CanisterInfo| governor_of(git, &i).unwrap_err();
+        assert!(refused(info(&[gov], false)).contains("runs no code"));
+        assert!(refused(info(&[gov, person], true)).contains("2 controllers"));
+        assert!(refused(info(&[], true)).contains("0 controllers"));
+        assert!(refused(info(&[git], true)).contains("controls itself"));
+        assert_eq!(governor_of(git, &info(&[gov], true)), Ok(gov));
+        assert!(ungoverned(git, person, &info(&[person], true)).unwrap_err().contains("which has 1 controllers"));
+        assert!(ungoverned(git, gov, &info(&[], false)).unwrap_err().contains("runs no code"));
+        assert_eq!(ungoverned(git, gov, &info(&[], true)), Ok(()));
+
+        crate::kv::remove(GIT.key);
+        let asks = std::cell::Cell::new(0);
+        let w = world.clone();
+        let canister_info = async |p: Principal| {
+            asks.set(asks.get() + 1);
+            ask(&w, p)
+        };
+        // Who each canister says it answers to: the git canister this one,
+        // another git canister someone else, an app canister nobody (it
+        // has no get_authority).
+        let authority_of = async |p: Principal| -> Result<Option<Principal>, String> {
+            if p == git {
+                Ok(Some(me))
+            } else if p == other {
+                Ok(Some(person))
+            } else {
+                Err(format!("{p} has no method get_authority"))
+            }
+        };
+        let name = |p: Principal| block_on(name_git(p, me, canister_info, authority_of));
+        assert!(name(me).unwrap_err().contains("its own git canister"));
+        assert!(name(person).unwrap_err().contains("controls itself"));
+        assert!(name(Principal::from_slice(&[9; 8])).unwrap_err().contains("no canister"));
+        assert!(name(app).unwrap_err().contains("no method get_authority"), "governed, but no git canister");
+        assert!(name(other).unwrap_err().contains("answers to"), "a git canister of someone else");
+        assert_eq!(GIT.get(), None);
+        assert_eq!(name(git), Ok(()));
+        assert_eq!(GIT.get(), Some(git));
+        let asked = asks.get();
+        assert_eq!(name(git), Ok(()), "the same again");
+        assert!(name(gov).unwrap_err().contains("named once"));
+        assert_eq!(asks.get(), asked, "nothing asked once named");
+        crate::kv::remove(GIT.key);
+    }
+
     /// The transport calls whatever the record names at the time.
     #[test]
     fn the_transport_follows_the_named_git_canister() {
@@ -155,6 +323,10 @@ mod tests {
             m if m == wire::SetApproved::METHOD => {
                 let m: wire::SetApproved = dec(arg);
                 enc(GIT.set_approved(&m.repo, m.seq, m.approved, m.retry).await.unwrap())
+            }
+            m if m == wire::SetSite::METHOD => {
+                let m: wire::SetSite = dec(arg);
+                enc(GIT.set_site(&m.repo, m.root).await.unwrap())
             }
             m if m == wire::CheckNewRepo::METHOD => {
                 let m: wire::CheckNewRepo = dec(arg);
@@ -306,6 +478,10 @@ mod tests {
         assert_eq!(block_on(git.set_push_policy(name, 1, policy)), Ok(()));
         assert!(ic_git_git::mirror::may_write(name, &writer, false).is_ok());
         assert!(ic_git_git::mirror::requires_signed_push(name));
+
+        assert_eq!(block_on(git.set_site(name, "/www/".into())), Ok(Ok(())));
+        assert_eq!(ic_git_git::site::get_config(name).map(|c| c.root), Some("www".into()));
+        assert!(block_on(git.set_site("peer-none", String::new())).unwrap().is_err(), "a repo the git side does not hold");
 
         let tip = push(name, b"module");
         assert_eq!(block_on(git.has_commit(&tip)), Ok(true));

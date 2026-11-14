@@ -36,6 +36,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
 
 [[package]]
+name = "authority_canister"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ic-cdk",
+ "ic-cdk-timers",
+ "ic-dev-kit-rs",
+ "ic-git-authority",
+ "ic-git-common",
+ "ic-git-compiler",
+ "ic-git-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -527,6 +543,22 @@ dependencies = [
  "typenum",
  "version_check",
  "zeroize",
+]
+
+[[package]]
+name = "git_canister"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "candid",
+ "hex",
+ "ic-cdk",
+ "ic-cdk-timers",
+ "ic-dev-kit-rs",
+ "ic-git-common",
+ "ic-git-git",
+ "ic-git-types",
+ "serde",
 ]
 
 [[package]]
