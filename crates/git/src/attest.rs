@@ -96,6 +96,7 @@ mod tests {
     #[test]
     fn the_site_artifact_is_the_served_entrypoint_proved() {
         store::create_repo("provrepo").unwrap();
+        crate::mirror::ungated_for_tests("provrepo");
         let body = b"<h1>hello</h1>";
         let index = store::put_object(ObjectType::Blob, body);
         let mut root = Vec::new();
@@ -121,6 +122,7 @@ mod tests {
     #[test]
     fn the_release_artifact_is_the_tips_blob_at_the_authoritys_path() {
         store::create_repo("relrepo").unwrap();
+        crate::mirror::ungated_for_tests("relrepo");
         let tip = store::commit_file_for_tests("relrepo", "contract.hex", b"0x6001", None);
         let path = RecordKind::Release { path: "/contract.hex".into() };
         let a = record_artifact("relrepo", &path).expect("release artifact resolves");
@@ -161,6 +163,7 @@ mod tests {
         };
 
         store::create_repo("srirepo").unwrap();
+        crate::mirror::ungated_for_tests("srirepo");
         site::set_config("srirepo", String::new()).unwrap();
 
         commit_index("srirepo", b"<script src=\"app.js\"></script>");

@@ -218,6 +218,26 @@ pub async fn flush_all() {
     }
 }
 
+/// The cut (docs/CANISTER_SPLIT.md, step 16.4): the git canister just
+/// named holds umobs' repos as the import copied them, and none of the
+/// mirrors, which the copy leaves out. Until it has a repo's approved set
+/// it serves none of its site, rather than a tip the voters may never
+/// have approved, and with no push policy only its operators push. So
+/// every mirror of every repo this side holds is marked, and all of them
+/// written; a write the git canister does not answer stays marked for the
+/// retry, and `repos_pending` says when none is left, which is when the
+/// git canister may thaw (step 16.5). Each write carries a fresh number
+/// from the counters this side kept, so a second rewrite is as safe as
+/// the first.
+pub async fn rewrite_all() {
+    for repo in crate::records::repo_meta_names() {
+        for m in ALL {
+            mark(&repo, m);
+        }
+    }
+    flush_all().await;
+}
+
 /// For post_upgrade, after everything that marks: the marked mirrors are
 /// written before the upgrade's first message, as they were when the
 /// mirrors were filled in place, so no push finds them empty. In one

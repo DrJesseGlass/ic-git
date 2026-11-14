@@ -335,6 +335,8 @@ service : {
   // once by an operator, after a check that a governor alone controls it
   set_git_canister : (principal) -> (Result);
   get_git_canister : () -> (opt principal) query;
+  // the repos with a mirror it has not yet taken (step 16.4)
+  get_mirrors_pending : () -> (vec text) query;
   // its messages, from its principal alone
   charge_push : (ChargePush) -> (Result);
   stage_job : (StageJob) -> (Result);

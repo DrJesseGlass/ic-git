@@ -534,6 +534,7 @@ mod tests {
         let git = Git { transport: Loopback::new(true) };
         let name = "peer-release";
         store::create_repo(name).unwrap();
+        ic_git_git::mirror::ungated_for_tests(name);
         assert!(ic_git_git::mirror::set_deploy_configs(name, 1, wasm_configs()));
         let refused = block_on(git.release_job(name)).unwrap();
         assert!(refused.is_err_and(|e| e == "deploy branch has no commits"));

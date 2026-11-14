@@ -119,7 +119,25 @@ pub fn set_approved(repo: &str, seq: u64, approved: Option<Vec<String>>) -> bool
     true
 }
 
-/// The approved set, or `None` when the repo requires no votes.
+/// Has the authority written the repo's approved set at all? A repo it has
+/// not is one this side cannot yet say is ungated: a git canister that
+/// imported umobs' store holds repos but no mirrors (docs/CANISTER_SPLIT.md,
+/// step 13), and serves none of them until the authority rewrites every
+/// mirror at the cut (step 16.4).
+pub fn approvals_written(repo: &str) -> bool {
+    crate::kv::get_bytes(&approved_key(repo)).is_some()
+}
+
+/// For tests: the authority's first word on a repo that requires no votes,
+/// as its repo creation sends. Sequence 0, so any write a test makes after
+/// it is newer.
+#[cfg(any(test, feature = "testing"))]
+pub fn ungated_for_tests(repo: &str) {
+    assert!(set_approved(repo, 0, None), "{repo}: the approved set was already written");
+}
+
+/// The approved set, or `None` when the repo requires no votes, or when
+/// the set was never written (`approvals_written` tells which).
 pub fn approved(repo: &str) -> Option<Approved> {
     crate::kv::get_json::<Option<Vec<String>>>(&approved_key(repo))
         .flatten()

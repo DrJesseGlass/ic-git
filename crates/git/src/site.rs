@@ -849,6 +849,9 @@ struct Served {
     commit: Option<String>,
 }
 
+/// Why a repo whose approvals the authority never wrote serves nothing.
+pub const AWAITING_AUTHORITY: &str = "the authority has not yet said which commits of this repo may be served";
+
 fn served_key(repo: &str) -> String {
     format!("served:{repo}")
 }
@@ -882,6 +885,9 @@ fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
 /// the gated regime returns the tip once, since pushes held for approval
 /// never deployed it.
 pub fn advance(repo: &str) -> Option<store::Oid> {
+    if !crate::mirror::approvals_written(repo) {
+        return None;
+    }
     let key = served_key(repo);
     let prev: Option<Served> = crate::kv::get_json(&key);
     let Some(approved) = crate::mirror::approved(repo) else {
@@ -920,7 +926,14 @@ fn recorded_if_approved(served: &Served, approved: &crate::mirror::Approved) -> 
 /// approvals mirror, which the authority updates with each ballot, so a
 /// withdrawn approval can never be served; an unapproved push is not
 /// served, and the last approved commit stays up.
+///
+/// A repo whose approved set the authority never wrote serves nothing:
+/// whether it requires votes is the authority's to say, and until it has,
+/// the tip may be a commit the voters never approved (step 16.4).
 pub fn served_commit(repo: &str) -> Result<store::Oid, &'static str> {
+    if !crate::mirror::approvals_written(repo) {
+        return Err(AWAITING_AUTHORITY);
+    }
     let Some(approved) = crate::mirror::approved(repo) else {
         return tip_of(repo);
     };
@@ -979,6 +992,7 @@ mod tests {
     #[test]
     fn serves_committed_bundle_with_provenance_headers() {
         store::create_repo("web").unwrap();
+        crate::mirror::ungated_for_tests("web");
         let index = store::put_object(ObjectType::Blob, b"<h1>hi</h1>");
         let js = store::put_object(ObjectType::Blob, b"console.log(1)");
 
@@ -1071,9 +1085,36 @@ mod tests {
         }
     }
 
+    /// A repo whose approved set the authority never wrote -- what a git
+    /// canister holds after the import, before the cut rewrites the
+    /// mirrors -- serves nothing and records nothing, not its tip; the
+    /// first write of the set decides, whichever way it goes.
+    #[test]
+    fn a_repo_the_authority_has_not_written_serves_nothing() {
+        store::create_repo("unwritten").unwrap();
+        set_config("unwritten", String::new()).unwrap();
+        let tip = store::commit_file_for_tests("unwritten", "index.html", b"tip", None);
+        let res = serve("unwritten", "");
+        assert_eq!(res.status_code, 404);
+        assert!(String::from_utf8_lossy(&res.body).contains(AWAITING_AUTHORITY));
+        assert!(resolve_entry("unwritten", "").is_none());
+        assert_eq!(served_commit("unwritten"), Err(AWAITING_AUTHORITY));
+        assert_eq!(advance("unwritten"), None);
+        assert!(crate::kv::get_bytes(&served_key("unwritten")).is_none(), "advance records nothing");
+
+        // Gated, nothing approved: still nothing, now for that reason.
+        assert!(crate::mirror::set_approved("unwritten", 1, Some(Vec::new())));
+        assert_eq!(served_commit("unwritten"), Err("no approved commit on the site branch"));
+        // Ungated: the tip.
+        assert!(crate::mirror::set_approved("unwritten", 2, None));
+        assert_eq!(served_commit("unwritten"), Ok(tip));
+        assert_eq!(serve("unwritten", "").body, b"tip");
+    }
+
     /// A fresh repo with an index.html commit per push.
     fn gated_repo(repo: &str) -> impl Fn(&[u8], Option<store::Oid>) -> store::Oid + '_ {
         store::create_repo(repo).unwrap();
+        crate::mirror::ungated_for_tests(repo);
         set_config(repo, String::new()).unwrap();
         let push = move |html: &[u8], parent: Option<store::Oid>| {
             let index = store::put_object(ObjectType::Blob, html);
@@ -1639,6 +1680,7 @@ mod tests {
     #[test]
     fn resolve_entry_matches_served_bytes() {
         store::create_repo("site2").unwrap();
+        crate::mirror::ungated_for_tests("site2");
         let index = store::put_object(ObjectType::Blob, b"<h1>site2</h1>");
         let mut root = Vec::new();
         root.extend_from_slice(b"100644 index.html\0");

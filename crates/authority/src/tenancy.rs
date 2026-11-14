@@ -2254,4 +2254,45 @@ mod tests {
         assert_eq!(git.retries.borrow().last(), Some(&None));
         crate::to_git::set_test_side(None);
     }
+
+    /// The cut (docs/CANISTER_SPLIT.md, step 16.4): a git side holding the
+    /// repos with none of their mirrors -- the git canister after the
+    /// import -- serves none of the sites until `rewrite_all` has written
+    /// every mirror of every repo, then serves each as it should: a gated
+    /// repo its approved commit, not the tip pushed after it. A write the
+    /// git side does not take stays pending until the retry delivers it.
+    #[test]
+    fn the_cut_rewrites_every_mirror() {
+        use crate::mirrors::{self, Mirror};
+        let git = Rc::new(Flaky::new());
+        crate::to_git::set_test_side(Some(git.clone()));
+        let alice = p(46);
+        credit(&alice, 10_000_000_000);
+        create_repo("t-cut-open", &alice, false).unwrap();
+        create_repo("t-cut-gated", &alice, false).unwrap();
+        set_required_votes("t-cut-gated", &alice, false, 1).unwrap();
+        let open = store::commit_file_for_tests("t-cut-open", "index.html", b"open", None);
+        let approved = store::commit_file_for_tests("t-cut-gated", "index.html", b"approved", None);
+        vote("t-cut-gated", &alice, &store::oid_hex(&approved), true).unwrap();
+        let tip = store::commit_file_for_tests("t-cut-gated", "index.html", b"unapproved", Some(approved));
+        for repo in ["t-cut-open", "t-cut-gated"] {
+            crate::kv::remove(&format!("served:{repo}"));
+            for m in ["push", "approved", "deploy", "seq"] {
+                crate::kv::remove(&format!("mirror:{m}:{repo}"));
+            }
+            assert_eq!(ic_git_git::site::served_commit(repo), Err(ic_git_git::site::AWAITING_AUTHORITY));
+        }
+
+        git.inject("set_deploy_configs", Inject::NotDelivered);
+        run(mirrors::rewrite_all());
+        assert_eq!(ic_git_git::site::served_commit("t-cut-open"), Ok(open));
+        assert_eq!(ic_git_git::site::served_commit("t-cut-gated"), Ok(approved), "not the tip {tip:?}");
+        assert!(crate::mirror::may_write("t-cut-gated", &alice, false).is_ok());
+        let pending: Vec<_> = mirrors::repos_pending().into_iter().filter(|r| r.starts_with("t-cut-")).collect();
+        assert_eq!(pending.len(), 1, "the write the git side did not take");
+        assert_eq!(mirrors::pending(&pending[0]), vec![Mirror::DeployConfigs]);
+        run(mirrors::flush_all());
+        assert!(mirrors::repos_pending().iter().all(|r| !r.starts_with("t-cut-")));
+        crate::to_git::set_test_side(None);
+    }
 }
