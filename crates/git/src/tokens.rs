@@ -305,6 +305,16 @@ pub fn revoke_unless(repo: &str, keep: impl Fn(&Principal) -> bool) -> usize {
         .count()
 }
 
+/// A record as another canister exported it (transfer.rs), indexed as it
+/// was there: `indexed_as` is `index_keys` for a readable record and the
+/// keys a dead one may have had.
+pub fn import_record(key: &str, value: String) {
+    for k in indexed_as(key, &value) {
+        store::token_index_put(k);
+    }
+    store::token_put(key, value);
+}
+
 /// Refused unless `id` has the shape of a token id.
 pub fn check_id(id: &str) -> Result<(), String> {
     if id.len() != ID_LEN || !id.bytes().all(|b| b.is_ascii_hexdigit()) {

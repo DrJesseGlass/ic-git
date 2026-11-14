@@ -14,8 +14,9 @@
 //! it is needed.
 
 use ic_dev_kit_rs::storage;
-use ic_stable_structures::StableBTreeMap;
+use ic_stable_structures::{StableBTreeMap, Storable};
 use std::cell::RefCell;
+use std::ops::Bound;
 
 thread_local! {
     static META: RefCell<StableBTreeMap<String, Vec<u8>, crate::memory::Memory>> =
@@ -74,6 +75,51 @@ pub fn keys_with_prefix(prefix: &str) -> Vec<String> {
             .take_while(|k| k.starts_with(prefix))
             .collect()
     })
+}
+
+/// One page of a map, for a walk that visits every entry across several
+/// messages (the git side's export, docs/CANISTER_SPLIT.md step 13): the
+/// entries from `start`, in key order, while `keep` holds of the key,
+/// until `budget` bytes of keys and values (by `size`) are taken. At least
+/// one entry when any remains, so a caller always advances; the last key
+/// is where the next page starts, excluded.
+pub fn page<K, V, M>(
+    map: &StableBTreeMap<K, V, M>,
+    start: Bound<K>,
+    budget: usize,
+    keep: impl Fn(&K) -> bool,
+    size: impl Fn(&K, &V) -> usize,
+) -> Vec<(K, V)>
+where
+    K: Storable + Ord + Clone,
+    V: Storable,
+    M: ic_stable_structures::Memory,
+{
+    let mut out = Vec::new();
+    let mut used = 0;
+    for e in map.range((start, Bound::Unbounded)) {
+        let (k, v) = (e.key().clone(), e.value());
+        if !keep(&k) {
+            break;
+        }
+        used += size(&k, &v);
+        out.push((k, v));
+        if used >= budget {
+            break;
+        }
+    }
+    out
+}
+
+/// A page (`page`) of the META entries whose key starts with `prefix`,
+/// after the key `after` when one is given: the git side's labels and
+/// site configs on their way to the git canister.
+pub fn export_prefix(prefix: &str, after: Option<&str>, budget: usize) -> Vec<(String, Vec<u8>)> {
+    let start = match after {
+        Some(a) => Bound::Excluded(a.to_string()),
+        None => Bound::Included(prefix.to_string()),
+    };
+    META.with(|m| page(&m.borrow(), start, budget, |k| k.starts_with(prefix), |k, v| k.len() + v.len()))
 }
 
 const AUTH_KEY: &str = "auth";

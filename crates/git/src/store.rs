@@ -15,7 +15,9 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::cell::RefCell;
 use std::io::{Read, Write};
+use std::ops::Bound;
 
+use crate::kv::page;
 use crate::memory::Memory;
 
 pub use ic_git_types::oid::{oid_hex, parse_oid, Oid};
@@ -354,6 +356,88 @@ pub fn list_refs(repo: &str) -> Vec<(String, Oid)> {
             .map(|e| (e.key()[prefix.len()..].to_string(), e.value()))
             .collect()
     })
+}
+
+// --- the move to the git canister (transfer.rs) -----------------------------
+//
+// Pages of each map in key order, and the writes that take a page in on
+// the other canister. An export carries values as they are stored (an
+// object's type code, length and zlib stream), so the copy is byte for
+// byte the original and the two digests can agree.
+
+/// After `after`, or from the start.
+fn from<K: Clone>(after: Option<&K>) -> Bound<K> {
+    after.map_or(Bound::Unbounded, |k| Bound::Excluded(k.clone()))
+}
+
+pub fn export_repos(after: Option<&String>, budget: usize) -> Vec<(String, String)> {
+    REPOS.with(|r| page(&r.borrow(), from(after), budget, |_| true, |k, v| k.len() + v.len()))
+}
+
+pub fn export_refs(after: Option<&String>, budget: usize) -> Vec<(String, Oid)> {
+    REFS.with(|r| page(&r.borrow(), from(after), budget, |_| true, |k, _| k.len() + 20))
+}
+
+pub fn export_objects(after: Option<&Oid>, budget: usize) -> Vec<(Oid, Vec<u8>)> {
+    OBJECTS.with(|o| page(&o.borrow(), from(after), budget, |_| true, |_, v| 20 + v.len()))
+}
+
+pub fn export_tokens(after: Option<&String>, budget: usize) -> Vec<(String, String)> {
+    TOKENS.with(|t| page(&t.borrow(), from(after), budget, |_| true, |k, v| k.len() + v.len()))
+}
+
+/// A repo as another canister held it: its name and HEAD target. Its
+/// label comes as its own record.
+pub fn import_repo(name: String, head: String) {
+    REPOS.with(|r| r.borrow_mut().insert(name, head));
+}
+
+/// A ref as another canister held it, by its full key ("<repo>\0<refname>").
+pub fn import_ref(key: String, oid: Oid) -> Result<(), String> {
+    if !key.contains('\0') {
+        return Err(format!("a ref key names a repo and a ref: {key:?}"));
+    }
+    REFS.with(|r| r.borrow_mut().insert(key, oid));
+    Ok(())
+}
+
+/// An object as another canister stored it. One already here is the same
+/// object (content-addressed); a new one is taken only if its bytes are
+/// what they claim: a known type code, a length that matches, and content
+/// that hashes to `oid`.
+pub fn import_object(oid: Oid, value: Vec<u8>) -> Result<(), String> {
+    if has_object(&oid) {
+        return Ok(());
+    }
+    let hex = oid_hex(&oid);
+    if oid.as_slice().len() != 20 {
+        return Err(format!("object {hex}: an oid is 20 bytes"));
+    }
+    if value.len() < 5 {
+        return Err(format!("object {hex}: too short to be a stored object"));
+    }
+    let object_type = ObjectType::from_pack_code(value[0]).ok_or_else(|| format!("object {hex}: unknown type code {}", value[0]))?;
+    let len = u32::from_le_bytes(value[1..5].try_into().unwrap()) as usize;
+    let mut content = Vec::with_capacity(len);
+    ZlibDecoder::new(&value[5..])
+        .read_to_end(&mut content)
+        .map_err(|e| format!("object {hex}: the stream does not inflate: {e}"))?;
+    if content.len() != len {
+        return Err(format!("object {hex}: inflates to {} bytes, {len} stated", content.len()));
+    }
+    if compute_oid(object_type, &content) != oid {
+        return Err(format!("object {hex}: the content hashes to something else"));
+    }
+    OBJECTS.with(|o| o.borrow_mut().insert(oid, value));
+    Ok(())
+}
+
+/// Every token record and index entry, gone: for an import that starts
+/// over, since tokens are the one kind a frozen exporter can still lose
+/// (a revoke, or a membership change through the mirrors).
+pub fn clear_tokens() {
+    TOKENS.with(|t| t.borrow_mut().clear_new());
+    TOKEN_INDEX.with(|t| t.borrow_mut().clear_new());
 }
 
 // --- schema version ----------------------------------------------------------

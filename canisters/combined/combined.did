@@ -220,6 +220,17 @@ type TxOutcome = record {
 };
 type ResultTxOutcome = variant { Ok : TxOutcome; Err : text };
 type SiteConfig = record { root : text };
+
+// The move to the git canister (docs/CANISTER_SPLIT.md, step 13): every
+// git-side record, in a fixed order, a page at a time, and the digest
+// each side computes over its copy.
+type Kind = variant { Repos; Refs; Objects; Tokens; Labels; Sites };
+type Cursor = record { kind : Kind; after : opt blob };
+type Record = record { kind : Kind; key : blob; value : blob };
+type Page = record { records : vec Record; next : opt Cursor };
+type ResultPage = variant { Ok : Page; Err : text };
+type Digest = record { done : bool; records : nat64; bytes : nat64; sha256 : opt text };
+type ResultDigest = variant { Ok : Digest; Err : text };
 type ReceiptSummary = record {
   status : text;
   block_number : nat64;
@@ -307,6 +318,18 @@ service : {
   revoke_push_token_id : (text) -> (Result);
   dead_push_tokens : () -> (vec text) query;
   purge_dead_push_token : (text) -> (Result);
+
+  // the move to the git canister (docs/CANISTER_SPLIT.md, step 13): the
+  // freeze (operators), the paged export and its digest (operators and
+  // the named importer, of a frozen store)
+  freeze : () -> (Result);
+  unfreeze : () -> (Result);
+  frozen : () -> (bool) query;
+  set_importer : (principal) -> (Result);
+  get_importer : () -> (opt principal) query;
+  export_page : (opt Cursor) -> (ResultPage);
+  digest_step : () -> (ResultDigest);
+  get_digest : () -> (opt Digest) query;
 
   // tenancy: accounts, ownership, membership, votes (docs/TENANCY.md)
   deposit : () -> (ResultAccount);
