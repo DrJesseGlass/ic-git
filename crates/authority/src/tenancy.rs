@@ -2284,7 +2284,17 @@ mod tests {
         }
 
         git.inject("set_deploy_configs", Inject::NotDelivered);
+        let before = git.calls.borrow().len();
         run(mirrors::rewrite_all());
+        // Each repo's deploy configs go before its approved set: the git
+        // side follows the set it takes with the configs it holds then.
+        let calls = git.calls.borrow()[before..].to_vec();
+        assert!(calls.contains(&"set_approved"));
+        for (i, c) in calls.iter().enumerate() {
+            if *c == "set_approved" {
+                assert_eq!(calls[i - 1], "set_deploy_configs", "{calls:?}");
+            }
+        }
         assert_eq!(ic_git_git::site::served_commit("t-cut-open"), Ok(open));
         assert_eq!(ic_git_git::site::served_commit("t-cut-gated"), Ok(approved), "not the tip {tip:?}");
         assert!(crate::mirror::may_write("t-cut-gated", &alice, false).is_ok());

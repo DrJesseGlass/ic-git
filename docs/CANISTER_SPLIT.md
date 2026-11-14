@@ -1094,7 +1094,21 @@ The cut on mainnet, in this order:
       a failure on record in `get_git_funding`). A write the git canister
       does not take stays marked for the retry; `get_mirrors_pending`
       lists the repos still marked, and empty is the sign for 16.5.
-      Naming the same id again writes them all again.
+      Naming the same id again writes them all again. The top-up comes
+      first, since a git canister short of cycles would refuse every
+      write. A flush writes a repo's deploy configs before its approved
+      set (`mirrors::ALL`): the git side follows a set it takes with the
+      configs it holds then, so the other order would leave the app of a
+      commit approved while the git canister was unnamed behind its site.
+      The first push policy a repo's mirror takes revokes no token
+      (`mirror::set_push_policy`): the imported tokens are what umobs'
+      own revocations left at the freeze, and revoking by the git
+      canister's operator rule, which does not know umobs' operators,
+      would delete some for good.
+      Left as is: a repo the git store holds with no record at the
+      authority (a creation whose answer was lost, impossible in one
+      canister) gets no mirrors and serves nothing; `create_repo` again
+      by its owner settles it.
       The git side no longer depends on the order: a repo whose approved
       set the authority never wrote serves nothing
       (`site::AWAITING_AUTHORITY`) and `advance` records nothing for it,

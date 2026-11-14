@@ -44,7 +44,13 @@ pub enum Mirror {
     DeployConfigs,
 }
 
-const ALL: [Mirror; 3] = [Mirror::PushPolicy, Mirror::Approved, Mirror::DeployConfigs];
+/// The order a flush writes them in: the deploy configs before the approved
+/// set, since the git side follows an approved set it takes by submitting
+/// the served commit's job under the configs it holds then. Written the
+/// other way round, a copy that has no configs yet (the cut, step 16.4)
+/// would follow a newly approved commit with no job, and the app would
+/// stay behind the site.
+const ALL: [Mirror; 3] = [Mirror::PushPolicy, Mirror::DeployConfigs, Mirror::Approved];
 
 /// How long after an unanswered write the marks are flushed again.
 pub const RETRY_SECS: u64 = 30;

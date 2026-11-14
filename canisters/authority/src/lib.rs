@@ -72,15 +72,19 @@ fn post_upgrade() {
 /// same one again is fine.
 ///
 /// Named, the git canister is brought up to date (docs/CANISTER_SPLIT.md,
-/// step 16.4): every mirror of every repo is written (`mirrors::rewrite_all`;
-/// `get_mirrors_pending` lists what it has not yet taken), and its cycles
-/// are topped up to the floor (`funding::top_up_git`, a failure on record
-/// in `get_git_funding`). Naming the same id again writes them all again.
+/// step 16.4): its cycles are topped up to the floor (`funding::top_up_git`,
+/// a failure on record in `get_git_funding`), and every mirror of every
+/// repo is written (`mirrors::rewrite_all`; `get_mirrors_pending` lists
+/// what it has not yet taken). Naming the same id again writes them all
+/// again. One update awaits three writes a repo: with many repos a client
+/// may give up waiting before it ends, and `get_mirrors_pending` says
+/// where it got to.
 #[ic_cdk::update(guard = "is_admin")]
 async fn set_git_canister(git: candid::Principal) -> Result<(), String> {
     peer::name_git(git, ic_cdk::api::canister_self(), canister_info, authority_of).await?;
-    mirrors::rewrite_all().await;
+    // Cycles first: a git canister short of them would refuse every write.
     let _ = funding::top_up_git().await;
+    mirrors::rewrite_all().await;
     Ok(())
 }
 
