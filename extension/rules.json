@@ -44,10 +44,47 @@
     "condition": {
       "regexFilter": "^https://([a-z0-9-]+\\.)*(icp-api\\.io|icp0\\.io|ic0\\.app)/api/v[0-9]+/(canister/|subnet/|status)",
       "initiatorDomains": [
-        "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io"
+        "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io",
+        "34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io"
       ],
       "resourceTypes": [
         "xmlhttprequest"
+      ]
+    }
+  },
+  {
+    "id": 4,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        {
+          "header": "Content-Security-Policy",
+          "operation": "set",
+          "value": "script-src 'none'; object-src 'none'; base-uri 'none'"
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "|https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/",
+      "resourceTypes": [
+        "main_frame"
+      ]
+    }
+  },
+  {
+    "id": 5,
+    "priority": 3,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "regexSubstitution": "https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/\\1/\\2\\3"
+      }
+    },
+    "condition": {
+      "regexFilter": "^https://34koz-jyaaa-aaaab-ahejq-cai\\.raw\\.icp0\\.io/site/([^/?#]+)(\\?[^#]*)?(#.*)?$",
+      "resourceTypes": [
+        "main_frame"
       ]
     }
   }

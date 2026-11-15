@@ -7,7 +7,7 @@
 //   script writes in the bytes this worker checked against the registry
 //   record (cached here, so a verified page needs no network at all), or a
 //   bare document under the stop page.
-// - Every page under /site/ on the ic-git canister is covered by the static
+// - Every page under /site/ on an ic-git host is covered by the static
 //   rule in rules.json: a Content-Security-Policy that runs no script. Once
 //   a site's entrypoint verifies, this worker installs a higher-priority
 //   session rule that replaces it with the policy derivePolicy pins for the
@@ -20,13 +20,18 @@
 // the page runs, open exactly the canisters checkBackends judged for that
 // tab's site -- governed ones running their approved build, and the NNS's
 // system canisters -- plus, with a warning, ungoverned ones. Per tab,
-// because the verdict is per site and every site shares one origin. A
+// because the verdict is per site and every site on a host shares its
+// origin. A
 // canister controlled by ic-git that runs no approved build fails the
 // site (check G), so the stop page says which and why.
+//
+// Two hosts serve sites (docs/CANISTER_SPLIT.md): ic-git until the canister
+// split, the git canister after, when ic-git's /site/ URLs redirect there.
+// A site is a repo on one host, checked as that host serves it.
 importScripts('bls12-381.js', 'verifier.js');
 
-const CANISTER = Verifier.DEFAULTS.canister;
-const ORIGIN = 'https://' + CANISTER + '.raw.icp0.io';
+const HOSTS = [Verifier.DEFAULTS.canister, Verifier.DEFAULTS.git];
+const originOf = host => 'https://' + host + '.raw.icp0.io';
 // The registry is read through both; they must return the same answer.
 const RPCS = ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'];
 const REFRESH_MINUTES = 10;
@@ -39,7 +44,7 @@ const BACKEND_RULE_BASE = 10_000, ALLOW_BASE = 50_000, TAB_CALLS_BASE = 60_000;
 // and the status endpoint, under /api/vN/. Not a canister's own /api/
 // routes on the gateway (ic-git's JSON API, whatever a repo is named).
 const API_HOSTS = '^https://([a-z0-9-]+\\.)*(icp-api\\.io|icp0\\.io|ic0\\.app)/api/v[0-9]+/(canister/|subnet/|status)';
-const SITE_DOMAIN = CANISTER + '.raw.icp0.io';
+const SITE_DOMAINS = HOSTS.map(h => h + '.raw.icp0.io');
 
 const twoRpcs = {
   async request({ method, params = [] }) {
@@ -68,37 +73,40 @@ const save = async sites => chrome.storage.session.set({ sites });
 // with its fragment on). Other paths under /site/ are covered by no record
 // and keep the static policy.
 const escape = s => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-const siteUrl = repo => ORIGIN + '/site/' + encodeURIComponent(repo) + '/';
-const entryRegex = repo => '^' + escape(siteUrl(repo)) + '(index\\.html)?(\\?[^#]*)?(#.*)?$';
-// A rule for one repo's entrypoint. Case matters (DNR's default is that it
+const siteUrl = (host, repo) => originOf(host) + '/site/' + encodeURIComponent(repo) + '/';
+const entryRegex = (host, repo) => '^' + escape(siteUrl(host, repo)) + '(index\\.html)?(\\?[^#]*)?(#.*)?$';
+// A rule for one site's entrypoint. Case matters (DNR's default is that it
 // does not): /site/Foo/ and /site/foo/ are different sites to siteOf.
-const entryCondition = repo => ({ regexFilter: entryRegex(repo), isUrlFilterCaseSensitive: true, resourceTypes: ['main_frame'] });
+const entryCondition = (host, repo) => ({ regexFilter: entryRegex(host, repo), isUrlFilterCaseSensitive: true, resourceTypes: ['main_frame'] });
+// A site's key in state: its host and repo.
+const keyOf = (host, repo) => host + '/' + repo;
 
-// Which site a URL is the entrypoint of, or null.
+// Which site a URL is the entrypoint of -- { host, repo } -- or null.
 function siteOf(href) {
   try {
     const u = new URL(href);
-    if (u.origin !== ORIGIN) return null;
+    const host = HOSTS.find(h => u.origin === originOf(h));
+    if (!host) return null;
     const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
-    return m ? decodeURIComponent(m[1]) : null;
+    return m ? { host, repo: decodeURIComponent(m[1]) } : null;
   } catch (_) { return null; } // not a URL, or a malformed escape
 }
 
-// Session rule ids: one per repo, from 100 up, remembered in state.
-function ruleIdFor(sites, repo) {
-  if (sites[repo] && sites[repo].ruleId) return sites[repo].ruleId;
+// Session rule ids: one per site, from 100 up, remembered in state.
+function ruleIdFor(sites, key) {
+  if (sites[key] && sites[key].ruleId) return sites[key].ruleId;
   const used = Object.values(sites).map(s => s.ruleId || 0);
   return Math.max(99, ...used) + 1;
 }
 
-async function pin(ruleId, repo, policy) {
+async function pin(ruleId, host, repo, policy) {
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [ruleId],
     addRules: [{
       id: ruleId,
       priority: PINNED_PRIORITY,
       action: { type: 'modifyHeaders', responseHeaders: [{ header: 'Content-Security-Policy', operation: 'set', value: policy }] },
-      condition: entryCondition(repo),
+      condition: entryCondition(host, repo),
     }],
   });
 }
@@ -114,7 +122,7 @@ async function unpin(ruleId) {
 // Only on icp-api.io, the host pages are expected to use: a call through
 // another IC API host stays blocked, as in Firefox.
 const ruleFor = id => '^https://icp-api\\.io/api/v[0-9]+/canister/' + escape(id) + '/';
-const tabRules = (tabId, repo, ids) => exclusive(async () => {
+const tabRules = (tabId, key, ids) => exclusive(async () => {
   const { backends = {} } = await chrome.storage.session.get('backends');
   const removeRuleIds = (backends[tabId] || { ruleIds: [] }).ruleIds;
   const used = new Set(Object.values(backends).flatMap(b => b.ruleIds));
@@ -125,10 +133,10 @@ const tabRules = (tabId, repo, ids) => exclusive(async () => {
     return {
       id: next, priority: PINNED_PRIORITY,
       action: { type: 'allow' },
-      condition: { regexFilter: ruleFor(id), initiatorDomains: [SITE_DOMAIN], resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
+      condition: { regexFilter: ruleFor(id), initiatorDomains: SITE_DOMAINS, resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
     };
   });
-  if (ids.length) backends[tabId] = { repo, ruleIds: addRules.map(r => r.id) };
+  if (ids.length) backends[tabId] = { site: key, ruleIds: addRules.map(r => r.id) };
   else delete backends[tabId];
   await chrome.storage.session.set({ backends });
   if (removeRuleIds.length || addRules.length) await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules });
@@ -146,12 +154,13 @@ const exclusive = fn => {
 };
 
 // Full check: registry record, served bytes, object walk, reference scan,
-// the policy to pin, and the backends the page may call. Concurrent
-// callers for one repo share one run.
-function verifySite(repo) {
-  if (inFlight.has(repo)) return inFlight.get(repo);
+// the policy to pin, and the backends the page may call -- all as `host`
+// serves the site. Concurrent callers for one site share one run.
+function verifySite(host, repo) {
+  const key = keyOf(host, repo);
+  if (inFlight.has(key)) return inFlight.get(key);
   const run = (async () => {
-    const opts = { repo, provider: twoRpcs, providerOnly: true, providerName: 'two RPCs' };
+    const opts = { repo, host, provider: twoRpcs, providerOnly: true, providerName: 'two RPCs' };
     const r = await Verifier.verify(opts);
     // The backends only matter for a page that will run: a page that failed
     // runs nothing, and its stop page should say why it failed, not what
@@ -165,26 +174,27 @@ function verifySite(repo) {
       r.allowedBackends = be.allowed;
       r.warning = be.warning;
     }
-    return exclusive(() => record(repo, r));
+    return exclusive(() => record(host, repo, r));
   })();
-  inFlight.set(repo, run);
-  run.finally(() => inFlight.delete(repo)).catch(() => {});
+  inFlight.set(key, run);
+  run.finally(() => inFlight.delete(key)).catch(() => {});
   return run;
 }
 
 // Pin (or unpin) what a full check found and store it.
-async function record(repo, r) {
+async function record(host, repo, r) {
   const sites = await load();
-  const ruleId = ruleIdFor(sites, repo);
+  const key = keyOf(host, repo);
+  const ruleId = ruleIdFor(sites, key);
   const site = {
-    repo, ruleId, checkedAt: Date.now(),
+    host, repo, ruleId, checkedAt: Date.now(),
     commit: r.record && r.record.commit, bundleHash: r.record && r.record.bundleHash,
     checks: r.checks, via: r.via, policyError: r.policyError || null,
     backends: r.backends || [], allowedBackends: r.allowedBackends || [], warning: r.warning || '',
   };
   if (r.verified && r.policy) {
-    const was = sites[repo];
-    await pin(ruleId, repo, r.policy);
+    const was = sites[key];
+    await pin(ruleId, host, repo, r.policy);
     site.status = 'verified';
     // A page loaded before this moment ran under an older rule (or none).
     site.pinnedAt = was && was.status === 'verified' && was.policy === r.policy ? was.pinnedAt : Date.now();
@@ -195,7 +205,7 @@ async function record(repo, r) {
     await unpin(ruleId);
     site.status = r.verified ? 'unpinnable' : 'failed';
   }
-  sites[repo] = site;
+  sites[key] = site;
   await save(sites);
   return site;
 }
@@ -205,20 +215,21 @@ async function record(repo, r) {
 // its way here -- run the full check again.
 async function recheck(site) {
   try {
-    const res = await fetch(siteUrl(site.repo), { cache: 'no-store', signal: AbortSignal.timeout(15_000) });
+    const res = await fetch(siteUrl(site.host, site.repo), { cache: 'no-store', signal: AbortSignal.timeout(15_000) });
     const bytes = new Uint8Array(await res.arrayBuffer());
     const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), x => x.toString(16).padStart(2, '0')).join('');
-    if (res.ok && hash === site.bundleHash) return site;
+    // Served from the site's host still: a redirect means it moved.
+    if (res.ok && !res.redirected && hash === site.bundleHash) return site;
   } catch (_) { /* fall through to the full check */ }
-  return verifySite(site.repo);
+  return verifySite(site.host, site.repo);
 }
 
 // --- tabs: what each one is showing ---
-const allowedKey = (tabId, repo) => tabId + ':' + repo;
+const allowedKey = (tabId, key) => tabId + ':' + key;
 
-async function allowed(tabId, repo) {
+async function allowed(tabId, key) {
   const { allowed = {} } = await chrome.storage.session.get('allowed');
-  return Boolean(allowed[allowedKey(tabId, repo)]);
+  return Boolean(allowed[allowedKey(tabId, key)]);
 }
 
 function badge(tabId, state, site) {
@@ -245,16 +256,17 @@ const tell = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg).catch(() => {})
 // already dropped by main.js). Answer at once with what the tab should show,
 // then check and tell the tab to reload if anything changes.
 async function visit(tabId, href, navStart) {
-  const repo = siteOf(href);
-  if (repo === null) { badge(tabId, 'uncovered'); await tabRules(tabId, null, []); return { status: 'uncovered' }; }
-  if (await allowed(tabId, repo)) {
+  const at = siteOf(href);
+  if (at === null) { badge(tabId, 'uncovered'); await tabRules(tabId, null, []); return { status: 'uncovered' }; }
+  const { host, repo } = at, key = keyOf(host, repo);
+  if (await allowed(tabId, key)) {
     // "Open anyway": the bytes as served now, unchecked, as the user chose.
     badge(tabId, 'allowed', { repo });
-    const res = await fetch(siteUrl(repo), { cache: 'no-store' });
+    const res = await fetch(siteUrl(host, repo), { cache: 'no-store' });
     return { status: 'allowed', text: await res.text() };
   }
   const sites = await load();
-  const known = sites[repo];
+  const known = sites[key];
 
   const failSoft = e => {
     const site = { repo, status: 'failed', checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message || String(e) }] };
@@ -268,14 +280,14 @@ async function visit(tabId, href, navStart) {
   if (known && known.status === 'verified' && known.pinnedAt <= navStart && known.text) {
     badge(tabId, 'verified', known);
     // This tab's calls: the site's judged backends, before the page runs.
-    await tabRules(tabId, repo, known.allowedBackends || []);
+    await tabRules(tabId, key, known.allowedBackends || []);
     const fresh = Date.now() - known.checkedAt < REFRESH_MINUTES * 60_000;
-    (fresh ? recheck(known) : verifySite(repo)).then(async site => {
+    (fresh ? recheck(known) : verifySite(host, repo)).then(async site => {
       if (site.status !== 'verified' || site.policy !== known.policy || site.bundleHash !== known.bundleHash) {
         tell(tabId, { type: 'result', status: site.status, reload: true, site: summary(site) });
       } else {
         if (site.warning !== known.warning) badge(tabId, 'verified', site);
-        if (JSON.stringify(site.allowedBackends) !== JSON.stringify(known.allowedBackends)) await tabRules(tabId, repo, site.allowedBackends || []);
+        if (JSON.stringify(site.allowedBackends) !== JSON.stringify(known.allowedBackends)) await tabRules(tabId, key, site.allowedBackends || []);
       }
     }, failSoft);
     return { status: 'verified', text: known.text, site: summary(known) };
@@ -288,10 +300,10 @@ async function visit(tabId, href, navStart) {
   // too), or stop.
   badge(tabId, 'checking', { repo });
   await tabRules(tabId, null, []);
-  verifySite(repo).then(async site => {
+  verifySite(host, repo).then(async site => {
     const reload = site.status === 'verified';
     // The tab's rules before the reload: its first call is already allowed.
-    if (reload) await tabRules(tabId, repo, site.allowedBackends || []);
+    if (reload) await tabRules(tabId, key, site.allowedBackends || []);
     badge(tabId, reload ? 'checking' : site.status, site);
     tell(tabId, { type: 'result', status: site.status, reload, site: summary(site) });
   }, failSoft);
@@ -310,24 +322,26 @@ const summary = site => ({
 // page; recorded so the badge keeps saying so.
 // Its rule ids and stored entries go through the same queue as the sites':
 // two tabs allowed together would otherwise take the same id.
-const allow = (tabId, repo) => exclusive(async () => {
+const allow = (tabId, host, repo) => exclusive(async () => {
   const { allowed = {} } = await chrome.storage.session.get('allowed');
-  const key = allowedKey(tabId, repo);
+  const key = allowedKey(tabId, keyOf(host, repo));
   const id = allowed[key] || Math.max(ALLOW_BASE, ...Object.values(allowed)) + 1;
   allowed[key] = id;
   await chrome.storage.session.set({ allowed });
-  // Its calls too: a page run unverified is run as it is, backends included.
+  // Its calls too: a page run unverified is run as it is, backends included
+  // -- from its own host only, so the tab moving on to a site on the other
+  // host does not take this exception with it.
   const calls = id - ALLOW_BASE + TAB_CALLS_BASE;
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [id, calls],
     addRules: [{
       id, priority: ALLOW_PRIORITY,
       action: { type: 'modifyHeaders', responseHeaders: [{ header: 'Content-Security-Policy', operation: 'remove' }] },
-      condition: { ...entryCondition(repo), tabIds: [tabId] },
+      condition: { ...entryCondition(host, repo), tabIds: [tabId] },
     }, {
       id: calls, priority: ALLOW_PRIORITY,
       action: { type: 'allow' },
-      condition: { regexFilter: API_HOSTS, initiatorDomains: [SITE_DOMAIN], resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
+      condition: { regexFilter: API_HOSTS, initiatorDomains: [host + '.raw.icp0.io'], resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
     }],
   });
 });
@@ -347,12 +361,16 @@ chrome.tabs.onRemoved.addListener(tabId => {
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = sender.tab && sender.tab.id;
   if (tabId === undefined) return false;
+  // A visit names its site by URL; the other messages name a repo, on the
+  // host of the page that sends them.
+  const at = siteOf(msg.type === 'visit' ? msg.url : sender.url);
+  const here = at && (msg.type === 'visit' || at.repo === msg.repo) ? at : null;
   const work = msg.type === 'visit' ? visit(tabId, msg.url, msg.navStart)
-    : msg.type === 'allow' ? allow(tabId, msg.repo).then(() => ({ ok: true }))
-    : msg.type === 'retry' ? verifySite(msg.repo).then(site => ({ status: site.status, site: summary(site) }))
+    : !here ? Promise.reject(new Error('this page is no site\'s entrypoint'))
+    : msg.type === 'allow' ? allow(tabId, here.host, here.repo).then(() => ({ ok: true }))
+    : msg.type === 'retry' ? verifySite(here.host, here.repo).then(site => ({ status: site.status, site: summary(site) }))
     : Promise.resolve({ error: 'unknown message' });
-  // A visit names its site by URL, the other messages by repo.
-  const repo = msg.repo || (msg.url && siteOf(msg.url)) || undefined;
+  const repo = msg.repo || (at && at.repo) || undefined;
   work.then(reply, e => reply({ status: 'failed', site: { repo, checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message }] } }));
   return true;
 });
@@ -364,5 +382,5 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 chrome.alarms.get('refresh').then(a => { if (!a) chrome.alarms.create('refresh', { periodInMinutes: REFRESH_MINUTES }); });
 chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name !== 'refresh') return;
-  for (const repo of Object.keys(await load())) await verifySite(repo).catch(() => {});
+  for (const site of Object.values(await load())) await verifySite(site.host, site.repo).catch(() => {});
 });

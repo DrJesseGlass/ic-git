@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ic-git verifier",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Checks ic-git sites against their on-chain record, runs only their verified scripts, and lets them call only approved canisters.",
   "permissions": [
     "declarativeNetRequest",
@@ -10,6 +10,7 @@
   ],
   "host_permissions": [
     "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/*",
+    "https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/*",
     "https://icp-api.io/*",
     "https://ethereum-sepolia-rpc.publicnode.com/*",
     "https://sepolia.gateway.tenderly.co/*"
@@ -20,7 +21,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/*"
+        "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/*",
+        "https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/*"
       ],
       "js": [
         "main.js"
@@ -30,7 +32,8 @@
     },
     {
       "matches": [
-        "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/*"
+        "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/*",
+        "https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/*"
       ],
       "js": [
         "content.js"

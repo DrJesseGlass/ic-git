@@ -1051,6 +1051,32 @@ The two canisters:
     - docs/ATTESTATION.md gets its two-canister closure paragraph
     - docs/TENANCY.md says that a repo with no votes required trusts the
       git canister for what deploys (decision 6.5.4)
+    - The git canister's id was reserved first, so the clients pin it:
+      `34koz-jyaaa-aaaab-ahejq-cai`, created empty on umobs' subnet on
+      2026-11-15 (`canister_ids.json`, `git_canister`). Step 15 installs
+      into it.
+    - 14a DONE 2026-11-15: the core, the loader and both extensions.
+      The core pins the git canister (`DEFAULTS.git`) and, from step 15,
+      its governor (`DEFAULTS.gitGovernor`, `null` until then: an
+      unpinned git canister is judged ungoverned, never approved).
+      `verify` reads a site as the host that serves it does, and only
+      it: with `host` given, a page that host redirects fails S; with
+      none, ic-git's URL is fetched and the host is where the page came
+      from, one of the two pinned ids or S fails. `get_site` and
+      `get_object` go to that host; `/api/<repo>/info` and the app
+      canisters' controller stay ic-git's. `checkBackends` judges the
+      host too when it is the git canister, under its pinned governor
+      and `ic-git#git` (judged only there, so a site ic-git still serves
+      draws no warning from a git canister it never calls). The
+      extensions (0.3.0) cover `/site/` on both hosts, keep a site per
+      host and repo, and scope their call rules to both site domains;
+      Firefox lets a redirect through unheld. Tests: the certified
+      vectors judge the git canister approved under a pinned governor
+      by `ic-git#git` alone, ungoverned without a pin; the live loader
+      test verifies a site redirected to the git canister with every
+      query sent there, refuses a redirect to another canister or a host
+      that only redirects; the live Firefox extension test passes on
+      ic-git as it serves now.
 
 The cut on mainnet, in this order:
 
