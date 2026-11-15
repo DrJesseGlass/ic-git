@@ -1080,8 +1080,7 @@ The cut on mainnet, in this order:
        Until the local e2e confirms this with a real git client, treat it
        as expected, not shown.
 
-    Steps 3 to 5 DONE 2026-11-14 (the redirects of step 6 are the next
-    leg). What shipped:
+    Steps 3 to 5 DONE 2026-11-14, step 6 DONE 2026-11-15. What shipped:
     - **16.3.** No new code: the authority build reads the one-canister
       layout, and leaves the git side's maps unread. Until the git
       canister is named, every message to it fails as not delivered,
@@ -1138,6 +1137,22 @@ The cut on mainnet, in this order:
       16.4), the copy named, every mirror taken, the gated site's
       approved commit served there, the thaw, a signed push with the
       same token at the new remote, and a repo created there.
+    - **16.6.** Once the git canister is named, the authority answers a
+      GET or HEAD of `/site/...` or `/<repo>.git/...` with a 308 to the
+      same path and query on the git canister (`ic_git_authority::moved`).
+      The new host is the request's with this canister's id swapped for
+      the git canister's, under the IC's gateway domains only (icp0.io,
+      ic0.app, the local replica's localhost, raw or not), so a forged
+      Host cannot point it elsewhere; any other host goes to the git
+      canister's raw icp0.io host. Writes, and the authority's own paths
+      (`/`, `/feed`, `/api`), are not redirected. Shown in the e2e with a
+      real git client: `ls-remote`, `clone` and `fetch` at the old URL
+      follow to the git canister and see its refs. A push at the old URL
+      arrives without its token (git does not carry the credentials to
+      another host) and is refused with `push token required`, so a
+      pusher needs the new remote, where the same token works.
+      The git half of `/api` is not redirected: step 14's clients ask the
+      git canister for it.
 
     **Rollback** is an upgrade of umobs back to the last one-canister
     release, which still holds every git-side record as of the freeze. The

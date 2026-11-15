@@ -16,7 +16,7 @@ use ic_git_compiler::{compile, interp, lang};
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{httpjson, kv};
 // The authority (crates/authority).
-use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, funding, icp, ledger, mirrors, names, peer, provenance, sol, tenancy, to_git};
+use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, funding, icp, ledger, mirrors, moved, names, peer, provenance, sol, tenancy, to_git};
 use ic_git_types::authority_side::{AuthoritySide, Published};
 use ic_git_types::side::Reply;
 use ic_git_types::wire;
@@ -209,6 +209,18 @@ fn get_git_funding() -> funding::Funding {
 #[ic_cdk::query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     let path = http::extract_path(&req.url);
+    let host = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.as_str());
+    // The old URLs of sites and remotes, once the git canister is named
+    // (docs/CANISTER_SPLIT.md, step 16.6).
+    if let Some(git) = peer::GIT.get() {
+        if let Some(to) = moved::location(&req.method, &req.url, host, ic_cdk::api::canister_self(), git) {
+            return redirect(&to);
+        }
+    }
     if path == "/" {
         return git_response(
             200,
@@ -227,14 +239,17 @@ fn http_request(req: HttpRequest) -> HttpResponse {
             return git_response(404, "text/plain", b"not found\n".to_vec());
         }
         let repo = path["/feed".len()..].trim_matches('/');
-        let host = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("host"))
-            .map(|(_, v)| v.as_str());
         return feed::serve((!repo.is_empty()).then_some(repo), host);
     }
     git_response(404, "text/plain", b"not found\n".to_vec())
+}
+
+/// A permanent redirect that keeps the method (308): a site or a remote
+/// that moved to the git canister.
+fn redirect(to: &str) -> HttpResponse {
+    let mut res = git_response(308, "text/plain", format!("moved to {to}\n").into_bytes());
+    res.headers.push(("Location".to_string(), to.to_string()));
+    res
 }
 
 /// The authority's routes of /api, answered from this canister's own

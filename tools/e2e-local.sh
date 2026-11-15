@@ -40,9 +40,10 @@
 # frozen, its writes refused naming the cut, a git canister pulling every
 # record in pages, and both digests agreeing); the console's query-backed
 # reads through the page's own code, and the /api reads; and last, the cut
-# itself (step 16.1 to 16.5: the copy pulled afresh and governed, the
-# combined canister upgraded to the authority build, the copy named, every
-# mirror rewritten, the copy thawed and pushed to).
+# itself (step 16: the copy pulled afresh and governed, the combined
+# canister upgraded to the authority build, the copy named, every mirror
+# rewritten, the copy thawed and pushed to, and the old URLs redirected:
+# a site in curl, a remote in git, which fetches through it).
 #
 # E2E_SPLIT=1 runs the user flows against the authority and git canisters
 # instead: the git canister is governed before the authority names it (the
@@ -1036,6 +1037,30 @@ expect "  ...and takes a signed push, same token, new remote" "$(signed "http://
 expect "  ...the push does not move the gated site" "$(served_at "$CSITE")" "^${CUT_SITE%% *} ${CUT_SITE#* }"
 expect "  ...the authority creates repos there now" "$(auth "$OP" create_repo '("after-cut")')" 'Ok'
 expect "  ...which the copy holds" "$(call "$OP" copy list_repos --query)" '"after-cut"'
+# 16.6: umobs answers the old URLs with a permanent redirect to the same
+# path on the git canister: a site's, and a remote's, which git follows
+# on its first request (http.followRedirects=initial).
+OLD="http://$G.raw.localhost:$PORT"
+NEW="http://$C.raw.localhost:$PORT"
+expect "16.6 an old site URL is a permanent redirect to the git canister" "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OLD/site/e2e-app/")" "^308 $NEW/site/e2e-app/\$"
+expect "  ...which a browser follows to the approved commit" "$(curl -sL -D "$WORK/h" -o /dev/null "$OLD/site/e2e-app/" -w '%{http_code} '; tr -d '\r' <"$WORK/h" | grep -i '^x-ic-git-commit:' | cut -d' ' -f2)" "^${CUT_SITE%% *} ${CUT_SITE#* }"
+expect "  ...an old remote's advertisement likewise, query kept" "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OLD/e2e-app.git/info/refs?service=git-upload-pack")" "^308 $NEW/e2e-app.git/info/refs[?]service=git-upload-pack\$"
+expect "  ...a write is not redirected" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OLD/e2e-app.git/git-upload-pack")" '^404$'
+expect "  ...nor the authority's own paths" "$(curl -s -o /dev/null -w '%{http_code}' "$OLD/feed/e2e-app")" '^200$'
+CUT_HEAD=$(git -C "$W" rev-parse HEAD)
+expect "git ls-remote at the old URL follows to the new remote" "$(git ls-remote "$OLD/e2e-app.git" 2>&1)" "^$CUT_HEAD[[:space:]]+refs/heads/main|$CUT_HEAD	refs/heads/main"
+rm -rf "$WORK/old-clone"
+git clone -q "$OLD/e2e-app.git" "$WORK/old-clone" 2>/dev/null || true
+expect "  ...a clone from it has the new remote's tip" "$(git -C "$WORK/old-clone" rev-parse HEAD 2>&1)" "^$CUT_HEAD\$"
+commit site/h.txt h after-redirect
+signed "http://ic:$BOUND@$C.raw.localhost:$PORT/e2e-app.git" >/dev/null || true
+expect "  ...and a fetch from it brings what was pushed at the new one" "$(git -C "$WORK/old-clone" fetch -q origin 2>&1; git -C "$WORK/old-clone" rev-parse origin/main 2>&1)" "$(git -C "$W" rev-parse HEAD)"
+commit site/i.txt i at-the-old-url
+# Git follows the redirect, but the token stays with the old host: the
+# new remote asks for one, and a push needs the new URL.
+expect "  ...but a push at the old URL arrives without its token" "$(signed "http://ic:$BOUND@$G.raw.localhost:$PORT/e2e-app.git" || true)" 'push token required'
+refuse "  ...and does not land" "$(call "$OP" copy list_refs '("e2e-app")' --query)" "$(git -C "$W" rev-parse HEAD)"
+git -C "$W" reset -q --hard HEAD~1
 fi
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"

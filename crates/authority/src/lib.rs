@@ -23,6 +23,7 @@ pub mod funding;
 pub mod icp;
 pub mod ledger;
 pub mod mirrors;
+pub mod moved;
 pub mod names;
 pub mod peer;
 pub mod provenance;
