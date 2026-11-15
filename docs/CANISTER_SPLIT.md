@@ -1113,15 +1113,20 @@ The cut on mainnet, in this order:
       with a reason that names step 16.4 (`ic_git_common::call`).
     - **16.4.** `set_git_canister`, once the canister passes the
       setter's rule, writes every mirror of every repo the authority
-      holds (`mirrors::rewrite_all`: all three marked, then flushed,
-      each write under a fresh number from the authority's counters),
-      and tops the git canister up to its floor (`funding::top_up_git`,
-      a failure on record in `get_git_funding`). A write the git canister
-      does not take stays marked for the retry; `get_mirrors_pending`
-      lists the repos still marked, and empty is the sign for 16.5.
-      Naming the same id again writes them all again. The top-up comes
-      first, since a git canister short of cycles would refuse every
-      write. A flush writes a repo's deploy configs before its approved
+      holds (`mirrors::mark_all` then `mirrors::flush_all`: all three
+      marked, then flushed, each write under a fresh number from the
+      authority's counters), and tops the git canister up to its floor
+      (`funding::top_up_git`, a failure on record in `get_git_funding`).
+      A write the git canister does not take stays marked for the retry;
+      `get_mirrors_pending` lists the repos still marked, and empty is
+      the sign for 16.5. Naming the same id again writes them all again.
+      The marks are made before anything is awaited, so from the naming
+      on `get_mirrors_pending` is true (a poll during the top-up cannot
+      read empty), and an upgrade landing before the writes are through
+      leaves marks for post_upgrade's retry rather than a named git
+      canister with nothing pending. The top-up comes before the writes,
+      since a git canister short of cycles would refuse every one. A
+      flush writes a repo's deploy configs before its approved
       set (`mirrors::ALL`): the git side follows a set it takes with the
       configs it holds then, so the other order would leave the app of a
       commit approved while the git canister was unnamed behind its site.

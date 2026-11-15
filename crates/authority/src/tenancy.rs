@@ -2283,6 +2283,18 @@ mod tests {
             assert_eq!(ic_git_git::site::served_commit(repo), Err(ic_git_git::site::AWAITING_AUTHORITY));
         }
 
+        // The marks alone, with no write: what set_git_canister does
+        // before its first await, so get_mirrors_pending is true from
+        // the naming on, and an upgrade in the top-up's window leaves the
+        // marks for post_upgrade's retry.
+        let before = git.calls.borrow().len();
+        mirrors::mark_all();
+        assert_eq!(git.calls.borrow().len(), before, "marking writes nothing");
+        for repo in ["t-cut-open", "t-cut-gated"] {
+            assert!(mirrors::repos_pending().contains(&repo.to_string()), "{repo} pending from the marks on");
+            assert_eq!(mirrors::pending(repo), mirrors::ALL.to_vec());
+        }
+
         git.inject("set_deploy_configs", Inject::NotDelivered);
         let before = git.calls.borrow().len();
         run(mirrors::rewrite_all());

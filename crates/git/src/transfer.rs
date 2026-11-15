@@ -553,10 +553,13 @@ pub fn import_start(source: Principal, me: Principal) -> Result<(), String> {
             return Err(format!("an import from {} is on record; import_reset before importing from {source}", st.source));
         }
         Some(st) if !st.copied => ImportState { error: None, ..st },
-        // Every page in: start over, the tokens of the last pull dropped
-        // first. A first import clears nothing: what this canister holds
-        // of its own, tokens included, is its own, and the digest will
-        // say whether the copy is the original alone.
+        // Every page in: start over, every token this canister holds
+        // dropped first (the copy is add-only, and a token the last pull
+        // brought cannot be told from one minted since, so a pull after
+        // the cut costs the canister its own tokens too). A first import
+        // clears nothing: what this canister holds of its own, tokens
+        // included, is its own, and the digest will say whether the copy
+        // is the original alone.
         Some(_) => {
             store::clear_tokens();
             kv::remove(DIGEST_KEY);
