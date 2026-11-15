@@ -165,6 +165,13 @@ async fn set_site(m: wire::SetSite) -> Result<(), String> {
     answered(GIT.set_site(&m.repo, m.root).await)
 }
 
+/// `GitSide::set_site_domains`: the site's own domains; the authority
+/// decided who may.
+#[ic_cdk::update(guard = "from_authority")]
+async fn set_site_domains(m: wire::SetSiteDomains) -> Result<(), String> {
+    answered(GIT.set_site_domains(&m.repo, m.domains).await)
+}
+
 /// `GitSide::check_new_repo`: would the repo be created? Its label.
 #[ic_cdk::update(guard = "from_authority")]
 async fn check_new_repo(m: wire::CheckNewRepo) -> Result<String, String> {
@@ -214,8 +221,12 @@ enum Route {
     /// POST /<repo>.git/<service> (upload-pack is a query; receive-pack
     /// mutates and upgrades to http_request_update)
     Rpc { repo: String, service: Service },
-    /// GET /site/<repo>/<path>: a committed static bundle (see site.rs).
+    /// GET /site/<repo>/<path>: a committed static bundle (see site.rs);
+    /// or GET /<path> with a site's own domain as the Host.
     Site { repo: String, path: String },
+    /// GET /.well-known/ic-domains: the domains the sites here are served
+    /// at, for the boundary nodes (docs/TENANCY.md, "Custom domains").
+    Domains,
     /// GET /api/...: the git side's read-only JSON for the repo browser
     /// (see api.rs); the authority canister answers its own routes.
     Api { url: String },
@@ -225,6 +236,22 @@ enum Route {
 
 fn route(req: &HttpRequest) -> Route {
     let path = http::extract_path(&req.url);
+    // On every host, a site's own domains included: whichever URL the
+    // boundary nodes read it at, the list is the whole canister's.
+    if path == "/.well-known/ic-domains" {
+        return if req.method == "GET" { Route::Domains } else { Route::NotFound };
+    }
+    // A site at its own domain: the whole origin is the site, from its
+    // root, and nothing else of this canister is reached there.
+    if let Some(repo) = site::repo_for_host(http::get_header(&req.headers, "host")) {
+        if req.method != "GET" {
+            return Route::NotFound;
+        }
+        return Route::Site {
+            repo,
+            path: path.trim_start_matches('/').to_string(),
+        };
+    }
     if path == "/" {
         return Route::Index;
     }
@@ -331,6 +358,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         } => http::upgrade_response(),
         Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
         Route::Site { repo, path } => site::serve(&repo, &path),
+        Route::Domains => git_response(200, "text/plain", site::domains_file().into_bytes()),
         Route::Api { url } => api_route(&url),
         Route::Index => {
             let repos = store::list_repos().join("\n");

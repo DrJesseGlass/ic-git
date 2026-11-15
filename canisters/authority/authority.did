@@ -429,6 +429,7 @@ service : {
   // F0: verifiable frontend serving (GET /site/<repo>/<path> on the git
   // canister, which keeps the config this sends it)
   set_site : (text, text) -> (Result);
+  set_site_domains : (text, vec text) -> (Result);
 
   // Track A: EVM deployment (E0 signing spine, E1 CREATE)
   evm_set_config : (text, text, nat64, vec text) -> (Result);

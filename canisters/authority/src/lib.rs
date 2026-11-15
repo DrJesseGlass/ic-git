@@ -938,6 +938,21 @@ async fn set_site(repo: String, root: String) -> Result<(), String> {
     }
 }
 
+/// Name the site's own domains (docs/TENANCY.md, "Custom domains"): the
+/// git canister serves a request whose Host is one of them as the site
+/// from its root, and lists them at /.well-known/ic-domains for the
+/// boundary nodes. The whole list each time; empty takes the site off
+/// every domain. Owner or operator; the git side checks the names and
+/// refuses one another repo holds.
+#[ic_cdk::update]
+async fn set_site_domains(repo: String, domains: Vec<String>) -> Result<(), String> {
+    tenancy::can_admin(&repo, &caller(), operator())?;
+    match to_git::set_site_domains(&repo, domains).await {
+        Ok(r) => r,
+        Err(f) => Err(format!("the site's domains could not be set ({f}); try again")),
+    }
+}
+
 // --- Track A: EVM deployment (phases E0/E1; see ROADMAP.md) ------------------
 
 /// Configure EVM signing and broadcast: the EVM RPC canister principal, the

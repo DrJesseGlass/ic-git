@@ -62,6 +62,7 @@ struct DeployConfig {
 #[derive(CandidType, Deserialize)]
 struct SiteConfig {
     root: String,
+    domains: Vec<String>,
 }
 #[derive(CandidType, Deserialize)]
 struct EvmDeployConfig {
@@ -165,7 +166,7 @@ fn print_vectors() {
         ("reply:icrc2_approve_ok", encode_one(Ok::<Nat, ()>(Nat::from(42u64))).unwrap()),
         ("reply:opt_deploy_config_some", encode_one(Some(DeployConfig { target: p.to_text(), source_path: "app.wasm".into(), mode: DeployMode::Upgrade })).unwrap()),
         ("reply:opt_deploy_config_none", encode_one(None::<DeployConfig>).unwrap()),
-        ("reply:opt_site_some", encode_one(Some(SiteConfig { root: "browser".into() })).unwrap()),
+        ("reply:opt_site_some", encode_one(Some(SiteConfig { root: "browser".into(), domains: vec!["git.example".into()] })).unwrap()),
         ("reply:result_deploy_status_ok", encode_one(Ok::<DeployStatus, String>(DeployStatus { commit: "0123456789abcdef0123456789abcdef01234567".into(), ok: true, message: "installed".into(), wasm_len: 365_000, wasm_sha256: "ab".repeat(32) })).unwrap()),
         ("reply:opt_evm_deploy_config_some", encode_one(Some(EvmDeployConfig { source_path: "build/Registry.hex".into(), gas_limit: 1_500_000 })).unwrap()),
         ("reply:push_tokens", encode_one(vec![

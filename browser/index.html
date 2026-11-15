@@ -144,7 +144,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc', 'approvals', 'objections', 'required', 'reached', 'governed', 'counts', 'change', 'ballots', 'RequiredVotes', 'AddVoter', 'RemoveVoter', 'Transfer', 'WasmDeploy', 'DeployMode', 'k', 'new_owner']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc', 'approvals', 'objections', 'required', 'reached', 'governed', 'counts', 'change', 'ballots', 'RequiredVotes', 'AddVoter', 'RemoveVoter', 'Transfer', 'WasmDeploy', 'DeployMode', 'k', 'new_owner', 'domains']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -757,6 +757,7 @@ const Console = (() => {
         ? form('f-deploy', [{ name: 'path', placeholder: 'path in the commit, e.g. app.wasm (.wasm, .wat or .lang)' }], 'deploy on push into the app canister') + '<p id="f-deploy-st" class="status"></p>'
         : '<p class="muted">create the app canister above, then choose what each push deploys into it.</p>') +
       form('f-site', [{ name: 'root', placeholder: 'directory to serve, e.g. site (empty = repo root)' }], 'serve as site') + '<p id="f-site-st" class="status"></p>' +
+      form('f-domains', [{ name: 'domains', placeholder: 'its own domains, space-separated, e.g. app.example www.app.example (empty = none)' }], 'serve at these domains') + '<p id="f-domains-st" class="status"></p>' +
       // Shown once the site config lands and says the repo is served: the
       // record attests the served entrypoint, so there is nothing to publish
       // for a repo that serves no site.
@@ -841,10 +842,13 @@ const Console = (() => {
       const wasmLeg = c => c.source_path + ' into ' + (c.target === info.app_canister ? 'the app canister' : short(c.target)) + ' (' + Object.keys(c.mode)[0] + ')';
       const evmLeg = c => 'a contract from ' + c.source_path + ' on the EVM chain (gas limit ' + c.gas_limit + ')';
       land('cfg-deploy', Promise.all([deployCfg, evmCfg]), ([w, e]) => w === undefined || e === undefined ? '?' : [w && wasmLeg(w), e && evmLeg(e)].filter(Boolean).join(' and ') || 'nothing (not configured)');
-      land('cfg-site', siteCfg, c => c === null ? 'not served' : 'served from ' + (c.root ? c.root + '/' : 'the repo root') + ' at /site/' + repo + '/' + (info.required_votes ? ', from the newest approved commit' : ''));
+      land('cfg-site', siteCfg, c => c === null ? 'not served' : 'served from ' + (c.root ? c.root + '/' : 'the repo root') + ' at /site/' + repo + '/' + (c.domains && c.domains.length ? ' and at ' + c.domains.map(d => 'https://' + d + '/').join(' ') : '') + (info.required_votes ? ', from the newest approved commit' : ''));
       // "app" names the repo's own app canister; the canister resolves it.
       onsubmit('f-deploy', async v => { await write('set_wasm_deploy', ['text', 'text', 'text'], [repo, 'app', v.path.trim()]); setTimeout(() => location.reload(), 800); return 'each push to the deploy branch now installs ' + v.path.trim(); });
       onsubmit('f-site', async v => { const root = v.root.trim().replace(/^\/+|\/+$/g, ''); await write('set_site', ['text', 'text'], [repo, root]); setTimeout(() => location.reload(), 800); return 'serving ' + (root || 'the repo root') + ' at /site/' + repo + '/'; });
+      // The whole list each time; the canister checks the names. A domain
+      // reaches the canister only once its DNS and the boundary nodes know it.
+      onsubmit('f-domains', async v => { const domains = v.domains.trim().split(/\s+/).filter(Boolean); await write('set_site_domains', ['text', { vec: 'text' }], [repo, domains]); setTimeout(() => location.reload(), 800); return domains.length ? 'serving at ' + domains.map(d => 'https://' + d + '/').join(' ') + ' once its DNS names this canister and the boundary nodes have registered it' : 'serving at no domain of its own'; });
       // What deploy now and reinstall install: with votes required, the
       // approved commit the site serves, not the tip.
       const release = info.required_votes ? 'the newest approved commit' : 'the deploy-branch tip';

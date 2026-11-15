@@ -41,7 +41,8 @@ crates/git/             the git side (docs/CANISTER_SPLIT.md)
   src/store.rs          stable-memory objects/refs/repos
   src/smart_http.rs     pkt-line codec, services, ref advertisement
   src/pack.rs           closure walk, pack writer, streamed upload-pack
-  src/site.rs           GET /site/<repo>/<path>: serve a committed static bundle
+  src/site.rs           GET /site/<repo>/<path>: serve a committed static bundle,
+                        or GET /<path> at the site's own domain
   src/api.rs            GET /api/...: read-only JSON for the repo browser
 crates/authority/       the authority: tenancy, ballots, deploys, provenance
 crates/common/, crates/types/, crates/compiler/

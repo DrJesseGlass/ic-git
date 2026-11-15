@@ -442,3 +442,13 @@ backends are all governed or system gets a green badge.
 - The K-of-N attestations (docs/ATTESTATION.md) behind the same stop page.
 - Safari (no `filterResponseData`; CSP injection unexamined), other
   hosting, and pages outside `/site/`.
+- A site at a tenant's own domain (docs/TENANCY.md, "Custom domains") is
+  loaded unchecked by both browsers and the loader: the extension acts on
+  the two pinned hosts only, so a hijacked domain shows no badge at all,
+  which is what the Curve frontend's DNS hijack of 2022 looked like to its
+  users.
+  The next leg pins a list of domain to repo in the core, like the
+  canister ids: a listed domain gets the same hold, check against the
+  record and block, and the record's bytes are fetched from the pinned
+  host, never from the domain, so a hijacked one fails closed. An
+  unlisted domain stays as it is.

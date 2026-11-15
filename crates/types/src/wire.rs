@@ -102,6 +102,8 @@ messages! {
     SetApproved = "set_approved" -> () { repo: String, seq: u64, approved: Option<Vec<String>>, retry: Option<Retry> }
     /// `GitSide::set_site`.
     SetSite = "set_site" -> Result<(), String> { repo: String, root: String }
+    /// `GitSide::set_site_domains`.
+    SetSiteDomains = "set_site_domains" -> Result<(), String> { repo: String, domains: Vec<String> }
     /// `GitSide::check_new_repo`.
     CheckNewRepo = "check_new_repo" -> Result<String, String> { name: String }
     /// `GitSide::create_repo`.

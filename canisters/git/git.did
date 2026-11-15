@@ -50,7 +50,7 @@ type PushTokenInfo = record {
   expires_ns : nat64;
   key : opt text;
 };
-type SiteConfig = record { root : text };
+type SiteConfig = record { root : text; domains : vec text };
 
 // The move to the git canister (docs/CANISTER_SPLIT.md, step 13): every
 // git-side record, in a fixed order, a page at a time, and the digest
@@ -93,6 +93,7 @@ type SetDeployConfigs = record { repo : text; seq : nat64; configs : DeployConfi
 type SetPushPolicy = record { repo : text; seq : nat64; policy : PushPolicy };
 type SetApproved = record { repo : text; seq : nat64; approved : opt vec text; retry : opt Retry };
 type SetSite = record { repo : text; root : text };
+type SetSiteDomains = record { repo : text; domains : vec text };
 type CheckNewRepo = record { name : text };
 type CreateRepo = record { name : text };
 type HasCommit = record { oid : blob };
@@ -159,6 +160,7 @@ service : (InitArg) -> {
   set_push_policy : (SetPushPolicy) -> ();
   set_approved : (SetApproved) -> ();
   set_site : (SetSite) -> (Result);
+  set_site_domains : (SetSiteDomains) -> (Result);
   check_new_repo : (CheckNewRepo) -> (ResultText);
   create_repo : (CreateRepo) -> (Result);
   has_commit : (HasCommit) -> (bool);

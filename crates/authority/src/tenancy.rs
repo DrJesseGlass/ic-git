@@ -2111,6 +2111,10 @@ mod tests {
         fn set_site<'a>(&'a self, repo: &'a str, root: String) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<(), String>>> {
             self.real.set_site(repo, root)
         }
+
+        fn set_site_domains<'a>(&'a self, repo: &'a str, domains: Vec<String>) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<(), String>>> {
+            self.real.set_site_domains(repo, domains)
+        }
         fn check_new_repo<'a>(&'a self, name: &'a str) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<String, String>>> {
             self.real.check_new_repo(name)
         }

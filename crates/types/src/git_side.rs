@@ -107,6 +107,13 @@ pub trait GitSide {
     /// again; the git side refuses a repo it does not hold.
     fn set_site<'a>(&'a self, repo: &'a str, root: String) -> Fut<'a, Reply<Result<(), String>>>;
 
+    /// Name the site's own domains (docs/TENANCY.md, "Custom domains"),
+    /// replacing what it had: the whole list, so a lost answer is settled
+    /// by asking again. The authority decides who may; the git side
+    /// checks each name, refuses one another repo holds, and serves a
+    /// request whose Host is one of them as the site.
+    fn set_site_domains<'a>(&'a self, repo: &'a str, domains: Vec<String>) -> Fut<'a, Reply<Result<(), String>>>;
+
     /// Would a repo of this name be created? Returns its label. The
     /// authority asks before it charges the creation fee.
     fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>>;
