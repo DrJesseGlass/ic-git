@@ -216,9 +216,14 @@ function badge(tabId, state, site) {
     uncovered: ['', '#6b6b6b', 'this page is covered by no record; its scripts are blocked'],
     unreachable: ['!', '#b3261e', 'moved to a site this extension has no permission for -- grant it in the extension\'s permissions; the page was not loaded'],
   }[state];
+  // A tab's own values override the defaults checkHosts sets, so a missing
+  // site host is said here too. Firefox resets them when the tab navigates,
+  // so a page on a host this extension cannot see shows the defaults, not
+  // the verdict of the page before it.
+  const missing = missingHosts.size ? '; and it cannot check sites on ' + [...missingHosts].map(h => originOf(h)).join(', ') + ' until you grant it that site in its permissions' : '';
   browser.action.setBadgeText({ tabId, text: look[0] }).catch(() => {});
   browser.action.setBadgeBackgroundColor({ tabId, color: look[1] }).catch(() => {});
-  browser.action.setTitle({ tabId, title: 'ic-git verifier: ' + (site ? site.repo + ' ' : '') + look[2] }).catch(() => {});
+  browser.action.setTitle({ tabId, title: 'ic-git verifier: ' + (site ? site.repo + ' ' : '') + look[2] + missing }).catch(() => {});
 }
 
 // What each tab's latest navigation came to, for the content script. A

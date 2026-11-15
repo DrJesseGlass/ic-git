@@ -328,7 +328,9 @@ const allow = (tabId, host, repo) => exclusive(async () => {
   const id = allowed[key] || Math.max(ALLOW_BASE, ...Object.values(allowed)) + 1;
   allowed[key] = id;
   await chrome.storage.session.set({ allowed });
-  // Its calls too: a page run unverified is run as it is, backends included.
+  // Its calls too: a page run unverified is run as it is, backends included
+  // -- from its own host only, so the tab moving on to a site on the other
+  // host does not take this exception with it.
   const calls = id - ALLOW_BASE + TAB_CALLS_BASE;
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [id, calls],
@@ -339,7 +341,7 @@ const allow = (tabId, host, repo) => exclusive(async () => {
     }, {
       id: calls, priority: ALLOW_PRIORITY,
       action: { type: 'allow' },
-      condition: { regexFilter: API_HOSTS, initiatorDomains: SITE_DOMAINS, resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
+      condition: { regexFilter: API_HOSTS, initiatorDomains: [host + '.raw.icp0.io'], resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
     }],
   });
 });
