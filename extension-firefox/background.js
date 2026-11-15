@@ -53,6 +53,27 @@ let hostsNote = '';
 browser.permissions.contains({ origins: ['https://*.icp0.io/*', 'https://*.ic0.app/*'] }).then(ok => {
   if (!ok) hostsNote = ' (calls through icp0.io or ic0.app cannot be cancelled: grant the extension those sites in its permissions)';
 }).catch(() => {});
+// The site hosts this extension may not act on. On a host it lacks, none
+// of its listeners or its content script run, so a page there would load
+// unchecked; an update does not grant the git canister's host, which only
+// 0.3.0 asks for. So a missing one is said on every tab's badge, and a
+// redirect to it from a host it holds is cancelled (onHeadersReceived).
+const missingHosts = new Set();
+async function checkHosts() {
+  for (const h of HOSTS) {
+    const ok = await browser.permissions.contains({ origins: [originOf(h) + '/*'] }).catch(() => false);
+    if (ok) missingHosts.delete(h); else missingHosts.add(h);
+  }
+  const text = missingHosts.size ? '!' : '';
+  browser.action.setBadgeText({ text }).catch(() => {});
+  if (missingHosts.size) {
+    browser.action.setBadgeBackgroundColor({ color: '#b3261e' }).catch(() => {});
+    browser.action.setTitle({ title: 'ic-git verifier: it cannot check sites on ' + [...missingHosts].map(h => originOf(h)).join(', ') + ' -- grant it that site in its permissions; until then, a redirect there is stopped' }).catch(() => {});
+  }
+}
+const hostsChecked = checkHosts();
+browser.permissions.onAdded.addListener(checkHosts);
+browser.permissions.onRemoved.addListener(checkHosts);
 
 const twoRpcs = {
   async request({ method, params = [] }) {
@@ -193,6 +214,7 @@ function badge(tabId, state, site) {
     unpinnable: ['!', '#b3261e', 'verified, but its scripts cannot be pinned -- the page was not loaded'],
     allowed: ['!', '#b35c00', 'NOT verified -- running anyway, as you chose'],
     uncovered: ['', '#6b6b6b', 'this page is covered by no record; its scripts are blocked'],
+    unreachable: ['!', '#b3261e', 'moved to a site this extension has no permission for -- grant it in the extension\'s permissions; the page was not loaded'],
   }[state];
   browser.action.setBadgeText({ tabId, text: look[0] }).catch(() => {});
   browser.action.setBadgeBackgroundColor({ tabId, color: look[1] }).catch(() => {});
@@ -222,7 +244,16 @@ const applied = new Map(); // requestId -> the policy set on its headers
 browser.webRequest.onHeadersReceived.addListener(async d => {
   // A redirect (ic-git's old /site/ URLs after the cut) loads no page here:
   // the page it leads to is held and checked on its own host.
-  if (d.statusCode >= 300 && d.statusCode < 400) return {};
+  if ([301, 302, 303, 307, 308].includes(d.statusCode)) {
+    // ...unless it leads to a site host this extension may not act on,
+    // where the page would load unchecked: stopped instead.
+    await hostsChecked;
+    const loc = (d.responseHeaders.find(h => h.name.toLowerCase() === 'location') || {}).value;
+    let to = null;
+    try { to = new URL(loc, d.url).origin; } catch (_) { /* no usable Location: nothing to follow */ }
+    if (to && [...missingHosts].some(h => originOf(h) === to)) { badge(d.tabId, 'unreachable', { repo: (siteOf(d.url) || {}).repo || '' }); return { cancel: true }; }
+    return {};
+  }
   const at = siteOf(d.url);
   let policy = BLOCK;
   if (at !== null) {

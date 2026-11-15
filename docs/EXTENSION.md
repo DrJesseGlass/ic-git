@@ -128,6 +128,14 @@ Enforcement:
   permissions on `icp0.io` and `ic0.app` that MV3 Firefox grants on
   install but not on an update; when they are missing the badge's hover
   text says so, and such calls go through unjudged.
+- **The git canister's host, on an update (Firefox).** 0.3.0 is the first
+  version to ask for `34koz-...raw.icp0.io`, and an update to it is not
+  granted that host either. Without it nothing of the extension runs
+  there, so a page on it would load unchecked: the badge says on every
+  tab which site host is missing, and a redirect to that host from
+  ic-git's (every site's old URL after the cut) is cancelled, with the
+  tab's badge saying why, until the user grants it. Chrome instead holds
+  an update that asks for a new host until the user accepts it.
 
 Two edges. A page run through the loader (`/site/ic-git-loader/`) under
 an extension calls as the loader's site, whose own list has no app
