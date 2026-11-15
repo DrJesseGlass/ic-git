@@ -50,7 +50,7 @@ pub enum Mirror {
 /// other way round, a copy that has no configs yet (the cut, step 16.4)
 /// would follow a newly approved commit with no job, and the app would
 /// stay behind the site.
-const ALL: [Mirror; 3] = [Mirror::PushPolicy, Mirror::DeployConfigs, Mirror::Approved];
+pub const ALL: [Mirror; 3] = [Mirror::PushPolicy, Mirror::DeployConfigs, Mirror::Approved];
 
 /// How long after an unanswered write the marks are flushed again.
 pub const RETRY_SECS: u64 = 30;
@@ -242,13 +242,26 @@ pub async fn flush_all() {
 /// git canister may thaw (step 16.5). Each write carries a fresh number
 /// from the counters this side kept, so a second rewrite is as safe as
 /// the first.
+///
+/// The marks come first and at once (`mark_all`), before anything is
+/// awaited: from the moment the git canister is named, `repos_pending`
+/// says what it has not taken, and an upgrade landing before the writes
+/// are through leaves marks for post_upgrade's `resume` rather than a
+/// named git canister with nothing to retry.
 pub async fn rewrite_all() {
+    mark_all();
+    flush_all().await;
+}
+
+/// Mark every mirror of every repo this side holds, with no write: the
+/// first half of `rewrite_all`, for a caller with something to await
+/// between naming the git canister and writing to it.
+pub fn mark_all() {
     for repo in crate::records::repo_meta_names() {
         for m in ALL {
             mark(&repo, m);
         }
     }
-    flush_all().await;
 }
 
 /// For post_upgrade, after everything that marks: the marked mirrors are
