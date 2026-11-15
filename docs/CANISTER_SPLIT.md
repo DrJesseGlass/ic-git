@@ -802,6 +802,7 @@ The two canisters:
           by the other side's principal: on the authority `charge_push`,
           `stage_job`, `submit_job` and `notify` (`peer::GIT.check_caller`);
           on the git canister the three mirror writes, `set_site`,
+          `set_site_domains` (docs/TENANCY.md, "Custom domains"),
           `check_new_repo`, `create_repo`, `has_commit`,
           `record_artifact`, `release_job` and `reply_chunk`
           (`peer::AUTHORITY.check_caller`). A stranger gets "only the

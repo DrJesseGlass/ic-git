@@ -28,23 +28,155 @@ use serde::{Deserialize, Serialize};
 pub struct SiteConfig {
     /// Directory within the repo tree the bundle is served from; "" = root.
     pub root: String,
+    /// The site's own domains (docs/TENANCY.md, "Custom domains"): a
+    /// request whose Host is one of them is the site, from its root. Each
+    /// is held by one repo; `check_domain` says what one may be. A config
+    /// stored before the field has none.
+    #[serde(default)]
+    pub domains: Vec<String>,
 }
 
 fn site_key(repo: &str) -> String {
     format!("site:{repo}")
 }
 
+const SITE_PREFIX: &str = "site:";
+
+/// Turn serving on from `root`. The domains, if any, stay as they are.
 pub fn set_config(repo: &str, root: String) -> Result<(), String> {
     if !store::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
     let root = root.trim_matches('/').to_string();
-    crate::kv::set_json(&site_key(repo), &SiteConfig { root });
+    let domains = get_config(repo).map(|c| c.domains).unwrap_or_default();
+    crate::kv::set_json(&site_key(repo), &SiteConfig { root, domains });
     Ok(())
 }
 
 pub fn get_config(repo: &str) -> Option<SiteConfig> {
     crate::kv::get_json(&site_key(repo))
+}
+
+/// How many domains one site may have.
+pub const MAX_DOMAINS: usize = 8;
+
+/// The IC's own domains, under which a host names a canister by its id,
+/// and the local one. No site's domain is under them.
+const RESERVED: [&str; 7] = ["icp0.io", "ic0.app", "icp-api.io", "icp1.io", "icp2.io", "internetcomputer.org", "localhost"];
+
+/// A domain a site may be served at: a DNS name as it would be looked up
+/// (lowercase, no trailing dot), of at least two labels, that is no IP
+/// address and is under none of `RESERVED`.
+pub fn check_domain(d: &str) -> Result<(), String> {
+    if d.len() > 253 {
+        return Err("a domain is at most 253 characters".to_string());
+    }
+    let labels: Vec<&str> = d.split('.').collect();
+    if labels.len() < 2 {
+        return Err(format!("{d:?} is not a domain: it has one label"));
+    }
+    for l in &labels {
+        if l.is_empty() || l.len() > 63 {
+            return Err(format!("{d:?} is not a domain: a label is empty or longer than 63 characters"));
+        }
+        if !l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            return Err(format!("{d:?} is not a domain as looked up: lowercase letters, digits and hyphens only"));
+        }
+        if l.starts_with('-') || l.ends_with('-') {
+            return Err(format!("{d:?} is not a domain: a label starts or ends with a hyphen"));
+        }
+    }
+    if labels.last().is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit())) {
+        return Err(format!("{d:?} is an IP address, not a domain"));
+    }
+    if RESERVED.iter().any(|r| d == *r || d.strip_suffix(r).is_some_and(|rest| rest.ends_with('.'))) {
+        return Err(format!("{d:?} is under one of the IC's own domains, where a host names a canister by its id"));
+    }
+    Ok(())
+}
+
+/// Name the site's domains, replacing what it had: the whole list, so a
+/// lost answer is settled by asking again, and an empty one takes the site
+/// off every domain. A domain another repo holds is refused until that
+/// repo gives it up (an operator may, on any repo). The site must be
+/// configured already: naming a domain does not turn serving on.
+pub fn set_domains(repo: &str, domains: Vec<String>) -> Result<(), String> {
+    let Some(mut cfg) = get_config(repo) else {
+        return Err(if store::repo_exists(repo) {
+            format!("no site configured for {repo}: set_site first")
+        } else {
+            format!("no such repo: {repo}")
+        });
+    };
+    let mut names: Vec<String> = Vec::new();
+    for d in domains {
+        let d = d.trim().trim_end_matches('.').to_ascii_lowercase();
+        check_domain(&d)?;
+        if let Some(holder) = repo_for_domain(&d).filter(|h| h != repo) {
+            return Err(format!("{d:?} is held by {holder}; it must be given up there first"));
+        }
+        if !names.contains(&d) {
+            names.push(d);
+        }
+    }
+    if names.len() > MAX_DOMAINS {
+        return Err(format!("a site has at most {MAX_DOMAINS} domains"));
+    }
+    cfg.domains = names;
+    crate::kv::set_json(&site_key(repo), &cfg);
+    Ok(())
+}
+
+/// Every site config, by repo.
+fn all_configs() -> Vec<(String, SiteConfig)> {
+    crate::kv::keys_with_prefix(SITE_PREFIX)
+        .into_iter()
+        .filter_map(|k| crate::kv::get_json(&k).map(|c| (k[SITE_PREFIX.len()..].to_string(), c)))
+        .collect()
+}
+
+/// The repo whose site holds this domain (a name as `check_domain` takes
+/// it). A walk of the site configs: there are few, and only a request on
+/// a domain makes it.
+pub fn repo_for_domain(domain: &str) -> Option<String> {
+    all_configs()
+        .into_iter()
+        .find(|(_, c)| c.domains.iter().any(|d| d == domain))
+        .map(|(repo, _)| repo)
+}
+
+/// A Host header as a domain: lowercase, without a port or a trailing dot.
+/// An IPv6 literal is kept whole, brackets and all, and is no domain.
+fn host_name(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+    if host.starts_with('[') {
+        return host;
+    }
+    let name = match host.rsplit_once(':') {
+        Some((n, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => n,
+        _ => host.as_str(),
+    };
+    name.trim_end_matches('.').to_string()
+}
+
+/// The repo whose site a request is for, by its Host: one of the site's
+/// domains. A host that could not be a domain (`check_domain`: a gateway
+/// host naming a canister by its id, the local one, an IP) is nobody's,
+/// without a walk.
+pub fn repo_for_host(host: Option<&str>) -> Option<String> {
+    let name = host_name(host?);
+    check_domain(&name).ok()?;
+    repo_for_domain(&name)
+}
+
+/// `/.well-known/ic-domains`: every domain any site here is served at, one
+/// per line, sorted. The IC's boundary nodes read it when a domain is
+/// registered for this canister, and refuse one it does not list.
+pub fn domains_file() -> String {
+    let mut all: Vec<String> = all_configs().into_iter().flat_map(|(_, c)| c.domains).collect();
+    all.sort();
+    all.dedup();
+    all.into_iter().map(|d| d + "\n").collect()
 }
 
 /// Stay under the ~2 MiB ingress reply limit with headroom for headers.
@@ -1042,6 +1174,98 @@ mod tests {
         set_config("web", "app".into()).unwrap();
         assert_eq!(serve("web", "main.js").status_code, 200);
         assert_eq!(serve("web", "").status_code, 404);
+    }
+
+    /// A site's own domains: named as looked up, held by one repo at a
+    /// time, under none of the IC's domains; a Host that is one of them
+    /// is the site, and the well-known file lists them all.
+    #[test]
+    fn custom_domains() {
+        store::create_repo("dom-a").unwrap();
+        store::create_repo("dom-b").unwrap();
+        store::create_repo("dom-nosite").unwrap();
+        assert!(set_domains("dom-none", vec!["a.example".into()]).unwrap_err().contains("no such repo"));
+        assert!(set_domains("dom-nosite", vec!["a.example".into()]).unwrap_err().contains("set_site first"));
+
+        set_config("dom-a", String::new()).unwrap();
+        set_config("dom-b", "www".into()).unwrap();
+        // Named as looked up: case and a trailing dot fall away, a repeat
+        // is one domain.
+        set_domains("dom-a", vec!["App.Example.".into(), " app.example".into(), "www.app.example".into()]).unwrap();
+        assert_eq!(get_config("dom-a").unwrap().domains, ["app.example", "www.app.example"]);
+        // The root can change without touching the domains.
+        set_config("dom-a", "site".into()).unwrap();
+        let cfg = get_config("dom-a").unwrap();
+        assert_eq!((cfg.root.as_str(), cfg.domains.len()), ("site", 2));
+
+        // One holder at a time, until it gives the domain up.
+        let held = set_domains("dom-b", vec!["app.example".into()]).unwrap_err();
+        assert!(held.contains("held by dom-a"), "{held}");
+        assert!(get_config("dom-b").unwrap().domains.is_empty(), "nothing of a refused list is kept");
+        set_domains("dom-a", vec!["www.app.example".into()]).unwrap();
+        set_domains("dom-b", vec!["app.example".into()]).unwrap();
+        assert_eq!(repo_for_domain("app.example").as_deref(), Some("dom-b"));
+        assert_eq!(repo_for_domain("www.app.example").as_deref(), Some("dom-a"));
+        assert_eq!(repo_for_domain("other.example"), None);
+
+        // What is no site's domain.
+        for bad in [
+            "localhost",
+            "example",
+            "x.icp0.io",
+            "icp0.io",
+            "a.b.ic0.app",
+            "x.raw.icp0.io",
+            "icp-api.io",
+            "1.2.3.4",
+            "-a.example",
+            "a-.example",
+            "a_b.example",
+            "a..example",
+            ".example",
+            "a.example.",
+            "A.example",
+            "xn--.example",
+            &format!("{}.example", "a".repeat(64)),
+            &format!("{}.example", ["abcdefghij"; 26].join(".")),
+        ] {
+            assert!(check_domain(bad).is_err(), "{bad}");
+        }
+        // Not refused for being long or odd-looking.
+        assert_eq!(check_domain("xn--bcher-kva.example"), Ok(()));
+        assert_eq!(check_domain("a.b.c.d.e.f.example"), Ok(()));
+        assert_eq!(check_domain("notlocalhost.example"), Ok(()), "only the reserved names themselves and what is under them");
+        assert_eq!(check_domain("icp0.io.example"), Ok(()));
+        let many: Vec<String> = (0..=MAX_DOMAINS).map(|i| format!("d{i}.example")).collect();
+        assert!(set_domains("dom-b", many).unwrap_err().contains("at most"));
+        assert_eq!(get_config("dom-b").unwrap().domains, ["app.example"], "the list before stays");
+
+        // A request's Host: the domain with its port, case and trailing dot
+        // gone; a gateway host, the local one, an IP are nobody's.
+        assert_eq!(repo_for_host(Some("App.Example:443")).as_deref(), Some("dom-b"));
+        assert_eq!(repo_for_host(Some("www.app.example.")).as_deref(), Some("dom-a"));
+        for none in [
+            "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io",
+            "umobs-yiaaa-aaaab-agyrq-cai.icp0.io",
+            "umobs-yiaaa-aaaab-agyrq-cai.raw.localhost:4950",
+            "localhost:4950",
+            "127.0.0.1:4950",
+            "[::1]:4950",
+            "other.example",
+            "app.example:x",
+            "",
+        ] {
+            assert_eq!(repo_for_host(Some(none)), None, "{none}");
+        }
+        assert_eq!(repo_for_host(None), None);
+
+        // The well-known file: every site's domains, sorted.
+        let file = domains_file();
+        assert!(file.contains("app.example\nwww.app.example\n"), "{file:?}");
+        assert!(file.lines().all(|l| check_domain(l).is_ok()));
+        set_domains("dom-a", vec![]).unwrap();
+        set_domains("dom-b", vec![]).unwrap();
+        assert!(!domains_file().contains("app.example"));
     }
 
     /// What the authority's votes do to a repo, as the git side sees it:

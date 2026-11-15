@@ -379,6 +379,28 @@ served() { served_at "$SITE"; }
 ic "$TEN" set_site '("e2e-app", "site")' >/dev/null
 TIP=$(git -C "$W" rev-parse HEAD)
 expect "served at the tip without votes" "$(served)" "^200 $TIP"
+
+section "custom domains"
+# docs/TENANCY.md, "Custom domains": a site at its own domain, which is
+# the whole origin there; the boundary nodes read /.well-known/ic-domains.
+# The Host goes through http_request itself: the local gateway routes by
+# canister id and carries no other host to the canister.
+at_host() { flat "$(call "$OP" git http_request "(record { method = \"${3:-GET}\"; url = \"$2\"; headers = vec { record { \"host\"; \"$1\" } }; body = blob \"\" })" --query)"; }
+expect "a voter may not name the domains" "$(ic "$V1" set_site_domains '("e2e-app", vec { "app.example" })')" 'does not own'
+expect "the owner names them, as looked up" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "App.Example."; "www.app.example" })')" 'Ok'
+expect "  ...get_site lists them" "$(flat "$(ic "$TEN" get_site '("e2e-app")' --query)")" 'domains = vec \{ "app.example"; "www.app.example" \}'
+expect "  ...and /.well-known/ic-domains does, for the boundary nodes" "$(curl -s "http://$HOST/.well-known/ic-domains")" '^www.app.example$'
+expect "the site at its domain, from its root" "$(at_host app.example /)" "X-Ic-Git-Commit\"; \"$TIP\".*status_code = 200"
+expect "  ...with its port, a blob of it" "$(at_host www.app.example:443 /index.html)" 'X-Ic-Git-Path"; "site/index.html".*status_code = 200'
+expect "  ...and nothing else of the canister there" "$(at_host app.example '/e2e-app.git/info/refs?service=git-upload-pack')" 'status_code = 404'
+expect "  ...not its JSON API" "$(at_host app.example /api/e2e-app/info)" 'not found in site bundle.*status_code = 404'
+expect "  ...nor a write" "$(at_host app.example /e2e-app.git/git-receive-pack POST)" 'status_code = 404'
+refuse "another host is not the site" "$(at_host other.example /)" 'X-Ic-Git-Commit'
+expect "a domain under the IC's own is refused" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "x.icp0.io" })')" 'own domains, where a host names a canister'
+expect "  ...and the list before it stays" "$(curl -s "http://$HOST/.well-known/ic-domains")" '^app.example$'
+expect "one domain is kept for the cut" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "app.example" })')" 'Ok'
+refuse "  ...the other is gone" "$(curl -s "http://$HOST/.well-known/ic-domains")" 'www'
+
 ic "$TEN" set_required_votes '("e2e-app", 1 : nat32)' >/dev/null
 expect "votes required, nothing approved: 404" "$(served)" '^404'
 ic "$TEN" vote "(\"e2e-app\", \"$TIP\", true)" >/dev/null
@@ -684,6 +706,7 @@ git -C "$W" reset -q --hard HEAD~1
 expect "a token cannot be minted" "$(ic "$TEN" create_push_token '("e2e-app", null, null)')" 'frozen'
 expect "a repo cannot be created" "$(ic "$TEN" create_repo '("while-frozen")')" 'frozen'
 expect "a site config cannot change" "$(ic "$TEN" set_site '("e2e-app", "site")')" 'frozen'
+expect "  ...nor its domains" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "app.example" })')" 'frozen'
 expect "an operator cannot write an object" "$(ic "$OP" put_object '("blob", blob "x")')" 'frozen'
 expect "  ...nor a ref" "$(ic "$OP" set_ref "(\"e2e-app\", \"refs/heads/x\", \"$A4\")")" 'frozen'
 expect "nothing was charged" "$(ic "$TEN" get_account "(principal \"$T\")")" "spent = $SPENT0 "

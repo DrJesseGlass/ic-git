@@ -219,7 +219,7 @@ type TxOutcome = record {
   contract_address : opt text;
 };
 type ResultTxOutcome = variant { Ok : TxOutcome; Err : text };
-type SiteConfig = record { root : text };
+type SiteConfig = record { root : text; domains : vec text };
 
 // The move to the git canister (docs/CANISTER_SPLIT.md, step 13): every
 // git-side record, in a fixed order, a page at a time, and the digest
@@ -408,6 +408,7 @@ service : {
 
   // F0: verifiable frontend serving (GET /site/<repo>/<path>)
   set_site : (text, text) -> (Result);
+  set_site_domains : (text, vec text) -> (Result);
   get_site : (text) -> (opt SiteConfig) query;
 
   // Track A: EVM deployment (E0 signing spine, E1 CREATE)

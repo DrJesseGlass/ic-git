@@ -145,6 +145,10 @@ impl<T: Transport> GitSide for Git<T> {
         Box::pin(send(&self.transport, wire::SetSite { repo: repo.into(), root }))
     }
 
+    fn set_site_domains<'a>(&'a self, repo: &'a str, domains: Vec<String>) -> Fut<'a, Reply<Result<(), String>>> {
+        Box::pin(send(&self.transport, wire::SetSiteDomains { repo: repo.into(), domains }))
+    }
+
     fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {
         Box::pin(send(&self.transport, wire::CheckNewRepo { name: name.into() }))
     }
@@ -337,6 +341,10 @@ mod tests {
                 let m: wire::SetSite = dec(arg);
                 enc(GIT.set_site(&m.repo, m.root).await.unwrap())
             }
+            m if m == wire::SetSiteDomains::METHOD => {
+                let m: wire::SetSiteDomains = dec(arg);
+                enc(GIT.set_site_domains(&m.repo, m.domains).await.unwrap())
+            }
             m if m == wire::CheckNewRepo::METHOD => {
                 let m: wire::CheckNewRepo = dec(arg);
                 enc(GIT.check_new_repo(&m.name).await.unwrap())
@@ -497,6 +505,11 @@ mod tests {
         assert_eq!(block_on(git.set_site(name, "/www/".into())), Ok(Ok(())));
         assert_eq!(ic_git_git::site::get_config(name).map(|c| c.root), Some("www".into()));
         assert!(block_on(git.set_site("peer-none", String::new())).unwrap().is_err(), "a repo the git side does not hold");
+        assert_eq!(block_on(git.set_site_domains(name, vec!["Peer.Example".into()])), Ok(Ok(())));
+        assert_eq!(ic_git_git::site::get_config(name).map(|c| c.domains), Some(vec!["peer.example".into()]));
+        assert_eq!(ic_git_git::site::repo_for_host(Some("peer.example:443")).as_deref(), Some(name));
+        assert!(block_on(git.set_site_domains(name, vec!["x.icp0.io".into()])).unwrap().is_err(), "the git side checks the names");
+        assert_eq!(block_on(git.set_site_domains(name, vec![])), Ok(Ok(())));
 
         let tip = push(name, b"module");
         assert_eq!(block_on(git.has_commit(&tip)), Ok(true));

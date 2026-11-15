@@ -135,6 +135,10 @@ impl GitSide for Git {
         ready(Ok(crate::transfer::check_unfrozen().and_then(|()| crate::site::set_config(repo, root))))
     }
 
+    fn set_site_domains<'a>(&'a self, repo: &'a str, domains: Vec<String>) -> Fut<'a, Reply<Result<(), String>>> {
+        ready(Ok(crate::transfer::check_unfrozen().and_then(|()| crate::site::set_domains(repo, domains))))
+    }
+
     fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {
         ready(Ok(crate::transfer::check_unfrozen().and_then(|()| store::check_new_repo(name))))
     }

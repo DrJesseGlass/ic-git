@@ -192,6 +192,23 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
                  tip, when none are required)."
             )
         }),
+        "set_site_domains" => args::<(String, Vec<String>)>(arg, m).map(|(repo, domains)| {
+            if domains.is_empty() {
+                format!("Serve the website of \"{repo}\" at no domain of its own any more: only at /site/{repo}/.")
+            } else {
+                // As the git side will keep them: lowercase, no trailing dot.
+                let at = domains
+                    .iter()
+                    .map(|d| format!("https://{}/", d.trim().trim_end_matches('.').to_ascii_lowercase()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "Serve the website of \"{repo}\" at {at}, as well as at /site/{repo}/. A domain reaches \
+                     it only once its DNS names this canister and the Internet Computer's boundary nodes \
+                     have registered it."
+                )
+            }
+        }),
         "evm_registry_publish_site" => args::<(String,)>(arg, m).map(|(repo,)| {
             format!(
                 "Publish a provenance record for the site of \"{repo}\" to the EVM registry: \
@@ -285,6 +302,8 @@ mod tests {
             ("deploy_now", encode_args(("ic-vote",)).unwrap(), &["now, without a push", "newest approved commit", "NEW contract", "charged to your ic-git balance"]),
             ("set_site", encode_args(("ic-vote", "site")).unwrap(), &["site/", "/site/ic-vote/"]),
             ("set_site", encode_args(("ic-vote", "")).unwrap(), &["repository root"]),
+            ("set_site_domains", encode_args(("ic-vote", vec!["Vote.Example.", "www.vote.example"])).unwrap(), &["https://vote.example/, https://www.vote.example/", "as well as at /site/ic-vote/", "boundary nodes"]),
+            ("set_site_domains", encode_args(("ic-vote", Vec::<String>::new())).unwrap(), &["no domain of its own", "only at /site/ic-vote/"]),
             ("evm_registry_publish_site", encode_args(("ic-vote",)).unwrap(), &["provenance record", "EVM action fee"]),
             ("deposit", encode_args(()).unwrap(), &["attached to this call"]),
         ];

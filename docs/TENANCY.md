@@ -403,13 +403,65 @@ whole limit times the fee cap when it sends.
 `/api/<repo>/info` reports `governed`. ic-vote's poll canister is the first
 intended user (docs/GOVERNANCE.md, section 7).
 
+## Custom domains
+
+A site is served at `/site/<repo>/` on the canister's own host. It can
+also be served at a domain of the tenant's own, where the whole origin is
+the site: `GET /` is the bundle's root, `GET /<path>` the blob at that
+path, and nothing else of the canister (no git, no `/api/`, no other
+site) is reached there. The bytes, and the `X-Ic-Git-*` headers that bind
+them to their commit, are the same as at `/site/<repo>/`.
+
+`set_site_domains(repo, domains)` names them: owner or operator, the whole
+list each time (empty takes the site off every domain). The git side
+checks each name and keeps the list in the site config, which `get_site`
+shows and the console edits. A domain is a DNS name as it would be looked
+up (lowercase, no trailing dot) of at least two labels, not an IP address,
+and not under the IC's own domains (`icp0.io`, `ic0.app`, `icp-api.io`,
+`localhost` and the like), where a host names a canister by its id. One
+repo holds a domain at a time: a second repo is refused it until the first
+gives it up, which an operator may do on any repo. A site has at most
+eight. Naming a domain does not turn serving on: `set_site` first.
+
+Reaching the canister at the domain is the IC's own custom-domain
+procedure, which the tenant drives (the boundary nodes' side is documented
+at internetcomputer.org under "custom domains"): DNS records for the
+domain (an ALIAS or CNAME to `icp1.io`, a `_canister-id` TXT record naming
+the canister, an `_acme-challenge` CNAME to
+`_acme-challenge.<domain>.icp2.io`), then a registration request to the
+boundary nodes, which read `GET /.well-known/ic-domains` on the canister
+and refuse a domain it does not list. That file is every domain any site
+here is served at, one per line, and `set_site_domains` is what puts a
+domain in it. The canister to name is the one serving the sites: umobs
+until the cut, the git canister after it (docs/CANISTER_SPLIT.md, step
+16), when a domain registered to umobs has to be registered again.
+There is no domain for the canister itself, only for sites: a domain a
+tenant names is that tenant's until an operator clears it, so an
+operator who wants one holds it on a repo of their own.
+
+What stands in the way today: a custom domain is reached through the
+IC's verifying gateway alone (there is no `.raw` form of it), which
+answers for a response carrying no certificate with a verification
+error, and ic-git certifies no site response yet (site.rs, "rung one":
+its sites are reached through the `.raw` gateway and verified by hash
+at the client). So the canister side of custom domains is complete and
+tested, and a domain is served live only once site responses are
+certified, which is its own leg.
+
+A domain is reached through the DNS its registrar serves, which nothing
+here checks. The clients (docs/EXTENSION.md) verify a site on the
+canister's own hosts only, so a page at a custom domain is loaded
+unchecked until they know the domain: a pinned list of domain to repo
+in the shared core, the next leg.
+
 ## Console
 
 The repo browser page gains a signed-in mode: connect a wallet, see balance
 and repos, create repos, mint, list and revoke push tokens, manage members and votes, deposit,
 and set what a push deploys (`set_wasm_deploy`, into the repo's app
 canister) and what is served as a site (`set_site`), run the configured
-deploy without a push (`deploy_now`), reinstall, and govern the backend.
+deploy without a push (`deploy_now`), name the site's own domains
+(`set_site_domains`), reinstall, and govern the backend.
 That is the whole tenant flow: nothing between a funded wallet and a
 deployed push needs dfx.
 

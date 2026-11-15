@@ -92,6 +92,12 @@ pub async fn set_site(repo: &str, root: String) -> Reply<Result<(), String>> {
     via!(set_site(repo, root))
 }
 
+/// The site's own domains, the whole list. The caller has checked the
+/// right to name them; the git side checks the names and keeps them.
+pub async fn set_site_domains(repo: &str, domains: Vec<String>) -> Reply<Result<(), String>> {
+    via!(set_site_domains(repo, domains))
+}
+
 /// Would a repo of this name be created? The authority asks before it
 /// charges the creation fee.
 pub async fn check_new_repo(name: &str) -> Reply<Result<String, String>> {
@@ -205,6 +211,10 @@ pub(crate) mod flaky {
 
         fn set_site<'a>(&'a self, repo: &'a str, root: String) -> Fut<'a, Reply<Result<(), String>>> {
             self.go("set_site", move || self.real.set_site(repo, root), Some(Err("refused by the git side".into())))
+        }
+
+        fn set_site_domains<'a>(&'a self, repo: &'a str, domains: Vec<String>) -> Fut<'a, Reply<Result<(), String>>> {
+            self.go("set_site_domains", move || self.real.set_site_domains(repo, domains), Some(Err("refused by the git side".into())))
         }
 
         fn check_new_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<String, String>>> {
