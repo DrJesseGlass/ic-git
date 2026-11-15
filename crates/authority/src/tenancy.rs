@@ -2295,13 +2295,19 @@ mod tests {
                 assert_eq!(calls[i - 1], "set_deploy_configs", "{calls:?}");
             }
         }
+        // The first repo by name, the gated one, did not take its deploy
+        // configs, and its approved set waits behind them: written alone,
+        // the git side would follow it with no configs and submit no job.
         assert_eq!(ic_git_git::site::served_commit("t-cut-open"), Ok(open));
-        assert_eq!(ic_git_git::site::served_commit("t-cut-gated"), Ok(approved), "not the tip {tip:?}");
         assert!(crate::mirror::may_write("t-cut-gated", &alice, false).is_ok());
         let pending: Vec<_> = mirrors::repos_pending().into_iter().filter(|r| r.starts_with("t-cut-")).collect();
-        assert_eq!(pending.len(), 1, "the write the git side did not take");
-        assert_eq!(mirrors::pending(&pending[0]), vec![Mirror::DeployConfigs]);
+        assert_eq!(pending, ["t-cut-gated"], "the repo whose write the git side did not take");
+        assert_eq!(mirrors::pending("t-cut-gated"), vec![Mirror::DeployConfigs, Mirror::Approved]);
+        assert_eq!(ic_git_git::site::served_commit("t-cut-gated"), Err(ic_git_git::site::AWAITING_AUTHORITY));
+        let before = git.calls.borrow().len();
         run(mirrors::flush_all());
+        assert_eq!(git.calls.borrow()[before..], ["set_deploy_configs", "set_approved"], "the retry, in order");
+        assert_eq!(ic_git_git::site::served_commit("t-cut-gated"), Ok(approved), "not the tip {tip:?}");
         assert!(mirrors::repos_pending().iter().all(|r| !r.starts_with("t-cut-")));
         crate::to_git::set_test_side(None);
     }

@@ -1100,6 +1100,9 @@ The cut on mainnet, in this order:
       set (`mirrors::ALL`): the git side follows a set it takes with the
       configs it holds then, so the other order would leave the app of a
       commit approved while the git canister was unnamed behind its site.
+      An unanswered write ends its repo's flush, so the mirrors after it
+      wait for the retry and go in the same order: the approved set never
+      lands ahead of deploy configs the git side did not take.
       The first push policy a repo's mirror takes revokes no token
       (`mirror::set_push_policy`): the imported tokens are what umobs'
       own revocations left at the freeze, and revoking by the git

@@ -196,8 +196,12 @@ async fn send(repo: &str, m: Mirror, seq: u64, retry: bool) -> Reply<()> {
 /// Write every marked mirror of the repo and clear the marks the git side
 /// answered. A mark made while a write was in flight (by another call of
 /// this canister) is newer than what was sent and stays, and so does a
-/// ballot's retry ask. An unanswered write leaves its mark and arms the
-/// retry.
+/// ballot's retry ask. An unanswered write leaves its mark, arms the
+/// retry, and ends the repo's flush: the mirrors after it in `ALL` stay
+/// marked and go with the retry, in order, so the approved set never
+/// lands ahead of deploy configs the git side did not take (the git side
+/// would follow it under the configs it held, and the deploy it should
+/// have submitted would be lost).
 pub async fn flush(repo: &str) {
     for m in ALL {
         let sent = load(repo);
@@ -211,7 +215,10 @@ pub async fn flush(repo: &str) {
                     save(repo, &p);
                 }
             }
-            Err(_) => arm_retry(std::time::Duration::from_secs(RETRY_SECS)),
+            Err(_) => {
+                arm_retry(std::time::Duration::from_secs(RETRY_SECS));
+                return;
+            }
         }
     }
 }
