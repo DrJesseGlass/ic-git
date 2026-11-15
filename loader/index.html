@@ -17,7 +17,10 @@
     1. reads get("R#site") from the registry on Sepolia -- through your
        wallet's provider when one is injected here and on Sepolia, else a
        public RPC;
-    2. fetches the served entrypoint, https://C.raw.icp0.io/site/R/;
+    2. fetches the served entrypoint, https://C.raw.icp0.io/site/R/, and
+       reads the page from whichever canister serves it: C until the
+       canister split, its pinned git canister after, when C redirects
+       there (anything else is refused);
     3. B: sha256(served) == the record's bundleHash;
     4. D: walks the record's commit to the site entrypoint through the
        canister's get_object query, checking every object's SHA-1 against
@@ -4274,11 +4277,23 @@ const Verifier = (() => {
     // nobody controls": an immutable controller is only as good as the
     // code it runs. A successor governor (a Handover vote) needs a new pin.
     governor: { id: '7kkwl-baaaa-aaaab-ag6rq-cai', module: 'a71ff65df07a3d3b79e383f7bf8b7bf912fd0bac5135936ed2c4cd90b68a641f' },
+    // The git canister (docs/CANISTER_SPLIT.md): after the cut it serves
+    // the sites and holds the objects, and `canister` above keeps the
+    // rest -- the registry's publisher, the app canisters' controller,
+    // the repo records of /api. Until then `canister` serves the sites
+    // too, and after it answers their old URLs with a redirect here; the
+    // two ids are the only hosts a site is read from.
+    git: '34koz-jyaaa-aaaab-ahejq-cai',
+    // The git canister's governor, pinned as `governor` is: { id, module }.
+    // Set when it is installed (step 15). Until then the git canister is
+    // judged as anything else its holder controls: ungoverned.
+    gitGovernor: null,
   };
   const GET_SELECTOR = '693ec85e'; // keccak256("get(string)")[..4], as in tools/verify.mjs
   const SITE_SUFFIX = '#site'; // provenance.rs::SITE_KEY_SUFFIX
   const APP_SUFFIX = '#app'; // provenance.rs::APP_KEY_SUFFIX: (commit, sha256 of the installed module)
   const CANISTER_KEY = 'ic-git#canister'; // provenance.rs::CANISTER_KEY: what ic-git itself runs
+  const GIT_KEY = 'ic-git#git'; // keys.rs::GIT_CANISTER_KEY: what the git canister runs
   // The NNS root canister: the one controller of the system canisters a page
   // may call (the ledgers, the cycles minting canister).
   const NNS_ROOT = 'r7inp-6aaaa-aaaaa-aaabq-cai';
@@ -4817,9 +4832,11 @@ function unverifiableSubresource(servedPath, body) {
     };
     return item();
   }
+  // Asked of the canister that serves the site (`host`, set by verify).
   async function query(o, method, arg) {
-    const content = { request_type: 'query', sender: Uint8Array.of(4), canister_id: principalBytes(o.canister), method_name: method, arg: textArg(arg), ingress_expiry: BigInt(Date.now() + 240_000) * 1_000_000n };
-    const r = await o.fetch(o.icApi + '/api/v2/canister/' + o.canister + '/query', { method: 'POST', headers: { 'content-type': 'application/cbor' }, body: cborEnc({ content }), signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const id = o.host || o.canister;
+    const content = { request_type: 'query', sender: Uint8Array.of(4), canister_id: principalBytes(id), method_name: method, arg: textArg(arg), ingress_expiry: BigInt(Date.now() + 240_000) * 1_000_000n };
+    const r = await o.fetch(o.icApi + '/api/v2/canister/' + id + '/query', { method: 'POST', headers: { 'content-type': 'application/cbor' }, body: cborEnc({ content }), signal: AbortSignal.timeout(TIMEOUT_MS) });
     if (!r.ok) throw new Error(method + ': HTTP ' + r.status);
     const res = cbor(new Uint8Array(await r.arrayBuffer()));
     if (res.status !== 'replied') throw new Error(method + ': ' + (res.reject_message || res.status));
@@ -4995,8 +5012,10 @@ function unverifiableSubresource(servedPath, body) {
   //               running an approved commit's build. Or ic-git itself,
   //               controlled by exactly the pinned governor, which has no
   //               controllers and runs the pinned module, with ic-git's
-  //               certified module hash the ic-git#canister record.
-  //   governed    ic-git under its governor as above, but running a module
+  //               certified module hash the ic-git#canister record. Or
+  //               the git canister, likewise under its own pinned
+  //               governor, with ic-git#git.
+  //   governed    ic-git (or the git canister) under its governor as above, but running a module
   //               the record does not name yet (the record follows each
   //               upgrade by a block or two, and a failed publish leaves
   //               it behind). Allowed, warned: the change was still voted.
@@ -5036,7 +5055,9 @@ function unverifiableSubresource(servedPath, body) {
         Object.assign(b, { kind: 'blocked', detail: 'governed by ic-git, but runs module ' + (st.moduleHash || 'none').slice(0, 16) + '... where the record approves ' + rec.bundleHash.slice(0, 16) + '... (commit ' + rec.commit.slice(0, 12) + ')' });
       }
     } else if (canisterId === o.canister && ctl.length === 1 && o.governor && ctl[0] === o.governor.id) {
-      Object.assign(b, await judgeGoverned(o, st));
+      Object.assign(b, await judgeGoverned(o, st, o.governor, CANISTER_KEY));
+    } else if (canisterId === o.git && ctl.length === 1 && o.gitGovernor && ctl[0] === o.gitGovernor.id) {
+      Object.assign(b, await judgeGoverned(o, st, o.gitGovernor, GIT_KEY));
     } else if (ctl.length === 0) {
       Object.assign(b, { kind: 'immutable', ok: true, detail: 'controlled by nobody: its code can never change' });
     } else {
@@ -5047,13 +5068,14 @@ function unverifiableSubresource(servedPath, body) {
     return b;
   }
 
-  // ic-git under its governor: approved when the governor is the one
-  // recorded (no controllers, the pinned module) and ic-git runs what
-  // ic-git#canister names. ic-git is never blocked here -- every page is
-  // served by it -- so each shortfall is a warning that says what fell
-  // short. The governor's own state is certified like any other.
-  async function judgeGoverned(o, st) {
-    const g = o.governor, gid = g.id.slice(0, 5) + '...';
+  // ic-git, or the git canister, under its governor `g`: approved when the
+  // governor is the one recorded (no controllers, the pinned module) and
+  // the canister runs what its record (`key`) names. Neither is ever
+  // blocked here -- every page is served by one of them -- so each
+  // shortfall is a warning that says what fell short. The governor's own
+  // state is certified like any other.
+  async function judgeGoverned(o, st, g, key) {
+    const gid = g.id.slice(0, 5) + '...';
     let gs;
     try { gs = await readCanisterState(g.id, o); } catch (e) { gs = { certified: false, checks: [{ ok: false, detail: e.message }] }; }
     const ungoverned = why => ({ kind: 'ungoverned', ok: true, warn: true, detail: 'controlled by its governor ' + gid + ', but ' + why + ': its code may change without a vote' });
@@ -5065,18 +5087,19 @@ function unverifiableSubresource(servedPath, body) {
     if (gs.moduleHash !== g.module) return ungoverned('the governor runs module ' + (gs.moduleHash || 'none').slice(0, 16) + '..., not the recorded ' + g.module.slice(0, 16) + '...');
     const voted = 'governed by its governor ' + gid + ' (no controllers; code changes only by its approvers\' vote)';
     let rec;
-    try { rec = decodeGet((await readRecord(o, CANISTER_KEY)).ret); } catch (e) {
-      return { kind: 'governed', ok: true, warn: true, detail: voted + '; its ' + CANISTER_KEY + ' record could not be read: ' + e.message };
+    try { rec = decodeGet((await readRecord(o, key)).ret); } catch (e) {
+      return { kind: 'governed', ok: true, warn: true, detail: voted + '; its ' + key + ' record could not be read: ' + e.message };
     }
     if (rec.present && st.moduleHash === rec.bundleHash) {
       return { kind: 'approved', ok: true, warn: gs.stale, detail: voted + '; runs the recorded build of commit ' + rec.commit.slice(0, 12) + (gs.stale ? '; the governor\'s certificate is stale' : '') };
     }
     return { kind: 'governed', ok: true, warn: true, detail: voted + '; but runs module ' + (st.moduleHash || 'none').slice(0, 16) + '...'
-      + (rec.present ? ', where ' + CANISTER_KEY + ' records ' + rec.bundleHash.slice(0, 16) + '... (commit ' + rec.commit.slice(0, 12) + ')' : ', and the registry holds no ' + CANISTER_KEY + ' record') };
+      + (rec.present ? ', where ' + key + ' records ' + rec.bundleHash.slice(0, 16) + '... (commit ' + rec.commit.slice(0, 12) + ')' : ', and the registry holds no ' + key + ' record') };
   }
 
   // The canisters a verified page of `repo` may call, judged one by one:
-  // ic-git itself (every page reads it), the system canisters the console
+  // ic-git itself (every page reads it), the git canister when it is the
+  // one serving the site (`host`, as verify found it), the system canisters the console
   // and wallets use, and the repo's app canister if it has one (asked of
   // ic-git's API, which may lie about the id -- the judgment of that id is
   // certified, so the worst a lie buys is a different canister allowed on
@@ -5091,7 +5114,7 @@ function unverifiableSubresource(servedPath, body) {
     let ids = o.canisters;
     let note = '';
     if (!ids) {
-      ids = [o.canister, ...Object.keys(SYSTEM)];
+      ids = [o.canister, ...(o.host && o.host !== o.canister ? [o.host] : []), ...Object.keys(SYSTEM)];
       try {
         const r = await o.fetch('https://' + o.canister + '.raw.icp0.io/api/' + encodeURIComponent(repo) + '/info', { cache: 'no-store', signal: AbortSignal.timeout(TIMEOUT_MS) });
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -5187,24 +5210,42 @@ function unverifiableSubresource(servedPath, body) {
     return 'script-src ' + await sources(page.scripts) + '; style-src ' + await sources(page.styles) + "; object-src 'none'; frame-src 'none'; base-uri 'none'";
   }
 
+  // The site's page on a canister's raw gateway host.
+  const siteUrl = (id, repo) => 'https://' + id + '.raw.icp0.io/site/' + encodeURIComponent(repo) + '/';
+  // The canister a raw gateway URL is served by, or null.
+  const hostOf = href => { try { const m = /^([a-z0-9-]+)\.raw\.icp0\.io$/.exec(new URL(href).hostname); return m ? m[1] : null; } catch (_) { return null; } };
+
+  // Verify a repo's site as `host` serves it (`git` or `canister`), and
+  // only as it serves it: a redirect elsewhere fails. With no host, the
+  // site is fetched at ic-git's own URL, which serves it until the cut and
+  // redirects to the git canister after, and the host is the canister
+  // that answered -- one of the two pinned ids, or the check fails. The
+  // page's objects are then read from that host.
   async function verify(options) {
     const o = { ...DEFAULTS, ...options };
     o.fetch = o.fetch || globalThis.fetch.bind(globalThis);
     const key = o.repo + SITE_SUFFIX;
-    const url = 'https://' + o.canister + '.raw.icp0.io/site/' + encodeURIComponent(o.repo) + '/';
     const checks = [];
     const check = (id, ok, label, detail) => { checks.push({ id, ok, label, detail: detail || '' }); return ok; };
-    const out = { repo: o.repo, key, url, checks, verified: false };
+    const out = { repo: o.repo, key, url: siteUrl(o.host || o.canister, o.repo), checks, verified: false };
+    if (o.host && o.host !== o.canister && o.host !== o.git) { check('S', false, 'fetch the served page', o.host + ' is not an ic-git canister'); return out; }
 
-    const [reg, res, site] = await Promise.all([
+    const [reg, res] = await Promise.all([
       readRecord(o, key).catch(e => e),
-      o.fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(TIMEOUT_MS) }).catch(e => e),
-      query(o, 'get_site', o.repo).catch(e => e),
+      o.fetch(out.url, { cache: 'no-store', signal: AbortSignal.timeout(TIMEOUT_MS) }).catch(e => e),
     ]);
     if (reg instanceof Error) { check('R', false, 'read the registry', reg.message); return out; }
     Object.assign(out, { via: reg.via, note: reg.note, record: decodeGet(reg.ret) });
     if (!check('R', out.record.present, 'the registry holds "' + key + '"', out.record.present ? '' : 'no record at ' + o.registry)) return out;
     if (res instanceof Error || !res.ok) { check('S', false, 'fetch the served page', res instanceof Error ? res.message : 'HTTP ' + res.status); return out; }
+    // Where the page came from, after any redirect: a fetch that was not
+    // redirected (or a test's, which says nothing) came from where it went.
+    const landed = res.redirected && res.url ? hostOf(res.url) : (o.host || o.canister);
+    if (landed !== o.canister && landed !== o.git) { check('S', false, 'fetch the served page', 'it was served from ' + (res.url || 'an unknown host') + ', which is no ic-git canister'); return out; }
+    if (o.host && landed !== o.host) { check('S', false, 'fetch the served page', 'it was redirected to ' + res.url + ': ' + o.host + ' no longer serves it'); return out; }
+    o.host = out.host = landed;
+    out.url = siteUrl(landed, o.repo);
+    const site = await query(o, 'get_site', o.repo).catch(e => e);
     const served = new Uint8Array(await res.arrayBuffer());
     out.bytes = served;
 
@@ -5236,7 +5277,7 @@ function unverifiableSubresource(servedPath, body) {
     // What an extension pins; the loader does not need it. Check E made the
     // same walk, so a page that verifies is one this pins.
     if (out.verified) {
-      try { out.policy = await derivePolicy(served, url); } catch (e) { out.policyError = e.message; }
+      try { out.policy = await derivePolicy(served, out.url); } catch (e) { out.policyError = e.message; }
     }
     return out;
   }
@@ -5344,7 +5385,7 @@ function unverifiableSubresource(servedPath, body) {
       // section 4): a governed one must run its approved build, a system
       // one belong to the NNS; an ungoverned one is allowed and said.
       if (r.verified) {
-        const be = await Verifier.checkBackends(repo, opts).catch(e => ({ ok: false, backends: [],
+        const be = await Verifier.checkBackends(repo, { ...opts, host: r.host }).catch(e => ({ ok: false, backends: [],
           check: { id: 'G', ok: false, label: 'the canisters the page may call are approved or system canisters', detail: e.message || String(e) } }));
         // The rows below name each canister, so the check's own detail
         // keeps only the note.

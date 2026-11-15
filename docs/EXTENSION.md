@@ -11,9 +11,20 @@ origin, cannot offer. This is the F2 rung of VISION.md.
 - `extension-firefox/` -- Firefox (Manifest V3). The stronger of the two;
   recommended where the guarantee matters most (operators, observers).
 
-Scope: pages under `/site/` on `umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io`,
+Scope: pages under `/site/` on `umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io`
+(ic-git) and `34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io` (its git canister),
 which covers the console (`ic-git`) and ic-vote. Nothing to do when a page
 verifies; an unmissable stop when it does not.
+
+Two hosts because of the canister split (docs/CANISTER_SPLIT.md): ic-git
+serves the sites until the cut, the git canister after, and ic-git then
+answers a site's old URL with a permanent redirect to the git canister. A
+site is a repo on one host, checked as that host serves it -- the core's
+`verify` with `host`, which fails a page that host only redirects -- and
+its objects are read from that host. With no host (the loader), `verify`
+fetches ic-git's URL and takes the host from where the page came from, one
+of the two pinned ids or the check fails. Both ids are pinned in the core
+(`DEFAULTS.canister`, `DEFAULTS.git`); a redirect cannot add a third.
 
 ## What it checks
 
@@ -58,8 +69,12 @@ controllers, never ic-git's. For each canister:
   certified state shows no controllers and the module `verified.json`
   records for it, and ic-git's certified module hash is the
   `ic-git#canister` record. ic-git's code then changes only by its
-  approvers' vote, and the chain says which build it runs.
-- **governed** -- ic-git under that governor, but running a module the
+  approvers' vote, and the chain says which build it runs. Or the git
+  canister, when it serves the site: likewise under its own governor,
+  pinned in the core (`DEFAULTS.gitGovernor`, set when the governor is
+  installed at step 15 of the split; until then the git canister is
+  ungoverned), and running what `ic-git#git` records.
+- **governed** -- ic-git (or the git canister) under that governor, but running a module the
   `ic-git#canister` record does not name (yet: the record follows an
   upgrade by a block or two, and a failed publish leaves it behind until
   the next). Allowed, warned: the change was still voted. ic-git is never
@@ -99,10 +114,10 @@ Enforcement:
   it is told to reload under the pinned policy -- so no first-visit
   reload is spent on them (decision 4 of docs/GOVERNANCE.md, settled:
   derive the list, do not reload). Per tab, because the verdict is per
-  site and every site shares one origin: a canister approved for site A
-  is not thereby open to site B. A call to a canister nobody judged is
-  blocked with no feedback but the badge text; "open anyway" opens that
-  tab's calls along with its scripts.
+  site and every site on a host shares its origin: a canister approved
+  for site A is not thereby open to site B. A call to a canister nobody
+  judged is blocked with no feedback but the badge text; "open anyway"
+  opens that tab's calls along with its scripts.
 - **Firefox:** the request listener holds each call from a `/site/` page
   to an IC API host, finds the canister in the site's judged backends or
   judges it on the spot (a verdict from a certified read is kept with

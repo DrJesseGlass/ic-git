@@ -25,16 +25,20 @@
 // is checkBackends', shared with Chrome and the loader; the known backends
 // are judged with the site, so its first calls do not wait, and an
 // unknown one is judged as it is called.
+//
+// Two hosts serve sites (docs/CANISTER_SPLIT.md): ic-git until the canister
+// split, the git canister after, when ic-git's /site/ URLs redirect there.
+// A site is a repo on one host, checked as that host serves it.
 
-const CANISTER = Verifier.DEFAULTS.canister;
-const ORIGIN = 'https://' + CANISTER + '.raw.icp0.io';
+const HOSTS = [Verifier.DEFAULTS.canister, Verifier.DEFAULTS.git];
+const originOf = host => 'https://' + host + '.raw.icp0.io';
 // The registry is read through both; they must return the same answer.
 const RPCS = ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'];
 const REFRESH_MINUTES = 10;
 const BLOCK = "script-src 'none'; object-src 'none'; base-uri 'none'";
 const BARE = '<!doctype html><html><head><meta charset="utf-8"><title>ic-git verifier</title></head><body></body></html>';
 const REFRESH = '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0"><title>ic-git verifier</title></head><body></body></html>';
-const FILTER = { urls: [ORIGIN + '/site/*'], types: ['main_frame'] };
+const FILTER = { urls: HOSTS.map(h => originOf(h) + '/site/*'), types: ['main_frame'] };
 // The IC's API, on every host that serves it; pages use icp-api.io. The
 // others need host permissions MV3 Firefox grants on install but not on
 // an update, so whether a call through them can be cancelled is checked
@@ -70,17 +74,22 @@ const twoRpcs = {
 
 const hex = bytes => Array.from(bytes, x => x.toString(16).padStart(2, '0')).join('');
 const sha256 = async bytes => hex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
-const entryUrl = repo => ORIGIN + '/site/' + encodeURIComponent(repo) + '/';
+const entryUrl = (host, repo) => originOf(host) + '/site/' + encodeURIComponent(repo) + '/';
+// A site's key in state: its host and repo.
+const keyOf = (host, repo) => host + '/' + repo;
 
-// Which site a URL is the entrypoint of, or null.
+// Which site a URL is the entrypoint of -- { host, repo } -- or null.
 function siteOf(href) {
   try {
     const u = new URL(href);
-    if (u.origin !== ORIGIN) return null;
+    const host = HOSTS.find(h => u.origin === originOf(h));
+    if (!host) return null;
     const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
-    return m ? decodeURIComponent(m[1]) : null;
+    return m ? { host, repo: decodeURIComponent(m[1]) } : null;
   } catch (_) { return null; } // not a URL, or a malformed escape
 }
+// Whether a URL is a page under /site/ on one of the hosts.
+const onSiteHost = href => { try { const u = new URL(href); return HOSTS.some(h => u.origin === originOf(h)) && u.pathname.startsWith('/site/'); } catch (_) { return false; } };
 
 // --- state (storage.session: it outlives this event page, not the browser) ---
 // Each read-modify-write of stored state runs alone: two that overlapped
@@ -94,19 +103,20 @@ const exclusive = fn => {
 const load = async () => (await browser.storage.session.get('sites')).sites || {};
 const remember = site => exclusive(async () => {
   const sites = await load();
-  sites[site.repo] = site;
+  sites[keyOf(site.host, site.repo)] = site;
   await browser.storage.session.set({ sites });
 });
 
 // --- verification ---
-// With `delivered`, the core checks those bytes -- the ones that actually
-// arrived -- instead of fetching the page again.
-async function check(repo, delivered) {
-  const url = entryUrl(repo);
+// The site as `host` serves it. With `delivered`, the core checks those
+// bytes -- the ones that actually arrived -- instead of fetching the page
+// again.
+async function check(host, repo, delivered) {
+  const url = entryUrl(host, repo);
   const via = delivered
     ? (u, init) => (u === url ? Promise.resolve(new Response(delivered, { status: 200 })) : fetch(u, init))
     : undefined;
-  const opts = { repo, provider: twoRpcs, providerOnly: true, providerName: 'two RPCs', fetch: via };
+  const opts = { repo, host, provider: twoRpcs, providerOnly: true, providerName: 'two RPCs', fetch: via };
   const r = await Verifier.verify(opts);
   // The backends only matter for a page that will run; they are judged
   // with the site so its first calls find their verdicts waiting.
@@ -120,7 +130,7 @@ async function check(repo, delivered) {
     warning = be.warning;
   }
   return {
-    repo, checkedAt: Date.now(),
+    host, repo, checkedAt: Date.now(),
     status: r.verified && r.policy ? 'verified' : r.verified ? 'unpinnable' : 'failed',
     commit: r.record && r.record.commit, bundleHash: r.record && r.record.bundleHash,
     policy: r.policy || null, policyError: r.policyError || null, checks: r.checks, via: r.via,
@@ -128,12 +138,13 @@ async function check(repo, delivered) {
   };
 }
 
-// The verdict on one canister a page of `repo` is calling, from the site's
-// judged backends or, for one not among them, a judgment made now. A
-// verdict from a certified read is kept with the site until its next
+// The verdict on one canister a page of the site is calling, from the
+// site's judged backends or, for one not among them, a judgment made now.
+// A verdict from a certified read is kept with the site until its next
 // check; an unreadable one is not, since the next call may well read.
-async function backend(repo, canisterId) {
-  const site = (await load())[repo];
+async function backend(host, repo, canisterId) {
+  const key = keyOf(host, repo);
+  const site = (await load())[key];
   const known = site && (site.backends || []).find(b => b.canister === canisterId);
   if (known) return known;
   const be = await Verifier.checkBackends(repo, { provider: twoRpcs, providerOnly: true, providerName: 'two RPCs', canisters: [canisterId] })
@@ -141,7 +152,7 @@ async function backend(repo, canisterId) {
   const b = be.backends[0];
   if (site && b.kind !== 'unreadable') await exclusive(async () => {
     const sites = await load();
-    const s = sites[repo];
+    const s = sites[key];
     if (s && !(s.backends || []).some(x => x.canister === canisterId)) { s.backends = [...(s.backends || []), b]; await browser.storage.session.set({ sites }); }
   });
   return b;
@@ -149,24 +160,25 @@ async function backend(repo, canisterId) {
 
 // The site's own state, from a fresh fetch. Concurrent callers share a run.
 const inFlight = new Map();
-function verifySite(repo) {
-  if (inFlight.has(repo)) return inFlight.get(repo);
-  const run = check(repo).then(async site => { await remember(site); return site; });
-  inFlight.set(repo, run);
-  run.finally(() => inFlight.delete(repo)).catch(() => {});
+function verifySite(host, repo) {
+  const key = keyOf(host, repo);
+  if (inFlight.has(key)) return inFlight.get(key);
+  const run = check(host, repo).then(async site => { await remember(site); return site; });
+  inFlight.set(key, run);
+  run.finally(() => inFlight.delete(key)).catch(() => {});
   return run;
 }
 
-const failedSite = (repo, e) => ({
-  repo, status: 'failed', checkedAt: Date.now(),
+const failedSite = (host, repo, e) => ({
+  host, repo, status: 'failed', checkedAt: Date.now(),
   checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message || String(e) }],
 });
 
 // --- tabs ---
-const allowedKey = (tabId, repo) => tabId + ':' + repo;
-async function allowed(tabId, repo) {
+const allowedKey = (tabId, key) => tabId + ':' + key;
+async function allowed(tabId, key) {
   const { allowed = {} } = await browser.storage.session.get('allowed');
-  return Boolean(allowed[allowedKey(tabId, repo)]);
+  return Boolean(allowed[allowedKey(tabId, key)]);
 }
 
 function badge(tabId, state, site) {
@@ -208,14 +220,18 @@ function settle(d, status, site) {
 const applied = new Map(); // requestId -> the policy set on its headers
 
 browser.webRequest.onHeadersReceived.addListener(async d => {
-  const repo = siteOf(d.url);
+  // A redirect (ic-git's old /site/ URLs after the cut) loads no page here:
+  // the page it leads to is held and checked on its own host.
+  if (d.statusCode >= 300 && d.statusCode < 400) return {};
+  const at = siteOf(d.url);
   let policy = BLOCK;
-  if (repo !== null) {
-    if (await allowed(d.tabId, repo)) { applied.set(d.requestId, null); return {}; }
-    let site = (await load())[repo];
+  if (at !== null) {
+    const { host, repo } = at;
+    if (await allowed(d.tabId, keyOf(host, repo))) { applied.set(d.requestId, null); return {}; }
+    let site = (await load())[keyOf(host, repo)];
     if (!site || site.status !== 'verified' || Date.now() - site.checkedAt > REFRESH_MINUTES * 60_000) {
       badge(d.tabId, 'checking', { repo });
-      site = await verifySite(repo).catch(e => failedSite(repo, e));
+      site = await verifySite(host, repo).catch(e => failedSite(host, repo, e));
     }
     if (site.status === 'verified') policy = site.policy;
   }
@@ -243,7 +259,7 @@ browser.webRequest.onBeforeRequest.addListener(d => {
     let at = 0;
     for (const c of chunks) { bytes.set(c, at); at += c.length; }
     let out;
-    try { out = await decide(d, bytes); } catch (e) { settle(d, 'failed', failedSite(siteOf(d.url) || '', e)); out = BARE; }
+    try { out = await decide(d, bytes); } catch (e) { const at = siteOf(d.url) || {}; settle(d, 'failed', failedSite(at.host, at.repo || '', e)); out = BARE; }
     applied.delete(d.requestId);
     filter.write(typeof out === 'string' ? new TextEncoder().encode(out) : out);
     filter.close();
@@ -252,10 +268,11 @@ browser.webRequest.onBeforeRequest.addListener(d => {
 
 // What the tab gets for a held response: its own bytes, or a document of ours.
 async function decide(d, bytes) {
-  const repo = siteOf(d.url);
-  if (repo === null) { settle(d, 'uncovered'); return BARE; }
-  if (await allowed(d.tabId, repo)) { settle(d, 'allowed', { repo }); return bytes; }
-  const site = (await load())[repo];
+  const at = siteOf(d.url);
+  if (at === null) { settle(d, 'uncovered'); return BARE; }
+  const { host, repo } = at;
+  if (await allowed(d.tabId, keyOf(host, repo))) { settle(d, 'allowed', { repo }); return bytes; }
+  const site = (await load())[keyOf(host, repo)];
   const policy = applied.get(d.requestId);
   if (site && site.status === 'verified' && await sha256(bytes) === site.bundleHash) {
     if (policy === site.policy) { settle(d, 'verified', site); return bytes; }
@@ -268,7 +285,7 @@ async function decide(d, bytes) {
   // else is stopped. A failure here is this navigation's, not the site's --
   // a targeted man in the middle can tamper with one response while the
   // record and every other fetch are honest -- so it is not remembered.
-  const mine = await check(repo, bytes).catch(e => failedSite(repo, e));
+  const mine = await check(host, repo, bytes).catch(e => failedSite(host, repo, e));
   if (mine.status === 'verified') { await remember(mine); settle(d, 'checking', mine); return REFRESH; }
   settle(d, mine.status, mine);
   return BARE;
@@ -279,26 +296,27 @@ async function decide(d, bytes) {
 // API. Not ours: anything else, this extension's own reads among them.
 browser.webRequest.onBeforeRequest.addListener(async d => {
   const page = d.documentUrl || d.originUrl || '';
-  let repo;
-  try { const u = new URL(page); if (u.origin !== ORIGIN || !u.pathname.startsWith('/site/')) return {}; repo = siteOf(page); } catch (_) { return {}; }
-  if (repo === null) return { cancel: true }; // no record covers the page: it may call nothing
+  if (!onSiteHost(page)) return {};
+  const at = siteOf(page);
+  if (at === null) return { cancel: true }; // no record covers the page: it may call nothing
+  const { host, repo } = at, key = keyOf(host, repo);
   const u = new URL(d.url);
   // The gateway hosts serve other things too (a canister's own
   // /api/<repo>/... routes, say), which are not ours.
   if (!API_PATH.test(u.pathname)) return {};
-  if (await allowed(d.tabId, repo)) return {};
+  if (await allowed(d.tabId, key)) return {};
   const m = CANISTER_PATH.exec(u.pathname);
   // Only the one host pages are expected to use, and only canister calls:
   // anything else of the IC's API is cancelled unjudged.
-  if (u.host !== 'icp-api.io' || !m) { noteBlocked(d.tabId, repo, u.host + u.pathname + ' (not a canister call on icp-api.io)'); return { cancel: true }; }
-  const b = await backend(repo, m[1]);
+  if (u.host !== 'icp-api.io' || !m) { noteBlocked(d.tabId, host, repo, u.host + u.pathname + ' (not a canister call on icp-api.io)'); return { cancel: true }; }
+  const b = await backend(host, repo, m[1]);
   if (b.ok) return {};
-  noteBlocked(d.tabId, repo, 'canister ' + m[1] + ', ' + b.detail);
+  noteBlocked(d.tabId, host, repo, 'canister ' + m[1] + ', ' + b.detail);
   return { cancel: true };
 }, API_FILTER, ['blocking']);
 
-async function noteBlocked(tabId, repo, what) {
-  const site = (await load())[repo] || { repo };
+async function noteBlocked(tabId, host, repo, what) {
+  const site = (await load())[keyOf(host, repo)] || { repo };
   badge(tabId, 'blockedCall', { ...site, blocked: what });
 }
 
@@ -311,21 +329,24 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     if (r && r.url === msg.url) return { status: r.status, site: r.site };
     // No held response for this page (one restored from history, say):
     // say what the site's state is, and let a reload settle the rest.
-    const repo = siteOf(msg.url);
-    if (repo === null) return { status: 'uncovered' };
-    const site = (await load())[repo];
-    return site && site.status === 'verified' ? { status: 'verified', site: summary(site) } : { status: 'checking', site: { repo } };
+    const at = siteOf(msg.url);
+    if (at === null) return { status: 'uncovered' };
+    const site = (await load())[keyOf(at.host, at.repo)];
+    return site && site.status === 'verified' ? { status: 'verified', site: summary(site) } : { status: 'checking', site: { repo: at.repo } };
   }
+  // The other messages name a repo, on the host of the page that sends them.
+  const at = siteOf(sender.url);
+  if (!at || at.repo !== msg.repo) return { error: 'this page is no site\'s entrypoint' };
   if (msg.type === 'allow') {
     await exclusive(async () => {
       const { allowed = {} } = await browser.storage.session.get('allowed');
-      allowed[allowedKey(tabId, msg.repo)] = true;
+      allowed[allowedKey(tabId, keyOf(at.host, at.repo))] = true;
       await browser.storage.session.set({ allowed });
     });
     return { ok: true };
   }
   if (msg.type === 'retry') {
-    const site = await verifySite(msg.repo).catch(e => failedSite(msg.repo, e));
+    const site = await verifySite(at.host, at.repo).catch(e => failedSite(at.host, at.repo, e));
     return { status: site.status, site: summary(site) };
   }
   return { error: 'unknown message' };
@@ -350,5 +371,5 @@ browser.tabs.onRemoved.addListener(tabId => {
 browser.alarms.get('refresh').then(a => { if (!a) browser.alarms.create('refresh', { periodInMinutes: REFRESH_MINUTES }); });
 browser.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name !== 'refresh') return;
-  for (const repo of Object.keys(await load())) await verifySite(repo).catch(() => {});
+  for (const site of Object.values(await load())) if (site.host) await verifySite(site.host, site.repo).catch(() => {});
 });

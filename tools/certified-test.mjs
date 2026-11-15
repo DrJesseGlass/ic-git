@@ -337,6 +337,31 @@ for (const id of [UMOBS, LEDGER]) {
   assert.equal(b.kind, 'ungoverned'); assert.match(b.detail, /not governed: controlled by 7kkwl/);
   pass('...a governor running another module, one whose state cannot be certified, or one that is not the pinned id: ungoverned');
 
+  // The git canister (docs/CANISTER_SPLIT.md, step 14) is judged as
+  // ic-git is, under a governor of its own and by its own record,
+  // ic-git#git. The captured governed canister stands in for it here, and
+  // the registry answers only for that key, so a judgment that read
+  // ic-git#canister would find no record.
+  const keyHex = k => Buffer.from(k).toString('hex');
+  const byKey = (key, rec) => ({ request: async ({ method, params }) => method === 'eth_chainId' ? '0xaa36a7'
+    : params[0].data.includes(keyHex(key)) ? registry(rec).request({ method, params }) : '0x' + '0'.repeat(192) });
+  const asGit = { canister: 'aaaaa-aa', git: UMOBS, gitGovernor: { id: GOV, module: gov.moduleHash } };
+  [r, b] = await judge({ ...asGit, provider: byKey('ic-git#git', umobs.moduleHash) });
+  assert.equal(b.kind, 'approved'); assert.ok(r.ok && !r.warn);
+  assert.match(b.detail, /governed by its governor 7kkwl.*recorded build of commit 018bf4d5b274/);
+  [r, b] = await judge({ ...asGit, provider: byKey('ic-git#canister', umobs.moduleHash) });
+  assert.equal(b.kind, 'governed'); assert.match(b.detail, /holds no ic-git#git record/);
+  pass('the git canister under its pinned governor, running what ic-git#git records: approved; ic-git#canister is not its record');
+  [r, b] = await judge({ ...asGit, gitGovernor: null, provider: byKey('ic-git#git', umobs.moduleHash) });
+  assert.equal(b.kind, 'ungoverned'); assert.ok(r.ok && r.warn); assert.match(b.detail, /not governed: controlled by 7kkwl/);
+  [r, b] = await judge({ ...asGit, gitGovernor: { id: GOV, module: '00'.repeat(32) }, provider: byKey('ic-git#git', umobs.moduleHash) });
+  assert.equal(b.kind, 'ungoverned'); assert.match(b.detail, /not the recorded 00000000/);
+  pass('...with no governor pinned for it, or one running another module: ungoverned');
+  assert.equal(Verifier.DEFAULTS.git, '34koz-jyaaa-aaaab-ahejq-cai');
+  const ids = JSON.parse(read('../canister_ids.json'));
+  assert.equal(ids.git_canister.ic, Verifier.DEFAULTS.git);
+  pass('the pinned git canister is canister_ids.json\'s git_canister');
+
   // The pin is the recorded governor: the one in verified.json.
   const rec = JSON.parse(read('../verified.json')).governor;
   const pin = Verifier.DEFAULTS.governor;
