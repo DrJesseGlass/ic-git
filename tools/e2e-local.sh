@@ -39,7 +39,10 @@
 # freeze and the copy (docs/CANISTER_SPLIT.md, step 13: the git side
 # frozen, its writes refused naming the cut, a git canister pulling every
 # record in pages, and both digests agreeing); the console's query-backed
-# reads through the page's own code, and the /api reads.
+# reads through the page's own code, and the /api reads; and last, the cut
+# itself (step 16.1 to 16.5: the copy pulled afresh and governed, the
+# combined canister upgraded to the authority build, the copy named, every
+# mirror rewritten, the copy thawed and pushed to).
 #
 # E2E_SPLIT=1 runs the user flows against the authority and git canisters
 # instead: the git canister is governed before the authority names it (the
@@ -206,6 +209,7 @@ cat > "$WORK/dfx.json" <<EOF
     "base": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
     "ruled": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
     "copy": { "type": "custom", "wasm": "$GITC_WASM", "candid": "$GITC_DID", "build": [] },
+    "copygov": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] },
     "governor": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] }$NAMES_ENTRY
   },
   "networks": { "local": { "bind": "127.0.0.1:$PORT", "type": "ephemeral" } }
@@ -235,7 +239,7 @@ if [ "$SPLIT" = 1 ]; then
   expect "the authority is not its own git canister" "$(call "$OP" authority set_git_canister "(principal \"$A\")")" 'its own git canister'
   expect "a git canister controlled by a person is refused" "$(call "$OP" authority set_git_canister "(principal \"$G\")")" 'controller|canister_info'
   expect "  ...and nothing is named" "$(call "$OP" authority get_git_canister --query)" '^\(null\)$'
-  expect "  ...so a repo cannot be created yet" "$(call "$OP" authority create_repo '("too-early")')" 'not set|not delivered'
+  expect "  ...so a repo cannot be created yet" "$(call "$OP" authority create_repo '("too-early")')" 'not named yet|not delivered'
   (cd "$WORK" && dfx canister create gitgov --identity "$OP" --no-wallet --with-cycles 20000000000000 >/dev/null 2>&1)
   (cd "$WORK" && dfx canister install gitgov --identity "$OP" --wasm "$GOV_WASM" \
     --argument "(record { target = principal \"$G\"; approvers = vec { principal \"$OPP\" }; threshold = 1 : nat32 })" >/dev/null 2>&1)
@@ -733,9 +737,10 @@ expect "  ...the same refs" "$(same "$(call "$OP" copy list_refs '("e2e-app")' -
 expect "  ...the same objects" "$(same "$(call "$OP" copy get_object "(\"$A4\")" --query)" "$(ic "$OP" get_object "(\"$A4\")" --query)")" '^same$'
 expect "  ...the same push tokens" "$(same "$(call "$OP" copy list_push_tokens '("e2e-app")' --query)" "$(ic "$OP" list_push_tokens '("e2e-app")' --query)")" '^same$'
 expect "  ...and the same site config" "$(same "$(call "$OP" copy get_site '("e2e-app")' --query)" "$(ic "$OP" get_site '("e2e-app")' --query)")" '^same$'
-# The copy serves the site: with no approvals mirror yet, the tip, which
-# is the approved commit here. The mirrors are rewritten at the cut.
-expect "the copy serves the site from the same commit" "$(served_at "http://$C.raw.localhost:$PORT/site/e2e-app/")" "^${FROZEN_SITE%% *} ${FROZEN_SITE#* }"
+# The copy holds none of the mirrors, which the authority writes at the
+# cut: until then it cannot tell a gated repo from an open one, and
+# serves neither, rather than a tip the voters never approved.
+expect "the copy serves no site until the authority writes its mirrors" "$(flat "$(curl -s -w ' %{http_code}' "http://$C.raw.localhost:$PORT/site/e2e-app/")")" 'has not yet said which commits.* 404$'
 expect "the thaw" "$(ic "$OP" unfreeze)" 'Ok'
 expect "  ...forgets the digest" "$(ic "$OP" get_digest --query)" '^\(null\)$'
 commit site/f.txt f after-thaw
@@ -975,6 +980,62 @@ EOF
   for r in ledger cmc_rate get_site get_deploy_config list_push_tokens pending_icp_deposits; do
     expect "console query $r (page code, local origin)" "$OUT" "ok $r"
   done
+fi
+
+if [ "$SPLIT" != 1 ]; then
+section "the cut (step 16)"
+# docs/CANISTER_SPLIT.md, step 16, on the combined canister and the copy:
+# the freeze, a fresh import with both digests agreeing, the copy handed
+# to a governor of its own, the combined canister upgraded in place to the
+# authority build, the copy named, every mirror rewritten, the thaw. Last,
+# since the combined canister is not one afterwards.
+W=$WORK/work
+CUT_SITE=$(served)
+CUT_TIP=$(git -C "$W" rev-parse HEAD)
+expect "before the cut, the gated site serves an approved commit, not the tip" "$CUT_SITE" "^200 [0-9a-f]{40}$"
+refuse "  ...(not the tip)" "$CUT_SITE" "$CUT_TIP"
+expect "16.1 the freeze" "$(ic "$OP" freeze)" 'Ok'
+expect "16.2 the copy pulls afresh" "$(call "$OP" copy import_start "(principal \"$G\")")" 'Ok'
+for _ in $(seq 1 120); do
+  ST=$(flat "$(call "$OP" copy import_status --query)")
+  echo "$ST" | grep -q 'running = false' && break
+  sleep 1
+done
+expect "  ...every page, no error" "$ST" 'copied = true.*error = null|error = null.*copied = true'
+COPY_SHA=$(printf '%s' "$ST" | sed -n 's/.*sha256 = opt "\([0-9a-f]*\)".*/\1/p')
+for _ in $(seq 1 200); do
+  D=$(flat "$(ic "$OP" digest_step)")
+  echo "$D" | grep -q 'done = true' && break
+done
+expect "  ...and both digests agree" "$D" "sha256 = opt \"${COPY_SHA:-none}\""
+# The copy's own governor, as step 15 makes before anything moves: the
+# setter names only a git canister a governor alone controls.
+(cd "$WORK" && dfx canister create copygov --identity "$OP" --no-wallet --with-cycles 20000000000000 >/dev/null 2>&1)
+(cd "$WORK" && dfx canister install copygov --identity "$OP" --wasm "$GOV_WASM" \
+  --argument "(record { target = principal \"$C\"; approvers = vec { principal \"$OPP\" }; threshold = 1 : nat32 })" >/dev/null 2>&1)
+COPYGOV=$(cd "$WORK" && dfx canister id copygov)
+(cd "$WORK" && dfx canister update-settings copygov --remove-controller "$OPP" --yes --identity "$OP" >/dev/null 2>&1)
+(cd "$WORK" && dfx canister update-settings copy --set-controller "$COPYGOV" --yes --identity "$OP" >/dev/null 2>&1)
+# 16.3: the combined canister becomes the authority, at the same id, over
+# its own state; the git side's records stay in its memory, unread.
+(cd "$WORK" && dfx canister install git --mode upgrade --yes --identity "$OP" --wasm "$AUTH_WASM" >/dev/null 2>&1)
+auth() { local who=$1; shift; call "$who" git "$@" --candid "$AUTH_DID"; }
+expect "16.3 upgraded in place to the authority build" "$(cd "$WORK" && dfx canister info "$G" --identity "$OP" 2>&1)" "Module hash: 0x$(sha "$AUTH_WASM")"
+expect "  ...the accounts kept" "$(auth "$TEN" get_account "(principal \"$T\")")" 'deposited = [1-9]'
+expect "  ...the repo records kept" "$(auth "$OP" get_repo_info '("e2e-app")')" 'required_votes = [1-9]'
+expect "  ...and until the git canister is named, what needs it is refused, naming the cut" "$(auth "$OP" create_repo '("after-cut")')" 'not named yet.*step 16.4'
+# 16.4: named, the authority writes every mirror of every repo.
+expect "16.4 the copy is named" "$(auth "$OP" set_git_canister "(principal \"$C\")")" 'Ok'
+expect "  ...and has taken every mirror" "$(auth "$OP" get_mirrors_pending --query)" '^\(vec \{\}\)$'
+CSITE="http://$C.raw.localhost:$PORT/site/e2e-app/"
+expect "  ...so it serves the gated site's approved commit, not the tip" "$(served_at "$CSITE")" "^${CUT_SITE%% *} ${CUT_SITE#* }"
+# 16.5: the thaw, and a push with the same token at the new remote.
+expect "16.5 the copy thaws" "$(call "$OP" copy unfreeze)" 'Ok'
+commit site/g.txt g after-cut
+expect "  ...and takes a signed push, same token, new remote" "$(signed "http://ic:$BOUND@$C.raw.localhost:$PORT/e2e-app.git")" 'main -> main'
+expect "  ...the push does not move the gated site" "$(served_at "$CSITE")" "^${CUT_SITE%% *} ${CUT_SITE#* }"
+expect "  ...the authority creates repos there now" "$(auth "$OP" create_repo '("after-cut")')" 'Ok'
+expect "  ...which the copy holds" "$(call "$OP" copy list_repos --query)" '"after-cut"'
 fi
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"

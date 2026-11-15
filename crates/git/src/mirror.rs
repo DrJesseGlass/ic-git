@@ -65,14 +65,20 @@ fn admit(repo: &str, seq: u64, pick: impl Fn(&mut Seqs) -> &mut Option<u64>) -> 
 /// Record a repo's push policy. A push token lasts only as long as its
 /// minter may write, so when the writers change, the repo's tokens minted
 /// by anyone no longer among them (and not an operator, by `is_operator`,
-/// the canister's own rule) are revoked. Returns whether the write was
-/// applied (see `admit`).
+/// the canister's own rule) are revoked. A first write changes no writers:
+/// there were none to compare, and the tokens a git canister imported at
+/// the cut (docs/CANISTER_SPLIT.md, step 16.4) were minted under umobs'
+/// policy and operators, which its own operator rule does not know, so
+/// revoking by it would delete tokens for good. They are the tokens
+/// umobs' own revocations left at the freeze, so keeping them keeps its
+/// rule; the next change of writers revokes as ever. Returns whether the
+/// write was applied (see `admit`).
 pub fn set_push_policy(repo: &str, seq: u64, policy: PushPolicy, is_operator: impl Fn(&Principal) -> bool) -> bool {
     if !admit(repo, seq, |s| &mut s.push) {
         return false;
     }
     let prev: Option<PushPolicy> = crate::kv::get_json(&push_key(repo));
-    let writers_changed = prev.as_ref().map(|p| &p.writers) != Some(&policy.writers);
+    let writers_changed = prev.as_ref().is_some_and(|p| p.writers != policy.writers);
     crate::kv::set_json(&push_key(repo), &policy);
     if writers_changed {
         crate::tokens::revoke_unless(repo, |p| is_operator(p) || policy.writers.contains(p));
@@ -119,7 +125,25 @@ pub fn set_approved(repo: &str, seq: u64, approved: Option<Vec<String>>) -> bool
     true
 }
 
-/// The approved set, or `None` when the repo requires no votes.
+/// Has the authority written the repo's approved set at all? A repo it has
+/// not is one this side cannot yet say is ungated: a git canister that
+/// imported umobs' store holds repos but no mirrors (docs/CANISTER_SPLIT.md,
+/// step 13), and serves none of them until the authority rewrites every
+/// mirror at the cut (step 16.4).
+pub fn approvals_written(repo: &str) -> bool {
+    crate::kv::get_bytes(&approved_key(repo)).is_some()
+}
+
+/// For tests: the authority's first word on a repo that requires no votes,
+/// as its repo creation sends. Sequence 0, so any write a test makes after
+/// it is newer.
+#[cfg(any(test, feature = "testing"))]
+pub fn ungated_for_tests(repo: &str) {
+    assert!(set_approved(repo, 0, None), "{repo}: the approved set was already written");
+}
+
+/// The approved set, or `None` when the repo requires no votes, or when
+/// the set was never written (`approvals_written` tells which).
 pub fn approved(repo: &str) -> Option<Approved> {
     crate::kv::get_json::<Option<Vec<String>>>(&approved_key(repo))
         .flatten()
@@ -183,5 +207,25 @@ mod tests {
         // their tokens, as before.
         assert!(set_push_policy("seq", 3, policy(&[]), |_| false));
         assert!(may_write("seq", &w, false).is_err());
+    }
+
+    /// The first push policy a repo's mirror takes revokes no token: the
+    /// tokens a git canister imported at the cut were minted under umobs'
+    /// rule, by minters this canister's operator rule may not know. A
+    /// change of writers after it revokes as ever.
+    #[test]
+    fn a_first_push_policy_revokes_no_token() {
+        store::create_repo("first").unwrap();
+        let (admin, w) = (Principal::from_slice(&[2; 8]), Principal::from_slice(&[3; 8]));
+        crate::tokens::mint("first", "tok-admin", admin, None, None).unwrap();
+        crate::tokens::mint("first", "tok-w", w, None, None).unwrap();
+        let policy = |writers: &[Principal]| PushPolicy {
+            writers: writers.to_vec(),
+            require_signed_push: false,
+        };
+        assert!(set_push_policy("first", 1, policy(&[w]), |_| false));
+        assert_eq!(crate::tokens::list("first").len(), 2, "the first write keeps both");
+        assert!(set_push_policy("first", 2, policy(&[]), |_| false));
+        assert!(crate::tokens::list("first").is_empty(), "a change of writers revokes");
     }
 }

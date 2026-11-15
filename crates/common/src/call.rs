@@ -25,7 +25,7 @@ impl Transport for Canister {
     fn call<'a>(&'a self, method: &'static str, arg: Vec<u8>) -> Fut<'a, Reply<Vec<u8>>> {
         Box::pin(async move {
             let Some(id) = (self.id)() else {
-                return Err(Failure::NotDelivered(format!("{method}: the other canister's id is not set")));
+                return Err(Failure::NotDelivered(format!("{method}: the other canister is not named yet; the authority names the git canister at the cut (docs/CANISTER_SPLIT.md, step 16.4)")));
             };
             match Call::bounded_wait(id, method).with_raw_args(&arg).await {
                 Ok(reply) => Ok(reply.into_bytes()),

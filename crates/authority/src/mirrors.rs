@@ -44,7 +44,13 @@ pub enum Mirror {
     DeployConfigs,
 }
 
-const ALL: [Mirror; 3] = [Mirror::PushPolicy, Mirror::Approved, Mirror::DeployConfigs];
+/// The order a flush writes them in: the deploy configs before the approved
+/// set, since the git side follows an approved set it takes by submitting
+/// the served commit's job under the configs it holds then. Written the
+/// other way round, a copy that has no configs yet (the cut, step 16.4)
+/// would follow a newly approved commit with no job, and the app would
+/// stay behind the site.
+const ALL: [Mirror; 3] = [Mirror::PushPolicy, Mirror::DeployConfigs, Mirror::Approved];
 
 /// How long after an unanswered write the marks are flushed again.
 pub const RETRY_SECS: u64 = 30;
@@ -190,8 +196,12 @@ async fn send(repo: &str, m: Mirror, seq: u64, retry: bool) -> Reply<()> {
 /// Write every marked mirror of the repo and clear the marks the git side
 /// answered. A mark made while a write was in flight (by another call of
 /// this canister) is newer than what was sent and stays, and so does a
-/// ballot's retry ask. An unanswered write leaves its mark and arms the
-/// retry.
+/// ballot's retry ask. An unanswered write leaves its mark, arms the
+/// retry, and ends the repo's flush: the mirrors after it in `ALL` stay
+/// marked and go with the retry, in order, so the approved set never
+/// lands ahead of deploy configs the git side did not take (the git side
+/// would follow it under the configs it held, and the deploy it should
+/// have submitted would be lost).
 pub async fn flush(repo: &str) {
     for m in ALL {
         let sent = load(repo);
@@ -205,7 +215,10 @@ pub async fn flush(repo: &str) {
                     save(repo, &p);
                 }
             }
-            Err(_) => arm_retry(std::time::Duration::from_secs(RETRY_SECS)),
+            Err(_) => {
+                arm_retry(std::time::Duration::from_secs(RETRY_SECS));
+                return;
+            }
         }
     }
 }
@@ -216,6 +229,26 @@ pub async fn flush_all() {
     for repo in repos_pending() {
         flush(&repo).await;
     }
+}
+
+/// The cut (docs/CANISTER_SPLIT.md, step 16.4): the git canister just
+/// named holds umobs' repos as the import copied them, and none of the
+/// mirrors, which the copy leaves out. Until it has a repo's approved set
+/// it serves none of its site, rather than a tip the voters may never
+/// have approved, and with no push policy only its operators push. So
+/// every mirror of every repo this side holds is marked, and all of them
+/// written; a write the git canister does not answer stays marked for the
+/// retry, and `repos_pending` says when none is left, which is when the
+/// git canister may thaw (step 16.5). Each write carries a fresh number
+/// from the counters this side kept, so a second rewrite is as safe as
+/// the first.
+pub async fn rewrite_all() {
+    for repo in crate::records::repo_meta_names() {
+        for m in ALL {
+            mark(&repo, m);
+        }
+    }
+    flush_all().await;
 }
 
 /// For post_upgrade, after everything that marks: the marked mirrors are

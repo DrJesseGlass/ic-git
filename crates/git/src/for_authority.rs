@@ -178,6 +178,7 @@ mod tests {
     fn a_large_reply_is_staged_past_its_head() {
         let repo = "stage-release";
         store::create_repo(repo).unwrap();
+        crate::mirror::ungated_for_tests(repo);
         let configs = DeployConfigs {
             wasm: Some(DeployConfig {
                 target: "aaaaa-aa".into(),

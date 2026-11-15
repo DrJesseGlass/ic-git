@@ -55,6 +55,11 @@ pub fn repo_meta_set<T: serde::Serialize>(repo: &str, value: &T) {
     }
 }
 
+/// Every repo that has tenancy metadata, by name.
+pub fn repo_meta_names() -> Vec<String> {
+    REPO_META.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect())
+}
+
 /// Every repo that has tenancy metadata, with it decoded.
 pub fn repo_meta_all<T: serde::de::DeserializeOwned>() -> Vec<(String, T)> {
     REPO_META.with(|m| {

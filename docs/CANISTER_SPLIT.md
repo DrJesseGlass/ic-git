@@ -1034,15 +1034,11 @@ The two canisters:
         git canister installed against the combined canister, refused
         the export until named, then importing it, both digests
         agreeing, the copy listing the same repos, refs, objects, tokens
-        and site config and serving the site from the same commit; the
-        thaw, and a push again.
-      - **Not here.** Steps 16.3 to 16.6: the upgrade of umobs to the
-        authority build over this state, the rewrite of every mirror, the
-        git canister's thaw at the cut and the redirects. Until the
-        mirrors are rewritten, a repo's site on the git canister serves
-        its tip, as an ungated repo's does, so the rewrite comes before
-        anything points at it. The e2e's rehearsal of the cut itself
-        grows with step 16.
+        and site config; the thaw, and a push again.
+      - **Not here.** Steps 16.3 to 16.6, below. The copy holds no
+        mirrors: as first shipped, a repo's site on it served its tip,
+        as an ungated repo's does, until the rewrite at the cut. Step
+        16.4 closed that on the git side.
 14. **Clients, before the cut** (as this phase always required):
     - the console talks to both canisters
     - `tools/verify.mjs` takes the site's canister and the registry
@@ -1083,6 +1079,65 @@ The cut on mainnet, in this order:
        remote, and the same token works there.
        Until the local e2e confirms this with a real git client, treat it
        as expected, not shown.
+
+    Steps 3 to 5 DONE 2026-11-14 (the redirects of step 6 are the next
+    leg). What shipped:
+    - **16.3.** No new code: the authority build reads the one-canister
+      layout, and leaves the git side's maps unread. Until the git
+      canister is named, every message to it fails as not delivered,
+      with a reason that names step 16.4 (`ic_git_common::call`).
+    - **16.4.** `set_git_canister`, once the canister passes the
+      setter's rule, writes every mirror of every repo the authority
+      holds (`mirrors::rewrite_all`: all three marked, then flushed,
+      each write under a fresh number from the authority's counters),
+      and tops the git canister up to its floor (`funding::top_up_git`,
+      a failure on record in `get_git_funding`). A write the git canister
+      does not take stays marked for the retry; `get_mirrors_pending`
+      lists the repos still marked, and empty is the sign for 16.5.
+      Naming the same id again writes them all again. The top-up comes
+      first, since a git canister short of cycles would refuse every
+      write. A flush writes a repo's deploy configs before its approved
+      set (`mirrors::ALL`): the git side follows a set it takes with the
+      configs it holds then, so the other order would leave the app of a
+      commit approved while the git canister was unnamed behind its site.
+      An unanswered write ends its repo's flush, so the mirrors after it
+      wait for the retry and go in the same order: the approved set never
+      lands ahead of deploy configs the git side did not take.
+      The first push policy a repo's mirror takes revokes no token
+      (`mirror::set_push_policy`): the imported tokens are what umobs'
+      own revocations left at the freeze, and revoking by the git
+      canister's operator rule, which does not know umobs' operators,
+      would delete some for good.
+      Left as is: a repo the git store holds with no record at the
+      authority (a creation whose answer was lost, impossible in one
+      canister) gets no mirrors and serves nothing; `create_repo` again
+      by its owner settles it.
+      The git side no longer depends on the order: a repo whose approved
+      set the authority never wrote serves nothing
+      (`site::AWAITING_AUTHORITY`) and `advance` records nothing for it,
+      where it used to serve the tip as if ungated
+      (`mirror::approvals_written`). With no push policy, only its
+      operators push.
+      The records: the authority's is published by its governor when
+      it installs the authority build (16.3), as every upgrade's is. The
+      git canister's (`ic-git#git`) is asked for by the git canister's
+      governor at an install, and the authority can check it only once
+      the git canister is named, so it needs one more install after
+      16.4 (a same-module upgrade proposal), not anything 16.4 does.
+    - **16.5.** No new code: `unfreeze` on the git canister, after
+      `get_mirrors_pending` is empty.
+    - **Tests.** The authority crate: a git side holding repos with no
+      mirrors serves none until `rewrite_all`, then the gated repo's
+      approved commit, not the tip, and a write it does not take stays
+      pending until the retry. The git crate: a repo with no approved
+      set serves nothing and records nothing; its first write decides.
+      The combined e2e ends with the cut: the copy pulled afresh with
+      both digests agreeing, handed to a governor of its own, the
+      combined canister upgraded in place to the authority build
+      (accounts and repo records kept, a creation refused naming
+      16.4), the copy named, every mirror taken, the gated site's
+      approved commit served there, the thaw, a signed push with the
+      same token at the new remote, and a repo created there.
 
     **Rollback** is an upgrade of umobs back to the last one-canister
     release, which still holds every git-side record as of the freeze. The
