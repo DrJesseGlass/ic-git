@@ -146,7 +146,7 @@ attestation record, the contract, and the extension do not change. This is the
 **Deployed today (Sepolia only):** `ProvenanceRegistry`, at
 `0xa1362DAda583c56a395D305a8C7A458E0B62A209`. Its source is
 `ProvenanceRegistry.sol` in the `registry` repo on the mainnet ic-git
-canister (`git clone https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/registry.git`,
+git canister (`git clone https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/registry.git`,
 commit `f3cd339`), built by that repo's `compile.js` (solc 0.8.28+commit.7893614a,
 optimizer on, 200 runs, EVM cancun). It has `set`/`get` and nothing else:
 no `attest`, no `agrees`, and its event is `Updated`, not `SitePublished`.

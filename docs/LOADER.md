@@ -32,8 +32,9 @@ spend Sepolia gas from the canister's EOA
 Sepolia ETH.
 
 ```sh
-C=umobs-yiaaa-aaaab-agyrq-cai
-GW=https://$C.raw.icp0.io
+C=umobs-yiaaa-aaaab-agyrq-cai   # the authority: the repo, its site, its record
+G=34koz-jyaaa-aaaab-ahejq-cai   # the git canister: the token, the push, the served page
+GW=https://$G.raw.icp0.io
 ```
 
 ### 1. Create the repo and point its site at loader/ (first time only)
@@ -48,10 +49,10 @@ dfx canister --network ic call $C set_site '("ic-git-loader", "loader")'
 A one-day token is enough; it expires on its own.
 
 ```sh
-TOKEN=$(dfx canister --network ic call $C create_push_token '("ic-git-loader", opt (1 : nat32), null)' \
+TOKEN=$(dfx canister --network ic call $G create_push_token '("ic-git-loader", opt (1 : nat32), null)' \
   | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
 : "${TOKEN:?create_push_token returned no token}"
-git push "https://ic:$TOKEN@umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/ic-git-loader.git" main
+git push "https://ic:$TOKEN@$G.raw.icp0.io/ic-git-loader.git" main
 ```
 
 ### 3. Check the canister serves the file in git
@@ -128,7 +129,7 @@ the canister's `registry` repo. For the record, or for a successor
 contract, this is how:
 
 ```sh
-git clone https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/registry.git   # commit f3cd339
+git clone https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/registry.git   # commit f3cd339
 ```
 
 On https://sepolia.etherscan.io/address/0xa1362DAda583c56a395D305a8C7A458E0B62A209#code,
@@ -155,7 +156,7 @@ show the source and call `get` for the user.
 ## What a user does (once, about two minutes)
 
 1. **Download** it, as `loader.html`, from anywhere:
-   `curl -so loader.html https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-git-loader/`,
+   `curl -so loader.html https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/ic-git-loader/`,
    a GitHub release, or `git show <commit>:loader/index.html > loader.html`
    from a clone. Use `curl`, not a browser visit: the browser runs the page
    on the canister's origin (README: never open the loader from the
