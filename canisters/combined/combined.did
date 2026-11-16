@@ -206,11 +206,15 @@ type NamesConfig = record {
   handle : text;
 };
 
+type FeeFallback = record { max_fee_gwei : nat64; tip_gwei : nat64 };
 type EvmConfig = record {
   evm_rpc : text;
   key_name : text;
   chain_id : nat64;
   rpc_urls : vec text;
+  // what a send caps its fees at when the fee-history read fails outcall
+  // consensus; none lets such a send fail (evm_set_fee_fallback)
+  fee_fallback : opt FeeFallback;
 };
 type TxOutcome = record {
   tx_hash : text;
@@ -416,6 +420,7 @@ service : {
   // Track A: EVM deployment (E0 signing spine, E1 CREATE)
   evm_set_config : (text, text, nat64, vec text) -> (Result);
   evm_get_config : () -> (opt EvmConfig) query;
+  evm_set_fee_fallback : (opt FeeFallback) -> (Result);
   names_set_config : (text, text) -> (Result);
   names_clear_config : () -> ();
   names_get_config : () -> (opt NamesConfig) query;

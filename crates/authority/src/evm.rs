@@ -582,10 +582,52 @@ pub struct EvmConfig {
     /// without presets is reached.
     #[serde(default)]
     pub rpc_urls: Vec<String>,
+    /// What a send caps its fees at when the fee-history read fails
+    /// (`fees`): none means the send fails as the read did. Set by the
+    /// operator (`evm_set_fee_fallback`) for a chain whose fees they know;
+    /// kept across `set_config`.
+    #[serde(default)]
+    pub fee_fallback: Option<FeeFallback>,
 }
 
 /// Cycles attached to each EVM RPC call; surplus refunded.
 const RPC_CYCLES: u128 = 3_000_000_000;
+
+/// The fee cap and tip a send uses when the chain cannot be asked: the
+/// fee-history read fails outcall consensus whenever the RPC cluster's
+/// nodes disagree on the head, at the latest and at the safe head alike
+/// (2026-11-16, three publishes out of five). The cap bounds what the
+/// transaction may pay; it pays the base fee at inclusion plus the tip.
+#[derive(CandidType, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct FeeFallback {
+    pub max_fee_gwei: u64,
+    pub tip_gwei: u64,
+}
+
+const GWEI: u128 = 1_000_000_000;
+
+/// The fallback in wei: (max_fee_per_gas, max_priority_fee_per_gas).
+fn fallback_fees(f: &FeeFallback) -> (u128, u128) {
+    (u128::from(f.max_fee_gwei) * GWEI, u128::from(f.tip_gwei) * GWEI)
+}
+
+/// Set, or clear, what a send falls back to. The tip may not exceed the
+/// cap, and neither may be zero: a zero tip is never mined, a zero cap
+/// never accepted.
+pub fn set_fee_fallback(fallback: Option<FeeFallback>) -> Result<(), String> {
+    let mut cfg = require_config()?;
+    if let Some(f) = &fallback {
+        if f.max_fee_gwei == 0 || f.tip_gwei == 0 {
+            return Err("the fallback's max fee and tip must both be above zero".into());
+        }
+        if f.tip_gwei > f.max_fee_gwei {
+            return Err("the fallback's tip may not exceed its max fee".into());
+        }
+    }
+    cfg.fee_fallback = fallback;
+    kv::set_json(CONFIG_KEY, &cfg);
+    Ok(())
+}
 
 const CONFIG_KEY: &str = "evm:config";
 const LOG_KEY: &str = "evm:deploy_log";
@@ -607,6 +649,8 @@ pub fn set_config(
         key_name,
         chain_id,
         rpc_urls,
+        // Set on its own, kept across a change of RPC or chain.
+        fee_fallback: get_config().and_then(|c| c.fee_fallback),
     };
     kv::set_json(CONFIG_KEY, &cfg);
     Ok(())
@@ -742,28 +786,37 @@ async fn nonce_of(cfg: &EvmConfig, address: &str, meter: &Meter) -> Result<u64, 
 }
 
 /// (max_fee_per_gas, max_priority_fee_per_gas) from the five blocks ending at
-/// the safe head. Safe, not Latest: the replicas' outcalls land on different
-/// nodes of the RPC cluster, and for a moment after every block those nodes
-/// disagree on which block is the latest, so a read at Latest fails consensus
+/// the finalized head, or the configured fallback when the chain cannot be
+/// asked. Finalized, not Latest: the replicas' outcalls land on different
+/// nodes of the RPC cluster, and those nodes disagree on the latest block
+/// for a moment after every one, so a read at Latest fails consensus
 /// whenever the head moves while the outcalls are out (2026-11-16: two
-/// publishes in a row, three answers among the replicas each time). The safe
-/// head moves once an epoch, so every replica reads the same window nearly
-/// always. Its base fee is up to an epoch old; `fee_pair` says how the cap
-/// allows for that.
+/// publishes in a row, three answers among the replicas each time); they
+/// disagreed on the safe head too (one publish of two at it). The finalized
+/// head moves once an epoch and only after the chain has settled on it, so
+/// every replica reads the same window nearly always. Its base fee is up
+/// to two epochs old; `fee_pair` says how the cap allows for that. When the
+/// read still fails and the operator has set a fallback, the send goes on
+/// with it rather than failing a publish that nothing else can retry (a
+/// governor publishes a record only at an install).
 async fn fees(cfg: &EvmConfig, meter: &Meter) -> Result<(u128, u128), String> {
-    let hist: FeeHistory = rpc_read(
+    let read: Result<FeeHistory, String> = rpc_read(
         cfg,
         "eth_feeHistory",
         FeeHistoryArgs {
             block_count: 5,
-            newest_block: BlockTag::Safe,
+            newest_block: BlockTag::Finalized,
             reward_percentiles: Some(vec![50]),
         },
         "eth_feeHistory",
         meter,
     )
-    .await?;
-    fee_pair(&hist)
+    .await;
+    match (read, &cfg.fee_fallback) {
+        (Ok(hist), _) => fee_pair(&hist),
+        (Err(_), Some(f)) => Ok(fallback_fees(f)),
+        (Err(e), None) => Err(format!("{e} (no fee fallback set: evm_set_fee_fallback)")),
+    }
 }
 
 /// The cap allows for the next few blocks beyond the window (the three ones
@@ -1531,6 +1584,29 @@ mod tests {
             base_fee_per_gas: vec![],
         };
         assert!(fee_pair(&empty).is_err());
+    }
+
+    /// A config stored before the fallback existed loads with none; the
+    /// fallback converts to wei; its bounds hold.
+    #[test]
+    fn fee_fallback_loads_absent_converts_and_is_bounded() {
+        let old: EvmConfig = serde_json::from_str(
+            r#"{"evm_rpc":"aaaaa-aa","key_name":"k","chain_id":11155111,"rpc_urls":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.fee_fallback, None);
+        let f = FeeFallback { max_fee_gwei: 50, tip_gwei: 2 };
+        assert_eq!(fallback_fees(&f), (50_000_000_000, 2_000_000_000));
+        set_config("aaaaa-aa".into(), "k".into(), 11155111, vec![]).unwrap();
+        assert!(set_fee_fallback(Some(FeeFallback { max_fee_gwei: 0, tip_gwei: 1 })).is_err());
+        assert!(set_fee_fallback(Some(FeeFallback { max_fee_gwei: 5, tip_gwei: 6 })).is_err());
+        set_fee_fallback(Some(f.clone())).unwrap();
+        assert_eq!(get_config().unwrap().fee_fallback, Some(f.clone()));
+        // Kept across a change of config, cleared only on purpose.
+        set_config("aaaaa-aa".into(), "k2".into(), 11155111, vec![]).unwrap();
+        assert_eq!(get_config().unwrap().fee_fallback, Some(f));
+        set_fee_fallback(None).unwrap();
+        assert_eq!(get_config().unwrap().fee_fallback, None);
     }
 
     #[test]

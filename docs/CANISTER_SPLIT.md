@@ -1293,8 +1293,10 @@ The cut on mainnet, in this order:
     From the run: the authority (and the combined build, for a rollback)
     got a public `cycle_balance`, the watch a floor over both canisters,
     and `tools/governor.sh` a check that the target can pay before it
-    proposes. Still open: a fee read that does not depend on the
-    cluster's nodes agreeing on a head.
+    proposes. And the fee read moved to the finalized head, with a
+    fallback cap and tip the operator sets (`evm_set_fee_fallback`) for
+    when the cluster's nodes still disagree: a record publish then goes
+    on instead of failing where nothing but another install retries it.
 
     Steps 3 to 5 code DONE 2026-11-14, step 6 DONE 2026-11-15. What shipped:
     - **16.3.** No new code: the authority build reads the one-canister

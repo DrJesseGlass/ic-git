@@ -75,7 +75,12 @@ dfx canister --network ic call $C evm_registry_publish_site '("ic-git-loader")'
 
 It returns the transaction hash and nonce as soon as the transaction is
 broadcast. The canister refuses to publish an entrypoint that loads
-anything unpinned; the loader is self-contained, so it passes.
+anything unpinned; the loader is self-contained, so it passes. An `Err`
+naming `eth_feeHistory` and `SysTransient` is the fee-history read
+failing outcall consensus (the RPC cluster's nodes disagreed on the
+head); nothing was signed, so publish again. With a fee fallback set
+(`evm_set_fee_fallback`, an operator call) the publish goes on through
+such a read instead.
 
 ### 5. Confirm on chain
 
