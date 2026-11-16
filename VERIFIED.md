@@ -7,11 +7,13 @@ the "Residual assumptions" and "Trusting trust" sections of the same file.
 
 Canister: `umobs-yiaaa-aaaab-agyrq-cai`. Controller since 2026-10-14: the
 governor `7kkwl-baaaa-aaaab-ag6rq-cai` alone (below, "The governor").
-The git canister `34koz-jyaaa-aaaab-ahejq-cai` (docs/CANISTER_SPLIT.md),
-controlled since 2026-11-16 by its own governor
-`3hps4-taaaa-aaaab-ahela-cai` alone, has its own table and section
-below ("The git canister"); `verified.json` records it under
-`git_canister`.
+Since the cut of 2026-11-16 (docs/CANISTER_SPLIT.md, step 16) it runs
+the authority build: the registry's publisher, the accounts, votes and
+deploys, and a redirect for the old site and remote URLs. The git
+canister `34koz-jyaaa-aaaab-ahejq-cai`, controlled since 2026-11-16 by
+its own governor `3hps4-taaaa-aaaab-ahela-cai` alone, holds the objects
+and serves every site; it has its own table and section below ("The git
+canister"), and `verified.json` records it under `git_canister`.
 
 | Date | Commit | Tag | Module hash (sha256 of the wasm) | On-chain match | Independent rebuilds |
 |---|---|---|---|---|---|
@@ -30,6 +32,55 @@ below ("The git canister"); `verified.json` records it under
 | 2026-10-10 | `018bf4d` | `v0.3.6` | `eb61f0e10be0b93c1f4162cf040c6dcc69ed1248ac940fc35b89c008ec9762a2` (gz) | MATCH, 2026-10-10 | deployer (pinned container, macOS arm64 host under emulation, at the branch head, same ic-git crate); GitHub Actions amd64 runner, [run 38019976528](https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528), identical hash |
 | 2026-10-27 | `73ffa5b` | `v0.3.7` | `72e21a4867f671ca6ee1ab3ab6f31f0694e2a75270aa11faf317a1e6c9dbea95` (gz) | MATCH, 2026-10-27 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 40427156571](https://github.com/DrJesseGlass/ic-git/actions/runs/40427156571), identical hash; installed by governor proposal 4 |
 | 2026-11-12 | `2469a17` | `v0.3.8` | `375c7ed6b342ce30ca8e559bed8c111764b1f853edb688b5f08f42d9759fc8f9` (gz) | MATCH, 2026-11-12 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43281752572](https://github.com/DrJesseGlass/ic-git/actions/runs/43281752572), identical hash; installed by governor proposal 5, record published by proposal 6 |
+| 2026-11-16 | `5c5c88e` | `v0.3.10` | `1e9ce2a185f3fa8366bfec8cd5146aa2daf5e9657ce7874c4492bfa4a02d8e57` (gz, the authority build) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760), identical hash; installed by governor proposal 8 at the cut, after proposal 7's combined build `b6868caa...d45b` (unrecorded on chain, an hour) |
+
+## The cut -- 2026-11-16
+
+ic-git is two canisters now (docs/CANISTER_SPLIT.md, step 16): umobs the
+authority, the git canister the store and the server of every site. The
+cut was run in one afternoon, each step checked against the IC's
+certified state, and rehearsed first by `tools/e2e-local.sh` with
+`BASE_REF=v0.3.8`: 276 checks on `5c5c88e`, the upgrade from v0.3.8 and
+every cut step included.
+
+1. **16.0, a step the runbook had not listed.** umobs ran v0.3.8, which
+   predates the freeze and the export (step 13, #125), so governor
+   proposal 7 first installed v0.3.10's combined build
+   `b6868caa...d45b`, the last one-canister release. Its first
+   execution failed: umobs was out of cycles, 8.2 G short of what the
+   install costs, which nothing had reported since only the governor
+   can read a canister's status. The operator deposited 1 T and
+   `tools/governor.sh execute 7` installed it. Its `ic-git#canister`
+   publish failed on `eth_feeHistory` consensus even at the safe head,
+   so no record names that module; it ran for about an hour.
+2. **16.1 and 16.2.** The freeze; the git canister named as the importer,
+   frozen, and `import_start` pulled umobs' git side in 9 pages: 1,999
+   records, 8,455,212 bytes. umobs' digest, stepped three times by the
+   operator, read `062496c6...6ee4`, the same as the copy's, over the
+   same count.
+3. **16.3.** Proposal 8 installed the authority build `1e9ce2a1...8e57`
+   over the same state and published `ic-git#canister` (commit
+   `5c5c88e`, that hash) in Sepolia tx `0x4d4a72f3...4597`, block
+   12148567.
+4. **16.4 and 16.5.** `set_git_canister` named `34koz`; every mirror was
+   taken at once (`get_mirrors_pending` empty) and no top-up was due,
+   the git canister being above its 1 T floor. The git canister thawed.
+5. **The first `ic-git#git` record.** Proposal 2 of the git canister's
+   governor installed the same module again, and the authority, now
+   taking the git canister's message, published `ic-git#git` (commit
+   `5c5c88e`, `d5b5bba7...49a7`) in tx `0x8cd09003...de7c`, block
+   12148580.
+6. **Afterwards.** `/site/...` on umobs answers 308 to the same path on
+   the git canister; the loader's and ic-vote's sites read VERIFIED
+   through it; `tools/check-module-hash.sh` asks both pairs and reads
+   MATCH for all six. umobs keeps the git-side records in stable
+   memory, unread, for the rollback window.
+
+Two things the cut taught, both open: a canister whose only controller
+is a governor reports its cycles to nobody, so the authority needs a
+public `cycle_balance` as the git canister has, and the watch a floor;
+and the fee-history read fails outcall consensus at the latest and at
+the safe head alike, so the publish needs a fallback that reads nothing.
 
 ## The git canister -- 2026-11-15 to 16
 
@@ -42,6 +93,7 @@ sites are read from and keeps v0.3.8.
 | Date | Commit | Tag | Module hash (sha256 of the wasm) | On-chain match | Independent rebuilds |
 |---|---|---|---|---|---|
 | 2026-11-16 | `28288c9` | `v0.3.9` | `d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43806589563](https://github.com/DrJesseGlass/ic-git/actions/runs/43806589563), identical hash; installed by the operator's key, then again by governor proposal 1 |
+| 2026-11-16 | `5c5c88e` | `v0.3.10` | `d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7` (gz, byte for byte v0.3.9's) | MATCH, 2026-11-16 | deployer and GitHub Actions ([run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760)), identical hash; installed by governor proposal 2 after the cut, which published the first `ic-git#git` record |
 
 The pinned container built `28288c9`, the merge of #135, to
 `d5b5bba7...49a7` (gz; raw `f25d202c...98fd`) for the git canister;
