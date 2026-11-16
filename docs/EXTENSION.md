@@ -407,6 +407,12 @@ a page's calls through those hosts. 0.2.1, published on 2026-10-15,
 judges ic-git itself by the governor rule ("approved" since the handover
 of 2026-10-14, where 0.2.0 still says "ungoverned"), so a site whose
 backends are all governed or system gets a green badge.
+0.3.0, published on 2026-11-16, holds the canister split's clients
+(docs/CANISTER_SPLIT.md, step 14): both pinned canisters as hosts, state
+keyed by host and repo, and the git canister's governor pinned beside
+ic-git's (step 15); both packages ask for the git canister's host
+permission, which an update does not grant in Firefox until the user
+accepts it ("The git canister's host, on an update").
 
 | Date | Package | Version | Commit | sha256 of SHA256SUMS | Registry tx | Chrome store id |
 |---|---|---|---|---|---|---|
@@ -418,6 +424,8 @@ backends are all governed or system gets a green badge.
 | 2026-10-09 | Firefox (`ic-git-extension-firefox`) | 0.2.0 | `3850d185eb713c96106ead6bbdc49ec9be3f1b23` | `fd899007641fc1ee13733bf4f08d2f1cc60c809eaeae6cdf80a459a2539636f7` | [`0x9d61795d...3174`](https://sepolia.etherscan.io/tx/0x9d61795de41de61cfaa7e0151a6950eb57492650b1fb81e28f1ebf6526683174) (Sepolia 11878302) | n/a |
 | 2026-10-15 | Chrome (`ic-git-extension`) | 0.2.1 | `51616b86a89743ce6e1e8303e2f44c99e1752f78` | `ad388dea1c25657fca8fdc398afc1fc8ea4fe30ad7a8a5a28c48179e75bcf5dc` | [`0x87ab3f2e...6d26`](https://sepolia.etherscan.io/tx/0x87ab3f2e9931a4886449a3265e616ebc46bfa35b5aca00a29f80ecf4df9e6d26) (Sepolia 11917681) | `fdcegfanhmpdnbcalfjdlboebhknkhco` |
 | 2026-10-15 | Firefox (`ic-git-extension-firefox`) | 0.2.1 | `51616b86a89743ce6e1e8303e2f44c99e1752f78` | `f97b5b07b5277f8d384c65c184c9e0c9f8a9701c0237f2016fe9749003a436ea` | [`0x787a49d5...f47c`](https://sepolia.etherscan.io/tx/0x787a49d554e74f0109f5e47b2f37ac2f9f14bcccc31fcc3a65df4d5791d6f47c) (Sepolia 11917693) | n/a |
+| 2026-11-16 | Chrome (`ic-git-extension`) | 0.3.0 | `64a6c75730a9586598d18a171e7f9146faf19f0f` | `46039e8185bf0c4f4f0e5985527edfc548790cdf63340b8aad40e0406545bd88` | [`0x548a16cc...5aa1`](https://sepolia.etherscan.io/tx/0x548a16cc29fb3fc60756cff94bfd4eb031a2dc15dbfd22059c1c2e5863045aa1) (Sepolia 12147959) | `fdcegfanhmpdnbcalfjdlboebhknkhco` |
+| 2026-11-16 | Firefox (`ic-git-extension-firefox`) | 0.3.0 | `64a6c75730a9586598d18a171e7f9146faf19f0f` | `fd84d305d45e434acb6c9babb829f75c5ea0e1d25665501ec58516ba0c6a9d7d` | [`0x61ffae38...1a0e`](https://sepolia.etherscan.io/tx/0x61ffae38f014fc79dc5009cf68cf04729a2c4c06d538ad5ddf3a01c0aeb31a0e) (Sepolia 12147966) | n/a |
 
 ## Next
 
