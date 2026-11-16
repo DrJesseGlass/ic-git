@@ -33,6 +33,31 @@ canister"), and `verified.json` records it under `git_canister`.
 | 2026-10-27 | `73ffa5b` | `v0.3.7` | `72e21a4867f671ca6ee1ab3ab6f31f0694e2a75270aa11faf317a1e6c9dbea95` (gz) | MATCH, 2026-10-27 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 40427156571](https://github.com/DrJesseGlass/ic-git/actions/runs/40427156571), identical hash; installed by governor proposal 4 |
 | 2026-11-12 | `2469a17` | `v0.3.8` | `375c7ed6b342ce30ca8e559bed8c111764b1f853edb688b5f08f42d9759fc8f9` (gz) | MATCH, 2026-11-12 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43281752572](https://github.com/DrJesseGlass/ic-git/actions/runs/43281752572), identical hash; installed by governor proposal 5, record published by proposal 6 |
 | 2026-11-16 | `5c5c88e` | `v0.3.10` | `1e9ce2a185f3fa8366bfec8cd5146aa2daf5e9657ce7874c4492bfa4a02d8e57` (gz, the authority build) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760), identical hash; installed by governor proposal 8 at the cut, after proposal 7's combined build `b6868caa...d45b` (unrecorded on chain, an hour) |
+| 2026-11-16 | `ef7722f` | `v0.3.11` | `f90c5c03faf3877b7bf73329a0ab3f207bfbf9aecbef6bed94c103c5e2127225` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43924565432](https://github.com/DrJesseGlass/ic-git/actions/runs/43924565432), identical hash; installed by governor proposal 9 |
+
+## v0.3.11 -- 2026-11-16
+
+The two lessons of the cut, in code (#140, #141): the authority reports
+its cycles (`cycle_balance`, a public query, as the git canister's; the
+watch holds both canisters to a 500 G floor and `tools/governor.sh`
+refuses to propose to a target under 200 G), and the fee-history read
+is at the finalized head with a fallback the operator sets
+(`evm_set_fee_fallback`) for when the RPC cluster's nodes still
+disagree. The combined build `8ab7783f...94cc` is kept as the rollback
+artifact; the git canister's module did not change.
+
+The pinned container built `ef7722f`, the merge of #141, to
+`f90c5c03...7225` (gz; raw `9ac02dbe...8bb1`); CI built the tag on a
+GitHub Actions x86_64 runner
+([run 43924565432](https://github.com/DrJesseGlass/ic-git/actions/runs/43924565432))
+and agreed byte for byte on all three modules. Governor proposal 9
+staged it in two chunks and one approval executed it; the new code
+published `ic-git#canister` (commit `ef7722f`, this module hash) in
+Sepolia tx `0x480e6b15...4580`, block 12149606. Right after, umobs
+answered `cycle_balance` for the first time, 1.31 T, and the operator
+set the fallback (50 gwei cap, 2 gwei tip). No e2e for this release:
+the changes are unit-tested and the publish path ran live at the
+install.
 
 ## The cut -- 2026-11-16
 

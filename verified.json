@@ -764,6 +764,44 @@
         "note": "the cut (docs/CANISTER_SPLIT.md, step 16), two installs by the governor in one afternoon. Proposal 7 installed the combined build b6868caa...d45b (raw 22f68be5...0039), the last one-canister release, which v0.3.8 lacked the freeze and export of; its first execution failed with umobs out of cycles (8.2G short of the install), the operator deposited 1T and the retry (governor.sh execute 7) installed it; its ic-git#canister publish failed on eth_feeHistory consensus (SysTransient, at the safe head), so no record names that module, which ran for about an hour. Then the freeze, the copy to the git canister (9 pages, 1,999 records, 8,455,212 bytes, digest 062496c6...6ee4 on both sides), and proposal 8 installed this module, the authority build, over the same state; its publish went through: ic-git#canister (commit 5c5c88e, this module hash) in Sepolia tx 0x4d4a72f3d8f5766408fdbb8d458ddb62a87e3fba6bb303ad60b21d7897ac4597, block 12148567. set_git_canister named 34koz-jyaaa-aaaab-ahejq-cai; every mirror was taken (get_mirrors_pending empty), no top-up was due (the git canister above the 1T floor); the git canister thawed. Afterwards umobs answers /site/... with a 308 to the git canister, the loader's and ic-vote's sites verify there, and the git-side records stay in umobs' stable memory, unread, for the rollback window. Gated by tools/e2e-local.sh with BASE_REF=v0.3.8: 276 checks on 5c5c88e, the upgrade from v0.3.8 and steps 16.1 to 16.6 included. The canister crate changed in #102 to #138: the split's steps 11 to 16 and the custom-domain routing; the did is the authority's (canisters/authority/authority.did)"
       },
       "wasm_sha256": "02d2cb897d462002f81ab429a33a5c43b875a79b16030c9329b9d6e63cb0a9c7"
+    },
+    {
+      "commit": "ef7722fdc09373ba9d65f618aaad86864e090b2a",
+      "tag": "v0.3.11",
+      "module_hash": "f90c5c03faf3877b7bf73329a0ab3f207bfbf9aecbef6bed94c103c5e2127225",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "authority_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+          "date": "2026-11-16",
+          "check": "built at ef7722f, the merge of #141: authority f90c5c03...7225 (raw 9ac02dbe...8bb1), combined 8ab7783f...94cc (raw 63e6b168...a346, the rollback artifact, not installed), git canister d5b5bba7...49a7 (unchanged since v0.3.9)"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/43924565432",
+          "date": "2026-11-16",
+          "check": "identical hashes for all three modules; the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-11-16",
+        "on_chain_match": "match",
+        "checked_by": "dfx canister info against the reproducible build's module sha256: Module hash 0xf90c5c03...7225, Controllers 7kkwl-baaaa-aaaab-ag6rq-cai",
+        "note": "installed by governor proposal 9 (two chunks, 1 of 2, executed in the same call); the new code published ic-git#canister (commit ef7722f, this module hash) in Sepolia tx 0x480e6b157a52bb68d6897413d4e6c00a70f8b79bcb709f1038b8c29bd9b64580, block 12149606, which the registry reads back. The two lessons of the cut (#140, #141): the authority reports its cycles (cycle_balance read 1.31T right after the install, the first reading ever; the watch holds both canisters to a 500G floor and governor.sh refuses a target under 200G), and the fee-history read is at the finalized head with a fallback the operator set after the install (evm_set_fee_fallback: 50 gwei cap, 2 gwei tip). The git canister stays on d5b5bba7...49a7 (its module did not change). No e2e was run for this release: the authority crate changed in evm.rs (fees) and lib.rs (two queries, one update), covered by unit tests, and the publish path ran live at the install"
+      },
+      "wasm_sha256": "9ac02dbee7f5c8c3bc73f9d1cb615d7ce39ccf988dbbd1768ec9864604a78bb1"
     }
   ]
 }
