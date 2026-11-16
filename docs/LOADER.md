@@ -203,8 +203,15 @@ reproduces the hash from a clone of the repository.
 The newest row is the current record. The first release's page did not run
 in a browser (a comment opener in its script text; fixed in #46), so it
 was republished the same day.
+The 2026-11-16 release is the first since the governor and the canister
+split's clients: the loader judges ic-git by the governor rule, reads a
+site from whichever of the two pinned canisters serves it, and pins the
+git canister's governor beside ic-git's (docs/CANISTER_SPLIT.md, steps
+14 and 15). Its record, `ic-git-loader#site`, replaced one that had
+named the September loader for seven weeks.
 
 | Date | Commit | sha256 of loader/index.html | Registry tx |
 |---|---|---|---|
 | 2026-09-29 | `050da748d33f92fd67094a694b420386973ef9b5` | `693af23578b49305b3cf6e253989a5b2b138065d60119504c4aec6dd502bd60e` | [`0x9292958231358ed4ce809cea8983c945ffdada759b9f1abb2cc2c85134d83647`](https://sepolia.etherscan.io/tx/0x9292958231358ed4ce809cea8983c945ffdada759b9f1abb2cc2c85134d83647) (Sepolia, block 11808833) |
 | 2026-09-29 | `056d0bf671b8a85bbb07e3551068ce8b85080ffd` | `5e3647d3672b7ee810c14e7b389d0bbd72bdf637b0f0434f4a6294063dde3cac` | [`0x8c3db364f11560ac786be014a984ab231131d6833001517e721eb8bac45198b9`](https://sepolia.etherscan.io/tx/0x8c3db364f11560ac786be014a984ab231131d6833001517e721eb8bac45198b9) (Sepolia, block 11809493) |
+| 2026-11-16 | `64a6c75730a9586598d18a171e7f9146faf19f0f` | `87cc9796953a0db99712b5bea0c5afbff4a684db639fff07c5d50b329a740061` | [`0x887d88c196966b644785ce8d1814e963b4bb3a25ec265cdef59822f416b9ad78`](https://sepolia.etherscan.io/tx/0x887d88c196966b644785ce8d1814e963b4bb3a25ec265cdef59822f416b9ad78) (Sepolia, block 12147943) |
