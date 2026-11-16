@@ -741,22 +741,40 @@ async fn nonce_of(cfg: &EvmConfig, address: &str, meter: &Meter) -> Result<u64, 
     u64::try_from(count).map_err(|_| "nonce overflows u64".into())
 }
 
-/// (max_fee_per_gas, max_priority_fee_per_gas) from recent fee history:
-/// tip = median of the 50th-percentile rewards (floor 1 gwei), max fee =
-/// 2 * next base fee + tip, which survives six consecutive full blocks.
+/// (max_fee_per_gas, max_priority_fee_per_gas) from the five blocks ending at
+/// the safe head. Safe, not Latest: the replicas' outcalls land on different
+/// nodes of the RPC cluster, and for a moment after every block those nodes
+/// disagree on which block is the latest, so a read at Latest fails consensus
+/// whenever the head moves while the outcalls are out (2026-11-16: two
+/// publishes in a row, three answers among the replicas each time). The safe
+/// head moves once an epoch, so every replica reads the same window nearly
+/// always. Its base fee is up to an epoch old; `fee_pair` says how the cap
+/// allows for that.
 async fn fees(cfg: &EvmConfig, meter: &Meter) -> Result<(u128, u128), String> {
     let hist: FeeHistory = rpc_read(
         cfg,
         "eth_feeHistory",
         FeeHistoryArgs {
             block_count: 5,
-            newest_block: BlockTag::Latest,
+            newest_block: BlockTag::Safe,
             reward_percentiles: Some(vec![50]),
         },
         "eth_feeHistory",
         meter,
     )
     .await?;
+    fee_pair(&hist)
+}
+
+/// The cap allows for the next few blocks beyond the window (the three ones
+/// to the head, with the cap tripling the base fee it survives nine
+/// consecutive full blocks, which the former 2 * base survived six of):
+/// max fee = 3 * the base fee after the window's newest block + tip, tip =
+/// median of the window's 50th-percentile rewards, floor 1 gwei. The cap is
+/// a bound, not a price: the transaction pays the base fee at inclusion plus
+/// the tip, and the cap only sets what the EOA must hold at the send
+/// (REGISTRY_SET_GAS).
+fn fee_pair(hist: &FeeHistory) -> Result<(u128, u128), String> {
     let base = *hist
         .base_fee_per_gas
         .last()
@@ -764,7 +782,7 @@ async fn fees(cfg: &EvmConfig, meter: &Meter) -> Result<(u128, u128), String> {
     let mut tips: Vec<u128> = hist.reward.iter().filter_map(|r| r.first().copied()).collect();
     tips.sort_unstable();
     let tip = tips.get(tips.len() / 2).copied().unwrap_or(0).max(1_000_000_000);
-    Ok((2 * base + tip, tip))
+    Ok((3 * base + tip, tip))
 }
 
 // --- sign and broadcast ------------------------------------------------------
@@ -1359,8 +1377,9 @@ const REGISTRY_KEY: &str = "evm:registry";
 /// burned itself out on the first governed deploy's record (tx
 /// 0xd68214fa..., nonce 20). Unused gas is refunded on chain, so the limit
 /// only sets what the EOA must hold at the time of the send: gas_limit times
-/// the max fee, which `fees` sets to twice the base fee plus the tip (at a
-/// 20 gwei base that is about 0.04 ETH per write, where 150k held 0.006).
+/// the max fee, which `fees` sets to three times the base fee plus the tip
+/// (at a 20 gwei base that is about 0.06 ETH per write, where 150k held
+/// 0.009).
 /// The margin over the measured creation cost is for longer keys and the
 /// next repricing.
 const REGISTRY_SET_GAS: u64 = 1_000_000;
@@ -1483,6 +1502,36 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cap is three base fees above the window plus the median tip, the
+    /// tip never under 1 gwei; an empty window is an error, not a zero fee.
+    #[test]
+    fn fee_cap_is_three_base_fees_plus_the_median_tip() {
+        let gwei = 1_000_000_000u128;
+        let hist = FeeHistory {
+            reward: vec![vec![3 * gwei], vec![gwei / 20], vec![gwei], vec![2 * gwei], vec![gwei / 20]],
+            gas_used_ratio: vec![0.5; 5],
+            oldest_block: 100,
+            base_fee_per_gas: vec![10 * gwei; 5].into_iter().chain([12 * gwei]).collect(),
+        };
+        // Median of 0.05, 0.05, 1, 2, 3 gwei is 1; base after the window is 12.
+        assert_eq!(fee_pair(&hist).unwrap(), (36 * gwei + gwei, gwei));
+        // A quiet chain (Sepolia's base fee rounds to zero): the floor tip.
+        let quiet = FeeHistory {
+            reward: vec![vec![0]; 5],
+            gas_used_ratio: vec![0.0; 5],
+            oldest_block: 100,
+            base_fee_per_gas: vec![0; 6],
+        };
+        assert_eq!(fee_pair(&quiet).unwrap(), (gwei, gwei));
+        let empty = FeeHistory {
+            reward: vec![],
+            gas_used_ratio: vec![],
+            oldest_block: 0,
+            base_fee_per_gas: vec![],
+        };
+        assert!(fee_pair(&empty).is_err());
+    }
 
     #[test]
     fn nonce_is_max_of_confirmed_and_stored_for_same_chain_and_eoa() {
