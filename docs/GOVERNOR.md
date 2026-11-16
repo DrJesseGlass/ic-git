@@ -166,3 +166,17 @@ passphrase-encrypted). Steps 1 to 4 can all be undone; step 5 cannot.
 Afterwards the extensions can judge ic-git itself: controllers == the
 governor, the governor's controllers empty, and the module hash ==
 `ic-git#canister` (docs/GOVERNANCE.md, section 4).
+
+## The second governor
+
+The git canister (docs/CANISTER_SPLIT.md, `34koz-jyaaa-aaaab-ahejq-cai`)
+gets a governor of its own: a second instance of the same module, with
+the git canister as its target and the same approvers and threshold, put
+in place by the split's step 15 the way this one was (the commands are
+there). After an upgrade it asks the git canister for `ic-git#git`,
+which the git canister asks the authority to publish. The clients pin
+it beside this one (`DEFAULTS.gitGovernor`); `verified.json` records it
+under `git_canister.governor`, and `tools/check-module-hash.sh` checks
+it as it checks this one. `tools/governor.sh` drives it with
+`GOVERNOR=git_governor`, the name `canister_ids.json` holds it under.
+It has no feed yet: its `proposals` and `log` are the public record.

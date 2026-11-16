@@ -18,19 +18,26 @@
 # Policy and handover proposals are rarer and are made with dfx directly
 # (docs/GOVERNOR.md has the commands).
 #
-# Environment: GOVERNOR (the governor's canister id; default: canister_ids.json
-# "governor" on ic), APPROVER (dfx identity; default icgit-admin-encrypt),
-# NETWORK (default https://icp-api.io). Each update call is signed by the
-# approver's identity, so an encrypted identity asks for its passphrase per
-# call: one to propose, one per 1 MiB of module, one per ballot.
+# Environment: GOVERNOR (the governor's canister id, or its name in
+# canister_ids.json: "governor" (default), ic-git's, or "git_governor", the
+# git canister's, docs/CANISTER_SPLIT.md step 15), APPROVER (dfx identity;
+# default icgit-admin-encrypt), NETWORK (default https://icp-api.io). Each
+# update call is signed by the approver's identity, so an encrypted identity
+# asks for its passphrase per call: one to propose, one per 1 MiB of module,
+# one per ballot.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NETWORK=${NETWORK:-https://icp-api.io}
 APPROVER=${APPROVER:-icgit-admin-encrypt}
 DID=canisters/governor/governor.did
-GOVERNOR=${GOVERNOR:-$(sed -n '/"governor"/,/}/s/.*"ic": *"\([^"]*\)".*/\1/p' canister_ids.json 2>/dev/null | head -1)}
-[ -n "$GOVERNOR" ] || { echo "set GOVERNOR to the governor's canister id" >&2; exit 2; }
+GOVERNOR=${GOVERNOR:-governor}
+# A name rather than an id: look it up on ic.
+case "$GOVERNOR" in
+  *-*) ;;
+  *) GOVERNOR=$(sed -n "/\"$GOVERNOR\"/,/}/s/.*\"ic\": *\"\([^\"]*\)\".*/\1/p" canister_ids.json 2>/dev/null | head -1) ;;
+esac
+[ -n "$GOVERNOR" ] || { echo "set GOVERNOR to the governor's canister id, or its name in canister_ids.json" >&2; exit 2; }
 
 gov() { dfx canister --network "$NETWORK" --identity "$APPROVER" call "$GOVERNOR" --candid "$DID" "$@"; }
 query() { dfx canister --network "$NETWORK" --identity anonymous call "$GOVERNOR" --candid "$DID" --query "$@"; }

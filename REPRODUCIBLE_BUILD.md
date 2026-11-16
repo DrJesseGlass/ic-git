@@ -190,6 +190,15 @@ Two independent observers, standing:
   upgrade-trust spectrum in "Residual assumptions" below: monitor first,
   governance later.
 
+The git canister (docs/CANISTER_SPLIT.md, step 15) is recorded in the same
+file under `git_canister`, a section of the same shape as the whole: its
+`id`, its `governor` (as the top-level `governor` is kept: id, module
+hash, init, history, policy) and its own `verified` list, newest last,
+whose entries name `git_canister.wasm.gz` as their artifact. The watch
+asks it the same three questions once the section exists: the module
+hash is the last entry's, the one controller is the recorded governor,
+and that governor runs its recorded module with no controllers.
+
 ## Residual assumptions (stated honestly)
 
 This is strong verifiability, not infinite. Two things it does *not* remove:
