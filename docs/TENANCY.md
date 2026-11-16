@@ -213,6 +213,19 @@ refused, and so is removing a voter or transferring the repo when that
 would leave `k` out of reach: lower `k` first. `k = 0`, the default,
 deploys on push as before.
 
+With `k` at 0 a repo trusts the git canister for what deploys. After the
+canister split (docs/CANISTER_SPLIT.md, decision 6.5.4) the git canister
+holds the branches and the authority holds the accounts, the ballots and
+the keys; a deploy is a job the git canister sends with proofs that the
+artifact is in the commit it names, and the authority checks the proofs
+and hashes the bytes itself. Which commit is the tip, only the git
+canister knows, so for a repo with no votes required its word on that is
+final: the same trust such a repo placed in the one canister before the
+split, and no governance claim is made by it. With `k` above 0 the git
+canister can only propose: the authority deploys and attests nothing its
+ballots have not approved, and the git canister serves only a commit the
+authority has told it is approved, however the git canister answers.
+
 A ballot is one of three. `Approve` counts 1. `Reject` counts 0: it says
 "no", or withdraws an earlier approval or objection, and raises the bar
 for nobody.

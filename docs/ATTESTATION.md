@@ -10,7 +10,9 @@ It closes the two gaps in the provenance stack:
 
 1. Frontend provenance -- "the bytes I loaded match the attested commit."
    Already shipped: the canister writes repo -> commit -> bundleHash, and
-   tools/verify.mjs checks a served page against it.
+   tools/verify.mjs checks a served page against it. After the canister
+   split (docs/CANISTER_SPLIT.md) the writer and the server are two
+   canisters; step 5 below says what closure means then.
 2. Backend verification -- "the canister doing the serving and attesting is
    itself running verified-honest code." New: third parties reproduce the
    canister's wasm (see REPRODUCIBLE_BUILD.md) and attest the result on-chain.
@@ -442,6 +444,35 @@ only ADD warnings (a check can downgrade, never falsely upgrade):
        IS the canister's own source repo (the self-hosting endgame of
        REPRODUCIBLE_BUILD.md). There, and only there, additionally require
        C_be == C_fe.
+
+       TWO CANISTERS. From the cut (docs/CANISTER_SPLIT.md, step 16) the
+       bytes of step 1 are served by the git canister and the record of
+       step 3 is written by the authority, ic-git itself, whose EOA owns
+       the registry; before it ic-git serves them too, and after it answers
+       the old URLs with a permanent redirect. Closure is then a property of
+       the pair, and it holds when:
+
+       - the page came from one of the two ids the verifier pins -- the core
+         reads a site only from the host that answered, never from one a
+         redirect leaves (check S; `tools/verify.mjs --host` asks for one
+         host and fails a page it only redirects);
+       - the serving canister runs what `ic-git#git` records and what the
+         trusted verifiers attested under its own canisterKey, and the
+         authority runs what `ic-git#canister` records under its key: each
+         under its own instance of the governor, pinned in the core
+         (`DEFAULTS.governor`; `DEFAULTS.gitGovernor` once step 15 installs
+         it -- until then the core judges the git canister ungoverned,
+         never approved), so H_live is read twice, once per canister;
+       - the `#site` record is the authority's word about what the git
+         canister serves: written only for bytes the git canister proved
+         are the entrypoint at that commit (split step 10), and for a repo
+         requiring votes only for a commit its ballots approved.
+
+       The registry holds no canister id, so the verifier's pinned ids are
+       what name the git canister the authority speaks for: a page served by
+       any other canister fails closure before any hash is compared, and a
+       git canister running a module `ic-git#git` does not name fails it as
+       a changed H_live does.
 
     6. Verdict (computed BEFORE step 7):
          GREEN   backendVerified && closure && frontend-match
