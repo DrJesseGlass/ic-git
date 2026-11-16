@@ -25,9 +25,10 @@ record=verified.json
 [ -f "$record" ] || { echo "no $record; nothing has been verified yet." >&2; exit 2; }
 
 # Latest entry = last element of .verified. jq if present, a sed fallback
-# otherwise so the script works on a bare macOS/Linux host; the fallback
-# reads the authority alone, since the git canister's section repeats the
-# same field names.
+# otherwise so the script works on a bare macOS/Linux host. The fallback
+# finds fields by name and position alone, so once the file has a
+# git_canister section, which repeats every name, it refuses rather than
+# read the wrong entry.
 git_id=
 if command -v jq >/dev/null; then
   canister=$(jq -r '.canister' "$record")
@@ -49,9 +50,15 @@ else
   gov_id=$(sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' "$record" | head -1)
   gov_hash=
   [ -z "$gov_id" ] || gov_hash=$(sed -n 's/.*"module_hash": *"\([^"]*\)".*/\1/p' "$record" | head -1)
-  grep -q '"git_canister"' "$record" && echo "no jq: the git canister's section is not checked." >&2
+  if grep -q '"git_canister"' "$record"; then
+    echo "$record has a git_canister section, which this script reads only with jq; install jq." >&2
+    exit 2
+  fi
 fi
 [ -n "$expected" ] && [ "$expected" != null ] || { echo "no module_hash in $record" >&2; exit 2; }
+if [ -n "$git_id" ]; then
+  [ -n "$git_expected" ] && [ "$git_expected" != null ] || { echo "git_canister in $record has no verified entry" >&2; exit 2; }
+fi
 
 info_err=$(mktemp); trap 'rm -f "$info_err"' EXIT
 # `dfx canister info` prints "Controllers: <p> <p>..." and "Module hash: 0x...".
@@ -119,7 +126,6 @@ check() {
 check "$canister" "$expected" "$commit" "$gov_id" "$gov_hash"
 if [ -n "$git_id" ]; then
   echo
-  [ -n "$git_expected" ] && [ "$git_expected" != null ] || { echo "git_canister in $record has no verified entry" >&2; exit 2; }
   check "$git_id" "$git_expected" "$git_commit" "$git_gov_id" "$git_gov_hash"
 fi
 exit "$status"

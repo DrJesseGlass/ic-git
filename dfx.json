@@ -24,7 +24,7 @@
     },
     "git_governor": {
       "type": "custom",
-      "build": "cargo build --target wasm32-unknown-unknown --release -p governor_canister",
+      "build": [],
       "wasm": "target/wasm32-unknown-unknown/release/governor_canister.wasm",
       "candid": "canisters/governor/governor.did"
     },

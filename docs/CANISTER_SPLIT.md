@@ -1144,8 +1144,13 @@ The cut on mainnet, in this order:
        which is what keeps `freeze`, `import_start`, `unfreeze` and the
        rest callable by the operator once the governor is the only
        controller: `list_authorized` names the operator's principal. Add
-       the backup approver too (`authorize`), so that the cut does not
-       hang on one key. Until 16.4 the canister holds nothing and serves
+       the backup approver too, so that losing the operator's key cannot
+       strand the cut (the backup is kept offline, and comes online for
+       exactly that):
+       ```sh
+       dfx canister $N call git_canister authorize '(principal "s72nn-dfy5r-qz2h5-x3fcc-zfdzo-jbpon-dt27i-nqchx-ey2nc-6iupn-6ae")'
+       ```
+       Until 16.4 the canister holds nothing and serves
        nothing (`site::AWAITING_AUTHORITY` for every repo), `get_authority`
        says umobs, and umobs, still the one-canister build, takes no
        message from it. That is the intended state before the cut.
@@ -1193,7 +1198,10 @@ The cut on mainnet, in this order:
        for `ic-git#git`, which the git canister can only ask the authority
        to publish, and umobs does not take the git canister's messages
        until the cut names it (16.4). Not fatal; the record comes from
-       one more install after 16.4, as 16.4's notes say.
+       one more install after 16.4, as 16.4's notes say. Before going
+       on, read the certified state once more: the git canister's module
+       hash is still the build's, and its controllers are the operator
+       and the governor. The handover locks in whatever the trial left.
     6. **Hand over** (irreversible): the governor alone.
        ```sh
        dfx canister $N update-settings git_canister --set-controller <git_governor> --yes
