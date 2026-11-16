@@ -82,7 +82,9 @@ governor reports its cycles to nobody: the authority now has a public
 floor, and `tools/governor.sh` refuses to propose to a target that
 cannot pay (in the release after v0.3.10). And the fee-history read
 fails outcall consensus at the latest and at the safe head alike, so
-the publish needs a fallback that reads nothing; still open.
+the read moved to the finalized head and the operator can set a
+fallback cap and tip (`evm_set_fee_fallback`) that a publish uses when
+the read still fails (the same release).
 
 ## The git canister -- 2026-11-15 to 16
 

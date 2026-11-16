@@ -984,6 +984,14 @@ fn evm_get_config() -> Option<evm::EvmConfig> {
     evm::get_config()
 }
 
+/// What a send caps its fees at when the fee-history read fails outcall
+/// consensus (crates/authority, `evm::fees`): a max fee and a tip in gwei,
+/// or none to let such a send fail. Kept across evm_set_config.
+#[ic_cdk::update(guard = "is_admin")]
+fn evm_set_fee_fallback(fallback: Option<evm::FeeFallback>) -> Result<(), String> {
+    evm::set_fee_fallback(fallback)
+}
+
 // --- ic-name-service hook (names.rs) -----------------------------------------
 
 /// Turn on the announce hook: after each successful install, tell the

@@ -353,6 +353,7 @@ fi
 
 section "operator guard"
 expect "tenant: evm_set_config refused" "$(ic "$TEN" evm_set_config '("x", "dfx_test_key", 11155111 : nat64, vec {})')" 'is not an operator'
+expect "tenant: evm_set_fee_fallback refused" "$(ic "$TEN" evm_set_fee_fallback '(opt record { max_fee_gwei = 50 : nat64; tip_gwei = 2 : nat64 })')" 'is not an operator'
 expect "tenant: sol_send refused" "$(ic "$TEN" sol_send '("x", 1 : nat64)')" 'is not an operator'
 expect "tenant: put_object refused" "$(ic "$TEN" put_object '("blob", blob "x")')" 'is not an operator'
 refuse "operator: evm_reset_nonce passes the guard" "$(ic "$OP" evm_reset_nonce)" 'rror|not an operator'
