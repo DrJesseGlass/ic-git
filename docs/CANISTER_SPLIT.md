@@ -1114,15 +1114,28 @@ The cut on mainnet, in this order:
     canister over. Its id is now fixed. Publish the step 14 clients and
     extensions with it.
 
-    The canister itself was created empty at step 14
+    DONE 2026-11-16. The canister itself was created empty at step 14
     (`34koz-jyaaa-aaaab-ahejq-cai`, 2026-11-15, controlled by the
-    operator's key), so what is left is the install, the governor, the
-    handover, and the pins. Every step is the operator's, from a terminal:
-    the identity is passphrase-encrypted, so each update call asks. Steps
-    1 to 5 can be undone; step 6 cannot. `$N` stands for
-    `--network https://icp-api.io --identity icgit-admin-encrypt`; the
-    checks read certified state (`dfx canister $N info <id>`, or the
-    core's reader through `tools/verify.mjs`).
+    operator's key); steps 1 to 6 below were run on 2026-11-15 and 16
+    as written, and step 7 is the pull request that records them. What
+    they left: `v0.3.9` (`28288c9`) built to `d5b5bba7...49a7` on the
+    deployer's machine and on CI alike and installed into the git
+    canister; the second governor `3hps4-taaaa-aaaab-ahela-cai` running
+    `a71ff65d...641f` with no controllers; trial proposal 1 executed
+    with the expected `record not published` (umobs, still the
+    one-canister build, has no `publish_git_record`); the git canister's
+    certified controllers `[3hps4...]`. The commands are kept for the
+    record and for a rerun on a copy. Every step is the operator's, from
+    a terminal: the identity is passphrase-encrypted, so each update
+    call asks. Steps 1 to 5 can be undone; step 6 cannot. `$N` stands
+    for `--network ic --identity icgit-admin-encrypt` (the network's
+    name, not its URL: dfx resolves `git_canister` and `git_governor`
+    through `canister_ids.json` only under a named network, and `create`
+    writes the new id under that name; in zsh define it as an array,
+    `N=(--network ic --identity icgit-admin-encrypt)`, so it splits into
+    words); the checks read certified state (`dfx canister --network ic
+    --identity anonymous info <name>`, or the core's reader through
+    `tools/verify.mjs`).
 
     1. **A release of the git canister.** Tag main (`v0.3.9`), build it
        in the pinned container (`tools/reproducible-build.sh --docker`)

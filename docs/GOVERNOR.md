@@ -170,13 +170,22 @@ governor, the governor's controllers empty, and the module hash ==
 ## The second governor
 
 The git canister (docs/CANISTER_SPLIT.md, `34koz-jyaaa-aaaab-ahejq-cai`)
-gets a governor of its own: a second instance of the same module, with
-the git canister as its target and the same approvers and threshold, put
-in place by the split's step 15 the way this one was (the commands are
-there). After an upgrade it asks the git canister for `ic-git#git`,
-which the git canister asks the authority to publish. The clients pin
-it beside this one (`DEFAULTS.gitGovernor`); `verified.json` records it
-under `git_canister.governor`, and `tools/check-module-hash.sh` checks
-it as it checks this one. `tools/governor.sh` drives it with
-`GOVERNOR=git_governor`, the name `canister_ids.json` holds it under.
-It has no feed yet: its `proposals` and `log` are the public record.
+has a governor of its own: `3hps4-taaaa-aaaab-ahela-cai`, a second
+instance of the same module (`a71ff65d...641f`, the artifact this one
+runs, installed again rather than rebuilt), with the git canister as
+its target and the same approvers and threshold, 1 of 2, from init. It
+was put in place on 2026-11-16 by the split's step 15 the way this one
+was: installed, its controller removed, one trial upgrade through it
+with the operator still a controller (proposal 1, the module the git
+canister already ran), then the handover. Certified since: the git
+canister's controllers `[3hps4...]`, the governor's `[]`. After an
+upgrade it asks the git canister for `ic-git#git`, which the git
+canister asks the authority to publish; until the cut (step 16.4) the
+authority does not take that message, so the trial's record publish
+failed as expected and the first `ic-git#git` record follows the cut.
+The clients pin it beside this one (`DEFAULTS.gitGovernor`);
+`verified.json` records it under `git_canister.governor`, and
+`tools/check-module-hash.sh` checks it as it checks this one.
+`tools/governor.sh` drives it with `GOVERNOR=git_governor`, the name
+`canister_ids.json` holds it under. It has no feed yet: its `proposals`
+and `log` are the public record.

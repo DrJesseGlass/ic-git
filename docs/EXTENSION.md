@@ -71,8 +71,8 @@ controllers, never ic-git's. For each canister:
   `ic-git#canister` record. ic-git's code then changes only by its
   approvers' vote, and the chain says which build it runs. Or the git
   canister, when it serves the site: likewise under its own governor,
-  pinned in the core (`DEFAULTS.gitGovernor`, set when the governor is
-  installed at step 15 of the split; until then the git canister is
+  pinned in the core (`DEFAULTS.gitGovernor`, `3hps4-...`, installed at
+  step 15 of the split; a client without the pin judges the git canister
   ungoverned), and running what `ic-git#git` records.
 - **governed** -- ic-git (or the git canister) under that governor, but running a module the
   `ic-git#canister` record does not name (yet: the record follows an

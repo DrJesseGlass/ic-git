@@ -368,6 +368,16 @@ for (const id of [UMOBS, LEDGER]) {
   assert.deepEqual([pin.id, pin.module], [rec.id, rec.module_hash]);
   assert.equal(gov.moduleHash, pin.module);
   pass('the pinned governor is verified.json\'s, and the captured governor runs it');
+
+  // So is the git canister's: verified.json's git_canister section names
+  // the canister the core pins and the governor it pins for it, which
+  // runs the same module as the first (split step 15).
+  const git = JSON.parse(read('../verified.json')).git_canister;
+  const gitPin = Verifier.DEFAULTS.gitGovernor;
+  assert.equal(git.id, Verifier.DEFAULTS.git);
+  assert.deepEqual([gitPin.id, gitPin.module], [git.governor.id, git.governor.module_hash]);
+  assert.equal(gitPin.module, pin.module);
+  pass('the pinned git governor is verified.json\'s git_canister.governor, on the same module');
 }
 
 if (process.argv.includes('--live')) {
