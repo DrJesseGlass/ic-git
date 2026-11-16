@@ -223,8 +223,8 @@ canister knows, so for a repo with no votes required its word on that is
 final: the same trust such a repo placed in the one canister before the
 split, and no governance claim is made by it. With `k` above 0 the git
 canister can only propose: the authority deploys and attests nothing its
-ballots have not approved, and tells the git canister which commit the
-site serves, however the git canister answers.
+ballots have not approved, and the git canister serves only a commit the
+authority has told it is approved, however the git canister answers.
 
 A ballot is one of three. `Approve` counts 1. `Reject` counts 0: it says
 "no", or withdraws an earlier approval or objection, and raises the bar

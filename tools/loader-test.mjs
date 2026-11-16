@@ -37,6 +37,15 @@ const html = read('../loader/index.html');
 const SHARED = ['// === shared: unverifiableSubresource ===', '// === end shared ==='];
 assert.equal(between(html, ...SHARED), between(read('./verify.mjs'), ...SHARED), 'the loader\'s scanner differs from tools/verify.mjs\'s');
 console.log('PASS  shared scanner block is identical to tools/verify.mjs');
+// What the core takes for an ic-git host (hostOf), tools/verify.mjs must
+// take too, or a host one accepts the other refuses at check S.
+{
+  const pattern = /\/\^\(\[a-z0-9-\]\+\)\\\.raw\\\.icp0\\\.io\$\//;
+  const [core, cli] = [read('../core/verifier.js'), read('./verify.mjs')].map(s => (pattern.exec(s) || [])[0]);
+  assert.ok(core, 'core/verifier.js hostOf pattern not found');
+  assert.equal(cli, core, 'tools/verify.mjs hostOf differs from the core\'s');
+  console.log('PASS  tools/verify.mjs recognises a serving host as the core does');
+}
 
 // Each <script> element must end where its source ends. The HTML parser ends
 // one at the first end tag it meets, and after a "<!--" in its text a later

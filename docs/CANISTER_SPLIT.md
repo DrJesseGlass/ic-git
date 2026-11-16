@@ -1085,7 +1085,7 @@ The two canisters:
       came from one of the two pinned ids (the authority's URL fetched
       with no `--host`, redirects followed, and the host is where the
       page came from), and from the host asked for when one was; a page
-      from anywhere else is refused unchecked. A, D and E read the host
+      from anywhere else is refused unchecked. A and D read the host
       that answered: the clone of D goes there, not where it was asked
       for. docs/ATTESTATION.md step 5 has the two-canister closure;
       docs/TENANCY.md ("Votes") says a repo with no votes required trusts

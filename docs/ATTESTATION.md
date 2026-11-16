@@ -459,9 +459,10 @@ only ADD warnings (a check can downgrade, never falsely upgrade):
        - the serving canister runs what `ic-git#git` records and what the
          trusted verifiers attested under its own canisterKey, and the
          authority runs what `ic-git#canister` records under its key: each
-         under its own instance of the governor, both pinned in the core
-         (`DEFAULTS.governor`, `DEFAULTS.gitGovernor`), so H_live is read
-         twice, once per canister;
+         under its own instance of the governor, pinned in the core
+         (`DEFAULTS.governor`; `DEFAULTS.gitGovernor` once step 15 installs
+         it -- until then the core judges the git canister ungoverned,
+         never approved), so H_live is read twice, once per canister;
        - the `#site` record is the authority's word about what the git
          canister serves: written only for bytes the git canister proved
          are the entrypoint at that commit (split step 10), and for a repo

@@ -15,7 +15,7 @@
 //   S. the page came from one of the two pinned ids. With --host, from that
 //      one, so a page the host only redirects fails; without it, the
 //      authority's URL is fetched and the host is where the page came from.
-//      Checks A, D and E are then made against that host, never against a
+//      Checks A and D then read that host (D clones from it), never a
 //      canister a redirect led to.
 //   A. served /site/<repo>/<path> carries X-Ic-Git-Commit equal to the
 //      registry entry's commit (the canister's on-chain attestation);
@@ -80,7 +80,12 @@ const opts = {
 };
 for (let i = 0; i < args.length; i++) {
   if (args[i].startsWith("--")) {
-    opts[args[i].slice(2)] = args[++i];
+    const value = args[++i];
+    if (value === undefined || value.startsWith("--")) {
+      console.error(`${args[i - 1]} needs a value`);
+      process.exit(2);
+    }
+    opts[args[i - 1].slice(2)] = value;
   } else {
     positional.push(args[i]);
   }
@@ -99,7 +104,9 @@ if (opts.host && opts.host !== opts.canister && opts.host !== opts.git) {
   process.exit(2);
 }
 // A canister's raw gateway host, and the canister a raw gateway URL is
-// served by (null when it is no such URL). As in core/verifier.js.
+// served by (null when it is no such URL). The pattern is the core's
+// (core/verifier.js hostOf; tools/loader-test.mjs holds the two to each
+// other), so what the core takes for an ic-git host, this does too.
 const gatewayOf = (id) => `https://${id}.raw.icp0.io`;
 const hostOf = (href) => {
   try {
@@ -115,6 +122,14 @@ let failures = 0;
 const report = (ok, label, detail) => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` -- ${detail}` : ""}`);
   if (!ok) failures++;
+};
+const summary = () => console.log(failures === 0 ? "\nVERIFIED" : `\nNOT VERIFIED (${failures} failing check${failures === 1 ? "" : "s"})`);
+// A check nothing after it can be made without: reported, summed up, and
+// the end.
+const fail = (label, detail) => {
+  report(false, label, detail);
+  summary();
+  process.exit(1);
 };
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
@@ -571,37 +586,39 @@ const keys = { site: repo + SITE_SUFFIX, deploy: repo };
 // wall clock, and is what lets --record auto tell a site-only repo from a
 // deploy-only one.
 const asked = opts.host || opts.canister;
-const siteUrl = `${gatewayOf(asked)}/site/${repo}/${path}`;
+// The repo and each path segment encoded, as the core encodes the repo: a
+// `#`, `?` or `%` in a name is part of it, not of the request.
+const siteUrl = `${gatewayOf(asked)}/site/${encodeURIComponent(repo)}/${path.split("/").map(encodeURIComponent).join("/")}`;
 const [siteRet, deployRet, servedRes] = await Promise.all([
   rpc("eth_call", [{ to: opts.registry, data: encodeGet(keys.site) }, "latest"]),
   rpc("eth_call", [{ to: opts.registry, data: encodeGet(keys.deploy) }, "latest"]),
-  fetch(siteUrl), // redirects followed: the cut sends ic-git's old URLs to the git canister
+  // Redirects followed: the cut sends ic-git's old URLs to the git canister.
+  // A fetch that fails outright is a failed check S, not a crash.
+  fetch(siteUrl).catch((e) => e),
 ]);
 const records = { site: decodeGet(siteRet), deploy: decodeGet(deployRet) };
-
-// What the canister actually served.
-if (!servedRes.ok) {
-  console.error(`fetch ${siteUrl}: HTTP ${servedRes.status}`);
-  process.exit(1);
-}
-const served = Buffer.from(await servedRes.arrayBuffer());
 
 // S. Where the page came from, after any redirect: one of the two pinned
 // ids, and the one asked for when --host named it. Every later check reads
 // that host, so a page some other canister served is not checked at all:
 // a record can match bytes a stranger copied, and that proves nothing.
+// Judged before the status, so a stranger's 404 is named as a stranger's.
+if (servedRes instanceof Error) fail("S: the page was served by an ic-git canister", `fetch ${siteUrl}: ${servedRes.cause?.message || servedRes.message}`);
 const landed = servedRes.redirected ? hostOf(servedRes.url) : asked;
 if (landed !== opts.canister && landed !== opts.git) {
-  report(false, "S: the page was served by an ic-git canister", `it came from ${servedRes.url}, which is neither ic-git nor the git canister`);
-  console.log(`\nNOT VERIFIED (1 failing check)`);
-  process.exit(1);
+  fail("S: the page was served by an ic-git canister", `it came from ${servedRes.url}, which is neither ic-git nor the git canister`);
 }
 if (opts.host && landed !== opts.host) {
-  report(false, "S: the page was served by the host asked for", `${opts.host} redirected to ${servedRes.url}: it no longer serves the site`);
-  console.log(`\nNOT VERIFIED (1 failing check)`);
-  process.exit(1);
+  fail("S: the page was served by the host asked for", `${opts.host} redirected to ${servedRes.url}: it no longer serves the site`);
 }
 const gateway = gatewayOf(landed);
+
+// What the canister actually served.
+if (!servedRes.ok) {
+  console.error(`fetch ${servedRes.url || siteUrl}: HTTP ${servedRes.status}${landed !== asked ? ` (${asked} redirected there)` : ""}`);
+  process.exit(1);
+}
+const served = Buffer.from(await servedRes.arrayBuffer());
 
 // A deploy record attests sha256 of the DECODED contract bytecode, so check B
 // needs the hex form for that kind. This is a property of the record, never of
@@ -654,7 +671,7 @@ console.log(`served: by ${whose(landed)} ${landed}, ${served.length} bytes, X-Ic
 // --- checks ------------------------------------------------------------------
 
 // S. Reported here; a page that failed it was refused above, unchecked.
-report(true, `S: the page was served by ${whose(landed)}`, servedRes.redirected ? `${asked} redirected there` : "");
+report(true, `S: the page was served by ${whose(landed)}`, landed !== asked ? `${whose(asked)} ${asked} redirected there` : "");
 
 // A. The served response claims exactly the attested commit.
 const commitOk = servedCommit === registryCommit;
@@ -739,5 +756,5 @@ if (kind === "site") {
   );
 }
 
-console.log(failures === 0 ? "\nVERIFIED" : `\nNOT VERIFIED (${failures} failing check${failures === 1 ? "" : "s"})`);
+summary();
 process.exit(failures === 0 ? 0 : 1);
