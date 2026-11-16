@@ -1078,6 +1078,18 @@ The two canisters:
       query sent there, refuses a redirect to another canister or a host
       that only redirects; the live Firefox extension test passes on
       ic-git as it serves now.
+    - 14b DONE 2026-11-15: `tools/verify.mjs` and the two docs.
+      `--canister` stays ic-git, the registry's publisher; `--git` is the
+      git canister, pinned as the core pins it; `--host` names which of
+      the two to read the site from. Check S, before any other: the page
+      came from one of the two pinned ids (the authority's URL fetched
+      with no `--host`, redirects followed, and the host is where the
+      page came from), and from the host asked for when one was; a page
+      from anywhere else is refused unchecked. A, D and E read the host
+      that answered: the clone of D goes there, not where it was asked
+      for. docs/ATTESTATION.md step 5 has the two-canister closure;
+      docs/TENANCY.md ("Votes") says a repo with no votes required trusts
+      the git canister for what deploys (decision 6.5.4).
 
 The cut on mainnet, in this order:
 
@@ -1350,6 +1362,8 @@ which is section 1.2's point.
   which canister serves the site and which one owns the registry record. The
   F2 verifier and docs/ATTESTATION.md's step 5 ("full-stack closure") both
   assume one canister today; closure becomes a two-canister property and the
-  spec needs a paragraph on it before phase 3.
+  spec needs a paragraph on it before phase 3. (Done at step 14b: `--canister`
+  is the registry's publisher, `--git` and `--host` the serving side, and the
+  spec's step 5 has the paragraph.)
 - The `agrees()` / K-of-N logic is unaffected -- it is keyed on a canister
   string, so two canisters simply means two attestation targets.

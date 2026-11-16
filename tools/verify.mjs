@@ -1,9 +1,22 @@
 #!/usr/bin/env node
 // F2 rung one (VISION.md section 2): the client-side verifier, as a CLI.
 //
-// Checks that what the ic-git canister serves is what the on-chain
-// ProvenanceRegistry attests, from the user's own trust domain:
+// Checks that what ic-git serves is what the on-chain ProvenanceRegistry
+// attests, from the user's own trust domain.
 //
+// Two canisters are in it (docs/CANISTER_SPLIT.md). ic-git itself, the
+// authority (--canister), publishes the registry records: its EOA owns the
+// registry, and it writes a record only for bytes the git side proved are in
+// the commit. The git canister (--git, pinned) serves the sites and holds the
+// objects from the cut (step 16); until then the authority serves them too,
+// and after it answers the old URLs with a permanent redirect to the git
+// canister. A site is read from the host that serves it, and only from it:
+//
+//   S. the page came from one of the two pinned ids. With --host, from that
+//      one, so a page the host only redirects fails; without it, the
+//      authority's URL is fetched and the host is where the page came from.
+//      Checks A, D and E are then made against that host, never against a
+//      canister a redirect led to.
 //   A. served /site/<repo>/<path> carries X-Ic-Git-Commit equal to the
 //      registry entry's commit (the canister's on-chain attestation);
 //   B. sha256 of the artifact equals the registry entry's bundleHash;
@@ -11,8 +24,8 @@
 //      the attested creation bytecode (advisory: constructors that write
 //      immutables legitimately transform it);
 //   D. (if git is installed) an independent `git clone` of the repo from
-//      the canister contains that commit, and the blob at <commit>:<path>
-//      is byte-identical to what was served.
+//      the host that served the page contains that commit, and the blob at
+//      <commit>:<path> is byte-identical to what was served.
 //   E. (site records) the served entrypoint's own markup references are
 //      enforceable -- a port of the canister's site::unverifiable_subresource.
 //      A matching hash on a page that pulls un-integrity'd code is a FAILED
@@ -39,7 +52,9 @@
 // Usage:
 //   node tools/verify.mjs <repo> <path> [--contract 0x...]
 //     [--record auto|site|deploy]
-//     [--canister umobs-yiaaa-aaaab-agyrq-cai]
+//     [--canister umobs-yiaaa-aaaab-agyrq-cai]   ic-git, the registry's publisher
+//     [--git 34koz-jyaaa-aaaab-ahejq-cai]        the git canister, as the core pins it
+//     [--host <one of the two>]                  read the site from this one only
 //     [--registry 0xa1362DAda583c56a395D305a8C7A458E0B62A209]
 //     [--rpc https://ethereum-sepolia-rpc.publicnode.com]
 
@@ -55,7 +70,9 @@ const SITE_SUFFIX = "#site"; // must match crates/types/src/keys.rs (its tests c
 const args = process.argv.slice(2);
 const positional = [];
 const opts = {
-  canister: "umobs-yiaaa-aaaab-agyrq-cai",
+  canister: "umobs-yiaaa-aaaab-agyrq-cai", // ic-git, the authority: the registry's publisher
+  git: "34koz-jyaaa-aaaab-ahejq-cai", // the git canister (core/verifier.js DEFAULTS.git)
+  host: null, // the one canister to read the site from; null: where ic-git's URL leads
   registry: "0xa1362DAda583c56a395D305a8C7A458E0B62A209",
   rpc: "https://ethereum-sepolia-rpc.publicnode.com",
   contract: null,
@@ -70,14 +87,29 @@ for (let i = 0; i < args.length; i++) {
 }
 const [repo, path] = positional;
 if (!repo || !path) {
-  console.error("usage: verify.mjs <repo> <path> [--contract 0x...] [--record auto|site|deploy] [--canister id] [--registry 0x...] [--rpc url]");
+  console.error("usage: verify.mjs <repo> <path> [--contract 0x...] [--record auto|site|deploy] [--canister id] [--git id] [--host id] [--registry 0x...] [--rpc url]");
   process.exit(2);
 }
 if (!["auto", "site", "deploy"].includes(opts.record)) {
   console.error(`--record must be auto, site, or deploy (got "${opts.record}")`);
   process.exit(2);
 }
-const gateway = `https://${opts.canister}.raw.icp0.io`;
+if (opts.host && opts.host !== opts.canister && opts.host !== opts.git) {
+  console.error(`--host must be ic-git (${opts.canister}) or the git canister (${opts.git}); ${opts.host} is neither`);
+  process.exit(2);
+}
+// A canister's raw gateway host, and the canister a raw gateway URL is
+// served by (null when it is no such URL). As in core/verifier.js.
+const gatewayOf = (id) => `https://${id}.raw.icp0.io`;
+const hostOf = (href) => {
+  try {
+    const m = /^([a-z0-9-]+)\.raw\.icp0\.io$/.exec(new URL(href).hostname);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+};
+const whose = (id) => (id === opts.canister ? "ic-git" : "the git canister");
 
 let failures = 0;
 const report = (ok, label, detail) => {
@@ -538,19 +570,38 @@ const keys = { site: repo + SITE_SUFFIX, deploy: repo };
 // them concurrently. Reading both keys costs one extra eth_call and no extra
 // wall clock, and is what lets --record auto tell a site-only repo from a
 // deploy-only one.
+const asked = opts.host || opts.canister;
+const siteUrl = `${gatewayOf(asked)}/site/${repo}/${path}`;
 const [siteRet, deployRet, servedRes] = await Promise.all([
   rpc("eth_call", [{ to: opts.registry, data: encodeGet(keys.site) }, "latest"]),
   rpc("eth_call", [{ to: opts.registry, data: encodeGet(keys.deploy) }, "latest"]),
-  fetch(`${gateway}/site/${repo}/${path}`),
+  fetch(siteUrl), // redirects followed: the cut sends ic-git's old URLs to the git canister
 ]);
 const records = { site: decodeGet(siteRet), deploy: decodeGet(deployRet) };
 
 // What the canister actually served.
 if (!servedRes.ok) {
-  console.error(`fetch ${gateway}/site/${repo}/${path}: HTTP ${servedRes.status}`);
+  console.error(`fetch ${siteUrl}: HTTP ${servedRes.status}`);
   process.exit(1);
 }
 const served = Buffer.from(await servedRes.arrayBuffer());
+
+// S. Where the page came from, after any redirect: one of the two pinned
+// ids, and the one asked for when --host named it. Every later check reads
+// that host, so a page some other canister served is not checked at all:
+// a record can match bytes a stranger copied, and that proves nothing.
+const landed = servedRes.redirected ? hostOf(servedRes.url) : asked;
+if (landed !== opts.canister && landed !== opts.git) {
+  report(false, "S: the page was served by an ic-git canister", `it came from ${servedRes.url}, which is neither ic-git nor the git canister`);
+  console.log(`\nNOT VERIFIED (1 failing check)`);
+  process.exit(1);
+}
+if (opts.host && landed !== opts.host) {
+  report(false, "S: the page was served by the host asked for", `${opts.host} redirected to ${servedRes.url}: it no longer serves the site`);
+  console.log(`\nNOT VERIFIED (1 failing check)`);
+  process.exit(1);
+}
+const gateway = gatewayOf(landed);
 
 // A deploy record attests sha256 of the DECODED contract bytecode, so check B
 // needs the hex form for that kind. This is a property of the record, never of
@@ -598,9 +649,12 @@ const servedCommit = servedRes.headers.get("x-ic-git-commit") ?? "";
 // fallback applied by the canister); the git-clone check must use this, not
 // the URL path. Fallback for canisters predating the header.
 const servedPath = servedRes.headers.get("x-ic-git-path") ?? path;
-console.log(`served: ${served.length} bytes, X-Ic-Git-Commit ${servedCommit}, tree path ${servedPath}`);
+console.log(`served: by ${whose(landed)} ${landed}, ${served.length} bytes, X-Ic-Git-Commit ${servedCommit}, tree path ${servedPath}`);
 
 // --- checks ------------------------------------------------------------------
+
+// S. Reported here; a page that failed it was refused above, unchecked.
+report(true, `S: the page was served by ${whose(landed)}`, servedRes.redirected ? `${asked} redirected there` : "");
 
 // A. The served response claims exactly the attested commit.
 const commitOk = servedCommit === registryCommit;
@@ -644,8 +698,11 @@ if (opts.contract && !wantsHex) {
   );
 }
 
-// D. Independent re-derivation: clone the repo from the canister and compare
-// the blob at <commit>:<path> with what was served.
+// D. Independent re-derivation: clone the repo from the host that served the
+// page and compare the blob at <commit>:<path> with what was served. The
+// clone goes where the page came from, not where it was asked for: ic-git
+// redirects a clone after the cut as it redirects the page, and git would
+// follow, but a host that served the bytes must also hold the commit.
 try {
   execFileSync("git", ["--version"], { stdio: "ignore" });
   const dir = mkdtempSync(join(tmpdir(), "icgit-verify-"));
