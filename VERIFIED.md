@@ -76,11 +76,13 @@ every cut step included.
    MATCH for all six. umobs keeps the git-side records in stable
    memory, unread, for the rollback window.
 
-Two things the cut taught, both open: a canister whose only controller
-is a governor reports its cycles to nobody, so the authority needs a
-public `cycle_balance` as the git canister has, and the watch a floor;
-and the fee-history read fails outcall consensus at the latest and at
-the safe head alike, so the publish needs a fallback that reads nothing.
+Two things the cut taught. A canister whose only controller is a
+governor reports its cycles to nobody: the authority now has a public
+`cycle_balance` as the git canister has, the watch reads both against a
+floor, and `tools/governor.sh` refuses to propose to a target that
+cannot pay (in the release after v0.3.10). And the fee-history read
+fails outcall consensus at the latest and at the safe head alike, so
+the publish needs a fallback that reads nothing; still open.
 
 ## The git canister -- 2026-11-15 to 16
 

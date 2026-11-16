@@ -5,7 +5,10 @@
 # with no controllers and running its recorded module (docs/GOVERNOR.md)?
 # Once verified.json has a `git_canister` section (docs/CANISTER_SPLIT.md,
 # step 15), the same three questions are asked of the git canister and
-# its governor.
+# its governor. A fourth, of each canister: does it hold cycles above a
+# floor (CYCLES_FLOOR, 500 G by default)? Its controller is a governor, so
+# only its own public `cycle_balance` can say, and an install fails for
+# want of cycles nobody saw otherwise, as one did at the cut.
 #
 #   tools/check-module-hash.sh            compare live hash vs the latest record
 #
@@ -123,9 +126,41 @@ check() {
   fi
 }
 
+# cycles <canister> <did>: the canister's own cycle_balance query against
+# CYCLES_FLOOR. A module without the query is noted, not failed (the
+# authority gained it after the cut); a read that fails otherwise is
+# status 3, not a mismatch; under the floor is status 1, so the watch
+# notifies while there is still time to deposit.
+CYCLES_FLOOR=${CYCLES_FLOOR:-500000000000}
+cycles() {
+  local canister=$1 did=$2 out bal
+  out=$(dfx canister --network ic --identity "${DFX_IDENTITY:-anonymous}" call "$canister" cycle_balance '()' --candid "$did" --query 2>"$info_err") || out=""
+  bal=$(printf '%s\n' "$out" | tr -d '_ ' | sed -n 's/^(\([0-9]*\):nat64)$/\1/p')
+  if [ -z "$bal" ]; then
+    if grep -q "no query method" "$info_err"; then
+      echo "cycles              : not reported by the module it runs (no cycle_balance query)"
+    else
+      echo "cycles              : <unreadable> -- this is NOT a mismatch." >&2
+      sed 's/^/  dfx: /' "$info_err" >&2 || true
+      [ "$status" = 1 ] || status=3
+    fi
+    return 0
+  fi
+  echo "cycles              : $bal (floor $CYCLES_FLOOR)"
+  if [ "$bal" -lt "$CYCLES_FLOOR" ]; then
+    echo "LOW -- $canister holds fewer cycles than the floor; deposit some:"
+    echo "  dfx canister --network ic deposit-cycles <amount> $canister"
+    status=1
+  else
+    echo "OK -- $canister holds cycles above the floor."
+  fi
+}
+
 check "$canister" "$expected" "$commit" "$gov_id" "$gov_hash"
+cycles "$canister" canisters/authority/authority.did
 if [ -n "$git_id" ]; then
   echo
   check "$git_id" "$git_expected" "$git_commit" "$git_gov_id" "$git_gov_hash"
+  cycles "$git_id" canisters/git/git.did
 fi
 exit "$status"

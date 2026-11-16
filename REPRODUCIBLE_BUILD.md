@@ -186,7 +186,11 @@ Two independent observers, standing:
   hash through a certificate-verifying client and compare it with the latest
   `verified.json` entry. A change is either a deploy that has not been
   reproduced and recorded yet, or an unauthorized upgrade; either way the job
-  fails and the owner is notified. This is the cheapest rung of the
+  fails and the owner is notified. It also reads each canister's own
+  `cycle_balance` against a floor (`CYCLES_FLOOR`, 500 G by default) and
+  fails under it: a canister whose only controller is a governor reports
+  its cycles to nobody else, and an install it cannot pay for fails at
+  the vote, as one did at the cut. This is the cheapest rung of the
   upgrade-trust spectrum in "Residual assumptions" below: monitor first,
   governance later.
 

@@ -325,6 +325,8 @@ service : {
   freeze : () -> (Result);
   unfreeze : () -> (Result);
   frozen : () -> (bool) query;
+  // what this canister holds in cycles (public: its controller is a governor)
+  cycle_balance : () -> (nat64) query;
   set_importer : (principal) -> (Result);
   get_importer : () -> (opt principal) query;
   export_page : (opt Cursor) -> (ResultPage);

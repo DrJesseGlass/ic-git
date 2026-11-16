@@ -449,6 +449,14 @@ fn frozen() -> bool {
     transfer::frozen()
 }
 
+/// What this canister holds in cycles (public, as on the authority and the
+/// git canister: its controller is a governor). Here so that a rollback to
+/// the one-canister build keeps the watch's view.
+#[ic_cdk::query]
+fn cycle_balance() -> u64 {
+    u64::try_from(ic_cdk::api::canister_cycle_balance()).unwrap_or(u64::MAX)
+}
+
 /// Name the one canister that may read the export besides operators
 /// (operators): the git canister that imports it.
 #[ic_cdk::update(guard = "is_admin")]

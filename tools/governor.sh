@@ -107,6 +107,25 @@ case "$cmd" in
     if [ -n "$built" ] && [ "${commit:0:7}" != "$built" ]; then
       echo "$module was built from $built..., not $commit" >&2; exit 2
     fi
+    # The install is paid by the target, whose only controller is the
+    # governor, so nothing but its own cycle_balance says whether it can:
+    # umobs could not at the cut (docs/CANISTER_SPLIT.md, step 16.0) and the
+    # proposal executed into an error. Refuse under MIN_TARGET_CYCLES
+    # (200 G by default); a target without the query is proposed to anyway.
+    target=$(query info | tr '\n' ' ' | sed -n 's/.*target = principal "\([a-z0-9-]*\)".*/\1/p')
+    min=${MIN_TARGET_CYCLES:-200000000000}
+    bal_did=$(mktemp); echo 'service : { cycle_balance : () -> (nat64) query }' >"$bal_did"
+    bal=$(dfx canister --network "$NETWORK" --identity anonymous call "$target" cycle_balance '()' --candid "$bal_did" --query 2>/dev/null | tr -d '_ ' | sed -n 's/^(\([0-9]*\):nat64)$/\1/p' || true)
+    rm -f "$bal_did"
+    if [ -z "$bal" ]; then
+      echo "the target $target does not report its cycles (no cycle_balance query); proposing anyway" >&2
+    elif [ "$bal" -lt "$min" ]; then
+      echo "the target $target holds $bal cycles, under the $min an install needs with room to spare; deposit first:" >&2
+      echo "  dfx canister --network $NETWORK --identity $APPROVER deposit-cycles <amount> $target" >&2
+      exit 1
+    else
+      echo "the target $target holds $bal cycles"
+    fi
     sha=$(shasum -a 256 "$module" | cut -d' ' -f1)
     echo "proposing: commit $commit, module $sha ($(wc -c <"$module" | tr -d ' ') bytes)"
     out=$(gov propose "(variant { Upgrade = record { commit = \"$commit\"; module_sha256 = \"$sha\"; arg = blob \"\" } })")
