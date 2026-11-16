@@ -1113,6 +1113,130 @@ The cut on mainnet, in this order:
     the git canister as its target and the same approvers, and hand the
     canister over. Its id is now fixed. Publish the step 14 clients and
     extensions with it.
+
+    The canister itself was created empty at step 14
+    (`34koz-jyaaa-aaaab-ahejq-cai`, 2026-11-15, controlled by the
+    operator's key), so what is left is the install, the governor, the
+    handover, and the pins. Every step is the operator's, from a terminal:
+    the identity is passphrase-encrypted, so each update call asks. Steps
+    1 to 5 can be undone; step 6 cannot. `$N` stands for
+    `--network https://icp-api.io --identity icgit-admin-encrypt`; the
+    checks read certified state (`dfx canister $N info <id>`, or the
+    core's reader through `tools/verify.mjs`).
+
+    1. **A release of the git canister.** Tag main (`v0.3.9`), build it
+       in the pinned container (`tools/reproducible-build.sh --docker`)
+       and keep the `git` line's hash; the artifact is
+       `target/reproducible/git_canister-<commit>.wasm.gz`. CI builds the
+       tag on its own runner (reproducible-build.yml) and must print the
+       same hash. Nothing installs into umobs: this release is the git
+       canister's alone, and umobs stays on v0.3.8 until 16.3.
+    2. **Install the git canister**, its authority named. The install
+       argument is the only thing the git canister is ever told, and the
+       cut cannot change it:
+       ```sh
+       dfx canister $N install git_canister --mode install \
+         --wasm target/reproducible/git_canister-<commit>.wasm.gz \
+         --argument '(record { authority = principal "umobs-yiaaa-aaaab-agyrq-cai" })'
+       ```
+       Its certified module hash must be the build's. The installer is on
+       the canister's admin allowlist from init (`auth::init_with_caller`),
+       which is what keeps `freeze`, `import_start`, `unfreeze` and the
+       rest callable by the operator once the governor is the only
+       controller: `list_authorized` names the operator's principal. Add
+       the backup approver too, so that losing the operator's key cannot
+       strand the cut (the backup is kept offline, and comes online for
+       exactly that):
+       ```sh
+       dfx canister $N call git_canister authorize '(principal "s72nn-dfy5r-qz2h5-x3fcc-zfdzo-jbpon-dt27i-nqchx-ey2nc-6iupn-6ae")'
+       ```
+       Until 16.4 the canister holds nothing and serves
+       nothing (`site::AWAITING_AUTHORITY` for every repo), `get_authority`
+       says umobs, and umobs, still the one-canister build, takes no
+       message from it. That is the intended state before the cut.
+    3. **Create and install the second governor**, from the attested
+       governor module rather than the current tree's: the module the
+       first governor runs (`a71ff65d...641f`, v0.3.6's
+       `governor-018bf4d.wasm.gz`, which the v0.3.7 and v0.3.8 container
+       runs rebuilt byte for byte; a run of the tree after v0.3.8 gave a
+       different one, `16a8df63...35f3` at 621b8e9 on 2026-11-13, the lock
+       having moved). One governor module for both, already recorded, so
+       the core pins one hash and nothing new needs attesting. The policy is the first governor's as it stands, 1 of 2,
+       installed as such: the backup key never has to come online.
+       ```sh
+       dfx canister $N create git_governor --no-wallet --with-cycles 2000000000000
+       dfx canister $N install git_governor \
+         --wasm target/reproducible/governor-018bf4d.wasm.gz \
+         --argument '(record { target = principal "34koz-jyaaa-aaaab-ahejq-cai"; approvers = vec { principal "3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe"; principal "s72nn-dfy5r-qz2h5-x3fcc-zfdzo-jbpon-dt27i-nqchx-ey2nc-6iupn-6ae" }; threshold = 1 : nat32 })'
+       ```
+       `create` writes the new id to `canister_ids.json` under
+       `git_governor` (dfx.json names it); commit that. Its certified
+       module hash must be `a71ff65d...641f`, and
+       `GOVERNOR=git_governor tools/governor.sh status` must show the
+       target and both approvers.
+    4. **Make it immutable**: remove its only controller.
+       ```sh
+       dfx canister $N update-settings git_governor \
+         --remove-controller 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe --yes
+       ```
+       Certified controllers `[]`.
+    5. **Trial, with the operator still a controller.** Add the governor
+       as a second controller of the git canister and run one upgrade
+       through it, to the module the canister already runs; this proves
+       staging and the chunked install on the new canister while the
+       operator can still repair anything. The install is paid from the
+       target's cycles (its chunk store holds the module), so check
+       `dfx canister $N status git_canister` first and top it up if it
+       is short; the authority tops it up to its floor at 16.4.
+       ```sh
+       dfx canister $N update-settings git_canister --add-controller <git_governor>
+       GOVERNOR=git_governor tools/governor.sh propose-upgrade target/reproducible/git_canister-<commit>.wasm.gz <commit>
+       GOVERNOR=git_governor tools/governor.sh vote <id> approve
+       ```
+       The outcome reads `executed: ... record not published: ...`, and
+       that is expected: after an install the governor asks its target
+       for `ic-git#git`, which the git canister can only ask the authority
+       to publish, and umobs does not take the git canister's messages
+       until the cut names it (16.4). Not fatal; the record comes from
+       one more install after 16.4, as 16.4's notes say. Before going
+       on, read the certified state once more: the git canister's module
+       hash is still the build's, and its controllers are the operator
+       and the governor. The handover locks in whatever the trial left.
+    6. **Hand over** (irreversible): the governor alone.
+       ```sh
+       dfx canister $N update-settings git_canister --set-controller <git_governor> --yes
+       ```
+       Certified controllers of the git canister: the governor alone; of
+       the governor: none. This is exactly what umobs' `set_git_canister`
+       checks at 16.4 before it names the canister.
+    7. **Record and pin**, in one pull request once the id exists:
+       - `verified.json` gets its `git_canister` section
+         (REPRODUCIBLE_BUILD.md, "The record"): the id, the governor with
+         its init and history as the first governor's are kept, and a
+         `verified` list whose first entry is this release.
+         `tools/check-module-hash.sh` and the six-hourly watch then ask
+         the git canister and its governor the same three questions they
+         ask umobs and its governor. VERIFIED.md gets "The git canister".
+       - `core/verifier.js`: `DEFAULTS.gitGovernor = { id: '<git_governor>',
+         module: 'a71ff65d...641f' }`, synced by `tools/sync-core.mjs` into
+         the loader and both extensions; `tools/certified-test.mjs` and
+         `tools/loader-test.mjs` pass.
+       - Docs: this step DONE; docs/EXTENSION.md and docs/ATTESTATION.md
+         drop their "until step 15" clauses; docs/GOVERNOR.md, "The
+         second governor", names it.
+       - Publish: push main into the canister's own ic-git repo and
+         republish the site record, so the served loader carries the pin;
+         submit the extensions (0.3.0 holds the step 14 clients and this
+         pin) to both stores. A client without the pin judges the git
+         canister ungoverned and warns, never approves, and nothing is
+         served from the git canister before 16.4, so the publish can
+         follow at its own pace.
+
+    Left as is: the second governor has no feed. umobs mirrors only the
+    governor that controls it (`feed_set_governor`), and the git canister
+    serves no feed yet; the second governor's `proposals` and `log` are
+    public queries, and `GOVERNOR=git_governor tools/governor.sh status`
+    reads them.
 16. **The cut.**
     1. Freeze umobs (step 13).
     2. The git canister imports, and both digests match.

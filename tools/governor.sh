@@ -5,8 +5,8 @@
 #   tools/governor.sh propose-upgrade <module.gz> <commit>
 #                                                  propose installing the module,
 #                                                  built from <commit> (40 hex),
-#                                                  into ic-git and stage it; prints
-#                                                  the proposal id
+#                                                  into the governor's target and
+#                                                  stage it; prints the proposal id
 #   tools/governor.sh stage <id> <module.gz>       (re)stage an upgrade's module,
 #                                                  e.g. after an interrupted run
 #   tools/governor.sh vote <id> approve|reject     cast or replace your ballot
@@ -18,19 +18,28 @@
 # Policy and handover proposals are rarer and are made with dfx directly
 # (docs/GOVERNOR.md has the commands).
 #
-# Environment: GOVERNOR (the governor's canister id; default: canister_ids.json
-# "governor" on ic), APPROVER (dfx identity; default icgit-admin-encrypt),
-# NETWORK (default https://icp-api.io). Each update call is signed by the
-# approver's identity, so an encrypted identity asks for its passphrase per
-# call: one to propose, one per 1 MiB of module, one per ballot.
+# Environment: GOVERNOR (the governor's canister id, or its name in
+# canister_ids.json: "governor" (default), ic-git's, or "git_governor", the
+# git canister's, docs/CANISTER_SPLIT.md step 15), APPROVER (dfx identity;
+# default icgit-admin-encrypt), NETWORK (default https://icp-api.io). Each
+# update call is signed by the approver's identity, so an encrypted identity
+# asks for its passphrase per call: one to propose, one per 1 MiB of module,
+# one per ballot.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NETWORK=${NETWORK:-https://icp-api.io}
 APPROVER=${APPROVER:-icgit-admin-encrypt}
 DID=canisters/governor/governor.did
-GOVERNOR=${GOVERNOR:-$(sed -n '/"governor"/,/}/s/.*"ic": *"\([^"]*\)".*/\1/p' canister_ids.json 2>/dev/null | head -1)}
-[ -n "$GOVERNOR" ] || { echo "set GOVERNOR to the governor's canister id" >&2; exit 2; }
+GOVERNOR=${GOVERNOR:-governor}
+# One of the two names rather than an id: look it up on ic. Only those two,
+# so a slip ("git") cannot resolve to a canister that is no governor.
+case "$GOVERNOR" in
+  governor|git_governor) GOVERNOR=$(sed -n "/\"$GOVERNOR\"/,/}/s/.*\"ic\": *\"\([^\"]*\)\".*/\1/p" canister_ids.json 2>/dev/null | head -1) ;;
+  *-*) ;;
+  *) echo "GOVERNOR must be a canister id, governor or git_governor; not $GOVERNOR" >&2; exit 2 ;;
+esac
+[ -n "$GOVERNOR" ] || { echo "set GOVERNOR to the governor's canister id, or its name in canister_ids.json" >&2; exit 2; }
 
 gov() { dfx canister --network "$NETWORK" --identity "$APPROVER" call "$GOVERNOR" --candid "$DID" "$@"; }
 query() { dfx canister --network "$NETWORK" --identity anonymous call "$GOVERNOR" --candid "$DID" --query "$@"; }
@@ -89,7 +98,8 @@ case "$cmd" in
   propose-upgrade)
     module=${1:?module file (.wasm.gz from tools/reproducible-build.sh --docker)}
     # The commit the module was built from, never the checkout's HEAD: the
-    # proposal, and after it ic-git#canister, binds the two together.
+    # proposal, and after it the record (ic-git#canister, or ic-git#git for
+    # the git canister), binds the two together.
     commit=${2:?the commit the module was built from (40 hex digits)}
     [ ${#commit} -eq 40 ] || { echo "commit must be the full 40-digit hash" >&2; exit 2; }
     # tools/reproducible-build.sh names its artifacts after the commit's first 7 digits.
