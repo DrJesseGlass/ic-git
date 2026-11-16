@@ -4284,10 +4284,11 @@ const Verifier = (() => {
     // too, and after it answers their old URLs with a redirect here; the
     // two ids are the only hosts a site is read from.
     git: '34koz-jyaaa-aaaab-ahejq-cai',
-    // The git canister's governor, pinned as `governor` is: { id, module }.
-    // Set when it is installed (step 15). Until then the git canister is
-    // judged as anything else its holder controls: ungoverned.
-    gitGovernor: null,
+    // The git canister's governor, pinned as `governor` is: the second
+    // instance of the same module (split step 15, 2026-11-16), the git
+    // canister's only controller, with no controllers of its own; recorded
+    // in verified.json under git_canister.governor.
+    gitGovernor: { id: '3hps4-taaaa-aaaab-ahela-cai', module: 'a71ff65df07a3d3b79e383f7bf8b7bf912fd0bac5135936ed2c4cd90b68a641f' },
   };
   const GET_SELECTOR = '693ec85e'; // keccak256("get(string)")[..4], as in tools/verify.mjs
   const SITE_SUFFIX = '#site'; // provenance.rs::SITE_KEY_SUFFIX

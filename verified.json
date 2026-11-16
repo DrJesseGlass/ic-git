@@ -61,6 +61,92 @@
       "threshold": 1
     }
   },
+  "git_canister": {
+    "id": "34koz-jyaaa-aaaab-ahejq-cai",
+    "role": "the git canister (docs/CANISTER_SPLIT.md): created empty on umobs' subnet 2026-11-15, installed at step 15 with umobs as its authority; holds nothing and serves nothing until the cut (step 16) names it",
+    "governor": {
+      "id": "3hps4-taaaa-aaaab-ahela-cai",
+      "role": "the git canister's only controller since 2026-11-16 (docs/GOVERNOR.md, 'The second governor'); it has no controllers itself, so this module is its code for good",
+      "tag": "v0.3.6",
+      "commit": "018bf4d5b2749492ecac0b94a5752a047f844767",
+      "module_hash": "a71ff65df07a3d3b79e383f7bf8b7bf912fd0bac5135936ed2c4cd90b68a641f",
+      "wasm_sha256": "afaf8511e54a8425487e71ae3d9c6492147e342a4b359bb490b45e11d60c8190",
+      "recipe": "the first governor's artifact (target/reproducible/governor-018bf4d.wasm.gz), the module 7kkwl runs, installed again; its builders are recorded under the top-level governor",
+      "init": {
+        "target": "34koz-jyaaa-aaaab-ahejq-cai",
+        "approvers": [
+          "3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe",
+          "s72nn-dfy5r-qz2h5-x3fcc-zfdzo-jbpon-dt27i-nqchx-ey2nc-6iupn-6ae"
+        ],
+        "threshold": 1
+      },
+      "history": [
+        {
+          "date": "2026-11-16",
+          "what": "created on umobs' subnet with 2T cycles and installed from the attested governor module, 1 of 2 with both approvers from init; certified module hash a71ff65d...641f"
+        },
+        {
+          "date": "2026-11-16",
+          "what": "its only controller removed; certified controllers []"
+        },
+        {
+          "date": "2026-11-16",
+          "what": "added as a second controller of the git canister; proposal 1 upgraded it to the module it ran (d5b5bba7...49a7, commit 28288c9) through the governor, staged in one chunk; the ic-git#git publish failed as expected before the cut (umobs has no publish_git_record until it runs the authority build), so nothing was published"
+        },
+        {
+          "date": "2026-11-16",
+          "what": "handover: the git canister's controllers set to [3hps4-taaaa-aaaab-ahela-cai] by the operator's key, its last act as a controller; certified controllers of the git canister [governor], of the governor []"
+        }
+      ],
+      "policy": {
+        "approvers": [
+          "3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe",
+          "s72nn-dfy5r-qz2h5-x3fcc-zfdzo-jbpon-dt27i-nqchx-ey2nc-6iupn-6ae"
+        ],
+        "threshold": 1
+      }
+    },
+    "verified": [
+      {
+        "commit": "28288c94369e87f4ab7840a66891364ea7911776",
+        "tag": "v0.3.9",
+        "module_hash": "d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7",
+        "recipe": {
+          "dockerfile": "Dockerfile.build",
+          "platform": "linux/amd64",
+          "rustc": "1.94.1",
+          "dfx": "0.31.0",
+          "base_image": "rust:1.94.1-slim-bookworm",
+          "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+          "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+        },
+        "builders": [
+          {
+            "who": "deployer (DrJesseGlass)",
+            "lineage": "pinned-container",
+            "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+            "date": "2026-11-15",
+            "check": "built at 28288c9, the merge of #135; the same run built umobs' combined module to e73c9d05...b7a6 (not installed: umobs stays on v0.3.8 until the cut) and the tree's governor to 16a8df63...35f3, which is not the module either governor runs"
+          },
+          {
+            "who": "GitHub Actions (independent runner)",
+            "lineage": "pinned-container",
+            "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+            "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/43806589563",
+            "date": "2026-11-16",
+            "check": "identical hash (d5b5bba7...49a7 gz, f25d202c...98fd raw); the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+          }
+        ],
+        "deployed": {
+          "date": "2026-11-16",
+          "on_chain_match": "match",
+          "checked_by": "dfx canister info against the reproducible build's module sha256: Module hash 0xd5b5bba7...49a7, Controllers 3hps4-taaaa-aaaab-ahela-cai",
+          "note": "the first install, by the operator's key with the init argument (record { authority = principal \"umobs-yiaaa-aaaab-agyrq-cai\" }), the only thing the git canister is ever told; the installer and the backup approver are on its admin allowlist (list_authorized). Governor proposal 1 then installed the same module through the governor as the trial before the handover. No ic-git#git record exists yet: the authority publishes it after the cut (step 16.4), when one more install through the governor asks for it. v0.3.9 is the git canister's release alone; umobs keeps v0.3.8 (375c7ed6...c8f9) until the cut"
+        },
+        "wasm_sha256": "f25d202c25bf8e888030aad774dbcc9f22ea962607bf9730b7c9297f876098fd"
+      }
+    ]
+  },
   "verified": [
     {
       "commit": "80bcb4ad957667fad91d0ece6b15c46060f28d54",

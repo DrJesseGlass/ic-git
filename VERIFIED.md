@@ -7,6 +7,11 @@ the "Residual assumptions" and "Trusting trust" sections of the same file.
 
 Canister: `umobs-yiaaa-aaaab-agyrq-cai`. Controller since 2026-10-14: the
 governor `7kkwl-baaaa-aaaab-ag6rq-cai` alone (below, "The governor").
+The git canister `34koz-jyaaa-aaaab-ahejq-cai` (docs/CANISTER_SPLIT.md),
+controlled since 2026-11-16 by its own governor
+`3hps4-taaaa-aaaab-ahela-cai` alone, has its own table and section
+below ("The git canister"); `verified.json` records it under
+`git_canister`.
 
 | Date | Commit | Tag | Module hash (sha256 of the wasm) | On-chain match | Independent rebuilds |
 |---|---|---|---|---|---|
@@ -25,6 +30,65 @@ governor `7kkwl-baaaa-aaaab-ag6rq-cai` alone (below, "The governor").
 | 2026-10-10 | `018bf4d` | `v0.3.6` | `eb61f0e10be0b93c1f4162cf040c6dcc69ed1248ac940fc35b89c008ec9762a2` (gz) | MATCH, 2026-10-10 | deployer (pinned container, macOS arm64 host under emulation, at the branch head, same ic-git crate); GitHub Actions amd64 runner, [run 38019976528](https://github.com/DrJesseGlass/ic-git/actions/runs/38019976528), identical hash |
 | 2026-10-27 | `73ffa5b` | `v0.3.7` | `72e21a4867f671ca6ee1ab3ab6f31f0694e2a75270aa11faf317a1e6c9dbea95` (gz) | MATCH, 2026-10-27 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 40427156571](https://github.com/DrJesseGlass/ic-git/actions/runs/40427156571), identical hash; installed by governor proposal 4 |
 | 2026-11-12 | `2469a17` | `v0.3.8` | `375c7ed6b342ce30ca8e559bed8c111764b1f853edb688b5f08f42d9759fc8f9` (gz) | MATCH, 2026-11-12 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43281752572](https://github.com/DrJesseGlass/ic-git/actions/runs/43281752572), identical hash; installed by governor proposal 5, record published by proposal 6 |
+
+## The git canister -- 2026-11-15 to 16
+
+Canister: `34koz-jyaaa-aaaab-ahejq-cai`, the git side of the split
+(docs/CANISTER_SPLIT.md, step 15). Controller since 2026-11-16: its own
+governor `3hps4-taaaa-aaaab-ahela-cai` alone. Until the cut (step 16)
+it holds nothing and serves nothing; umobs stays the one canister the
+sites are read from and keeps v0.3.8.
+
+| Date | Commit | Tag | Module hash (sha256 of the wasm) | On-chain match | Independent rebuilds |
+|---|---|---|---|---|---|
+| 2026-11-16 | `28288c9` | `v0.3.9` | `d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43806589563](https://github.com/DrJesseGlass/ic-git/actions/runs/43806589563), identical hash; installed by the operator's key, then again by governor proposal 1 |
+
+The pinned container built `28288c9`, the merge of #135, to
+`d5b5bba7...49a7` (gz; raw `f25d202c...98fd`) for the git canister;
+CI built the tag on a GitHub Actions x86_64 runner and agreed byte for
+byte. The same runs built umobs' combined module to `e73c9d05...b7a6`,
+which nothing installs (umobs is upgraded next by the cut, to the
+authority build), and the tree's governor to `16a8df63...35f3`, which
+neither governor runs: the lock file moved after v0.3.8, and the
+governor module that is pinned everywhere is still v0.3.6's
+`a71ff65d...641f`.
+
+The rollout followed step 15 of docs/CANISTER_SPLIT.md, each step
+checked against the IC's certified state:
+
+1. 2026-11-16: the operator's key installed `d5b5bba7...49a7` into the
+   empty canister with its one init argument, the authority
+   `umobs-yiaaa-aaaab-agyrq-cai`; the certified module hash matched the
+   build. The installer and the backup approver (`s72nn...6ae`) are on
+   its admin allowlist (`list_authorized`), so the cut's `freeze`,
+   `import_start` and `unfreeze` stay callable once the governor is its
+   only controller.
+2. The second governor: created on the same subnet with 2 T cycles and
+   installed from the attested governor artifact, `a71ff65d...641f`,
+   the module `7kkwl` runs, with the git canister as its target and the
+   same policy as the first governor's, 1 of 2 with both approvers, from
+   init. Its certified module hash matched; then its only controller was
+   removed, certified controllers `[]`.
+3. Added as a second controller of the git canister, and one upgrade run
+   through it while the operator could still repair anything: proposal 1
+   installed the module the canister already ran, staged in one chunk
+   and approved. It executed with `record not published`: the governor
+   asks its target for `ic-git#git` after an install, the git canister
+   asks the authority to publish it, and umobs, still the one-canister
+   build, has no `publish_git_record` until the cut (16.4). Expected; the
+   first `ic-git#git` record follows the cut.
+4. The handover: the operator's key set the git canister's controllers
+   to the governor alone, its last act as a controller. Certified
+   afterwards: the git canister `[3hps4...]`, the governor `[]`.
+   `tools/check-module-hash.sh` asks both pairs the same three questions
+   and reads MATCH for all six.
+
+The clients pin the second governor beside the first
+(`DEFAULTS.gitGovernor` in `core/verifier.js`, synced into the loader
+and both extensions). A client without the pin judges the git canister
+ungoverned and warns, never approves; nothing is served from it before
+the cut, so the published loader and the store extensions can follow at
+their own pace.
 
 ## The governor -- 2026-10-11 to 14
 
