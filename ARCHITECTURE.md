@@ -235,9 +235,10 @@ Who can tamper with what a cloner receives?
   nothing about what a stock client can prove: the client trusts whatever
   bytes the gateway hands it either way. Raw is therefore not a security
   downgrade for git traffic; it's an honest label on an existing trust
-  relationship. (Verified locally: dfx's gateway returns 503 for uncertified
-  responses on `<id>.localhost` and serves them fine on `<id>.raw.localhost`
-  - raw is required until item 2 below lands.)
+  relationship. (Verified locally: dfx's gateway returns 503 for a
+  response that neither carries a certificate nor declares that it has
+  none. The git routes declare it, crates/git/src/certify.rs, so the
+  non-raw host serves git traffic too; the sites it serves certified.)
 - **What a malicious gateway can actually do:** it cannot fabricate objects
   matching a commit hash the client already trusts (that's a SHA-1 preimage),
   but it *can* serve stale refs, hide branches, or advertise a fabricated
@@ -278,7 +279,8 @@ different escape hatch, so keep the two cases apart:
   replica that answered the query. Certifying it makes a lying replica
   detectable *by the gateway*, with no client change and no user action --
   a smaller win than it first sounds, but a free one, and unlike the git case
-  it is not zero.
+  it is not zero. Done: every site response is certified
+  (crates/git/src/certify.rs; VISION.md F0.5).
 - **The escape hatch git does not have.** The served bundle's sha256 is
   published to an EVM registry, so a client can obtain the expected hash over
   a channel the IC gateway does not control and compare it to the bytes it
@@ -289,7 +291,9 @@ different escape hatch, so keep the two cases apart:
 
 Consequence for sequencing: certification (VISION.md F0.5) is a cheap
 defense-in-depth rung against a dishonest replica, not a prerequisite for the
-verifying client (F2), and not a substitute for it.
+verifying client (F2), and not a substitute for it. It shipped after F2,
+for the custom domains (docs/TENANCY.md), which the verifying gateway
+alone serves.
 
 ### Auth
 

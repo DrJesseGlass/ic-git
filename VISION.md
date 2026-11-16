@@ -69,23 +69,25 @@ The path here, in shippable order:
 - **F0 -- serve from the repo.** The canister serves a committed static
   bundle over `http_request`: the serving code and the source of truth are
   the same audited canister, and there is no upload step, CDN, or DNS record
-  between the commit and the reader. Responses are *not* certified today --
-  `site.rs` sets provenance headers (`X-Ic-Git-Commit`, `X-Ic-Git-Path`) and
-  no `certified_data`, and both clients fetch the raw domain, which bypasses
-  gateway verification. See F0.5.
-- **F0.5 -- certify the served response.** `set_certified_data` over the
-  served bundle plus an `IC-Certificate` header, served from the non-raw
-  domain. What this buys a stock browser is narrow but real and needs no
-  user action: a query call is answered by a *single replica* with no
-  consensus, so an uncertified response is one replica's unverified word,
-  while a certified one carries the subnet's threshold signature and the
-  gateway rejects a replica that lies. What it does *not* buy is protection
-  from a malicious gateway -- certificate verification for non-raw domains
-  happens inside the gateway itself, so a stock client trusts the gateway
-  either way (ARCHITECTURE.md, "Trust model"). That gap is F2's job, and F2
-  closes it without needing this rung: the registry comparison reaches the
-  bundle hash over an independent channel (an EVM RPC), which a hostile
-  gateway cannot forge or suppress.
+  between the commit and the reader. `site.rs` sets provenance headers
+  (`X-Ic-Git-Commit`, `X-Ic-Git-Path`) on every response; both clients
+  fetch the raw domain and verify by hash.
+- **F0.5 -- certify the served response.** Done (crates/git/src/certify.rs):
+  the git canister keeps a certification tree over every URL of every
+  site, signs its root into its certified data, and each site response
+  carries the `IC-Certificate` header, so the non-raw domain and every
+  custom domain serve the sites. What this buys a stock browser is narrow
+  but real and needs no user action: a query call is answered by a
+  *single replica* with no consensus, so an uncertified response is one
+  replica's unverified word, while a certified one carries the subnet's
+  threshold signature and the gateway rejects a replica that lies. What it
+  does *not* buy is protection from a malicious gateway -- certificate
+  verification for non-raw domains happens inside the gateway itself, so a
+  stock client trusts the gateway either way (ARCHITECTURE.md, "Trust
+  model"). That gap is F2's job, and F2 closes it without needing this
+  rung: the registry comparison reaches the bundle hash over an
+  independent channel (an EVM RPC), which a hostile gateway cannot forge
+  or suppress.
 - **F1 -- attest on update.** On push, publish `(commit, sha256(bundle))` to
   the ProvenanceRegistry. The machinery exists today
   (`provenance::tip_record`); F1 is wiring it into the deploy queue.

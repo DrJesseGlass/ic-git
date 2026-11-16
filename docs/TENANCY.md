@@ -453,14 +453,19 @@ There is no domain for the canister itself, only for sites: a domain a
 tenant names is that tenant's until an operator clears it, so an
 operator who wants one holds it on a repo of their own.
 
-What stands in the way today: a custom domain is reached through the
-IC's verifying gateway alone (there is no `.raw` form of it), which
-answers for a response carrying no certificate with a verification
-error, and ic-git certifies no site response yet (site.rs, "rung one":
-its sites are reached through the `.raw` gateway and verified by hash
-at the client). So the canister side of custom domains is complete and
-tested, and a domain is served live only once site responses are
-certified, which is its own leg.
+A custom domain is reached through the IC's verifying gateway alone
+(there is no `.raw` form of it), which passes a response only with the
+subnet's certificate over it, or with the canister's declaration that it
+has none. The git canister certifies every response at
+`/site/<repo>/...` on its own host (crates/git/src/certify.rs; VISION.md
+F0.5). At a domain the URL is the site's own, `/` and `/<path>`, which
+names no repo, so the certification tree, which is one tree for every
+host, cannot hold it against another site's `/`: the response there is
+declared uncertified, which the gateway passes as it passes the raw
+host, and the clients verify by hash once they know the domain (below).
+Certifying the domain form, by the request's Host, is its own leg; a
+path under `/site/` at a domain is the one shape the gateway refuses
+until then.
 
 A domain is reached through the DNS its registrar serves, which nothing
 here checks. The clients (docs/EXTENSION.md) verify a site on the

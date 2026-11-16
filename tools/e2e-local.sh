@@ -381,6 +381,21 @@ ic "$TEN" set_site '("e2e-app", "site")' >/dev/null
 TIP=$(git -C "$W" rev-parse HEAD)
 expect "served at the tip without votes" "$(served)" "^200 $TIP"
 
+# The IC's verifying gateway, the non-raw host, passes a response only
+# with the subnet's certificate over it (crates/git/src/certify.rs): every
+# URL of a site carries one, and the rest of the canister declares that
+# it has none, which the gateway passes as it passes the raw host.
+NHOST="$G.localhost:$PORT"
+nserved() { served_at "http://$NHOST/site/e2e-app/"; }
+at_gateway() { flat "$(curl -s -w ' %{http_code}' "http://$NHOST$1")"; }
+expect "the verifying gateway serves the site, certified" "$(nserved)" "^200 $TIP"
+expect "  ...a file of it" "$(at_gateway /site/e2e-app/b.txt)" '^b +200$'
+expect "  ...its miss" "$(at_gateway /site/e2e-app/nope)" '^not found in site bundle +404$'
+expect "  ...a slash after a file is a miss" "$(at_gateway /site/e2e-app/b.txt/)" '^not found in site bundle +404$'
+expect "  ...a repo with no site" "$(at_gateway /site/nope/)" '^no site configured for repo +404$'
+expect "  ...the API, declared uncertified" "$(at_gateway /api/repos)" 'e2e-app.* 200$'
+expect "  ...and a clone over it" "$(git clone -q "http://$NHOST/e2e-app.git" "$WORK/nclone" 2>&1; git -C "$WORK/nclone" rev-parse HEAD)" "^$TIP$"
+
 section "custom domains"
 # docs/TENANCY.md, "Custom domains": a site at its own domain, which is
 # the whole origin there; the boundary nodes read /.well-known/ic-domains.
@@ -391,6 +406,7 @@ expect "a voter may not name the domains" "$(ic "$V1" set_site_domains '("e2e-ap
 expect "the owner names them, as looked up" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "App.Example."; "www.app.example" })')" 'Ok'
 expect "  ...get_site lists them" "$(flat "$(ic "$TEN" get_site '("e2e-app")' --query)")" 'domains = vec \{ "app.example"; "www.app.example" \}'
 expect "  ...and /.well-known/ic-domains does, for the boundary nodes" "$(curl -s "http://$HOST/.well-known/ic-domains")" '^www.app.example$'
+expect "  ...certified, at the verifying gateway" "$(at_gateway /.well-known/ic-domains)" '^app.example www.app.example +200$'
 expect "the site at its domain, from its root" "$(at_host app.example /)" "X-Ic-Git-Commit\"; \"$TIP\".*status_code = 200"
 expect "  ...with its port, a blob of it" "$(at_host www.app.example:443 /index.html)" 'X-Ic-Git-Path"; "site/index.html".*status_code = 200'
 expect "  ...and nothing else of the canister there" "$(at_host app.example '/e2e-app.git/info/refs?service=git-upload-pack')" 'status_code = 404'
@@ -412,8 +428,10 @@ NEW=$(git -C "$W" rev-parse HEAD)
 expect "new push, unapproved: the approved commit stays up" "$(served)" "^200 $TIP"
 ic "$TEN" vote "(\"e2e-app\", \"$NEW\", true)" >/dev/null
 expect "new push approved: served" "$(served)" "^200 $NEW"
+expect "  ...certified, at the verifying gateway" "$(nserved)" "^200 $NEW"
 ic "$TEN" vote "(\"e2e-app\", \"$NEW\", false)" >/dev/null
 expect "approval withdrawn: rolled back" "$(served)" "^200 $TIP"
+expect "  ...certified, at the verifying gateway" "$(nserved)" "^200 $TIP"
 ic "$TEN" vote "(\"e2e-app\", \"$NEW\", true)" >/dev/null
 
 section "approval-gated deploy and announce"
@@ -795,6 +813,7 @@ else
   (cd "$WORK" && dfx canister install git --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
 fi
 expect "site unchanged" "$(served)" "^${BEFORE%% *} ${BEFORE#* }"
+expect "  ...certified again, from stable memory" "$(nserved)" "^${BEFORE%% *} ${BEFORE#* }"
 expect "tokens kept" "$(ic "$TEN" list_push_tokens '("e2e-app")' | grep -c 'id =')" '^[1-9]'
 expect "balance kept" "$(ic "$TEN" get_account "(principal \"$T\")")" 'deposited = [1-9]'
 expect "push-cert still offered (the seed survived)" "$(curl -s "http://ic:$BOUND@$HOST/e2e-app.git/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert='

@@ -34,6 +34,10 @@ base64 = "0.23"
 ed25519-dalek = { version = "2", default-features = false }
 ic-git-common = { path = "../common" }
 ic-git-types = { path = "../types" }
+# Response certification (certify.rs): the tree, the witnesses and the
+# headers the IC's HTTP gateway verifies; ic-certification for its tree type.
+ic-http-certification = "4.0.1"
+ic-certification = "4.0.1"
 
 [dev-dependencies]
 ic-git-common = { path = "../common", features = ["testing"] }
