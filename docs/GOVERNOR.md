@@ -180,9 +180,11 @@ with the operator still a controller (proposal 1, the module the git
 canister already ran), then the handover. Certified since: the git
 canister's controllers `[3hps4...]`, the governor's `[]`. After an
 upgrade it asks the git canister for `ic-git#git`, which the git
-canister asks the authority to publish; until the cut (step 16.4) the
-authority does not take that message, so the trial's record publish
-failed as expected and the first `ic-git#git` record follows the cut.
+canister asks the authority to publish; before the cut (step 16.4) the
+authority did not take that message, so the trial's record publish
+failed as expected, and proposal 2, a same-module install after the
+cut, published the first `ic-git#git` record (2026-11-16, Sepolia tx
+`0x8cd09003...de7c`).
 The clients pin it beside this one (`DEFAULTS.gitGovernor`);
 `verified.json` records it under `git_canister.governor`, and
 `tools/check-module-hash.sh` checks it as it checks this one.

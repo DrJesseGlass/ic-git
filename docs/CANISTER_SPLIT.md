@@ -1,7 +1,9 @@
 # Canister split: separating the key-holder from the parser
 
-Status: **decided; phase 1 DONE; section 6 decided 2026-10-28 (proof-carrying
-jobs, votes on the authority); phase 2 planned.** This document records why ic-git
+Status: **DONE on mainnet 2026-11-16 (the cut, step 16; v0.3.10): umobs is
+the authority, `34koz` the git canister, each under a governor of its own.
+Section 6 decided 2026-10-28 (proof-carrying jobs, votes on the authority).**
+This document records why ic-git
 should be more than one canister, the one constraint that dictates which piece
 moves, the module partition, and the order of operations.
 
@@ -1271,7 +1273,28 @@ The cut on mainnet, in this order:
        Until the local e2e confirms this with a real git client, treat it
        as expected, not shown.
 
-    Steps 3 to 5 DONE 2026-11-14, step 6 DONE 2026-11-15. What shipped:
+    RUN ON MAINNET 2026-11-16, all of it, in one afternoon (VERIFIED.md,
+    "The cut", has the hashes, the digests and the transactions). What
+    the rehearsal had not shown: umobs ran v0.3.8, which predates step
+    13, so a step came first:
+
+    0. **umobs to the last one-canister release** (governor proposal 7,
+       the combined build `b6868caa...d45b`), so that it has the freeze
+       and the export. The install failed once with umobs out of cycles,
+       which only its controller can read and its controller is the
+       governor: an operator deposit of 1 T and `tools/governor.sh
+       execute 7` installed it. Its record publish failed on the
+       fee-history read, so no record names that module (it ran an
+       hour; proposal 8's record covers what runs).
+
+    Then 16.1 to 16.5 as written, with 16.2's digest stepped three times
+    (8.4 MiB, 1,999 records, 9 pages), proposal 8 for 16.3, and the
+    `ic-git#git` record by the git governor's proposal 2 after 16.5.
+    Open from the run: a public `cycle_balance` on the authority and a
+    floor in the watch; a fee read that does not depend on the cluster's
+    nodes agreeing on a head.
+
+    Steps 3 to 5 code DONE 2026-11-14, step 6 DONE 2026-11-15. What shipped:
     - **16.3.** No new code: the authority build reads the one-canister
       layout, and leaves the git side's maps unread. Until the git
       canister is named, every message to it fails as not delivered,

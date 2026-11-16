@@ -456,45 +456,27 @@ r = await Verifier.verify({ repo: 'no-such-repo-' + Date.now() });
 pass('a repo with no record fails at the registry', !r.verified && r.checks.length === 1 && r.checks[0].id === 'R', r);
 
 // After the cut (docs/CANISTER_SPLIT.md, step 16.6) ic-git's own URL
-// redirects to the git canister, which then answers every query. Stood in
-// for here: the site's fetch reports a redirect to the git canister, and a
-// query addressed to the git canister goes to ic-git with its canister id
-// rewritten, as a perfect copy would answer. The page must then be read
-// from the git canister, and a redirect anywhere else refused.
+// redirects to the git canister, which then answers every query. Live
+// since 2026-11-16, so the redirect is the real one and the stub only
+// records which canister each query went to; a redirect anywhere else is
+// stood in for (the landing forged) and must be refused.
 const { canister: UMOBS, git: GIT } = Verifier.DEFAULTS;
-const idBytes = text => {
-  const B = 'abcdefghijklmnopqrstuvwxyz234567';
-  let bits = 0, val = 0; const out = [];
-  for (const ch of text.replace(/-/g, '')) { val = (val << 5) | B.indexOf(ch); bits += 5; if (bits >= 8) { out.push((val >> (bits - 8)) & 255); bits -= 8; } }
-  return Buffer.from(out.slice(4));
-};
 const asked = [];
 const cut = landing => async (url, init) => {
   url = String(url);
   const q = /\/api\/v2\/canister\/([a-z0-9-]+)\/query$/.exec(url);
-  if (q) {
-    asked.push(q[1]);
-    if (q[1] === GIT) {
-      const body = Buffer.from(init.body), at = body.indexOf(idBytes(GIT));
-      idBytes(UMOBS).copy(body, at);
-      return fetch(url.replace(GIT, UMOBS), { ...init, body });
-    }
-    return fetch(url, init);
-  }
+  if (q) asked.push(q[1]);
   const res = await fetch(url, init);
   if (!url.includes('/site/') || !landing) return res;
   const bytes = await res.arrayBuffer();
   return { ok: res.ok, status: res.status, redirected: true, url: url.replace(UMOBS, landing), arrayBuffer: async () => bytes };
 };
-r = await Verifier.verify({ repo: 'ic-vote', fetch: cut(GIT) });
-pass('redirected to the git canister: verified there, its objects read from it', r.verified && r.host === GIT && r.url.startsWith('https://' + GIT + '.raw.icp0.io/site/ic-vote/') && asked.length > 0 && asked.every(id => id === GIT), r);
-asked.length = 0;
 r = await Verifier.verify({ repo: 'ic-vote', fetch: cut(null) });
-pass('not redirected: verified on ic-git itself, as before the cut', r.verified && r.host === UMOBS && asked.every(id => id === UMOBS), r);
+pass('redirected to the git canister (live): verified there, its objects read from it', r.verified && r.host === GIT && r.url.startsWith('https://' + GIT + '.raw.icp0.io/site/ic-vote/') && asked.length > 0 && asked.every(id => id === GIT), r);
 r = await Verifier.verify({ repo: 'ic-vote', fetch: cut('ryjl3-tyaaa-aaaaa-aaaba-cai') });
 pass('redirected to another canister: refused at S', !r.verified && r.checks.at(-1).id === 'S' && /no ic-git canister/.test(r.checks.at(-1).detail), r);
-r = await Verifier.verify({ repo: 'ic-vote', host: UMOBS, fetch: cut(GIT) });
-pass('asked for the page as ic-git serves it, and redirected: refused at S, since ic-git no longer serves it', !r.verified && r.checks.at(-1).id === 'S' && /no longer serves it/.test(r.checks.at(-1).detail), r);
+r = await Verifier.verify({ repo: 'ic-vote', host: UMOBS, fetch: cut(null) });
+pass('asked for the page as ic-git serves it, and redirected (live): refused at S, since ic-git no longer serves it', !r.verified && r.checks.at(-1).id === 'S' && /no longer serves it/.test(r.checks.at(-1).detail), r);
 r = await Verifier.verify({ repo: 'ic-vote', host: 'ryjl3-tyaaa-aaaaa-aaaba-cai' });
 pass('asked to read another canister as the host: refused at S', !r.verified && r.checks.length === 1 && r.checks[0].id === 'S', r);
 const be = await Verifier.checkBackends('ic-vote', { host: GIT });

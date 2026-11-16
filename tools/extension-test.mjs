@@ -21,7 +21,9 @@ if (!process.argv.includes('--browser') || !bin) {
   process.exit(2);
 }
 const EXT = fileURLToPath(new URL('../extension', import.meta.url));
-const GW = 'https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io';
+// The git canister's host: since the cut (docs/CANISTER_SPLIT.md, step 16,
+// 2026-11-16) it serves every site, and ic-git's own host only redirects.
+const GW = 'https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io';
 const VOTE = GW + '/site/ic-vote/';
 const CONSOLE = GW + '/site/ic-git/';
 const sleep = ms => new Promise(r => setTimeout(r, ms));

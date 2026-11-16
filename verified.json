@@ -63,7 +63,7 @@
   },
   "git_canister": {
     "id": "34koz-jyaaa-aaaab-ahejq-cai",
-    "role": "the git canister (docs/CANISTER_SPLIT.md): created empty on umobs' subnet 2026-11-15, installed at step 15 with umobs as its authority; holds nothing and serves nothing until the cut (step 16) names it",
+    "role": "the git canister (docs/CANISTER_SPLIT.md): created empty on umobs' subnet 2026-11-15, installed at step 15 with umobs as its authority; since the cut (step 16, 2026-11-16) it holds the objects and serves every site, and umobs answers the old URLs with a redirect to it",
     "governor": {
       "id": "3hps4-taaaa-aaaab-ahela-cai",
       "role": "the git canister's only controller since 2026-11-16 (docs/GOVERNOR.md, 'The second governor'); it has no controllers itself, so this module is its code for good",
@@ -96,6 +96,10 @@
         {
           "date": "2026-11-16",
           "what": "handover: the git canister's controllers set to [3hps4-taaaa-aaaab-ahela-cai] by the operator's key, its last act as a controller; certified controllers of the git canister [governor], of the governor []"
+        },
+        {
+          "date": "2026-11-16",
+          "what": "the cut: the git canister frozen, imported umobs' git side (9 pages, 1,999 records, 8,455,212 bytes; digests agreed), named by the authority (set_git_canister), every mirror taken, thawed; proposal 2 installed the same module and published ic-git#git (tx 0x8cd09003...de7c)"
         }
       ],
       "policy": {
@@ -142,6 +146,44 @@
           "on_chain_match": "match",
           "checked_by": "dfx canister info against the reproducible build's module sha256: Module hash 0xd5b5bba7...49a7, Controllers 3hps4-taaaa-aaaab-ahela-cai",
           "note": "the first install, by the operator's key with the init argument (record { authority = principal \"umobs-yiaaa-aaaab-agyrq-cai\" }), the only thing the git canister is ever told; the installer and the backup approver are on its admin allowlist (list_authorized). Governor proposal 1 then installed the same module through the governor as the trial before the handover. No ic-git#git record exists yet: the authority publishes it after the cut (step 16.4), when one more install through the governor asks for it. v0.3.9 is the git canister's release alone; umobs keeps v0.3.8 (375c7ed6...c8f9) until the cut"
+        },
+        "wasm_sha256": "f25d202c25bf8e888030aad774dbcc9f22ea962607bf9730b7c9297f876098fd"
+      },
+      {
+        "commit": "5c5c88e0dc59c9f7e91e0974d9aac1f71c98d333",
+        "tag": "v0.3.10",
+        "module_hash": "d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7",
+        "recipe": {
+          "dockerfile": "Dockerfile.build",
+          "platform": "linux/amd64",
+          "rustc": "1.94.1",
+          "dfx": "0.31.0",
+          "base_image": "rust:1.94.1-slim-bookworm",
+          "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+          "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+        },
+        "builders": [
+          {
+            "who": "deployer (DrJesseGlass)",
+            "lineage": "pinned-container",
+            "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+            "date": "2026-11-16",
+            "check": "built at 5c5c88e: the git canister module is byte for byte v0.3.9's (no git-side change between the tags)"
+          },
+          {
+            "who": "GitHub Actions (independent runner)",
+            "lineage": "pinned-container",
+            "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+            "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760",
+            "date": "2026-11-16",
+            "check": "identical hash"
+          }
+        ],
+        "deployed": {
+          "date": "2026-11-16",
+          "on_chain_match": "match",
+          "checked_by": "dfx canister info: Module hash 0xd5b5bba7...49a7, Controllers 3hps4-taaaa-aaaab-ahela-cai",
+          "note": "after the cut named it, governor proposal 2 installed the same module again so that its governor would ask for the record the trial could not get: ic-git#git (commit 5c5c88e, this module hash) in Sepolia tx 0x8cd090037c3971c2498570d691460e6b63daa0f437e529d826aae9c3c691de7c, block 12148580, the first ic-git#git record. The canister holds the copy of umobs' git side as of the freeze (1,999 records, digest 062496c6...6ee4) and serves every site since the thaw"
         },
         "wasm_sha256": "f25d202c25bf8e888030aad774dbcc9f22ea962607bf9730b7c9297f876098fd"
       }
@@ -684,6 +726,44 @@
         "note": "installed by governor proposal 5 (staged in two chunks, 1 of 2, executed in the same call). Its ic-git#canister publish failed before broadcast (eth_feeHistory: the replicas' RPC responses did not reach consensus, SysTransient), so proposal 6 installed the same module again, as proposal 1 did, and the new code published ic-git#canister (commit 2469a17, this module hash) in Sepolia tx 0x1b288796f114e1db331a813ed2e2d8e4418317dfafc51627cb1f5e6b4049c411, block 12120810, status success; the registry reads it back. The canister crate changed in #84 to #101: canister split phase 2 (proofs, jobs carry proofs, governed repos .wasm only, the crate split, mirrors) and phase 3 steps 6 to 10; git.did unchanged. Gated by tools/e2e-local.sh 179/179 on 9e67f2c, the branch head of #101, whose tree is the merge's (the upgrade-from-v0.3.7 section included). Before the upgrade the deploy queue was empty and ic-vote's site and app both ran 55ed3b9; after both upgrades they still do, the queue is empty, and no job was queued"
       },
       "wasm_sha256": "3b868b7a154f1f64f5163bebe87d2b31407a779a8231c870d9b529f977ae0f41"
+    },
+    {
+      "commit": "5c5c88e0dc59c9f7e91e0974d9aac1f71c98d333",
+      "tag": "v0.3.10",
+      "module_hash": "1e9ce2a185f3fa8366bfec8cd5146aa2daf5e9657ce7874c4492bfa4a02d8e57",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "authority_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes); the authority build of the split, installed over the combined build"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+          "date": "2026-11-16",
+          "check": "built at 5c5c88e, the merge of #138: combined b6868caa...d45b (raw 22f68be5...0039), authority 1e9ce2a1...8e57 (raw 02d2cb89...a9c7), git canister d5b5bba7...49a7 (unchanged from v0.3.9), the tree's governor 16a8df63...35f3 (neither governor runs it)"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760",
+          "date": "2026-11-16",
+          "check": "identical hashes for the combined, authority and git canister modules; the tag-push trigger does not run --check, the on-chain comparison is the deployer's"
+        }
+      ],
+      "deployed": {
+        "date": "2026-11-16",
+        "on_chain_match": "match",
+        "checked_by": "dfx canister info against the reproducible build's module sha256: Module hash 0x1e9ce2a1...8e57, Controllers 7kkwl-baaaa-aaaab-ag6rq-cai",
+        "note": "the cut (docs/CANISTER_SPLIT.md, step 16), two installs by the governor in one afternoon. Proposal 7 installed the combined build b6868caa...d45b (raw 22f68be5...0039), the last one-canister release, which v0.3.8 lacked the freeze and export of; its first execution failed with umobs out of cycles (8.2G short of the install), the operator deposited 1T and the retry (governor.sh execute 7) installed it; its ic-git#canister publish failed on eth_feeHistory consensus (SysTransient, at the safe head), so no record names that module, which ran for about an hour. Then the freeze, the copy to the git canister (9 pages, 1,999 records, 8,455,212 bytes, digest 062496c6...6ee4 on both sides), and proposal 8 installed this module, the authority build, over the same state; its publish went through: ic-git#canister (commit 5c5c88e, this module hash) in Sepolia tx 0x4d4a72f3d8f5766408fdbb8d458ddb62a87e3fba6bb303ad60b21d7897ac4597, block 12148567. set_git_canister named 34koz-jyaaa-aaaab-ahejq-cai; every mirror was taken (get_mirrors_pending empty), no top-up was due (the git canister above the 1T floor); the git canister thawed. Afterwards umobs answers /site/... with a 308 to the git canister, the loader's and ic-vote's sites verify there, and the git-side records stay in umobs' stable memory, unread, for the rollback window. Gated by tools/e2e-local.sh with BASE_REF=v0.3.8: 276 checks on 5c5c88e, the upgrade from v0.3.8 and steps 16.1 to 16.6 included. The canister crate changed in #102 to #138: the split's steps 11 to 16 and the custom-domain routing; the did is the authority's (canisters/authority/authority.did)"
+      },
+      "wasm_sha256": "02d2cb897d462002f81ab429a33a5c43b875a79b16030c9329b9d6e63cb0a9c7"
     }
   ]
 }
