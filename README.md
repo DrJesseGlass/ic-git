@@ -59,6 +59,8 @@ tools/reproducible-build.sh, tools/check-module-hash.sh
 tools/e2e-local.sh      end-to-end pass on a throwaway local replica, run
                         before every mainnet upgrade
 tools/verify.mjs        check a served site against its registry record (CLI)
+tools/console-routes-test.mjs
+                        the console's routing between the two canisters, offline
 core/verifier.js        the verification core: the loader inlines it and the
                         extension copies it (both synced by tools/sync-core.mjs);
                         readCanisterState reads a canister's module hash and

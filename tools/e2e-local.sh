@@ -977,6 +977,12 @@ section "console reads"
 for p in pricing e2e-app/info "account/$T" e2e-app/deploys; do
   expect "/api/$p" "$(curl -s "http://$AHOST/api/$p")" '^\{'
 done
+# After the cut the console reads these from the git canister's origin, so
+# the gateway must let a page on another canister's host read them.
+expect "the gateway serves the authority's /api with CORS for a page on another host" "$(curl -sI -H "Origin: http://$HOST" "http://$AHOST/api/pricing" | tr -d '\r' | tr 'A-Z' 'a-z')" '^access-control-allow-origin: \*$'
+if command -v node >/dev/null; then
+  expect "console routes (tools/console-routes-test.mjs)" "$(node "$ROOT/tools/console-routes-test.mjs" 2>&1)" 'all passed'
+fi
 if command -v node >/dev/null; then
   cat >"$WORK/reads.mjs" <<'EOF'
 import { readFileSync } from 'node:fs';
@@ -988,7 +994,13 @@ globalThis.location = { hostname: 'localhost', origin: 'http://localhost:' + por
 const html = readFileSync(page, 'utf8');
 const IC = new Function(html.slice(html.indexOf('// === candid ==='), html.indexOf('// === end candid ===')) + '\nreturn IC;')();
 const ACCOUNT = { record: { owner: 'principal', subaccount: { opt: 'blob' } } };
+// The console's routes block: on a replica it learns the authority from
+// the serving canister (get_authority on the git canister; the combined
+// canister has no such method and is the authority itself).
+const Routes = new Function(html.slice(html.indexOf('// === routes ==='), html.indexOf('// === end routes ===')) + '\nreturn Routes;')();
+const loc = { hostname: G + '.raw.localhost', host: G + '.raw.localhost:' + port, protocol: 'http:' };
 const reads = {
+  authority: async () => { const a = await Routes.authorityOf(loc, IC.query); if (a !== A) throw new Error('names ' + a + ', not ' + A); },
   ledger: () => IC.query('ryjl3-tyaaa-aaaaa-aaaba-cai', 'icrc1_balance_of', [ACCOUNT], [{ owner: T, subaccount: null }]),
   cmc_rate: () => IC.query('rkp4c-7iaaa-aaaaa-aaaca-cai', 'get_icp_xdr_conversion_rate', [], []),
   get_site: () => IC.query(G, 'get_site', ['text'], ['e2e-app']),
@@ -1001,7 +1013,7 @@ for (const [name, f] of Object.entries(reads)) {
 }
 EOF
   OUT=$(node "$WORK/reads.mjs" "$ROOT/browser/index.html" "$PORT" "$G" "$A" "$T" 2>&1 || true)
-  for r in ledger cmc_rate get_site get_deploy_config list_push_tokens pending_icp_deposits; do
+  for r in authority ledger cmc_rate get_site get_deploy_config list_push_tokens pending_icp_deposits; do
     expect "console query $r (page code, local origin)" "$OUT" "ok $r"
   done
 fi

@@ -478,6 +478,28 @@ deploy without a push (`deploy_now`), name the site's own domains
 That is the whole tenant flow: nothing between a funded wallet and a
 deployed push needs dfx.
 
+After the canister split (docs/CANISTER_SPLIT.md, step 14c) the console
+talks to both canisters. The page is served by one of them: ic-git until
+the cut, the git canister after it. Git reads (`/api/repos`, refs, trees,
+blobs, commits) go to that canister's `/api` on the page's own origin;
+the tenancy reads (`/api/pricing`, `account`, a repo's `info`, `votes`,
+`proposals` and `deploys`) go to the authority's host, which the gateway
+serves with `access-control-allow-origin: *` (the IC's and the local
+replica's both; the e2e checks the header). Push tokens and the site
+config are the git canister's, by query and by signed call; every other
+call, and the spender a deposit approves on a ledger, is the authority's.
+On mainnet the console pins both ids, as the verifier core does: the
+canister a page approves as a spender is not learned from the canister
+that served the page. On a replica or another deployment it asks the
+serving canister (`get_authority`, the git canister's), and a canister
+without that method is the one-canister build and the authority itself.
+`tools/console-routes-test.mjs` checks the routing offline, against the
+two `.did` files, and the e2e runs it; the e2e's console reads learn the
+authority the same way on both the combined and the split network. At a
+host that is not a canister's own (a domain, a bare localhost) the
+console says it has no canister to talk to; the git browser above it
+needs none.
+
 A wallet that signs for its user asks this canister, before signing, for a
 readable description of the call (ICRC-21, `icrc21_canister_call_consent_
 message`; advertised through ICRC-10) and refuses to sign without one. The
