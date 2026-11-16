@@ -92,8 +92,10 @@ match, and let a verified page call only the canisters judged for it.
   needs no second check.
 - `alarms`: to re-check verified sites every ten minutes, so a new record
   takes effect without waiting for a visit.
-- Host permission `umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io`: the ic-git
-  canister whose pages are verified.
+- Host permissions `34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io` and
+  `umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io`: the git canister whose pages
+  are verified, and ic-git's own host, which redirects to it (0.3.0 added
+  the first; docs/CANISTER_SPLIT.md).
 - Host permission `icp-api.io`: the Internet Computer's public query
   endpoint, to read the canister's git objects for the commit check, and
   the certified code hash and controllers of each canister a verified

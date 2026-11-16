@@ -1,8 +1,10 @@
 # ic-git
 
-A minimal git remote that runs *on* the Internet Computer: one Rust canister
-speaking git's smart-HTTP protocol, objects in stable memory, and (soon) an
-asset-canister deploy triggered by every push to `main`.
+A minimal git remote that runs *on* the Internet Computer: a git canister
+speaking git's smart-HTTP protocol, objects in stable memory, serving every
+site it hosts; and an authority canister holding the accounts, the votes,
+the deploys and the registry's key (docs/CANISTER_SPLIT.md). A push to
+`main` can deploy.
 
 Design: [ARCHITECTURE.md](ARCHITECTURE.md). Built on
 [ic-dev-kit-rs](https://github.com/DrJesseGlass/ic-dev-kit-rs).
@@ -28,14 +30,22 @@ git push "http://ic:$TOKEN@$(dfx canister id git).raw.localhost:$(dfx info webse
 git clone "http://$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git"
 ```
 
-On mainnet the remote URL is `https://<canister-id>.raw.icp0.io/<repo>.git`
-(raw domain - see the "Trust model" section in ARCHITECTURE.md for why that's fine, and
-sign your tags).
+On mainnet the remote URL is
+`https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/<repo>.git`, the git
+canister's host (raw domain - see the "Trust model" section in
+ARCHITECTURE.md for why that's fine, and sign your tags). The old host,
+`umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io`, answers a fetch with a redirect
+there; a push needs the new remote.
 
 ## Layout
 
 ```
-canisters/combined/     the canister on umobs: both sides in one module (Rust)
+canisters/git/          the git canister (34koz-jyaaa-aaaab-ahejq-cai on mainnet):
+                        the remote, the objects, every site
+canisters/authority/    the authority (umobs-yiaaa-aaaab-agyrq-cai): accounts,
+                        ballots, deploys, the registry's key
+canisters/combined/     both sides in one module: the local build (`dfx deploy
+                        git`) and the rollback artifact (docs/CANISTER_SPLIT.md)
   src/lib.rs            HTTP routing + candid admin API
 crates/git/             the git side (docs/CANISTER_SPLIT.md)
   src/store.rs          stable-memory objects/refs/repos
@@ -91,8 +101,10 @@ ARCHITECTURE.md         the design
 `browser/index.html` is a GitHub-style read-only browser: repositories,
 branches and tags, commit log, trees, and files. It is one file with no
 external resources, so the registry attestation of that single blob covers
-every byte that runs (VISION.md section 2). It talks to the canister's own
-`/api/...` routes on the same origin:
+every byte that runs (VISION.md section 2). It talks to the git canister's
+own `/api/...` routes on the page's origin (the tenancy routes further
+down are the authority's; docs/TENANCY.md, "the console talks to both
+canisters"):
 
 ```
 GET /api/repos                          [{name, head, site}]
@@ -107,19 +119,23 @@ GET /api/<repo>/blob/<rev>/<path>       raw bytes, text/plain, nosniff
 that resolved a commit carries `X-Ic-Git-Commit`.
 
 ic-git hosts the browser from its own source: push this repository to the
-canister as repo `ic-git`, point the site at the `browser` directory, and
-attest it like any other frontend.
+git canister as repo `ic-git`, point the site at the `browser` directory,
+and attest it like any other frontend. The repo, its site and its record
+are the authority's calls; the push token and the push are the git
+canister's.
 
 ```sh
-dfx canister --network ic call umobs-yiaaa-aaaab-agyrq-cai create_repo '("ic-git")'
-TOKEN=$(dfx canister --network ic call umobs-yiaaa-aaaab-agyrq-cai create_push_token '("ic-git")' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
-git push "https://ic:$TOKEN@umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/ic-git.git" main
-dfx canister --network ic call umobs-yiaaa-aaaab-agyrq-cai set_site '("ic-git", "browser")'
-dfx canister --network ic call umobs-yiaaa-aaaab-agyrq-cai evm_registry_publish_site '("ic-git")'
+A=umobs-yiaaa-aaaab-agyrq-cai   # the authority
+G=34koz-jyaaa-aaaab-ahejq-cai   # the git canister
+dfx canister --network ic call $A create_repo '("ic-git")'
+TOKEN=$(dfx canister --network ic call $G create_push_token '("ic-git")' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
+git push "https://ic:$TOKEN@$G.raw.icp0.io/ic-git.git" main
+dfx canister --network ic call $A set_site '("ic-git", "browser")'
+dfx canister --network ic call $A evm_registry_publish_site '("ic-git")'
 node tools/verify.mjs ic-git index.html
 ```
 
-The page is then at `https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-git/`
+The page is then at `https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/ic-git/`
 and browses, among other things, its own source.
 
 ## Verifying a site in the browser
@@ -164,28 +180,31 @@ cycles and are charged for creation, each push, storage rent, and each
 deploy action; an action that would overdraw is refused first. Apps deployed
 to the IC run in a canister the owner controls, created from their balance.
 
-From the browser: open `/site/ic-git/`, connect a wallet (OISY), and use
-the console panels; the panel shows the wallet's ICP and cycles ledger
-balances next to its ic-git balance. From the command line, the same calls through dfx:
+From the browser: open `/site/ic-git/` on the git canister's host, connect
+a wallet (OISY), and use the console panels; the panel shows the wallet's
+ICP and cycles ledger balances next to its ic-git balance. From the command
+line, the same calls through dfx; the push tokens are the git canister's,
+everything else the authority's:
 
 ```sh
-C=umobs-yiaaa-aaaab-agyrq-cai
+C=umobs-yiaaa-aaaab-agyrq-cai   # the authority
+G=34koz-jyaaa-aaaab-ahejq-cai   # the git canister
 dfx canister --network https://icp-api.io call $C deposit_from_cycles_ledger '(2_000_000_000_000)'   # after icrc2_approve on the cycles ledger
 dfx canister --network https://icp-api.io call $C deposit_from_icp '(50_000_000)'   # 0.5 ICP, after icrc2_approve on the ICP ledger for it plus 0.0001 ICP
 dfx canister --network https://icp-api.io call $C pending_icp_deposits   # finish_icp_deposit(id) completes one whose conversion did not finish
 dfx canister --network https://icp-api.io call $C create_repo '("myapp")'
 dfx canister --network https://icp-api.io call $C add_member '("myapp", principal "<friend>", "voter")'
 dfx canister --network https://icp-api.io call $C set_required_votes '("myapp", 1)'
-dfx canister --network https://icp-api.io call $C create_push_token '("myapp", opt 90)'   # lifetime in days: default 30, max 365
-dfx canister --network https://icp-api.io call $C list_push_tokens '("myapp")'
+dfx canister --network https://icp-api.io call $G create_push_token '("myapp", opt 90)'   # lifetime in days: default 30, max 365
+dfx canister --network https://icp-api.io call $G list_push_tokens '("myapp")'
 # Signed pushes: bind the token to your SSH key, and have git sign with it
-dfx canister --network https://icp-api.io call $C create_push_token "(\"myapp\", null, opt \"$(cat ~/.ssh/id_ed25519.pub)\")"
+dfx canister --network https://icp-api.io call $G create_push_token "(\"myapp\", null, opt \"$(cat ~/.ssh/id_ed25519.pub)\")"
 git config gpg.format ssh && git config user.signingkey ~/.ssh/id_ed25519.pub && git config push.gpgSign if-asked
 dfx canister --network https://icp-api.io call $C set_require_signed_push '("myapp", true)'   # optional: refuse unbound tokens
 ```
 
 `GET /api/account/<principal>`, `/api/<repo>/info`, `/api/<repo>/votes/<commit>`
-and `/api/pricing` expose the same state read-only. `GET /api/<repo>/deploys`
+and `/api/pricing`, on the authority's host, expose the same state read-only. `GET /api/<repo>/deploys`
 returns the wasm deploy config, the last attempt, and the provenance log
 (commit, target, wasm sha256 per install), so a deployed app can name the
 commit it actually came from rather than the branch tip (demo/README.md).
@@ -219,8 +238,8 @@ that release wrote, and the console's reads. It prints PASS or FAIL per check an
 non-zero on any failure; `KEEP=1` leaves the network up afterwards.
 
 Admin API calls (`put_object`, `set_ref`, and the EVM, Solana, pricing and
-other operator calls) are restricted to operators: the canister's controllers
-and the admin allowlist. The deploying identity is put on the allowlist at
+other operator calls) are restricted to operators: each canister's controllers
+and its admin allowlist. The deploying identity is put on the allowlist at
 init (`auth::init_with_caller`), and the allowlist survives upgrades via a
 stable snapshot. `create_repo` is open to any signed-in, funded caller (see
 docs/TENANCY.md).

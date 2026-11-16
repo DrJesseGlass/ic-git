@@ -366,7 +366,8 @@ commit away from the recorded one, and `tools/verify.mjs` check A then
 fails until the next publish.
 
 ```sh
-C=umobs-yiaaa-aaaab-agyrq-cai
+C=umobs-yiaaa-aaaab-agyrq-cai   # the authority: the repo, its site, its record
+G=34koz-jyaaa-aaaab-ahejq-cai   # the git canister: the token, the push, the served listing
 PKG=extension; REPO=ic-git-extension          # or extension-firefox, ic-git-extension-firefox
 
 node tools/extension-sums.mjs --check $PKG    # the listing is current
@@ -376,14 +377,14 @@ dfx canister --network ic call $C create_repo "(\"$REPO\")"
 dfx canister --network ic call $C set_site "(\"$REPO\", \"$PKG/SHA256SUMS\")"
 
 # Push main.
-TOKEN=$(dfx canister --network ic call $C create_push_token "(\"$REPO\", opt (1 : nat32), null)" \
+TOKEN=$(dfx canister --network ic call $G create_push_token "(\"$REPO\", opt (1 : nat32), null)" \
   | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
 : "${TOKEN:?create_push_token returned no token}"
-git push "https://ic:$TOKEN@$C.raw.icp0.io/$REPO.git" main
+git push "https://ic:$TOKEN@$G.raw.icp0.io/$REPO.git" main
 
 # The canister serves the listing in git (from a terminal, not a browser).
 git show main:$PKG/SHA256SUMS | shasum -a 256
-curl -s "https://$C.raw.icp0.io/site/$REPO/" | shasum -a 256
+curl -s "https://$G.raw.icp0.io/site/$REPO/" | shasum -a 256
 
 # Publish, then confirm once the transaction is mined: wait for the
 # receipt as for the loader (docs/LOADER.md, step 5), or verify.mjs still

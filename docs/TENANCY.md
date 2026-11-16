@@ -445,9 +445,10 @@ the canister, an `_acme-challenge` CNAME to
 boundary nodes, which read `GET /.well-known/ic-domains` on the canister
 and refuse a domain it does not list. That file is every domain any site
 here is served at, one per line, and `set_site_domains` is what puts a
-domain in it. The canister to name is the one serving the sites: umobs
-until the cut, the git canister after it (docs/CANISTER_SPLIT.md, step
-16), when a domain registered to umobs has to be registered again.
+domain in it. The canister to name is the one serving the sites: the git
+canister, `34koz-jyaaa-aaaab-ahejq-cai`, since the cut
+(docs/CANISTER_SPLIT.md, step 16); a domain registered to umobs before it
+has to be registered again.
 There is no domain for the canister itself, only for sites: a domain a
 tenant names is that tenant's until an operator clears it, so an
 operator who wants one holds it on a repo of their own.
@@ -479,8 +480,9 @@ That is the whole tenant flow: nothing between a funded wallet and a
 deployed push needs dfx.
 
 After the canister split (docs/CANISTER_SPLIT.md, step 14c) the console
-talks to both canisters. The page is served by one of them: ic-git until
-the cut, the git canister after it. Git reads (`/api/repos`, refs, trees,
+talks to both canisters. The page is served by the git canister (by
+ic-git itself before the cut of 2026-11-16, whose host now redirects
+there). Git reads (`/api/repos`, refs, trees,
 blobs, commits) go to that canister's `/api` on the page's own origin;
 the tenancy reads (`/api/pricing`, `account`, a repo's `info`, `votes`,
 `proposals` and `deploys`) go to the authority's host, which the gateway

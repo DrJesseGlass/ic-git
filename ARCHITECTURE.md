@@ -42,16 +42,25 @@ all the clever work on the read path and keeping the write path dumb.
 
 ```mermaid
 flowchart LR
-    dev[git client] -->|smart HTTP over raw gateway| G[combined_canister]
+    dev[git client] -->|smart HTTP over raw gateway| G[git canister 34koz]
+    users[browsers] -->|"/site/..."| G
     subgraph IC
-        G -->|"objects, refs (stable memory)"| S[(StableBTreeMap store)]
-        G -->|"post-receive: chunked upload<br/>create_batch / create_chunk / commit_batch"| A[asset canister]
+        G -->|"objects, refs, sites (stable memory)"| S[(StableBTreeMap store)]
+        G <-->|"jobs with proofs; mirrors of its decisions"| A[authority umobs]
+        A -->|install_code| APP[app canisters]
     end
-    A -->|serves site| users[browsers]
+    A -->|site, app and canister records| REG[registry on Sepolia]
 ```
 
-- **`combined_canister`** (`canisters/combined`; Rust, `ic-cdk` + `ic-stable-structures` +
-  [`ic-dev-kit-rs`](https://github.com/DrJesseGlass/ic-dev-kit-rs)): HTTP
+- **Two canisters since the cut of 2026-11-16** (docs/CANISTER_SPLIT.md):
+  the git canister (`canisters/git`, crate `crates/git`) holds the objects
+  and refs, takes pushes and serves every site; the authority
+  (`canisters/authority`, crate `crates/authority`) holds the accounts, the
+  ballots, the deploy queue and the threshold key that writes the registry.
+  `canisters/combined` builds both sides into one module: the local build
+  (`dfx deploy git`) and the rollback artifact. Rust, `ic-cdk` +
+  `ic-stable-structures` +
+  [`ic-dev-kit-rs`](https://github.com/DrJesseGlass/ic-dev-kit-rs): HTTP
   endpoints, pkt-line codec,
   packfile reader/writer, object store, refs, push auth, deploy trigger.
   Multi-repo: path prefix `/<repo>.git/...` keys everything.
@@ -60,10 +69,7 @@ flowchart LR
   guards the candid admin API; persisted across upgrades), and later `large_objects` (chunked
   uploads, see the "Push size" section) and `telemetry`. Streamed clone
   responses use the dev kit's `StreamingStrategy`/`StreamingCallbackToken`
-  types (in the dev kit since v0.3.0). The same code also builds as two
-  canisters, `canisters/authority` and `canisters/git`, for the cut of
-  docs/CANISTER_SPLIT.md (phase 3, step 12c): the combined build is what
-  umobs runs until then.
+  types (in the dev kit since v0.3.0).
 - **asset canister**: the stock certified-assets canister from the SDK
   (`dfx`'s frontend canister). the canister's principal is granted `Commit`
   permission so it can upload. Zero custom code here.
