@@ -84,7 +84,7 @@ check() {
     echo "could not read the on-chain module hash -- this is NOT a mismatch." >&2
     sed 's/^/  dfx: /' "$info_err" >&2 || true
     [ "$status" = 1 ] || status=3
-    return
+    return 0
   fi
   echo "on-chain module hash: $onchain"
   if [ "$onchain" = "$expected" ]; then
@@ -95,7 +95,7 @@ check() {
     echo "or treat this as an unauthorized upgrade."
     status=1
   fi
-  [ -n "$gov_id" ] || return
+  [ -n "$gov_id" ] || return 0
   ctl=$(controllers_of "$out")
   echo "controllers         : ${ctl:-<none>}"
   if [ "$ctl" = "$gov_id" ]; then
@@ -110,7 +110,7 @@ check() {
     echo "governor            : <unreadable> -- this is NOT a mismatch." >&2
     sed 's/^/  dfx: /' "$info_err" >&2 || true
     [ "$status" = 1 ] || status=3
-    return
+    return 0
   fi
   gctl=$(controllers_of "$gout")
   echo "governor module hash: $ghash"
