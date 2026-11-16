@@ -146,7 +146,12 @@ passphrase-encrypted). Steps 1 to 4 can all be undone; step 5 cannot.
    propose-upgrade <module> <commit>` (the commit it was built from,
    in full) and `vote <id> approve`. This proves the whole path
    on mainnet (staging, the chunked install, `ic-git#canister` on chain)
-   while the operator can still repair anything.
+   while the operator can still repair anything. `propose-upgrade` first
+   reads the target's `cycle_balance` and refuses under
+   `MIN_TARGET_CYCLES` (200 G by default): the install is paid by the
+   target, and once the governor is its only controller nothing else
+   can see it running low (umobs did, at the cut; a deposit by anyone
+   fixes it, `dfx canister --network ic deposit-cycles <amount> <id>`).
    ```sh
    dfx canister --network https://icp-api.io --identity icgit-admin-encrypt update-settings umobs-yiaaa-aaaab-agyrq-cai --add-controller <governor>
    ```

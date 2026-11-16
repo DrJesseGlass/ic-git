@@ -121,6 +121,16 @@ fn get_git_canister() -> Option<candid::Principal> {
     peer::GIT.get()
 }
 
+/// What this canister holds in cycles. Public, as the git canister's is:
+/// its controller is a governor, and `canister_status` answers controllers
+/// alone, so without this nobody could see it running low. It did, at the
+/// cut (docs/CANISTER_SPLIT.md, step 16.0): an install failed for want of
+/// 8 G that nothing had reported. The watch reads it against a floor.
+#[ic_cdk::query]
+fn cycle_balance() -> u64 {
+    u64::try_from(ic_cdk::api::canister_cycle_balance()).unwrap_or(u64::MAX)
+}
+
 #[derive(candid::CandidType)]
 struct CanisterInfoArgs {
     canister_id: candid::Principal,

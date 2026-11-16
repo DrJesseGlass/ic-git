@@ -1290,9 +1290,11 @@ The cut on mainnet, in this order:
     Then 16.1 to 16.5 as written, with 16.2's digest stepped three times
     (8.4 MiB, 1,999 records, 9 pages), proposal 8 for 16.3, and the
     `ic-git#git` record by the git governor's proposal 2 after 16.5.
-    Open from the run: a public `cycle_balance` on the authority and a
-    floor in the watch; a fee read that does not depend on the cluster's
-    nodes agreeing on a head.
+    From the run: the authority (and the combined build, for a rollback)
+    got a public `cycle_balance`, the watch a floor over both canisters,
+    and `tools/governor.sh` a check that the target can pay before it
+    proposes. Still open: a fee read that does not depend on the
+    cluster's nodes agreeing on a head.
 
     Steps 3 to 5 code DONE 2026-11-14, step 6 DONE 2026-11-15. What shipped:
     - **16.3.** No new code: the authority build reads the one-canister
