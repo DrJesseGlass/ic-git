@@ -56,6 +56,13 @@ updates:
         update-types: [version-update:semver-major]
       - dependency-name: k256
         update-types: [version-update:semver-minor]
+      # wasmi 2.0's instruction encoder compiles into one function past the
+      # IC's complexity limit (IC0505), so the replica refuses to install the
+      # module at all (crates/compiler/Cargo.toml). CI does not install, so
+      # the bump passes `test` and fails only `deny` (wasmparser twice) and
+      # the local e2e. Lift this after an install of a 2.x build succeeds.
+      - dependency-name: wasmi
+        update-types: [version-update:semver-major]
 
   # The demo app: its own workspace and lock, outside the attested module.
   - package-ecosystem: cargo
