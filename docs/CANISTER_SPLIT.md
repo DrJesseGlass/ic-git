@@ -1090,6 +1090,21 @@ The two canisters:
       for. docs/ATTESTATION.md step 5 has the two-canister closure;
       docs/TENANCY.md ("Votes") says a repo with no votes required trusts
       the git canister for what deploys (decision 6.5.4).
+    - 14c DONE 2026-11-15: the console (`browser/index.html`, a `routes`
+      block). Git reads stay on the page's origin, the tenancy reads go
+      to the authority's host (the gateway's CORS lets a `/site/` page
+      read it: `access-control-allow-origin: *` from the IC's gateway
+      and the local replica's, which the e2e checks), push tokens and
+      `get_site` are the serving canister's
+      by query and by signed call, every other call and the ledger
+      spender are the authority's. The authority is pinned for the two
+      mainnet ids (a page must not learn its spender from the canister
+      that served it); elsewhere it is the serving canister's
+      `get_authority`, and a canister without the method is the
+      one-canister build. `tools/console-routes-test.mjs` holds the
+      pins to `canister_ids.json` and every routed call to the `.did`
+      that has it; the e2e's console reads resolve the authority on
+      both networks. docs/TENANCY.md ("Console") says the same.
 
 The cut on mainnet, in this order:
 
