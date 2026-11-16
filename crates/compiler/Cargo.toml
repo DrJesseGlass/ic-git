@@ -27,7 +27,7 @@ wasm-encoder = "0.263"
 # (IC0505, "function complexity too high"), so the replica refuses to
 # install the module at all. Checked 2026-11-13; CI does not install, so
 # only the local e2e catches it. Bump again only after an install succeeds.
-wasmi = "1"
+wasmi = "2"
 
 [dev-dependencies]
 serde_json = "1"
