@@ -471,10 +471,14 @@ host and none for another cannot be witnessed for the other. The edges
 of one tree: at a domain page under `/api/`, `/feed/` or a `.git/`
 path the canister host's answer stays declared uncertified, as before,
 and the declaration sits at the page's own entry, so the page there is
-no better certified than the API is; a domain's 404 under `/site/`,
-where the canister host holds its sites, fails the gateway's check
-rather than passing certified; and the Host a certificate covers is the
-domain as it is written, which is what a browser sends, so a request
+no better certified than the API is; under `/site/`, where the canister
+host holds its sites, a domain's 404 is certified at each of the
+canister host's entries: always at the wildcards over the sites, and at
+every URL of every site up to certify.rs's `SITE_CROSS_CAP` entries for
+the canister as a whole, past which a domain's 404 at the very URL of a
+page at the canister host fails the gateway's check rather than passing
+certified; and the Host a certificate covers is the domain as it is
+written, which is what a browser sends, so a request
 whose Host spells it otherwise (a port, capitals, a trailing dot) is
 answered without one, and fails the gateway's check at a page. A site past
 certify.rs's caps is served at its domains declared uncertified, as

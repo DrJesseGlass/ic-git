@@ -417,6 +417,12 @@ expect "  ...certified, at the verifying gateway" "$(at_gateway /.well-known/ic-
 expect "the site at its domain, certified by its Host" "$(at_host app.example /)" 'certified_request_headers:\[\\"host\\"\].*"IC-Certificate"'
 expect "  ...a file of it, at its other domain" "$(at_host www.app.example /index.html)" 'certified_request_headers:\[\\"host\\"\].*"IC-Certificate"'
 expect "  ...and its miss, at the root wildcard" "$(at_host app.example /nope)" 'not found in site bundle.*expr_path=:2dn3gmlodHRwX2V4cHJjPCo\+:'
+# Under /site/ the canister host holds its sites: the domain's 404 is at
+# the most specific entry there, a site's URL, its wildcard, the no-site
+# wildcard (the expression paths, CBOR then base64).
+expect "  ...at a URL of a site at the canister host" "$(at_host app.example /site/e2e-app/b.txt)" 'not found in site bundle.*expr_path=:2dn3hWlodHRwX2V4cHJkc2l0ZWdlMmUtYXBwZWIudHh0YzwkPg==:'
+expect "  ...at a site's wildcard" "$(at_host app.example /site/e2e-app/nope)" 'not found in site bundle.*expr_path=:2dn3hGlodHRwX2V4cHJkc2l0ZWdlMmUtYXBwYzwqPg==:'
+expect "  ...at the no-site wildcard" "$(at_host app.example /site/nope/)" 'not found in site bundle.*expr_path=:2dn3g2lodHRwX2V4cHJkc2l0ZWM8Kj4=:'
 expect "the index keeps its place at the verifying gateway, beside the domain's root" "$(at_gateway /)" '^ic-git +repos: .*e2e-app.* 200$'
 expect "  ...and the domain's page is, there, the canister host's 404" "$(at_gateway /index.html)" '^not found +404$'
 expect "the site at its domain, from its root" "$(at_host app.example /)" "X-Ic-Git-Commit\"; \"$TIP\".*status_code = 200"
