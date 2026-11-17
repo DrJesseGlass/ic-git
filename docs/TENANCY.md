@@ -465,15 +465,15 @@ so each such entry is certified with the request's Host and method
 (GET and HEAD), and a domain's `/` is told from another's, and from
 the canister host's own index at `/`, by the Host the certificate
 covers. The canister host's answers at the paths a domain's site took
-(its index, its 404) are certified beside them, so neither host loses a
-path. The edges of one tree: a domain page under `/api/`, `/feed/` or a
-`.git/` path leaves the canister host's answer there uncertified, as
-before; and a path with an entry for one host and none for another
-cannot be witnessed for the other, so a domain's 404 under `/site/`,
-where the canister host holds its sites, and a domain's 404 at a path
-another site has a page at (its favicon, say), fail the gateway's check
-rather than passing certified. A site past certify.rs's caps is served
-at its domains declared uncertified, as every domain was before this.
+(its index, its 404) are certified beside them, and so is every other
+domain's 404, so no host loses a path: a path with an entry for one
+host and none for another cannot be witnessed for the other. The edges
+of one tree: a domain page under `/api/`, `/feed/` or a `.git/` path
+leaves the canister host's answer there uncertified, as before; and a
+domain's 404 under `/site/`, where the canister host holds its sites,
+fails the gateway's check rather than passing certified. A site past
+certify.rs's caps is served at its domains declared uncertified, as
+every domain was before this.
 
 A domain is reached through the DNS its registrar serves, which nothing
 here checks. The clients (docs/EXTENSION.md) verify a site on the

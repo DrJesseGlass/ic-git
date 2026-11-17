@@ -29,17 +29,16 @@
 //! One tree, matched by the path, has edges. Where a domain's site has a
 //! page, the canister host answers the same path with something else
 //! (its index at `/`, a 404, a site under `/site/`), and that answer is
-//! certified beside it (a "shadow"), so neither host loses the path; the
-//! API, the feeds and the git protocol have no fixed answer, so a domain
-//! page under `/api/`, `/feed/` or a `.git/` path leaves the canister
-//! host's answer there uncertified, as before (`canister_host_answer`).
-//! And a path that has an entry for one host and none for another
-//! cannot be witnessed for the other and fails the gateway's check: a
-//! domain's 404 under `/site/`, where the canister host holds a
-//! wildcard, and a domain's 404 at a path another domain's site has a
-//! page at, whose exact entry sits above the root wildcard the 404 is
-//! at. The shadows cover the canister host; between domains the edge
-//! stands.
+//! certified beside it (a "shadow"), and so is every other domain's 404
+//! (a "cross"), so no host loses the path: a path with an entry for one
+//! host and none for another cannot be witnessed for the other, since
+//! its exact entry sits above the root wildcard the other's 404 is at.
+//! The API, the feeds and the git protocol have no fixed answer, so a
+//! domain page under `/api/`, `/feed/` or a `.git/` path leaves the
+//! canister host's answer there uncertified, as before
+//! (`canister_host_answer`). What remains is a domain's 404 under
+//! `/site/`, where the canister host holds its sites under wildcards
+//! more specific than the root's: the gateway's check fails there.
 //!
 //! The tree is heap state: rebuilt from stable memory at install and
 //! upgrade (`rebuild`) and recomputed for a site whenever what it serves
@@ -181,6 +180,9 @@ struct State {
     /// The canister host's answers at the paths of the domains' sites
     /// that have no exact entry of their own.
     shadow: BTreeMap<String, HttpCertification>,
+    /// (host, method, path): each domain's 404 at the paths other
+    /// domains' sites have and it has not.
+    cross: BTreeMap<(String, String, String), HttpCertification>,
     /// The sha256 of each blob served, by oid.
     bodies: BTreeMap<Vec<u8>, [u8; 32]>,
     /// In tests, a smaller cap.
@@ -271,7 +273,7 @@ pub fn rebuild() {
     for (repo, _) in site::all_configs() {
         site_entries(&repo);
     }
-    STATE.with(|s| shadows(&mut s.borrow_mut()));
+    STATE.with(|s| between(&mut s.borrow_mut()));
     publish();
 }
 
@@ -279,7 +281,7 @@ pub fn rebuild() {
 /// served commit, a push, a ref an operator wrote.
 pub fn site_changed(repo: &str) {
     site_entries(repo);
-    STATE.with(|s| shadows(&mut s.borrow_mut()));
+    STATE.with(|s| between(&mut s.borrow_mut()));
     publish();
 }
 
@@ -292,7 +294,7 @@ pub fn domains_changed() {
 /// The list of repos changed: the index at `/`, where a domain's site
 /// has its root too, is certified beside it.
 pub fn repos_changed() {
-    STATE.with(|s| shadows(&mut s.borrow_mut()));
+    STATE.with(|s| between(&mut s.borrow_mut()));
     publish();
 }
 
@@ -431,14 +433,25 @@ fn canister_host_answer(path: &str) -> Option<HttpResponse> {
     Some(site::not_found())
 }
 
+/// The paths the domains' sites have, between them.
+fn domain_paths(s: &State) -> BTreeSet<String> {
+    s.domains.values().flat_map(|d| d.exact.keys().map(|(_, _, p)| p.clone())).collect()
+}
+
+/// Recompute what the other hosts answer at the paths the domains' sites
+/// have: the shadows and the crosses.
+fn between(s: &mut State) {
+    shadows(s);
+    crosses(s);
+}
+
 /// Recompute the shadows: the canister host's answers at every path a
 /// domain's site has and no exact entry covers.
 fn shadows(s: &mut State) {
     for (path, c) in std::mem::take(&mut s.shadow) {
         delete(&HttpCertificationPath::exact(path), &c);
     }
-    let paths: BTreeSet<String> = s.domains.values().flat_map(|d| d.exact.keys().map(|(_, _, p)| p.clone())).collect();
-    for path in paths {
+    for path in domain_paths(s) {
         if s.exact.contains_key(&path) {
             continue;
         }
@@ -449,9 +462,42 @@ fn shadows(s: &mut State) {
     }
 }
 
+/// Recompute the crosses: each domain's 404, for its hosts and methods,
+/// at every path another domain's site has and it has not, so that the
+/// path, an exact leaf, keeps an entry for every host. The 404 is one
+/// certification per host and method, whatever the path (the request
+/// hash covers the method and the Host, not the path), so a cross is a
+/// tree entry and no hash; only the entries that changed are touched.
+fn crosses(s: &mut State) {
+    let paths = domain_paths(s);
+    let mut want = BTreeMap::new();
+    for d in s.domains.values() {
+        for ((host, method), c) in &d.miss {
+            for path in &paths {
+                let key = (host.clone(), method.clone(), path.clone());
+                if !d.exact.contains_key(&key) {
+                    want.insert(key, *c);
+                }
+            }
+        }
+    }
+    let had = std::mem::replace(&mut s.cross, want);
+    for (key, c) in &had {
+        if s.cross.get(key) != Some(c) {
+            delete(&HttpCertificationPath::exact(key.2.clone()), c);
+        }
+    }
+    for (key, c) in &s.cross {
+        if had.get(key) != Some(c) {
+            insert(&HttpCertificationPath::exact(key.2.clone()), c);
+        }
+    }
+}
+
 /// The entry that answers for a request: at a site's own domain, the
-/// site's entry for the Host, the method and the path, or its 404 at the
-/// root wildcard; at the canister host, the path's exact entry (a site's
+/// site's entry for the Host, the method and the path, its 404 at a path
+/// another domain's site has (a cross), or its 404 at the root wildcard;
+/// at the canister host, the path's exact entry (a site's
 /// URL, the domains file, a shadow); else the wildcard of its site; else,
 /// under `/site`, the no-site wildcard; else the root wildcard, which
 /// declares no certification.
@@ -467,7 +513,8 @@ fn lookup(path: &str, host: Option<&str>, method: &str) -> (HttpCertificationPat
             }
             let name = site::host_name(host.unwrap_or_default());
             if let Some(d) = s.domains.get(&repo) {
-                if let Some(c) = d.exact.get(&(name.clone(), method.to_string(), path.to_string())) {
+                let key = (name.clone(), method.to_string(), path.to_string());
+                if let Some(c) = d.exact.get(&key).or_else(|| s.cross.get(&key)) {
                     return (HttpCertificationPath::exact(path.to_string()), *c, Kind::Full);
                 }
                 if let Some(c) = d.miss.get(&(name, method.to_string())) {
@@ -762,12 +809,32 @@ mod tests {
         let (_, c, kind) = lookup("//index.html", Some("app.example"), "GET");
         assert_eq!(kind, Kind::Full);
         assert_eq!(certify_full("GET", "/", "app.example", &res, None), Some(c));
-        // Domains off: the entries and the shadows go, the index is
-        // declared again.
+        // The two sites had the same paths: nothing between them. `other`
+        // loses its docs: at its domain, /docs/a.txt is now a path only
+        // web's site has, an exact leaf above the root wildcard; its 404
+        // is certified there for it (a cross), as served, both methods.
+        assert!(STATE.with(|s| s.borrow().cross.is_empty()));
+        let index = store::put_object(ObjectType::Blob, b"<h1>other</h1>");
+        let root = tree(&[("100644", "index.html", &index)]);
+        commit("other", &root);
+        site::advance("other");
+        for method in METHODS {
+            assert!(proves_at("/docs/a.txt", Some("other.example"), method, &["http_expr", "docs", "a.txt", "<$>"]), "{method}");
+            assert!(served_at_domain_as_certified("other", "other.example", method, "docs/a.txt"), "{method}");
+        }
+        assert_eq!(site::serve("other", "docs/a.txt").status_code, 404);
+        // The same 404 as at a path nobody has; web's page is as it was;
+        // nothing crosses the other way, web having every path.
+        assert_eq!(lookup("/docs/a.txt", Some("other.example"), "GET").1, lookup("/nope", Some("other.example"), "GET").1);
+        assert!(proves_at("/nope", Some("other.example"), "GET", &["http_expr", "<*>"]));
+        assert!(served_at_domain_as_certified("web", "app.example", "GET", "docs/a.txt"));
+        assert!(STATE.with(|s| s.borrow().cross.keys().all(|(h, _, _)| h == "other.example")));
+        // Domains off: the entries, the shadows and the crosses go, the
+        // index is declared again.
         site::set_domains("web", vec![]).unwrap();
         site::set_domains("other", vec![]).unwrap();
         assert_eq!(kind_at("/", None, "GET"), Kind::Skip);
         assert!(proves("/index.html", &["http_expr", "<*>"]));
-        assert!(STATE.with(|s| s.borrow().domains.is_empty() && s.borrow().shadow.is_empty()));
+        assert!(STATE.with(|s| s.borrow().domains.is_empty() && s.borrow().shadow.is_empty() && s.borrow().cross.is_empty()));
     }
 }
