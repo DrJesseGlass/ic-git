@@ -215,13 +215,13 @@ fn site_entries(repo: &str) {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         // Out with the old: every exact URL of the site, and its wildcard.
-        let prefix = format!("/site/{repo}");
-        let old: Vec<String> = s
-            .exact
-            .range(prefix.clone()..)
-            .map(|(k, _)| k.clone())
-            .take_while(|k| k == &prefix || k.starts_with(&format!("{prefix}/")))
-            .collect();
+        // The root and the rest are two walks: in key order another
+        // repo's root can sit between them (`/site/web-2` before
+        // `/site/web/`).
+        let root = format!("/site/{repo}");
+        let under = format!("{root}/");
+        let mut old: Vec<String> = s.exact.range(under.clone()..).map(|(k, _)| k.clone()).take_while(|k| k.starts_with(&under)).collect();
+        old.push(root);
         for url in old {
             if let Some(c) = s.exact.remove(&url) {
                 delete(&HttpCertificationPath::exact(url), &c);
@@ -263,6 +263,15 @@ fn site_entries(repo: &str) {
 /// The entry that answers for a URL path: its exact entry; else the
 /// wildcard of its site; else, under `/site`, the no-site wildcard; else
 /// the root wildcard, which declares no certification.
+///
+/// By the path alone: the tree is one for every host, and the gateway
+/// matches it by the path. A site at its own domain answers `/<path>`
+/// from its root, which the root wildcard declares uncertified, except
+/// under `/site`, where the entries are the canister host's: a page of a
+/// domain's site at such a path (`https://app.example/site/x`) is served
+/// as the site has it and fails the gateway's check, until the domain
+/// form is certified by the request's Host (docs/TENANCY.md, "Custom
+/// domains").
 fn lookup(path: &str) -> (HttpCertificationPath<'static>, HttpCertification) {
     STATE.with(|s| {
         let s = s.borrow();
@@ -442,5 +451,30 @@ mod tests {
         site_changed("web");
         assert!(proves("/site/web/index.html", &["http_expr", "site", "<*>"]));
         assert!(STATE.with(|s| s.borrow().exact.keys().all(|k| !k.starts_with("/site/web"))));
+    }
+
+    #[test]
+    fn a_site_whose_name_sorts_between_another_and_its_pages_leaves_that_site_whole() {
+        for repo in ["web", "web-2"] {
+            store::create_repo(repo).unwrap();
+            crate::mirror::ungated_for_tests(repo);
+            site(repo, b"<h1>one</h1>");
+        }
+        rebuild();
+        site::set_config("web", String::new()).unwrap();
+        site::set_config("web-2", String::new()).unwrap();
+        // `web` loses its docs: a commit with the root index only.
+        let index = store::put_object(ObjectType::Blob, b"<h1>two</h1>");
+        let root = tree(&[("100644", "index.html", &index)]);
+        commit("web", &root);
+        site::advance("web");
+        // Nothing stale under /site/web/, and web-2 is as it was.
+        assert!(proves("/site/web/docs/a.txt", &["http_expr", "site", "web", "<*>"]));
+        assert!(served_as_certified("/site/web/docs/a.txt"));
+        assert!(served_as_certified("/site/web/index.html"));
+        assert!(served_as_certified("/site/web-2/docs/a.txt"));
+        assert!(served_as_certified("/site/web-2"));
+        let keys: Vec<String> = STATE.with(|s| s.borrow().exact.keys().filter(|k| k.starts_with("/site/web/")).cloned().collect());
+        assert_eq!(keys, ["/site/web/", "/site/web/index.html"]);
     }
 }
