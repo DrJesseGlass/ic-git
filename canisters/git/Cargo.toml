@@ -20,7 +20,7 @@ candid = "0.10"
 
 serde = { version = "1", features = ["derive"] }
 hex = { version = "0.4", features = ["serde"] }
-base64 = "0.23"
+base64 = "0.22"
 
 # The workspace crates of docs/CANISTER_SPLIT.md: the git side, and what
 # both sides share. Never the authority.

@@ -24,8 +24,8 @@ dfx deploy git
 dfx canister call git create_repo '("hello")'
 TOKEN=$(dfx canister call git create_push_token '("hello")' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
 
-# Stock git against the local HTTP gateway (note `.raw.` - the non-raw
-# gateway enforces response certification and returns 503):
+# Stock git against the local HTTP gateway (`.raw.`: the non-raw gateway
+# serves git traffic too, declared uncertified, and the sites certified):
 git push "http://ic:$TOKEN@$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git" main
 git clone "http://$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git"
 ```
@@ -53,6 +53,8 @@ crates/git/             the git side (docs/CANISTER_SPLIT.md)
   src/pack.rs           closure walk, pack writer, streamed upload-pack
   src/site.rs           GET /site/<repo>/<path>: serve a committed static bundle,
                         or GET /<path> at the site's own domain
+  src/certify.rs        the certificate on every site response, which the
+                        IC's verifying gateway and the custom domains need
   src/api.rs            GET /api/...: read-only JSON for the repo browser
 crates/authority/       the authority: tenancy, ballots, deploys, provenance
 crates/common/, crates/types/, crates/compiler/

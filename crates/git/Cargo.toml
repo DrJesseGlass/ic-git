@@ -27,13 +27,19 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 sha1 = "0.10"
 sha2 = "0.10"
 hex = { version = "0.4", features = ["serde"] }
-base64 = "0.23"
+base64 = "0.22"
 # Key-bound pushes (tokens.rs, signed_push.rs): verify the Ed25519 SSH
 # signature on a git push certificate. Verification only: no default
 # features, so no rand/getrandom and nothing that needs the OS.
 ed25519-dalek = { version = "2", default-features = false }
 ic-git-common = { path = "../common" }
 ic-git-types = { path = "../types" }
+# Response certification (certify.rs): the tree, the witnesses and the
+# headers the IC's HTTP gateway verifies; ic-certification for its tree type.
+# It is on base64 0.22, so the workspace is (deny.toml bans two versions),
+# and it brings serde_cbor, excepted there with the reason.
+ic-http-certification = "4.0.1"
+ic-certification = "4.0.1"
 
 [dev-dependencies]
 ic-git-common = { path = "../common", features = ["testing"] }

@@ -12,9 +12,13 @@
 //! came from (X-Ic-Git-Commit) -- the binding a client-side verifier (F2)
 //! checks against the ProvenanceRegistry.
 //!
-//! Rung one deliberately: no IC response certification yet (reach it via the
-//! .raw gateway, or verify by hash -- which is the F2 story anyway), and
-//! blobs above the single-response cap are rejected rather than streamed.
+//! Every answer here is certified (certify.rs): the IC's gateway at a
+//! non-raw host passes it with the subnet's certificate over its bytes,
+//! and the raw host passes it as before, where the clients verify by hash
+//! (the F2 story). One URL, one answer: `served` takes a bare blob path or
+//! a directory with or without its trailing slash, and anything else is
+//! the site's one miss, so the certified set is exactly the bundle. Blobs
+//! above the single-response cap are rejected rather than streamed.
 
 use crate::object;
 use crate::store::{self, ObjectType};
@@ -50,7 +54,13 @@ pub fn set_config(repo: &str, root: String) -> Result<(), String> {
     let root = root.trim_matches('/').to_string();
     let domains = get_config(repo).map(|c| c.domains).unwrap_or_default();
     crate::kv::set_json(&site_key(repo), &SiteConfig { root, domains });
+    crate::certify::site_changed(repo);
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn clear_config_for_tests(repo: &str) {
+    crate::kv::remove(&site_key(repo));
 }
 
 pub fn get_config(repo: &str) -> Option<SiteConfig> {
@@ -124,11 +134,12 @@ pub fn set_domains(repo: &str, domains: Vec<String>) -> Result<(), String> {
     }
     cfg.domains = names;
     crate::kv::set_json(&site_key(repo), &cfg);
+    crate::certify::domains_changed();
     Ok(())
 }
 
 /// Every site config, by repo.
-fn all_configs() -> Vec<(String, SiteConfig)> {
+pub(crate) fn all_configs() -> Vec<(String, SiteConfig)> {
     crate::kv::keys_with_prefix(SITE_PREFIX)
         .into_iter()
         .filter_map(|k| crate::kv::get_json(&k).map(|c| (k[SITE_PREFIX.len()..].to_string(), c)))
@@ -177,6 +188,19 @@ pub fn domains_file() -> String {
     all.sort();
     all.dedup();
     all.into_iter().map(|d| d + "\n").collect()
+}
+
+/// GET /.well-known/ic-domains, as certified (certify.rs).
+pub fn domains_response() -> HttpResponse {
+    expressed(crate::git_response(200, "text/plain", domains_file().into_bytes()))
+}
+
+/// With the header that names what its certificate covers (certify.rs):
+/// on every answer of `serve` and on the domains file, before either is
+/// hashed.
+fn expressed(mut res: HttpResponse) -> HttpResponse {
+    res.headers.push(crate::certify::expression_header());
+    res
 }
 
 /// Stay under the ~2 MiB ingress reply limit with headroom for headers.
@@ -936,33 +960,120 @@ fn plain(status_code: u16, msg: &str) -> HttpResponse {
     crate::git_response(status_code, "text/plain", msg.as_bytes().to_vec())
 }
 
+/// The 404 for a repo with no site, as certified for every such repo at
+/// once (certify.rs).
+pub(crate) fn no_site() -> HttpResponse {
+    expressed(plain(404, "no site configured for repo\n"))
+}
+
+fn not_in_bundle() -> HttpResponse {
+    plain(404, "not found in site bundle\n")
+}
+
+/// The 404 `serve` gives for a path the site does not answer: the one
+/// response certified for every such path of the site (certify.rs).
+pub(crate) fn miss(repo: &str) -> HttpResponse {
+    expressed(match site_state(repo) {
+        Ok(_) => not_in_bundle(),
+        Err(res) => res,
+    })
+}
+
+/// What a site is serving from, or the 404 that says why not.
+fn site_state(repo: &str) -> Result<(SiteConfig, store::Oid), HttpResponse> {
+    let Some(cfg) = get_config(repo) else {
+        return Err(plain(404, "no site configured for repo\n"));
+    };
+    match served_commit(repo) {
+        Ok(c) => Ok((cfg, c)),
+        Err(why) => Err(plain(404, &format!("{why}\n"))),
+    }
+}
+
+/// The blob `serve` answers with.
+struct Resolved {
+    /// Its tree location (site root prefix and index.html fallback applied).
+    path: String,
+    body: Vec<u8>,
+    oid: store::Oid,
+    /// The request named a directory, and this is its index.html.
+    index: bool,
+}
+
 /// The blob `serve` would return for `path`, given an already-resolved commit and
-/// config: its tree location (site root prefix and index.html fallback
-/// applied) and bytes. One walk from the root -- a blob serves directly; a
+/// config. One walk from the root -- a blob serves directly; a
 /// directory (including "" for the bundle root) serves the index.html inside.
-fn resolve_blob(commit: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<(String, Vec<u8>)> {
+fn resolve_blob(commit: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<Resolved> {
     let rel = path.trim_matches('/');
     let full = match (cfg.root.is_empty(), rel.is_empty()) {
         (true, _) => rel.to_string(),
         (false, true) => cfg.root.clone(),
         (false, false) => format!("{}/{rel}", cfg.root),
     };
-    match object::node_at_path(commit, &full) {
-        Ok((ObjectType::Blob, body)) => Some((full, body)),
-        Ok((ObjectType::Tree, tree)) => object::tree_entries(&tree)
+    match object::node_at_path_oid(commit, &full) {
+        Ok((oid, ObjectType::Blob, body)) => Some(Resolved { path: full, body, oid, index: false }),
+        Ok((_, ObjectType::Tree, tree)) => object::tree_entries(&tree)
             .ok()
             .and_then(|es| es.into_iter().find(|e| e.name == b"index.html"))
-            .and_then(|e| store::get_object_parsed(&e.oid))
-            .and_then(|(ty, body)| {
-                let name = if full.is_empty() {
+            .and_then(|e| store::get_object_parsed(&e.oid).map(|(ty, body)| (e.oid, ty, body)))
+            .and_then(|(oid, ty, body)| {
+                let path = if full.is_empty() {
                     "index.html".to_string()
                 } else {
                     format!("{full}/index.html")
                 };
-                (ty == ObjectType::Blob).then_some((name, body))
+                (ty == ObjectType::Blob).then_some(Resolved { path, body, oid, index: true })
             }),
         _ => None,
     }
+}
+
+/// The sub-paths a site answers at, as `serve` takes them: "" for the
+/// root, each blob of the bundle, and each directory holding an
+/// index.html with and without its trailing slash; in tree order, so
+/// the count is the same every time. An empty list when the site serves
+/// nothing (no config, no commit: every path is the one miss). `Err`
+/// past `cap` of them.
+pub(crate) fn bundle_paths(repo: &str, cap: usize) -> Result<Vec<String>, ()> {
+    let Ok((cfg, commit)) = site_state(repo) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    match object::node_at_path_oid(&commit, &cfg.root) {
+        Ok((_, ObjectType::Blob, _)) => out.push(String::new()),
+        Ok((oid, ObjectType::Tree, _)) => walk_bundle(&oid, "", &mut out, cap)?,
+        _ => {}
+    }
+    Ok(out)
+}
+
+fn walk_bundle(tree: &store::Oid, prefix: &str, out: &mut Vec<String>, cap: usize) -> Result<(), ()> {
+    let Some((ObjectType::Tree, content)) = store::get_object_parsed(tree) else {
+        return Ok(());
+    };
+    let Ok(entries) = object::tree_entries(&content) else {
+        return Ok(());
+    };
+    let index = entries.iter().any(|e| e.name == b"index.html" && e.mode != "40000");
+    if index {
+        out.push(prefix.to_string());
+        if !prefix.is_empty() {
+            out.push(format!("{prefix}/"));
+        }
+    }
+    for e in &entries {
+        let Ok(name) = std::str::from_utf8(&e.name) else { continue };
+        let rel = if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
+        match e.mode.as_str() {
+            "40000" => walk_bundle(&e.oid, &rel, out, cap)?,
+            "160000" => {}
+            _ => out.push(rel),
+        }
+        if out.len() > cap {
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 /// How far back from the tip `advance` looks for the newest approved commit.
@@ -1017,6 +1128,15 @@ fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
 /// the gated regime returns the tip once, since pushes held for approval
 /// never deployed it.
 pub fn advance(repo: &str) -> Option<store::Oid> {
+    let moved = advance_served(repo);
+    // Whatever moved, or did not, what the site answers is recomputed
+    // from the state of now: a push changes an open site's every page
+    // without moving anything here.
+    crate::certify::site_changed(repo);
+    moved
+}
+
+fn advance_served(repo: &str) -> Option<store::Oid> {
     if !crate::mirror::approvals_written(repo) {
         return None;
     }
@@ -1082,28 +1202,37 @@ pub fn served_commit(repo: &str) -> Result<store::Oid, &'static str> {
 pub fn resolve_entry(repo: &str, path: &str) -> Option<(store::Oid, String, Vec<u8>)> {
     let cfg = get_config(repo)?;
     let commit = served_commit(repo).ok()?;
-    let (served, body) = resolve_blob(&commit, &cfg, path)?;
-    Some((commit, served, body))
+    let r = resolve_blob(&commit, &cfg, path)?;
+    Some((commit, r.path, r.body))
 }
 
-/// GET /site/<repo>/<path>. `path` may be "", carry a trailing slash
-/// (directory request), or name a blob.
+/// GET /site/<repo>/<path>. `path` is "" for the root, a blob's path, or
+/// a directory's with or without its trailing slash.
 pub fn serve(repo: &str, path: &str) -> HttpResponse {
-    let Some(cfg) = get_config(repo) else {
-        return plain(404, "no site configured for repo\n");
-    };
-    let commit = match served_commit(repo) {
-        Ok(c) => c,
-        Err(why) => return plain(404, &format!("{why}\n")),
-    };
+    served(repo, path).0
+}
 
-    let Some((served, body)) = resolve_blob(&commit, &cfg, path) else {
-        return plain(404, "not found in site bundle\n");
+/// `serve`, and the blob it answered with, for the certifier's body
+/// hashes (certify.rs).
+pub(crate) fn served(repo: &str, path: &str) -> (HttpResponse, Option<store::Oid>) {
+    let (cfg, commit) = match site_state(repo) {
+        Ok(s) => s,
+        Err(res) => return (expressed(res), None),
     };
-    if body.len() > MAX_BODY {
-        return plain(413, "file exceeds the single-response limit\n");
+    // One URL, one answer: an empty component, or a slash after a file,
+    // is a miss, so that the certified set is exactly the bundle's files
+    // and directories.
+    if path.starts_with('/') || path.contains("//") {
+        return (expressed(not_in_bundle()), None);
     }
-    let mut res = crate::git_response(200, content_type(&served), body);
+    let dir = path.ends_with('/');
+    let Some(r) = resolve_blob(&commit, &cfg, path).filter(|r| r.index || !dir) else {
+        return (expressed(not_in_bundle()), None);
+    };
+    if r.body.len() > MAX_BODY {
+        return (expressed(plain(413, "file exceeds the single-response limit\n")), None);
+    }
+    let mut res = crate::git_response(200, content_type(&r.path), r.body);
     // The provenance binding a verifier checks against the registry. Path is
     // the actual location in the commit tree (site root and index.html
     // fallback applied), so `git show <commit>:<path>` reproduces the body.
@@ -1111,8 +1240,8 @@ pub fn serve(repo: &str, path: &str) -> HttpResponse {
         .push(("X-Ic-Git-Repo".to_string(), repo.to_string()));
     res.headers
         .push(("X-Ic-Git-Commit".to_string(), store::oid_hex(&commit)));
-    res.headers.push(("X-Ic-Git-Path".to_string(), served));
-    res
+    res.headers.push(("X-Ic-Git-Path".to_string(), r.path));
+    (expressed(res), Some(r.oid))
 }
 
 #[cfg(test)]

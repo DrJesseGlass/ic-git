@@ -10,7 +10,7 @@ use ic_git_compiler::{compile, interp, lang};
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git), likewise.
-use ic_git_git::{api, jobs, mirror, outbox, pack, receive, signed_push, site, smart_http, store, to_authority, tokens, transfer};
+use ic_git_git::{api, certify, jobs, mirror, outbox, pack, receive, signed_push, site, smart_http, store, to_authority, tokens, transfer};
 // The authority (crates/authority), likewise.
 use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, icp, ledger, mirrors, names, provenance, sol, tenancy, to_git};
 use ic_git_types::authority_side::Event;
@@ -50,6 +50,7 @@ fn init() {
     tenancy::arm_rent_timer();
     arm_push_cert_seed();
     feed::arm_governor_timer();
+    certify::rebuild();
 }
 
 #[ic_cdk::pre_upgrade]
@@ -73,6 +74,8 @@ fn post_upgrade() {
     // survive in stable memory; their timers do not.
     mirrors::resume();
     outbox::resume();
+    // The certification tree is heap state: from stable memory again.
+    certify::rebuild();
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -134,14 +137,15 @@ fn route(req: &HttpRequest) -> Route {
             repo: (!repo.is_empty()).then(|| repo.to_string()),
         };
     }
-    if let Some(rest) = path.strip_prefix("/site/") {
+    // `/site` and everything under it is a site's, the repo's name
+    // included when it is empty: the answer for no such site is one
+    // certified 404 (certify.rs), and the gateway holds that path family
+    // to it.
+    if let Some(rest) = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/')) {
         if req.method != "GET" {
             return Route::NotFound;
         }
-        let (repo, sub) = rest.split_once('/').unwrap_or((rest, ""));
-        if repo.is_empty() {
-            return Route::NotFound;
-        }
+        let (repo, sub) = rest.trim_start_matches('/').split_once('/').unwrap_or((rest.trim_start_matches('/'), ""));
         return Route::Site {
             repo: repo.to_string(),
             path: sub.to_string(),
@@ -210,7 +214,15 @@ fn unauthorized() -> HttpResponse {
 
 #[ic_cdk::query]
 fn http_request(req: HttpRequest) -> HttpResponse {
-    match route(&req) {
+    let mut res = routed(&req);
+    // With the certificate the gateway verifies it by (certify.rs), or
+    // the declaration that there is none.
+    certify::attach(&req.url, &mut res);
+    res
+}
+
+fn routed(req: &HttpRequest) -> HttpResponse {
+    match route(req) {
         // head_target doubles as the repo-existence probe: one REPOS read.
         Route::InfoRefs { repo, service } => match store::head_target(&repo) {
             None => git_response(404, "text/plain", b"no such repo\n".to_vec()),
@@ -230,7 +242,7 @@ fn http_request(req: HttpRequest) -> HttpResponse {
         } => http::upgrade_response(),
         Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
         Route::Site { repo, path } => site::serve(&repo, &path),
-        Route::Domains => git_response(200, "text/plain", site::domains_file().into_bytes()),
+        Route::Domains => site::domains_response(),
         Route::Api { url } => api_route(&url),
         Route::Feed { repo } => {
             let host = req
@@ -421,7 +433,9 @@ fn get_object(oid_hex: String) -> Option<Vec<u8>> {
 #[ic_cdk::update(guard = "is_admin")]
 fn set_ref(repo: String, refname: String, oid_hex: String) -> Result<(), String> {
     transfer::check_unfrozen()?;
-    store::set_ref(&repo, &refname, store::parse_oid(&oid_hex)?)
+    store::set_ref(&repo, &refname, store::parse_oid(&oid_hex)?)?;
+    certify::site_changed(&repo);
+    Ok(())
 }
 
 // --- the move to the git canister (docs/CANISTER_SPLIT.md, step 13) ---------

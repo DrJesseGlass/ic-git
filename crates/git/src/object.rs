@@ -110,6 +110,11 @@ pub fn tag_target(content: &[u8]) -> Result<Oid, String> {
 /// root tree). One walk from the root; callers that need "directory ->
 /// index.html" semantics look inside the returned tree instead of re-walking.
 pub fn node_at_path(commit_oid: &Oid, path: &str) -> Result<(store::ObjectType, Vec<u8>), String> {
+    node_at_path_oid(commit_oid, path).map(|(_, ty, content)| (ty, content))
+}
+
+/// `node_at_path`, with the object's id as well.
+pub fn node_at_path_oid(commit_oid: &Oid, path: &str) -> Result<(Oid, store::ObjectType, Vec<u8>), String> {
     let (ty, content) = store::get_object_parsed(commit_oid).ok_or("commit object missing")?;
     if ty != store::ObjectType::Commit {
         return Err("ref tip is not a commit".into());
@@ -126,7 +131,8 @@ pub fn node_at_path(commit_oid: &Oid, path: &str) -> Result<(store::ObjectType, 
             .ok_or_else(|| format!("path not found: {comp}"))?
             .oid;
     }
-    store::get_object_parsed(&oid).ok_or_else(|| "object missing".into())
+    let (ty, content) = store::get_object_parsed(&oid).ok_or("object missing")?;
+    Ok((oid, ty, content))
 }
 
 /// Resolve a slash-separated path within a commit's tree to blob content.
