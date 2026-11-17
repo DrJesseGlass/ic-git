@@ -408,12 +408,23 @@ expect "the owner names them, as looked up" "$(ic "$TEN" set_site_domains '("e2e
 expect "  ...get_site lists them" "$(flat "$(ic "$TEN" get_site '("e2e-app")' --query)")" 'domains = vec \{ "app.example"; "www.app.example" \}'
 expect "  ...and /.well-known/ic-domains does, for the boundary nodes" "$(curl -s "http://$HOST/.well-known/ic-domains")" '^www.app.example$'
 expect "  ...certified, at the verifying gateway" "$(at_gateway /.well-known/ic-domains)" '^app.example www.app.example +200$'
+# The domain form (certify.rs): the certificate covers the request's Host
+# and method, so a domain's / is told from another's and from the index.
+# The local gateway routes by canister id alone, so the domain's answers
+# are read from http_request itself; the canister host's answers at the
+# same paths, the index and its 404 beside them, through the gateway.
+# (candid prints the quotes inside the expression's text escaped)
+expect "the site at its domain, certified by its Host" "$(at_host app.example /)" 'certified_request_headers:\[\\"host\\"\].*"IC-Certificate"'
+expect "  ...a file of it, at its other domain" "$(at_host www.app.example /index.html)" 'certified_request_headers:\[\\"host\\"\].*"IC-Certificate"'
+expect "  ...and its miss, at the root wildcard" "$(at_host app.example /nope)" 'not found in site bundle.*expr_path=:2dn3gmlodHRwX2V4cHJjPCo\+:'
+expect "the index keeps its place at the verifying gateway, beside the domain's root" "$(at_gateway /)" '^ic-git +repos: .*e2e-app.* 200$'
+expect "  ...and the domain's page is, there, the canister host's 404" "$(at_gateway /index.html)" '^not found +404$'
 expect "the site at its domain, from its root" "$(at_host app.example /)" "X-Ic-Git-Commit\"; \"$TIP\".*status_code = 200"
 expect "  ...with its port, a blob of it" "$(at_host www.app.example:443 /index.html)" 'X-Ic-Git-Path"; "site/index.html".*status_code = 200'
 expect "  ...and nothing else of the canister there" "$(at_host app.example '/e2e-app.git/info/refs?service=git-upload-pack')" 'status_code = 404'
 expect "  ...not its JSON API" "$(at_host app.example /api/e2e-app/info)" 'not found in site bundle.*status_code = 404'
 expect "  ...nor a write" "$(at_host app.example /e2e-app.git/git-receive-pack POST)" 'status_code = 404'
-refuse "another host is not the site" "$(at_host other.example /)" 'X-Ic-Git-Commit'
+refuse "another host is not the site" "$(at_host other.example /)" '"X-Ic-Git-Commit"; "'
 expect "a domain under the IC's own is refused" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "x.icp0.io" })')" 'own domains, where a host names a canister'
 expect "  ...and the list before it stays" "$(curl -s "http://$HOST/.well-known/ic-domains")" '^app.example$'
 expect "one domain is kept for the cut" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "app.example" })')" 'Ok'

@@ -458,14 +458,19 @@ A custom domain is reached through the IC's verifying gateway alone
 subnet's certificate over it, or with the canister's declaration that it
 has none. The git canister certifies every response at
 `/site/<repo>/...` on its own host (crates/git/src/certify.rs; VISION.md
-F0.5; live since v0.3.12, 2026-11-17). At a domain the URL is the site's own, `/` and `/<path>`, which
-names no repo, so the certification tree, which is one tree for every
-host, cannot hold it against another site's `/`: the response there is
-declared uncertified, which the gateway passes as it passes the raw
-host, and the clients verify by hash once they know the domain (below).
-Certifying the domain form, by the request's Host, is its own leg; a
-path under `/site/` at a domain is the one shape the gateway refuses
-until then.
+F0.5; live since v0.3.12, 2026-11-17) and every response at a site's
+own domains: there the URL is the site's own, `/` and `/<path>`, which
+names no repo, and the certification tree is one tree for every host,
+so each such entry is certified with the request's Host and method
+(GET and HEAD), and a domain's `/` is told from another's, and from
+the canister host's own index at `/`, by the Host the certificate
+covers. The canister host's answers at the paths a domain's site took
+(its index, its 404) are certified beside them, so neither host loses a
+path. The edges of one tree: a domain page under `/api/` leaves the
+canister host's API uncertified at that one path, and a domain's 404
+under `/site/`, where the canister host holds its sites, fails the
+gateway's check. A site past certify.rs's caps is served at its domains
+declared uncertified, as every domain was before this.
 
 A domain is reached through the DNS its registrar serves, which nothing
 here checks. The clients (docs/EXTENSION.md) verify a site on the

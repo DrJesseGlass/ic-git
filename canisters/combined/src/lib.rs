@@ -220,8 +220,9 @@ fn unauthorized() -> HttpResponse {
 fn http_request(req: HttpRequest) -> HttpResponse {
     let mut res = routed(&req);
     // With the certificate the gateway verifies it by (certify.rs), or
-    // the declaration that there is none.
-    certify::attach(&req.url, &mut res);
+    // the declaration that there is none: by the path, and at a site's
+    // own domain by the Host and the method too.
+    certify::attach(&req.url, http::get_header(&req.headers, "host"), &req.method, &mut res);
     res
 }
 
@@ -256,15 +257,10 @@ fn routed(req: &HttpRequest) -> HttpResponse {
                 .map(|(_, v)| v.as_str());
             feed::serve(repo.as_deref(), host)
         }
-        Route::Index => {
-            let repos = store::list_repos().join("\n");
-            git_response(
-                200,
-                "text/plain",
-                format!("ic-git\n\nrepos:\n{repos}\n\nfeeds (Atom): /feed/<repo>, and /feed for ic-git itself\n").into_bytes(),
-            )
-        }
-        Route::NotFound => git_response(404, "text/plain", b"not found\n".to_vec()),
+        // The one index both builds serve (site.rs): it is certified beside
+        // a domain's root, so it has one text.
+        Route::Index => site::index_response(),
+        Route::NotFound => site::not_found(),
     }
 }
 

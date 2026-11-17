@@ -150,7 +150,12 @@ impl GitSide for Git {
         if store::repo_exists(name) {
             return ready(Ok(Ok(())));
         }
-        ready(Ok(crate::transfer::check_unfrozen().and_then(|()| store::create_repo(name))))
+        ready(Ok(crate::transfer::check_unfrozen().and_then(|()| {
+            store::create_repo(name)?;
+            // The index at / lists it (certify.rs).
+            crate::certify::repos_changed();
+            Ok(())
+        })))
     }
 
     fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>> {

@@ -134,7 +134,9 @@ pub fn set_domains(repo: &str, domains: Vec<String>) -> Result<(), String> {
     }
     cfg.domains = names;
     crate::kv::set_json(&site_key(repo), &cfg);
+    // The domains file, and the site's entries at its domains.
     crate::certify::domains_changed();
+    crate::certify::site_changed(repo);
     Ok(())
 }
 
@@ -158,7 +160,7 @@ pub fn repo_for_domain(domain: &str) -> Option<String> {
 
 /// A Host header as a domain: lowercase, without a port or a trailing dot.
 /// An IPv6 literal is kept whole, brackets and all, and is no domain.
-fn host_name(host: &str) -> String {
+pub(crate) fn host_name(host: &str) -> String {
     let host = host.trim().to_ascii_lowercase();
     if host.starts_with('[') {
         return host;
@@ -195,8 +197,23 @@ pub fn domains_response() -> HttpResponse {
     expressed(crate::git_response(200, "text/plain", domains_file().into_bytes()))
 }
 
+/// GET /, the canister's index: its name and its repos, one per line.
+/// Certified beside a domain's root when a site has a domain
+/// (certify.rs, the shadows), so it is one function's answer.
+pub fn index_response() -> HttpResponse {
+    let repos = store::list_repos().join("\n");
+    expressed(crate::git_response(200, "text/plain", format!("ic-git\n\nrepos:\n{repos}\n").into_bytes()))
+}
+
+/// The canister's 404 for a path that is nothing of it. Certified beside
+/// a domain's pages (certify.rs, the shadows), so it is one function's
+/// answer.
+pub fn not_found() -> HttpResponse {
+    expressed(crate::git_response(404, "text/plain", b"not found\n".to_vec()))
+}
+
 /// With the header that names what its certificate covers (certify.rs):
-/// on every answer of `serve` and on the domains file, before either is
+/// on every answer of `serve` and on the pages beside it, before any is
 /// hashed.
 fn expressed(mut res: HttpResponse) -> HttpResponse {
     res.headers.push(crate::certify::expression_header());

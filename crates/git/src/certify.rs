@@ -8,40 +8,55 @@
 //! certificate says the subnet served these bytes, the registry record
 //! says they are the committed ones.
 //!
-//! What is certified: every URL a site answers at the canister's own
-//! host (`/site/<repo>`, `/site/<repo>/`, and each file and directory of
-//! the bundle under them, as site.rs `serve` answers them), the 404 for
-//! any other URL under a site, the 404 for a repo with no site, and
-//! `/.well-known/ic-domains`. Everything else is declared uncertified
-//! (the protocol's "no certification" expression, which the gateway
-//! passes as it passes the raw host): the git protocol, whose answers
-//! depend on the request body and are checked by the client against its
-//! refs (ARCHITECTURE.md, "Trust model"); `/api`; the index; and a site
-//! at its own domain, where the URL names no repo, until that form is
-//! certified too (docs/TENANCY.md, "Custom domains"). A site of more than
+//! What is certified, at the canister's own host: every URL a site
+//! answers (`/site/<repo>`, `/site/<repo>/`, and each file and directory
+//! of the bundle under them, as site.rs `serve` answers them), the 404
+//! for any other URL under a site, the 404 for a repo with no site, and
+//! `/.well-known/ic-domains`. At a site's own domains (docs/TENANCY.md,
+//! "Custom domains"): every URL of the site, `/` and `/<path>`, and its
+//! 404 for the rest, each certified with the request's Host and method
+//! (GET and HEAD), since the tree is one tree for every host and the
+//! gateway matches it by the path: a domain's `/` is told from another's,
+//! and from the canister host's own index at `/`, by the Host the
+//! certificate covers. Everything else is declared uncertified (the
+//! protocol's "no certification" expression, which the gateway passes as
+//! it passes the raw host): the git protocol, whose answers depend on the
+//! request body and are checked by the client against its refs
+//! (ARCHITECTURE.md, "Trust model"), and `/api`. A site of more than
 //! `SITE_FILE_CAP` files is declared uncertified as a whole rather than
 //! certified in part.
 //!
+//! One tree, matched by the path, has edges. Where a domain's site has a
+//! page, the canister host answers the same path with something else
+//! (its index at `/`, a 404, a site under `/site/`), and that answer is
+//! certified beside it (a "shadow"), so neither host loses the path; the
+//! API has no fixed answer, so a domain page under `/api/` leaves the
+//! canister host's API uncertified at that one path. And a path that
+//! has an entry for one host and none for the other, such as a domain's
+//! 404 under `/site/`, where the canister host holds a wildcard, cannot
+//! be witnessed for the other and fails the gateway's check.
+//!
 //! The tree is heap state: rebuilt from stable memory at install and
 //! upgrade (`rebuild`) and recomputed for a site whenever what it serves
-//! can change (`site_changed`: the config, the served commit, a push, a
-//! ref written by an operator). Each URL is certified by asking `serve`
-//! for it, so the certified bytes and the served bytes are one function's
-//! answer. Body hashes are kept by blob, so a push that changes one file
-//! hashes one file.
+//! can change (`site_changed`: the config, the domains, the served
+//! commit, a push, a ref written by an operator; `repos_changed` for the
+//! index). Each URL is certified by asking `serve` for it, so the
+//! certified bytes and the served bytes are one function's answer. Body
+//! hashes are kept by blob, so a push that changes one file hashes one
+//! file.
 
 use crate::site;
 use crate::store::Oid;
 use ic_certification::HashTree;
 use ic_dev_kit_rs::http::HttpResponse;
 use ic_http_certification::{
-    DefaultCelBuilder, DefaultResponseCertification, DefaultResponseOnlyCelExpression, HttpCertification,
-    HttpCertificationPath, HttpCertificationTree, HttpCertificationTreeEntry, HttpResponse as CertResponse, StatusCode,
-    CERTIFICATE_EXPRESSION_HEADER_NAME,
+    DefaultCelBuilder, DefaultFullCelExpression, DefaultResponseCertification, DefaultResponseOnlyCelExpression,
+    HttpCertification, HttpCertificationPath, HttpCertificationTree, HttpCertificationTreeEntry,
+    HttpRequest as CertRequest, HttpResponse as CertResponse, Method, StatusCode, CERTIFICATE_EXPRESSION_HEADER_NAME,
 };
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 /// How many URLs (files, and directories with an index) a site may have
@@ -50,9 +65,18 @@ use std::sync::OnceLock;
 /// whole, which the raw host and the verifying clients serve as before.
 pub const SITE_FILE_CAP: usize = 2000;
 
+/// How many entries a site's domains may add (its URLs, times its
+/// domains, times the two methods); past this the domain form is left
+/// as it was before it was certified: declared uncertified.
+pub const DOMAIN_ENTRY_CAP: usize = 16_000;
+
 /// The response headers the certificate covers: what a client reads. The
 /// body and the status are always covered.
 const CERTIFIED_HEADERS: [&str; 5] = ["Content-Type", "Cache-Control", "X-Ic-Git-Repo", "X-Ic-Git-Commit", "X-Ic-Git-Path"];
+
+/// The methods a domain's entries are made for: the request's method is
+/// in its hash.
+const METHODS: [&str; 2] = ["GET", "HEAD"];
 
 fn cel() -> &'static DefaultResponseOnlyCelExpression<'static> {
     static CEL: OnceLock<DefaultResponseOnlyCelExpression<'static>> = OnceLock::new();
@@ -65,9 +89,27 @@ fn cel() -> &'static DefaultResponseOnlyCelExpression<'static> {
     })
 }
 
+/// The domain form: the request's Host and method are in the hash too.
+fn full_cel() -> &'static DefaultFullCelExpression<'static> {
+    static CEL: OnceLock<DefaultFullCelExpression<'static>> = OnceLock::new();
+    CEL.get_or_init(|| {
+        DefaultCelBuilder::full_certification()
+            .with_request_headers(vec!["host"])
+            .with_response_certification(DefaultResponseCertification::certified_response_headers(
+                CERTIFIED_HEADERS.to_vec(),
+            ))
+            .build()
+    })
+}
+
 fn cel_text() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
     TEXT.get_or_init(|| cel().to_string())
+}
+
+fn full_text() -> &'static str {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    TEXT.get_or_init(|| full_cel().to_string())
 }
 
 fn skip_text() -> &'static str {
@@ -77,21 +119,63 @@ fn skip_text() -> &'static str {
 
 /// The header every certified response carries, naming what its
 /// certificate covers. Part of the response before it is hashed, so
-/// site.rs puts it on every answer of `serve` and on the domains file.
+/// site.rs puts it on every answer of `serve` and on the pages beside
+/// it; `attach` replaces it when the entry it found covers otherwise.
 pub fn expression_header() -> (String, String) {
     (CERTIFICATE_EXPRESSION_HEADER_NAME.to_string(), cel_text().to_string())
 }
 
+fn set_expression(res: &mut HttpResponse, text: &str) {
+    res.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CERTIFICATE_EXPRESSION_HEADER_NAME));
+    res.headers.push((CERTIFICATE_EXPRESSION_HEADER_NAME.to_string(), text.to_string()));
+}
+
+/// What an entry's certificate covers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// Nothing: declared uncertified.
+    Skip,
+    /// The response, at its path.
+    Response,
+    /// The response, at its path, for the request's Host and method.
+    Full,
+}
+
+impl Kind {
+    fn text(self) -> &'static str {
+        match self {
+            Kind::Skip => skip_text(),
+            Kind::Response => cel_text(),
+            Kind::Full => full_text(),
+        }
+    }
+}
+
+/// A site's entries at its own domains.
+#[derive(Default)]
+struct Domain {
+    /// (host, method, path): each URL of the site.
+    exact: BTreeMap<(String, String, String), HttpCertification>,
+    /// (host, method): the site's 404 for every other path, at the root
+    /// wildcard.
+    miss: BTreeMap<(String, String), HttpCertification>,
+}
+
 #[derive(Default)]
 struct State {
-    /// Exact URLs: every file and directory of every certified site, and
-    /// the domains file.
+    /// Exact URLs at the canister host: every file and directory of
+    /// every certified site, and the domains file.
     exact: BTreeMap<String, HttpCertification>,
     /// Per repo with a site config, the wildcard under `/site/<repo>`:
     /// the certified miss, or skip for a site past the cap.
     sites: BTreeMap<String, HttpCertification>,
     /// The wildcard under `/site`: the 404 for a repo with no site.
     no_site: Option<HttpCertification>,
+    /// Per repo, its entries at its domains.
+    domains: BTreeMap<String, Domain>,
+    /// The canister host's answers at the paths of the domains' sites
+    /// that have no exact entry of their own.
+    shadow: BTreeMap<String, HttpCertification>,
     /// The sha256 of each blob served, by oid.
     bodies: BTreeMap<Vec<u8>, [u8; 32]>,
     /// In tests, a smaller cap.
@@ -114,11 +198,25 @@ fn cert_response(res: &HttpResponse) -> CertResponse<'_> {
         .build()
 }
 
-/// The certification of a response `serve` or `domains_response` gave:
+/// The request a domain's entry is made for: the method and the Host,
+/// which are what its hash covers (the path is the tree's).
+fn request(method: &str, path: &str, host: &str) -> CertRequest<'static> {
+    CertRequest::builder()
+        .with_method(Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET))
+        .with_url(path.to_string())
+        .with_headers(vec![("host".to_string(), host.to_string())])
+        .build()
+}
+
+/// The certification of a response `serve` or its neighbours gave:
 /// `None` only for a response without the expression header, which none
 /// of theirs is.
 fn certify(res: &HttpResponse, body_hash: Option<[u8; 32]>) -> Option<HttpCertification> {
     HttpCertification::response_only(cel(), &cert_response(res), body_hash).ok()
+}
+
+fn certify_full(method: &str, path: &str, host: &str, res: &HttpResponse, body_hash: Option<[u8; 32]>) -> Option<HttpCertification> {
+    HttpCertification::full(full_cel(), &request(method, path, host), &cert_response(res), body_hash).ok()
 }
 
 fn body_hash(s: &mut State, oid: &Oid, body: &[u8]) -> [u8; 32] {
@@ -168,19 +266,28 @@ pub fn rebuild() {
     for (repo, _) in site::all_configs() {
         site_entries(&repo);
     }
+    STATE.with(|s| shadows(&mut s.borrow_mut()));
     publish();
 }
 
-/// What a site serves may have changed: its config, its served commit,
-/// a push, a ref an operator wrote.
+/// What a site serves may have changed: its config, its domains, its
+/// served commit, a push, a ref an operator wrote.
 pub fn site_changed(repo: &str) {
     site_entries(repo);
+    STATE.with(|s| shadows(&mut s.borrow_mut()));
     publish();
 }
 
 /// The domains file changed.
 pub fn domains_changed() {
     domains_entry();
+    publish();
+}
+
+/// The list of repos changed: the index at `/`, where a domain's site
+/// has its root too, is certified beside it.
+pub fn repos_changed() {
+    STATE.with(|s| shadows(&mut s.borrow_mut()));
     publish();
 }
 
@@ -200,8 +307,8 @@ fn domains_entry() {
     });
 }
 
-/// The URLs of a site, from the sub-paths `serve` takes: "" is the root,
-/// at both `/site/<repo>` and `/site/<repo>/`.
+/// The URLs of a site at the canister host, from the sub-paths `serve`
+/// takes: "" is the root, at both `/site/<repo>` and `/site/<repo>/`.
 fn urls(repo: &str, sub: &str) -> Vec<String> {
     if sub.is_empty() {
         vec![format!("/site/{repo}"), format!("/site/{repo}/")]
@@ -210,14 +317,19 @@ fn urls(repo: &str, sub: &str) -> Vec<String> {
     }
 }
 
+/// The URL of a site's sub-path at its own domain: the root is `/`.
+fn domain_url(sub: &str) -> String {
+    format!("/{sub}")
+}
+
 fn site_entries(repo: &str) {
     let wild = HttpCertificationPath::wildcard(format!("/site/{repo}"));
     STATE.with(|s| {
         let mut s = s.borrow_mut();
-        // Out with the old: every exact URL of the site, and its wildcard.
-        // The root and the rest are two walks: in key order another
-        // repo's root can sit between them (`/site/web-2` before
-        // `/site/web/`).
+        // Out with the old: every exact URL of the site, its wildcard, and
+        // its domains' entries. The root and the rest are two walks: in
+        // key order another repo's root can sit between them
+        // (`/site/web-2` before `/site/web/`).
         let root = format!("/site/{repo}");
         let under = format!("{root}/");
         let mut old: Vec<String> = s.exact.range(under.clone()..).map(|(k, _)| k.clone()).take_while(|k| k.starts_with(&under)).collect();
@@ -230,10 +342,18 @@ fn site_entries(repo: &str) {
         if let Some(c) = s.sites.remove(repo) {
             delete(&wild, &c);
         }
-        // A repo with no site: the `/site` wildcard answers for it.
-        if site::get_config(repo).is_none() {
-            return;
+        if let Some(d) = s.domains.remove(repo) {
+            for ((_, _, path), c) in &d.exact {
+                delete(&HttpCertificationPath::exact(path.clone()), c);
+            }
+            for c in d.miss.values() {
+                delete(&HttpCertificationPath::wildcard(""), c);
+            }
         }
+        // A repo with no site: the `/site` wildcard answers for it.
+        let Some(cfg) = site::get_config(repo) else {
+            return;
+        };
         let cap = s.cap;
         let subs = match site::bundle_paths(repo, cap) {
             Ok(subs) => subs,
@@ -244,74 +364,148 @@ fn site_entries(repo: &str) {
                 return;
             }
         };
+        let hosts = cfg.domains;
+        let with_domains = !hosts.is_empty() && subs.len() * hosts.len() * METHODS.len() <= DOMAIN_ENTRY_CAP;
+        let mut domain = Domain::default();
         for sub in subs {
-            let (res, blob) = site::served(repo, &sub);
+            let (mut res, blob) = site::served(repo, &sub);
             let hash = blob.map(|oid| body_hash(&mut s, &oid, &res.body));
             let Some(c) = certify(&res, hash) else { continue };
             for url in urls(repo, &sub) {
                 insert(&HttpCertificationPath::exact(url.clone()), &c);
                 s.exact.insert(url, c);
             }
+            if with_domains {
+                set_expression(&mut res, full_text());
+                let path = domain_url(&sub);
+                for host in &hosts {
+                    for method in METHODS {
+                        let Some(c) = certify_full(method, &path, host, &res, hash) else { continue };
+                        insert(&HttpCertificationPath::exact(path.clone()), &c);
+                        domain.exact.insert((host.clone(), method.to_string(), path.clone()), c);
+                    }
+                }
+            }
         }
-        if let Some(c) = certify(&site::miss(repo), None) {
+        let mut miss = site::miss(repo);
+        if let Some(c) = certify(&miss, None) {
             insert(&wild, &c);
             s.sites.insert(repo.to_string(), c);
+        }
+        if with_domains {
+            set_expression(&mut miss, full_text());
+            for host in &hosts {
+                for method in METHODS {
+                    let Some(c) = certify_full(method, "/", host, &miss, None) else { continue };
+                    insert(&HttpCertificationPath::wildcard(""), &c);
+                    domain.miss.insert((host.clone(), method.to_string()), c);
+                }
+            }
+            s.domains.insert(repo.to_string(), domain);
         }
     });
 }
 
-/// The entry that answers for a URL path: its exact entry; else the
-/// wildcard of its site; else, under `/site`, the no-site wildcard; else
-/// the root wildcard, which declares no certification.
-///
-/// By the path alone: the tree is one for every host, and the gateway
-/// matches it by the path. A site at its own domain answers `/<path>`
-/// from its root, which the root wildcard declares uncertified, except
-/// under `/site`, where the entries are the canister host's: a page of a
-/// domain's site at such a path (`https://app.example/site/x`) is served
-/// as the site has it and fails the gateway's check, until the domain
-/// form is certified by the request's Host (docs/TENANCY.md, "Custom
-/// domains").
-fn lookup(path: &str) -> (HttpCertificationPath<'static>, HttpCertification) {
+/// What the canister host answers at a path a domain's site has, so
+/// that the path keeps an entry for both hosts: its index at `/`, a site
+/// under `/site/`, or its 404. `None` for the API, which has no fixed
+/// answer.
+fn canister_host_answer(path: &str) -> Option<HttpResponse> {
+    if path == "/" {
+        return Some(site::index_response());
+    }
+    if path.starts_with("/api/") {
+        return None;
+    }
+    if let Some(rest) = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/')) {
+        let rest = rest.trim_start_matches('/');
+        let (repo, sub) = rest.split_once('/').unwrap_or((rest, ""));
+        return Some(site::serve(repo, sub));
+    }
+    Some(site::not_found())
+}
+
+/// Recompute the shadows: the canister host's answers at every path a
+/// domain's site has and no exact entry covers.
+fn shadows(s: &mut State) {
+    for (path, c) in std::mem::take(&mut s.shadow) {
+        delete(&HttpCertificationPath::exact(path), &c);
+    }
+    let paths: BTreeSet<String> = s.domains.values().flat_map(|d| d.exact.keys().map(|(_, _, p)| p.clone())).collect();
+    for path in paths {
+        if s.exact.contains_key(&path) {
+            continue;
+        }
+        let Some(res) = canister_host_answer(&path) else { continue };
+        let Some(c) = certify(&res, None) else { continue };
+        insert(&HttpCertificationPath::exact(path.clone()), &c);
+        s.shadow.insert(path, c);
+    }
+}
+
+/// The entry that answers for a request: at a site's own domain, the
+/// site's entry for the Host, the method and the path, or its 404 at the
+/// root wildcard; at the canister host, the path's exact entry (a site's
+/// URL, the domains file, a shadow); else the wildcard of its site; else,
+/// under `/site`, the no-site wildcard; else the root wildcard, which
+/// declares no certification.
+fn lookup(path: &str, host: Option<&str>, method: &str) -> (HttpCertificationPath<'static>, HttpCertification, Kind) {
     STATE.with(|s| {
         let s = s.borrow();
-        if let Some(c) = s.exact.get(path) {
-            return (HttpCertificationPath::exact(path.to_string()), *c);
+        if let Some(repo) = site::repo_for_host(host) {
+            // The domains file is answered on every host.
+            if path == DOMAINS_URL {
+                if let Some(c) = s.exact.get(path) {
+                    return (HttpCertificationPath::exact(path.to_string()), *c, Kind::Response);
+                }
+            }
+            let name = site::host_name(host.unwrap_or_default());
+            if let Some(d) = s.domains.get(&repo) {
+                if let Some(c) = d.exact.get(&(name.clone(), method.to_string(), path.to_string())) {
+                    return (HttpCertificationPath::exact(path.to_string()), *c, Kind::Full);
+                }
+                if let Some(c) = d.miss.get(&(name, method.to_string())) {
+                    return (HttpCertificationPath::wildcard(""), *c, Kind::Full);
+                }
+            }
+            return (HttpCertificationPath::wildcard(""), HttpCertification::skip(), Kind::Skip);
+        }
+        if let Some(c) = s.exact.get(path).or_else(|| s.shadow.get(path)) {
+            return (HttpCertificationPath::exact(path.to_string()), *c, Kind::Response);
         }
         if let Some(rest) = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/')) {
             let repo = rest.trim_start_matches('/').split('/').next().unwrap_or("");
             if let Some(c) = s.sites.get(repo) {
-                return (HttpCertificationPath::wildcard(format!("/site/{repo}")), *c);
+                let kind = if *c == HttpCertification::skip() { Kind::Skip } else { Kind::Response };
+                return (HttpCertificationPath::wildcard(format!("/site/{repo}")), *c, kind);
             }
             if let Some(c) = s.no_site {
-                return (HttpCertificationPath::wildcard("/site"), c);
+                return (HttpCertificationPath::wildcard("/site"), c, Kind::Response);
             }
         }
-        (HttpCertificationPath::wildcard(""), HttpCertification::skip())
+        (HttpCertificationPath::wildcard(""), HttpCertification::skip(), Kind::Skip)
     })
 }
 
-/// The witness for a URL path: the expression path the header names, the
-/// pruned tree, and whether the entry declares no certification.
-pub(crate) fn witness(path: &str) -> Option<(Vec<String>, HashTree, bool)> {
-    let (entry_path, c) = lookup(path);
+/// The witness for a request: the expression path the header names, the
+/// pruned tree, and what the entry covers.
+pub(crate) fn witness(path: &str, host: Option<&str>, method: &str) -> Option<(Vec<String>, HashTree, Kind)> {
+    let (entry_path, c, kind) = lookup(path, host, method);
     let entry = HttpCertificationTreeEntry::new(&entry_path, &c);
     let tree = TREE.with(|t| t.borrow().witness(&entry, path).ok())?;
-    Some((entry_path.to_expr_path(), tree, c == HttpCertification::skip()))
+    Some((entry_path.to_expr_path(), tree, kind))
 }
 
 /// The two headers the gateway reads, for the response the canister is
-/// about to give at `url`: the expression (replacing the one `serve` put
-/// there when the entry declares no certification) and the certificate
+/// about to give to a request: the expression (replacing the one `serve`
+/// put there when the entry found covers otherwise) and the certificate
 /// with the witness. Only in a query with a certificate to give; an
 /// update's answer is not verified.
-pub fn attach(url: &str, res: &mut HttpResponse) {
+pub fn attach(url: &str, host: Option<&str>, method: &str, res: &mut HttpResponse) {
     let Some(cert) = data_certificate() else { return };
     let path = ic_dev_kit_rs::http::extract_path(url);
-    let Some((expr_path, tree, skip)) = witness(path) else { return };
-    res.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CERTIFICATE_EXPRESSION_HEADER_NAME));
-    let expr = if skip { skip_text() } else { cel_text() };
-    res.headers.push((CERTIFICATE_EXPRESSION_HEADER_NAME.to_string(), expr.to_string()));
+    let Some((expr_path, tree, kind)) = witness(path, host, method) else { return };
+    set_expression(res, kind.text());
     res.headers.push(certificate_header(&cert, &tree, &expr_path));
 }
 
@@ -383,20 +577,42 @@ mod tests {
         TREE.with(|t| t.borrow().root_hash())
     }
 
-    /// The witness for `path` proves the tree's root, and names `expr`.
+    /// The witness for `path` at the canister host proves the tree's
+    /// root, and names `expr`.
     fn proves(path: &str, expr: &[&str]) -> bool {
-        let (expr_path, tree, _) = witness(path).expect("a witness");
+        proves_at(path, None, "GET", expr)
+    }
+
+    fn proves_at(path: &str, host: Option<&str>, method: &str, expr: &[&str]) -> bool {
+        let (expr_path, tree, _) = witness(path, host, method).expect("a witness");
         tree.digest() == root() && expr_path == expr
     }
 
-    /// The response the canister gives at `url` is the one certified
-    /// there: its certification, recomputed, is the entry's.
+    fn kind_at(path: &str, host: Option<&str>, method: &str) -> Kind {
+        witness(path, host, method).expect("a witness").2
+    }
+
+    /// The response the canister gives at `url` on its own host is the
+    /// one certified there: its certification, recomputed, is the entry's.
     fn served_as_certified(url: &str) -> bool {
-        let (repo, sub) = url.strip_prefix("/site/").unwrap().split_once('/').unwrap_or((url.strip_prefix("/site/").unwrap(), ""));
+        let rest = url.strip_prefix("/site/").unwrap();
+        let (repo, sub) = rest.split_once('/').unwrap_or((rest, ""));
         let res = site::serve(repo, sub);
         let hash = Some(Sha256::digest(&res.body).into());
-        let (_, c) = lookup(url);
+        let (_, c, _) = lookup(url, None, "GET");
         certify(&res, hash) == Some(c)
+    }
+
+    /// The response the canister gives for `sub` at a domain is the one
+    /// certified there for that Host and method: the gateway recomputes
+    /// the request hash from the request it forwarded.
+    fn served_at_domain_as_certified(repo: &str, host: &str, method: &str, sub: &str) -> bool {
+        let mut res = site::serve(repo, sub);
+        set_expression(&mut res, full_text());
+        let path = domain_url(sub);
+        let hash = Some(Sha256::digest(&res.body).into());
+        let (_, c, kind) = lookup(&path, Some(host), method);
+        kind == Kind::Full && certify_full(method, &path, host, &res, hash) == Some(c)
     }
 
     #[test]
@@ -426,12 +642,12 @@ mod tests {
         // Another repo: the no-site 404; everything else: declared.
         assert!(proves("/site/other/x", &["http_expr", "site", "<*>"]));
         assert!(proves("/site", &["http_expr", "site", "<*>"]));
-        let (_, _, skip) = witness("/api/repos").unwrap();
-        assert!(skip);
+        assert_eq!(kind_at("/api/repos", None, "GET"), Kind::Skip);
         assert!(proves("/api/repos", &["http_expr", "<*>"]));
         assert!(proves("/web.git/info/refs", &["http_expr", "<*>"]));
+        assert!(proves("/", &["http_expr", "<*>"]));
         assert!(proves("/.well-known/ic-domains", &["http_expr", ".well-known", "ic-domains", "<$>"]));
-        assert_eq!(certify(&site::domains_response(), None), Some(lookup("/.well-known/ic-domains").1));
+        assert_eq!(certify(&site::domains_response(), None), Some(lookup("/.well-known/ic-domains", None, "GET").1));
 
         // A push moves the tip: the root changes, the new page is certified.
         site("web", b"<h1>two</h1>");
@@ -442,8 +658,7 @@ mod tests {
         // Past the cap, the site is declared uncertified as a whole.
         set_cap_for_tests(3);
         site_changed("web");
-        let (_, _, skip) = witness("/site/web/index.html").unwrap();
-        assert!(skip);
+        assert_eq!(kind_at("/site/web/index.html", None, "GET"), Kind::Skip);
         assert!(proves("/site/web/index.html", &["http_expr", "site", "web", "<*>"]));
         set_cap_for_tests(SITE_FILE_CAP);
         // Serving off: the no-site 404 again, and nothing of the site left.
@@ -476,5 +691,65 @@ mod tests {
         assert!(served_as_certified("/site/web-2"));
         let keys: Vec<String> = STATE.with(|s| s.borrow().exact.keys().filter(|k| k.starts_with("/site/web/")).cloned().collect());
         assert_eq!(keys, ["/site/web/", "/site/web/index.html"]);
+    }
+
+    #[test]
+    fn a_site_at_its_domains_is_certified_by_host_and_the_canister_host_keeps_its_paths() {
+        for repo in ["web", "other"] {
+            store::create_repo(repo).unwrap();
+            crate::mirror::ungated_for_tests(repo);
+            site(repo, format!("<h1>{repo}</h1>").as_bytes());
+            site::set_config(repo, String::new()).unwrap();
+        }
+        rebuild();
+        // Before any domain: the index at / is declared, like the rest.
+        assert_eq!(kind_at("/", None, "GET"), Kind::Skip);
+        site::set_domains("web", vec!["app.example".into(), "www.app.example".into()]).unwrap();
+        site::set_domains("other", vec!["other.example".into()]).unwrap();
+        // Each URL of each site, for each of its hosts and both methods,
+        // as the gateway would recompute it from the forwarded request.
+        for (repo, host) in [("web", "app.example"), ("web", "www.app.example"), ("other", "other.example")] {
+            for sub in ["", "index.html", "app/main.js", "docs", "docs/", "docs/a.txt"] {
+                for method in METHODS {
+                    assert!(served_at_domain_as_certified(repo, host, method, sub), "{repo} {host} {method} {sub:?}");
+                }
+            }
+            let expr: Vec<&str> = vec!["http_expr", "docs", "a.txt", "<$>"];
+            assert!(proves_at("/docs/a.txt", Some(host), "GET", &expr), "{host}");
+            assert!(proves_at("/", Some(host), "HEAD", &["http_expr", "", "<$>"]), "{host}");
+            // The site's 404 for the rest, at the root wildcard, for this
+            // host; and the port a gateway would not send is stripped.
+            assert!(proves_at("/nope", Some(host), "GET", &["http_expr", "<*>"]), "{host}");
+            assert_eq!(kind_at("/nope", Some(host), "GET"), Kind::Full);
+            assert_eq!(kind_at("/", Some(&format!("{host}:443")), "GET"), Kind::Full);
+        }
+        // The two sites' roots are told apart by the Host: different leaves.
+        let (_, web, _) = lookup("/", Some("app.example"), "GET");
+        let (_, other, _) = lookup("/", Some("other.example"), "GET");
+        assert_ne!(web, other);
+        // A host that is nobody's domain is the canister host: the index.
+        assert_eq!(kind_at("/", Some("nobody.example"), "GET"), Kind::Response);
+        // The canister host keeps every path the domains took: its index
+        // at /, certified beside the domains' roots; its 404 at their
+        // pages; its own site at /site/web/index.html, as before.
+        assert!(proves("/", &["http_expr", "", "<$>"]));
+        assert_eq!(certify(&site::index_response(), None), Some(lookup("/", None, "GET").1));
+        assert!(proves("/index.html", &["http_expr", "index.html", "<$>"]));
+        assert_eq!(certify(&site::not_found(), None), Some(lookup("/index.html", None, "GET").1));
+        assert!(proves("/site/web/index.html", &["http_expr", "site", "web", "index.html", "<$>"]));
+        assert!(served_as_certified("/site/web/index.html"));
+        // A new repo changes the index: recertified.
+        let before = lookup("/", None, "GET").1;
+        store::create_repo("third").unwrap();
+        repos_changed();
+        assert_ne!(before, lookup("/", None, "GET").1);
+        assert_eq!(certify(&site::index_response(), None), Some(lookup("/", None, "GET").1));
+        // Domains off: the entries and the shadows go, the index is
+        // declared again.
+        site::set_domains("web", vec![]).unwrap();
+        site::set_domains("other", vec![]).unwrap();
+        assert_eq!(kind_at("/", None, "GET"), Kind::Skip);
+        assert!(proves("/index.html", &["http_expr", "<*>"]));
+        assert!(STATE.with(|s| s.borrow().domains.is_empty() && s.borrow().shadow.is_empty()));
     }
 }
