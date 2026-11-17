@@ -390,6 +390,7 @@ nserved() { served_at "http://$NHOST/site/e2e-app/"; }
 at_gateway() { flat "$(curl -s -w ' %{http_code}' "http://$NHOST$1")"; }
 expect "the verifying gateway serves the site, certified" "$(nserved)" "^200 $TIP"
 expect "  ...a file of it" "$(at_gateway /site/e2e-app/b.txt)" '^b +200$'
+expect "  ...and HEAD, which is the same answer" "$(curl -s -I -o /dev/null -w '%{http_code}' "http://$NHOST/site/e2e-app/")" '^200$'
 expect "  ...its miss" "$(at_gateway /site/e2e-app/nope)" '^not found in site bundle +404$'
 expect "  ...a slash after a file is a miss" "$(at_gateway /site/e2e-app/b.txt/)" '^not found in site bundle +404$'
 expect "  ...a repo with no site" "$(at_gateway /site/nope/)" '^no site configured for repo +404$'

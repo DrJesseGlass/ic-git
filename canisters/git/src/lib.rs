@@ -241,13 +241,17 @@ fn route(req: &HttpRequest) -> Route {
     let path = http::extract_path(&req.url);
     // On every host, a site's own domains included: whichever URL the
     // boundary nodes read it at, the list is the whole canister's.
+    // A read is GET or HEAD: the certified answers (certify.rs) are the
+    // same for both, and a HEAD answered otherwise would fail the
+    // gateway's check against the entry at its URL.
+    let read = req.method == "GET" || req.method == "HEAD";
     if path == "/.well-known/ic-domains" {
-        return if req.method == "GET" { Route::Domains } else { Route::NotFound };
+        return if read { Route::Domains } else { Route::NotFound };
     }
     // A site at its own domain: the whole origin is the site, from its
     // root, and nothing else of this canister is reached there.
     if let Some(repo) = site::repo_for_host(http::get_header(&req.headers, "host")) {
-        if req.method != "GET" {
+        if !read {
             return Route::NotFound;
         }
         return Route::Site {
@@ -270,7 +274,7 @@ fn route(req: &HttpRequest) -> Route {
     // certified 404 (certify.rs), and the gateway holds that path family
     // to it.
     if let Some(rest) = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/')) {
-        if req.method != "GET" {
+        if !read {
             return Route::NotFound;
         }
         let (repo, sub) = rest.trim_start_matches('/').split_once('/').unwrap_or((rest.trim_start_matches('/'), ""));

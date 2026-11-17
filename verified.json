@@ -100,6 +100,10 @@
         {
           "date": "2026-11-16",
           "what": "the cut: the git canister frozen, imported umobs' git side (9 pages, 1,999 records, 8,455,212 bytes; digests agreed), named by the authority (set_git_canister), every mirror taken, thawed; proposal 2 installed the same module and published ic-git#git (tx 0x8cd09003...de7c)"
+        },
+        {
+          "date": "2026-11-17",
+          "what": "proposal 3 installed v0.3.12 (483699d, 0be0bb4d...335e; certified site responses) and published ic-git#git (tx 0x01937f20...93dc, block 12151353): the first release through this governor since the cut"
         }
       ],
       "policy": {
@@ -186,6 +190,44 @@
           "note": "after the cut named it, governor proposal 2 installed the same module again so that its governor would ask for the record the trial could not get: ic-git#git (commit 5c5c88e, this module hash) in Sepolia tx 0x8cd090037c3971c2498570d691460e6b63daa0f437e529d826aae9c3c691de7c, block 12148580, the first ic-git#git record. The canister holds the copy of umobs' git side as of the freeze (1,999 records, digest 062496c6...6ee4) and serves every site since the thaw"
         },
         "wasm_sha256": "f25d202c25bf8e888030aad774dbcc9f22ea962607bf9730b7c9297f876098fd"
+      },
+      {
+        "commit": "483699d575088d5936444292b7b857b32d85ec99",
+        "tag": "v0.3.12",
+        "module_hash": "0be0bb4d9d52ce5b4503b232b0edc1ffc1377e6befa4293d010ea6c562c7335e",
+        "recipe": {
+          "dockerfile": "Dockerfile.build",
+          "platform": "linux/amd64",
+          "rustc": "1.94.1",
+          "dfx": "0.31.0",
+          "base_image": "rust:1.94.1-slim-bookworm",
+          "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+          "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+        },
+        "builders": [
+          {
+            "who": "deployer (DrJesseGlass)",
+            "lineage": "pinned-container",
+            "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+            "date": "2026-11-17",
+            "check": "built at 483699d, the merge of #144 (certified site responses)"
+          },
+          {
+            "who": "GitHub Actions (independent runner)",
+            "lineage": "pinned-container",
+            "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+            "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/43996412291",
+            "date": "2026-11-17",
+            "check": "identical hash"
+          }
+        ],
+        "deployed": {
+          "date": "2026-11-17",
+          "on_chain_match": "match",
+          "checked_by": "tools/check-module-hash.sh after the install: on-chain module hash 0be0bb4d...335e, controllers 3hps4-taaaa-aaaab-ahela-cai",
+          "note": "governor proposal 3 (1,058 G cycles read first), staged in one chunk, one approval executed it; the new code had the authority publish ic-git#git (commit 483699d, this module hash) in Sepolia tx 0x01937f202c82f0f825da23e44affe50e52c7e0d9f47f95a0fab541ded0eb93dc, block 12151353. First release through this governor since the cut. Every site response is certified: the verifying gateway (34koz-jyaaa-aaaab-ahejq-cai.icp0.io) serves /site/ic-git/ with the IC-Certificate header; the authority stays at v0.3.11, nothing it serves changed"
+        },
+        "wasm_sha256": "5245957b844f5daaf41a3c9fb5e83f11be503f528f7032e45d0476546cce3614"
       }
     ]
   },

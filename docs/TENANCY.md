@@ -458,7 +458,7 @@ A custom domain is reached through the IC's verifying gateway alone
 subnet's certificate over it, or with the canister's declaration that it
 has none. The git canister certifies every response at
 `/site/<repo>/...` on its own host (crates/git/src/certify.rs; VISION.md
-F0.5). At a domain the URL is the site's own, `/` and `/<path>`, which
+F0.5; live since v0.3.12, 2026-11-17). At a domain the URL is the site's own, `/` and `/<path>`, which
 names no repo, so the certification tree, which is one tree for every
 host, cannot hold it against another site's `/`: the response there is
 declared uncertified, which the gateway passes as it passes the raw

@@ -31,6 +31,9 @@ cd "$(dirname "$0")/.."
 NETWORK=${NETWORK:-https://icp-api.io}
 APPROVER=${APPROVER:-icgit-admin-encrypt}
 DID=canisters/governor/governor.did
+# The hints below repeat the governor this run was given, so the next
+# command goes to the same one (a vote cast without it goes to ic-git's).
+HINT=${GOVERNOR:+GOVERNOR=$GOVERNOR }
 GOVERNOR=${GOVERNOR:-governor}
 # One of the two names rather than an id: look it up on ic. Only those two,
 # so a slip ("git") cannot resolve to a canister that is no governor.
@@ -77,7 +80,7 @@ stage_module() {
     off=$((off + $(wc -c <"$part")))
   done
   printf '%s' "$out" | grep -q 'ready = true' || { echo "proposal $id is not ready after staging: $out" >&2; exit 1; }
-  echo "proposal $id is staged; vote with: tools/governor.sh vote $id approve"
+  echo "proposal $id is staged; vote with: ${HINT}tools/governor.sh vote $id approve"
 }
 
 cmd=${1:-}
@@ -131,7 +134,7 @@ case "$cmd" in
     out=$(gov propose "(variant { Upgrade = record { commit = \"$commit\"; module_sha256 = \"$sha\"; arg = blob \"\" } })")
     id=$(printf '%s' "$out" | sed -n 's/.*Ok = \([0-9_]*\) : nat64.*/\1/p' | tr -d _)
     [ -n "$id" ] || { echo "$out" >&2; exit 1; }
-    echo "proposal $id; staging (if this stops, finish with: tools/governor.sh stage $id $module)"
+    echo "proposal $id; staging (if this stops, finish with: ${HINT}tools/governor.sh stage $id $module)"
     stage_module "$id" "$module"
     ;;
   stage) stage_module "${1:?proposal id}" "${2:?module file}" ;;

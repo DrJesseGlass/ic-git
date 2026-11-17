@@ -35,6 +35,40 @@ canister"), and `verified.json` records it under `git_canister`.
 | 2026-11-16 | `5c5c88e` | `v0.3.10` | `1e9ce2a185f3fa8366bfec8cd5146aa2daf5e9657ce7874c4492bfa4a02d8e57` (gz, the authority build) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760), identical hash; installed by governor proposal 8 at the cut, after proposal 7's combined build `b6868caa...d45b` (unrecorded on chain, an hour) |
 | 2026-11-16 | `ef7722f` | `v0.3.11` | `f90c5c03faf3877b7bf73329a0ab3f207bfbf9aecbef6bed94c103c5e2127225` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43924565432](https://github.com/DrJesseGlass/ic-git/actions/runs/43924565432), identical hash; installed by governor proposal 9 |
 
+## v0.3.12, the git canister -- 2026-11-17
+
+The sites are certified (#144; VISION.md F0.5, crates/git/src/certify.rs):
+the git canister keeps a certification tree over every URL of every
+site, its root is the canister's certified data, and each site response
+carries the `IC-Certificate` header, so the IC's verifying gateway, the
+non-raw host and every custom domain, serves them; the git protocol,
+`/api` and the index declare no certification, which the gateway passes.
+The first release through the git canister's governor since the cut.
+
+The pinned container built `483699d`, the merge of #144, to
+`0be0bb4d...335e` (gz; raw `5245957b...3614`) for the git canister; CI
+built the tag on a GitHub Actions x86_64 runner
+([run 43996412291](https://github.com/DrJesseGlass/ic-git/actions/runs/43996412291))
+and agreed byte for byte on all three modules. The same runs built the
+authority to `56aa3419...196b`, which nothing installs: nothing umobs
+serves changed, and it keeps v0.3.11; and the combined build to
+`faed7796...cfa`, the rollback artifact. Git governor proposal 3 read
+the target's cycles first (1,058 G), staged the module in one chunk,
+and one approval executed it; the new code had the authority publish
+`ic-git#git` (commit `483699d`, this module hash) in Sepolia tx
+`0x01937f20...93dc`, block 12151353. Right after,
+`https://34koz-jyaaa-aaaab-ahejq-cai.icp0.io/site/ic-git/` answered 200
+with the certificate header, the first page the verifying gateway ever
+served from ic-git. The e2e ran before the merge on both builds against
+the local verifying gateway (split 187/0, combined 288/0 with the
+upgrade from v0.3.11).
+
+One thing the install showed: a HEAD request at a site URL on the
+verifying host answers 503, since the canister answered HEAD with the
+plain 404 while the gateway held the URL to its certified page. Fixed
+in the source after this release (HEAD reads what GET reads); it ships
+with the next one.
+
 ## v0.3.11 -- 2026-11-16
 
 The two lessons of the cut, in code (#140, #141): the authority reports
@@ -123,6 +157,7 @@ sites are read from and keeps v0.3.8.
 |---|---|---|---|---|---|
 | 2026-11-16 | `28288c9` | `v0.3.9` | `d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43806589563](https://github.com/DrJesseGlass/ic-git/actions/runs/43806589563), identical hash; installed by the operator's key, then again by governor proposal 1 |
 | 2026-11-16 | `5c5c88e` | `v0.3.10` | `d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7` (gz, byte for byte v0.3.9's) | MATCH, 2026-11-16 | deployer and GitHub Actions ([run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760)), identical hash; installed by governor proposal 2 after the cut, which published the first `ic-git#git` record |
+| 2026-11-17 | `483699d` | `v0.3.12` | `0be0bb4d9d52ce5b4503b232b0edc1ffc1377e6befa4293d010ea6c562c7335e` (gz) | MATCH, 2026-11-17 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43996412291](https://github.com/DrJesseGlass/ic-git/actions/runs/43996412291), identical hash; installed by git governor proposal 3 |
 
 The pinned container built `28288c9`, the merge of #135, to
 `d5b5bba7...49a7` (gz; raw `f25d202c...98fd`) for the git canister;
