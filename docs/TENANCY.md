@@ -468,10 +468,15 @@ covers. The canister host's answers at the paths a domain's site took
 (its index, its 404) are certified beside them, and so is every other
 domain's 404, so no host loses a path: a path with an entry for one
 host and none for another cannot be witnessed for the other. The edges
-of one tree: a domain page under `/api/`, `/feed/` or a `.git/` path
-leaves the canister host's answer there uncertified, as before; and a
-domain's 404 under `/site/`, where the canister host holds its sites,
-fails the gateway's check rather than passing certified. A site past
+of one tree: at a domain page under `/api/`, `/feed/` or a `.git/`
+path the canister host's answer stays declared uncertified, as before,
+and the declaration sits at the page's own entry, so the page there is
+no better certified than the API is; a domain's 404 under `/site/`,
+where the canister host holds its sites, fails the gateway's check
+rather than passing certified; and the Host a certificate covers is the
+domain as it is written, which is what a browser sends, so a request
+whose Host spells it otherwise (a port, capitals, a trailing dot) is
+answered without one, and fails the gateway's check at a page. A site past
 certify.rs's caps is served at its domains declared uncertified, as
 every domain was before this.
 
