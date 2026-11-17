@@ -127,6 +127,14 @@ order; `truncated` says the list stops short of them all (1000 files, or
 a tree too vast to walk), and then no renames are paired. It reads no
 blob; the lines are the reader's to work out from the two.
 
+The commit view does that: under a commit it lists the files `/diff`
+names and, for each, fetches the two blobs and shows the lines that
+changed, compared in the page itself (the "diff" block of
+`browser/index.html`; `node tools/browser-diff-test.mjs` holds it to
+`git diff`). `#/<repo>/commit/<rev>/<base>` compares any two revs. A
+binary file, a file over a megabyte and two versions more than 2000
+changed lines apart are named and not compared.
+
 `<rev>` is `HEAD`, a 40-hex oid, or a bare branch/tag name. Every response
 that resolved a commit carries `X-Ic-Git-Commit`.
 
