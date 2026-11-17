@@ -396,6 +396,11 @@ expect "  ...a slash after a file is a miss" "$(at_gateway /site/e2e-app/b.txt/)
 expect "  ...a repo with no site" "$(at_gateway /site/nope/)" '^no site configured for repo +404$'
 expect "  ...the API, declared uncertified" "$(at_gateway /api/repos)" 'e2e-app.* 200$'
 expect "  ...and a clone over it" "$(git clone -q "http://$NHOST/e2e-app.git" "$WORK/nclone" 2>&1; git -C "$WORK/nclone" rev-parse HEAD)" "^$TIP$"
+# The diff of the tip (crates/git/src/diff.rs) is against its parent and
+# names the files git names.
+DIFF=$(curl -s "http://$HOST/api/e2e-app/diff/$TIP")
+expect "the API's diff of the tip is against its parent" "$DIFF" "\"base\":\"$(git -C "$W" rev-parse "$TIP~1")\""
+expect "  ...and names the files git names" "$(echo "$DIFF" | grep -o '"path":"[^"]*"' | sed 's/"path":"\(.*\)"/\1/' | sort | tr '\n' ' ')" "^$(git -C "$W" diff-tree -r --no-commit-id --name-only "$TIP" | sort | tr '\n' ' ')\$"
 
 section "custom domains"
 # docs/TENANCY.md, "Custom domains": a site at its own domain, which is

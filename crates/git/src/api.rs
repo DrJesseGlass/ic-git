@@ -6,6 +6,7 @@
 //!   GET /api/<repo>/commit/<rev>
 //!   GET /api/<repo>/tree/<rev>[/<path>]
 //!   GET /api/<repo>/blob/<rev>/<path>
+//!   GET /api/<repo>/diff/<rev>[?base=<rev>]     the files that changed
 //!
 //! The git side's half; the authority's routes (a repo's info, votes,
 //! proposals and deploys, accounts, pricing) are in api_authority.rs, which
@@ -21,7 +22,17 @@
 //! it is looking at. Blobs are served as `text/plain` with `nosniff` whatever
 //! their extension: this is a data endpoint for a page that renders content
 //! itself, never a place from which markup executes.
+//!
+//! `/diff` is the files that differ between two commits' trees (diff.rs):
+//! from `base` to `<rev>`, where `base` is the commit's first parent
+//! unless the query names another rev, and nothing at all for a commit
+//! with no parent, whose every file is then added. It names the blobs on
+//! each side and reads none: the page fetches the two with `/blob` at the
+//! `base` and `commit` this answers with, by `old_path` (or `path`) and
+//! `path`, and works out the lines itself. At most `MAX_DIFF_FILES` are
+//! listed; `truncated` says there were more.
 
+use crate::diff;
 use crate::object;
 use crate::site;
 use crate::store::{self, ObjectType, Oid};
@@ -31,6 +42,8 @@ use serde::Serialize;
 
 const DEFAULT_COMMITS: usize = 30;
 const MAX_COMMITS: usize = 200;
+/// How many changed files one `/diff` lists.
+const MAX_DIFF_FILES: usize = 1000;
 
 #[derive(Serialize)]
 struct RepoInfo {
@@ -76,6 +89,33 @@ struct TreeInfo {
     commit: String,
     path: String,
     entries: Vec<Entry>,
+}
+
+#[derive(Serialize)]
+struct DiffSide {
+    oid: String,
+    mode: String,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct DiffFile {
+    path: String,
+    status: &'static str,
+    /// Where a renamed file was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_path: Option<String>,
+    old: Option<DiffSide>,
+    new: Option<DiffSide>,
+}
+
+#[derive(Serialize)]
+struct DiffInfo {
+    commit: String,
+    /// The commit compared against; null for a commit with no parent.
+    base: Option<String>,
+    files: Vec<DiffFile>,
+    truncated: bool,
 }
 
 /// Answer a GET under `/api/` that the authority's half (api_authority.rs)
@@ -180,8 +220,48 @@ pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
                 Ok(res)
             })
         }
+        ("diff", Some(rev), None) => {
+            let base = match query.get("base").map(|b| decode(b)) {
+                Some(Ok(b)) => Some(b),
+                Some(Err(e)) => return error(400, &e),
+                None => None,
+            };
+            with_rev(&repo, rev, |tip| {
+                let base = match base {
+                    Some(b) => Some(resolve_rev(&repo, &b)?),
+                    None => commit_tree(&tip)?.1.first().copied(),
+                };
+                let old = base.as_ref().map(|b| commit_tree(b).map(|(tree, _)| tree)).transpose()?;
+                let d = diff::tree_diff(old.as_ref(), &commit_tree(&tip)?.0, MAX_DIFF_FILES)?;
+                let text = |p: &[u8]| String::from_utf8_lossy(p).into_owned();
+                let side = |s: diff::Side| DiffSide { oid: store::oid_hex(&s.oid), kind: kind_of(&s.mode), mode: s.mode };
+                let files = d
+                    .changes
+                    .into_iter()
+                    .map(|c| DiffFile {
+                        path: text(&c.path),
+                        status: c.status.as_str(),
+                        old_path: c.old_path.as_deref().map(text),
+                        old: c.old.map(side),
+                        new: c.new.map(side),
+                    })
+                    .collect();
+                let info = DiffInfo { commit: store::oid_hex(&tip), base: base.as_ref().map(store::oid_hex), files, truncated: d.truncated };
+                Ok(json(200, &info, Some(&tip)))
+            })
+        }
         _ => error(404, "not found"),
     }
+}
+
+/// A commit's tree and parents.
+fn commit_tree(oid: &Oid) -> Result<(Oid, Vec<Oid>), String> {
+    let (ty, content) = store::get_object_parsed(oid).ok_or("commit object missing")?;
+    if ty != ObjectType::Commit {
+        return Err(format!("{} is not a commit", store::oid_hex(oid)));
+    }
+    let refs = object::commit_refs(&content)?;
+    Ok((refs.tree, refs.parents))
 }
 
 fn repos() -> Vec<RepoInfo> {
@@ -291,6 +371,57 @@ fn kind_of(mode: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diff_is_against_the_first_parent_or_the_base_named() {
+        let (c1, c2) = seed("api-diff");
+        // c2 added "sub dir"/b.txt over its parent c1.
+        let res = get("/api/api-diff/diff/HEAD");
+        assert_eq!(res.status_code, 200);
+        assert_eq!(header(&res, "X-Ic-Git-Commit"), Some(store::oid_hex(&c2).as_str()));
+        let v = body_json(&res);
+        assert_eq!(v["commit"], store::oid_hex(&c2));
+        assert_eq!(v["base"], store::oid_hex(&c1));
+        assert_eq!(v["truncated"], false);
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["path"], "sub dir/b.txt");
+        assert_eq!(files[0]["status"], "added");
+        assert!(files[0]["old"].is_null());
+        assert!(files[0].get("old_path").is_none());
+        assert_eq!(files[0]["new"]["mode"], "100644");
+        assert_eq!(files[0]["new"]["kind"], "blob");
+        // The blob it names is the one /blob serves at the commit and path.
+        let b = store::put_object(ObjectType::Blob, b"bravo\n");
+        assert_eq!(files[0]["new"]["oid"], store::oid_hex(&b));
+        // A commit with no parent: nothing to compare against, all added.
+        let root = body_json(&get("/api/api-diff/diff/v1"));
+        assert!(root["base"].is_null());
+        assert_eq!(root["files"][0]["path"], "a.txt");
+        assert_eq!(root["files"][0]["status"], "added");
+        // A base named in the query, here the other way round: deleted.
+        let back = body_json(&get("/api/api-diff/diff/v1?base=HEAD"));
+        assert_eq!(back["commit"], store::oid_hex(&c1));
+        assert_eq!(back["base"], store::oid_hex(&c2));
+        assert_eq!(back["files"][0]["status"], "deleted");
+        assert!(back["files"][0]["new"].is_null());
+        // A commit against itself: nothing.
+        let same = body_json(&get(&format!("/api/api-diff/diff/HEAD?base={}", store::oid_hex(&c2))));
+        assert_eq!(same["files"].as_array().unwrap().len(), 0);
+        // A branch with a slash in its name, as base, percent-encoded.
+        store::set_ref("api-diff", "refs/heads/feature/login", c1).unwrap();
+        let named = body_json(&get("/api/api-diff/diff/HEAD?base=feature%2Flogin"));
+        assert_eq!(named["base"], store::oid_hex(&c1));
+        for (url, status) in [
+            ("/api/api-diff/diff/nope", 404),
+            ("/api/api-diff/diff/HEAD?base=nope", 404),
+            ("/api/api-diff/diff/HEAD?base=%zz", 400),
+            ("/api/api-diff/diff/HEAD/extra", 404),
+            ("/api/api-diff/diff", 404),
+        ] {
+            assert_eq!(get(url).status_code, status, "{url}");
+        }
+    }
 
     /// The git side's half of /api, as the canister asks it once the
     /// authority's half has passed.

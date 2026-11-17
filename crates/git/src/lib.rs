@@ -13,6 +13,7 @@ pub mod api;
 pub mod attest;
 pub mod certify;
 pub mod consent;
+pub mod diff;
 pub mod for_authority;
 pub mod gitproof;
 pub mod jobs;
