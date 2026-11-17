@@ -73,7 +73,9 @@ function gitDiff(a, b) {
   writeFileSync(join(dir, 'b'), b);
   let out = '';
   try {
-    execFileSync('git', ['diff', '--no-index', '--no-color', '--diff-algorithm=myers', '--no-indent-heuristic', '-U3', 'a', 'b'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    // git as it ships, whatever this machine's configuration says.
+    execFileSync('git', ['diff', '--no-index', '--no-color', '--no-ext-diff', '--no-textconv', '--diff-algorithm=myers', '--no-indent-heuristic', '--inter-hunk-context=0', '-U3', 'a', 'b'],
+      { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_EXTERNAL_DIFF: '' } });
   } catch (e) { out = e.stdout; }
   return out.split('\n').slice(4).join('\n').replace(/^(@@ [^@]* @@).*$/gm, '$1');
 }
@@ -157,6 +159,15 @@ const big = far('same', 50000);
 const one = Diff.hunks(big, big.replace('same25000\n', 'other\n'));
 assert.equal(one.length, 1);
 assert.equal(Diff.header(one[0]), '@@ -24998,7 +24998,7 @@');
-pass('files more than 2000 edits apart are refused; a long file with one change is not');
+// Lines only added, or only taken away, are never too many: a new file,
+// a file gone, a block put into the middle of one.
+const added = Diff.hunks('', far('n', 5000));
+assert.equal(added.length, 1);
+assert.equal(Diff.header(added[0]), '@@ -0,0 +1,5000 @@');
+assert.equal(Diff.header(Diff.hunks(far('n', 5000), '')[0]), '@@ -1,5000 +0,0 @@');
+const put = Diff.hunks(seq(1, 10), seq(1, 5) + far('n', 3000) + seq(6, 10));
+assert.equal(Diff.header(put[0]), '@@ -3,6 +3,3006 @@');
+assert.equal(apply(seq(1, 10), put), seq(1, 5) + far('n', 3000) + seq(6, 10));
+pass('files more than 2000 edits apart are refused; a long file with one change, a long new file and a long block added are not');
 
 console.log('browser diff: ' + checks + ' checks passed');
