@@ -41,10 +41,11 @@
 //! page at such a path is no better certified than the API is. Under
 //! `/site/` the canister host holds its sites at exact leaves and under
 //! wildcards more specific than the root's, so a domain's 404 is
-//! certified at each of those too (crosses again: at every URL of every
-//! site, at each `/site/<repo>` wildcard and at the `/site` wildcard),
-//! up to `SITE_CROSS_CAP` entries; past it they are left out, and a
-//! domain's 404 under `/site/` fails the gateway's check. And the Host
+//! certified at each of those too (crosses again: at each `/site/<repo>`
+//! wildcard and at the `/site` wildcard, and at every URL of every site,
+//! these up to `SITE_CROSS_CAP` entries; past it the wildcards alone are
+//! kept, and a domain's 404 at the very URL of a site's page at the
+//! canister host fails the gateway's check). And the Host
 //! an entry covers is the domain as it is written, which is what a
 //! browser sends: a request whose Host spells it otherwise (a port,
 //! capitals, a trailing dot) is routed to the site and given no entry
@@ -85,12 +86,15 @@ pub const SITE_FILE_CAP: usize = 2000;
 /// as it was before it was certified: declared uncertified.
 pub const DOMAIN_ENTRY_CAP: usize = 16_000;
 
-/// How many entries the domains' 404s may add under `/site/` (the URLs
-/// of every site in the canister and the wildcards over them, times
+/// How many entries the domains' 404s may add at the URLs of the sites
+/// at the canister host (the URLs of every site in the canister, times
 /// every domain, times the two methods). Each is a tree entry and no
 /// hash, recomputed in memory at every change of a site; past this they
-/// are left out as a whole, and a domain's 404 under `/site/` fails the
-/// gateway's check rather than passing certified.
+/// are left out as a whole, and a domain's 404 at such a URL fails the
+/// gateway's check rather than passing certified. The entries at the
+/// wildcards over the sites are few and always there, and those at the
+/// paths of other domains' sites are not counted here: `DOMAIN_ENTRY_CAP`
+/// bounds each site's.
 pub const SITE_CROSS_CAP: usize = 32_000;
 
 /// The response headers the certificate covers: what a client reads. The
@@ -316,9 +320,12 @@ pub fn rebuild() {
 /// What a site serves may have changed: its config, its domains, its
 /// served commit, a push, a ref an operator wrote.
 pub fn site_changed(repo: &str) {
-    site_entries(repo);
-    STATE.with(|s| between(&mut s.borrow_mut()));
-    publish();
+    // A repo with no site, before and after, has nothing here: a push to
+    // it recomputes nothing.
+    if site_entries(repo) {
+        STATE.with(|s| between(&mut s.borrow_mut()));
+        publish();
+    }
 }
 
 /// The domains file changed.
@@ -330,7 +337,7 @@ pub fn domains_changed() {
 /// The list of repos changed: the index at `/`, where a domain's site
 /// has its root too, is certified beside it.
 pub fn repos_changed() {
-    STATE.with(|s| between(&mut s.borrow_mut()));
+    STATE.with(|s| shadows(&mut s.borrow_mut()));
     publish();
 }
 
@@ -365,7 +372,8 @@ fn domain_url(sub: &str) -> String {
     format!("/{sub}")
 }
 
-fn site_entries(repo: &str) {
+/// Whether the site had entries or has them now.
+fn site_entries(repo: &str) -> bool {
     let wild = HttpCertificationPath::wildcard(format!("/site/{repo}"));
     STATE.with(|s| {
         let mut s = s.borrow_mut();
@@ -377,15 +385,19 @@ fn site_entries(repo: &str) {
         let under = format!("{root}/");
         let mut old: Vec<String> = s.exact.range(under.clone()..).map(|(k, _)| k.clone()).take_while(|k| k.starts_with(&under)).collect();
         old.push(root);
+        let mut had = false;
         for url in old {
             if let Some(c) = s.exact.remove(&url) {
                 delete(&HttpCertificationPath::exact(url), &c);
+                had = true;
             }
         }
         if let Some(c) = s.sites.remove(repo) {
             delete(&wild, &c);
+            had = true;
         }
         if let Some(d) = s.domains.remove(repo) {
+            had = true;
             for ((_, _, path), c) in &d.exact {
                 delete(&HttpCertificationPath::exact(path.clone()), c);
             }
@@ -395,7 +407,7 @@ fn site_entries(repo: &str) {
         }
         // A repo with no site: the `/site` wildcard answers for it.
         let Some(cfg) = site::get_config(repo) else {
-            return;
+            return had;
         };
         let cap = s.cap;
         let subs = match site::bundle_paths(repo, cap) {
@@ -404,7 +416,7 @@ fn site_entries(repo: &str) {
                 let c = HttpCertification::skip();
                 insert(&wild, &c);
                 s.sites.insert(repo.to_string(), c);
-                return;
+                return true;
             }
         };
         let hosts = cfg.domains;
@@ -446,7 +458,8 @@ fn site_entries(repo: &str) {
             }
             s.domains.insert(repo.to_string(), domain);
         }
-    });
+        true
+    })
 }
 
 /// What the canister host answers at a path a domain's site has, so
@@ -509,20 +522,20 @@ fn shadows(s: &mut State) {
 /// Recompute the crosses: each domain's 404, for its hosts and methods,
 /// wherever another host has an entry more specific than the root
 /// wildcard the 404 is at, and the domain has no page: at every path
-/// another domain's site has, and, under `/site/`, at every URL of every
-/// site at the canister host and at the wildcards over them, so that a
-/// leaf keeps an entry for every host and the gateway finds the 404 at
-/// the most specific path there is. The 404 is one certification per
-/// host and method, whatever the path (the request hash covers the
-/// method and the Host, not the path), so a cross is a tree entry and no
-/// hash; only the entries that changed are touched.
+/// another domain's site has, and, under `/site/`, at the wildcards over
+/// the canister host's sites and at every URL of every site there (these
+/// up to the cap), so that a leaf keeps an entry for every host and the
+/// gateway finds the 404 at the most specific path there is. The 404 is
+/// one certification per host and method, whatever the path (the request
+/// hash covers the method and the Host, not the path), so a cross is a
+/// tree entry and no hash; only the entries that changed are touched.
 fn crosses(s: &mut State) {
     let paths = domain_paths(s);
     let wilds: Vec<String> =
         s.no_site.iter().map(|_| "/site".to_string()).chain(s.sites.keys().map(|repo| format!("/site/{repo}"))).collect();
     let site_urls = || s.exact.keys().filter(|url| *url != DOMAINS_URL);
     let misses: usize = s.domains.values().map(|d| d.miss.len()).sum();
-    let under_site = misses.saturating_mul(site_urls().count() + wilds.len()) <= s.cross_cap;
+    let under_cap = misses.saturating_mul(site_urls().count()) <= s.cross_cap;
     let mut want = Cross::new();
     let mut want_wild = Cross::new();
     for d in s.domains.values() {
@@ -534,11 +547,11 @@ fn crosses(s: &mut State) {
                 }
             };
             paths.iter().for_each(&mut at);
-            if under_site {
+            if under_cap {
                 site_urls().for_each(&mut at);
-                for prefix in &wilds {
-                    want_wild.insert((host.clone(), method.clone(), prefix.clone()), *c);
-                }
+            }
+            for prefix in &wilds {
+                want_wild.insert((host.clone(), method.clone(), prefix.clone()), *c);
             }
         }
     }
@@ -578,16 +591,16 @@ fn site_wildcards(path: &str) -> Vec<String> {
     out
 }
 
-/// The entry that answers for a request: at a site's own domain, the
-/// site's entry for the Host, the method and the path, its 404 at a path
-/// another host has an entry at (a cross: the exact path, else under
-/// `/site/` the most specific wildcard the canister host holds there), or
-/// its 404 at the root wildcard, and none of them for a Host that is not the domain as written: the
-/// gateway hashes the header it was sent, not the name it routes to;
-/// at the canister host, the path's exact entry (a site's
-/// URL, the domains file, a shadow); else the wildcard of its site; else,
-/// under `/site`, the no-site wildcard; else the root wildcard, which
-/// declares no certification.
+/// The entry that answers for a request. At a site's own domain: the
+/// site's entry for the Host, the method and the path; else its 404 where
+/// another host has an entry (a cross: the exact path, else under
+/// `/site/` the most specific wildcard the canister host holds there);
+/// else its 404 at the root wildcard; and none of them for a Host that is
+/// not the domain as written, since the gateway hashes the header it was
+/// sent, not the name it routes to. At the canister host: the path's
+/// exact entry (a site's URL, the domains file, a shadow); else the
+/// wildcard of its site; else, under `/site`, the no-site wildcard; else
+/// the root wildcard, which declares no certification.
 fn lookup(path: &str, host: Option<&str>, method: &str) -> (HttpCertificationPath<'static>, HttpCertification, Kind) {
     STATE.with(|s| {
         let s = s.borrow();
@@ -595,7 +608,7 @@ fn lookup(path: &str, host: Option<&str>, method: &str) -> (HttpCertificationPat
             // The domains file is answered on every host.
             if path == DOMAINS_URL {
                 if let Some(c) = s.exact.get(path) {
-                    return (HttpCertificationPath::exact(path.to_string()), *c, Kind::Response);
+                    return (exact_path(path), *c, Kind::Response);
                 }
             }
             let sent = host.unwrap_or_default();
@@ -603,11 +616,11 @@ fn lookup(path: &str, host: Option<&str>, method: &str) -> (HttpCertificationPat
             if let Some(d) = s.domains.get(&repo).filter(|_| sent == name) {
                 let key = (name.clone(), method.to_string(), path.to_string());
                 if let Some(c) = d.exact.get(&key).or_else(|| s.cross.get(&key)) {
-                    return (HttpCertificationPath::exact(path.to_string()), *c, Kind::Full);
+                    return (exact_path(path), *c, Kind::Full);
                 }
                 for prefix in site_wildcards(path) {
                     if let Some(c) = s.cross_wild.get(&(name.clone(), method.to_string(), prefix.clone())) {
-                        return (HttpCertificationPath::wildcard(prefix), *c, Kind::Full);
+                        return (wildcard_path(&prefix), *c, Kind::Full);
                     }
                 }
                 if let Some(c) = d.miss.get(&(name, method.to_string())) {
@@ -617,11 +630,11 @@ fn lookup(path: &str, host: Option<&str>, method: &str) -> (HttpCertificationPat
             return (HttpCertificationPath::wildcard(""), HttpCertification::skip(), Kind::Skip);
         }
         if let Some(c) = s.exact.get(path) {
-            return (HttpCertificationPath::exact(path.to_string()), *c, Kind::Response);
+            return (exact_path(path), *c, Kind::Response);
         }
         if let Some(c) = s.shadow.get(path) {
             let kind = if *c == HttpCertification::skip() { Kind::Skip } else { Kind::Response };
-            return (HttpCertificationPath::exact(path.to_string()), *c, kind);
+            return (exact_path(path), *c, kind);
         }
         if let Some((repo, _)) = site::site_path(path) {
             if let Some(c) = s.sites.get(repo) {
@@ -1064,17 +1077,25 @@ mod tests {
         assert!(most_specific("/site/other/new.txt", host, "HEAD"));
         assert_eq!(lookup("/site/other/docs/a.txt", host, "GET").0.to_expr_path(), wild(&["site", "other"]));
         assert!(most_specific("/site/other/docs/a.txt", host, "GET"));
-        // Past the cap the crosses under /site are left out as a whole:
-        // the 404 is at the root wildcard, which the gateway refuses there.
+        // Past the cap the crosses at the sites' URLs are left out as a
+        // whole and the wildcards kept: the 404 passes but at the very
+        // URL of a page at the canister host, an exact leaf above the
+        // wildcard, where the gateway's rule refuses it.
         set_cross_cap_for_tests(3);
         site_changed("web");
-        assert!(STATE.with(|s| s.borrow().cross.is_empty() && s.borrow().cross_wild.is_empty()));
-        assert_eq!(lookup("/site/web/nope", host, "GET").0.to_expr_path(), wild(&[]));
-        assert!(!most_specific("/site/web/nope", host, "GET"));
+        assert!(STATE.with(|s| s.borrow().cross.is_empty() && !s.borrow().cross_wild.is_empty()));
+        assert!(most_specific("/site/web/nope", host, "GET"));
+        assert!(most_specific("/site/bare/x", host, "GET"));
         assert!(most_specific("/nope", host, "GET"));
+        assert_eq!(lookup("/site/web/index.html", host, "GET").0.to_expr_path(), wild(&["site", "web"]));
+        assert!(!most_specific("/site/web/index.html", host, "GET"));
         set_cross_cap_for_tests(SITE_CROSS_CAP);
         site_changed("web");
-        assert!(most_specific("/site/web/nope", host, "GET"));
+        assert!(most_specific("/site/web/index.html", host, "GET"));
+        // A push to a repo with no site recomputes nothing.
+        let before = root();
+        site_changed("bare");
+        assert_eq!(root(), before);
         // Domains off: nothing of the domain is left under /site.
         site::set_domains("web", vec![]).unwrap();
         assert!(STATE.with(|s| s.borrow().cross.is_empty() && s.borrow().cross_wild.is_empty()));
