@@ -115,7 +115,17 @@ GET /api/<repo>/commits/<rev>?n=30      first-parent walk, newest first
 GET /api/<repo>/commit/<rev>            one commit
 GET /api/<repo>/tree/<rev>[/<path>]     {commit, path, entries: [{name, mode, kind, oid}]}
 GET /api/<repo>/blob/<rev>/<path>       raw bytes, text/plain, nosniff
+GET /api/<repo>/diff/<rev>[?base=<rev>] {commit, base, files: [{path, status, old_path, old, new}], truncated}
 ```
+
+`/diff` lists the files that differ between two commits' trees, from
+`base` (the first parent unless named; null for a commit without one) to
+`<rev>`: `status` is `added`, `deleted`, `modified` or `renamed` (the
+same content gone from one path and come at one, with `old_path`), and
+`old` and `new` are `{oid, mode, kind}` or null. The files come in path
+order; `truncated` says the list stops short of them all (1000 files, or
+a tree too vast to walk), and then no renames are paired. It reads no
+blob; the lines are the reader's to work out from the two.
 
 `<rev>` is `HEAD`, a 40-hex oid, or a bare branch/tag name. Every response
 that resolved a commit carries `X-Ic-Git-Commit`.
