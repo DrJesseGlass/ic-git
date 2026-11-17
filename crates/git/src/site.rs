@@ -134,7 +134,9 @@ pub fn set_domains(repo: &str, domains: Vec<String>) -> Result<(), String> {
     }
     cfg.domains = names;
     crate::kv::set_json(&site_key(repo), &cfg);
+    // The domains file, and the site's entries at its domains.
     crate::certify::domains_changed();
+    crate::certify::site_changed(repo);
     Ok(())
 }
 
@@ -158,7 +160,7 @@ pub fn repo_for_domain(domain: &str) -> Option<String> {
 
 /// A Host header as a domain: lowercase, without a port or a trailing dot.
 /// An IPv6 literal is kept whole, brackets and all, and is no domain.
-fn host_name(host: &str) -> String {
+pub(crate) fn host_name(host: &str) -> String {
     let host = host.trim().to_ascii_lowercase();
     if host.starts_with('[') {
         return host;
@@ -195,8 +197,23 @@ pub fn domains_response() -> HttpResponse {
     expressed(crate::git_response(200, "text/plain", domains_file().into_bytes()))
 }
 
+/// GET /, the canister's index: its name and its repos, one per line.
+/// Certified beside a domain's root when a site has a domain
+/// (certify.rs, the shadows), so it is one function's answer.
+pub fn index_response() -> HttpResponse {
+    let repos = store::list_repos().join("\n");
+    expressed(crate::git_response(200, "text/plain", format!("ic-git\n\nrepos:\n{repos}\n").into_bytes()))
+}
+
+/// The canister's 404 for a path that is nothing of it. Certified beside
+/// a domain's pages (certify.rs, the shadows), so it is one function's
+/// answer.
+pub fn not_found() -> HttpResponse {
+    expressed(crate::git_response(404, "text/plain", b"not found\n".to_vec()))
+}
+
 /// With the header that names what its certificate covers (certify.rs):
-/// on every answer of `serve` and on the domains file, before either is
+/// on every answer of `serve` and on the pages beside it, before any is
 /// hashed.
 fn expressed(mut res: HttpResponse) -> HttpResponse {
     res.headers.push(crate::certify::expression_header());
@@ -1204,6 +1221,24 @@ pub fn resolve_entry(repo: &str, path: &str) -> Option<(store::Oid, String, Vec<
     let commit = served_commit(repo).ok()?;
     let r = resolve_blob(&commit, &cfg, path)?;
     Some((commit, r.path, r.body))
+}
+
+/// The repo and sub-path a URL path under `/site` names, as `serve` takes
+/// them: `/site` and `/site/` name the empty repo, `/site/<repo>` its
+/// root, `/site/<repo>/<sub>` the rest. `None` off `/site`. One parse for
+/// the routers and for the certifier's shadows (certify.rs), so what is
+/// certified at such a path is what is served there.
+pub fn site_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/'))?;
+    let rest = rest.trim_start_matches('/');
+    Some(rest.split_once('/').unwrap_or((rest, "")))
+}
+
+/// The sub-path a URL path names at a site's own domain, as `serve` takes
+/// it: one leading slash off, so `//x` keeps its empty component and is
+/// the miss the certifier holds for it, as `/site/<repo>//x` is.
+pub fn domain_path(path: &str) -> &str {
+    path.strip_prefix('/').unwrap_or(path)
 }
 
 /// GET /site/<repo>/<path>. `path` is "" for the root, a blob's path, or
