@@ -16,6 +16,11 @@ pub struct TreeEntry {
     pub oid: Oid,
 }
 
+/// Whether a tree entry's mode is a directory's, in either spelling.
+pub fn is_tree_mode(mode: &str) -> bool {
+    mode == "40000" || mode == "040000"
+}
+
 pub fn tree_entries(content: &[u8]) -> Result<Vec<TreeEntry>, String> {
     let mut out = Vec::new();
     let mut i = 0;

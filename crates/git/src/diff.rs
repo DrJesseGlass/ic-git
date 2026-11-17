@@ -9,12 +9,21 @@
 //! work out (the repo browser fetches them by commit and path).
 //!
 //! A rename is reported where git reports one without being asked to
-//! look inside files: a deleted file and an added one with the same
-//! content (the same blob id), and only when that content left one path
-//! and arrived at one, so two copies of an empty file are never paired.
-//! A file renamed and edited in one commit is a deletion and an addition.
+//! look inside files: a deleted file and an added one of the same kind
+//! with the same content (the same blob id), and only when that content
+//! left one path and arrived at one, so two copies of an empty file are
+//! never paired. A file renamed and edited in one commit is a deletion
+//! and an addition.
+//!
+//! The changes come in path order (bytes, a directory's files at its
+//! name with the slash, which is the order git keeps a tree in), and the
+//! walk is bounded twice: by the changes it lists and by the directories
+//! it opens, since a pushed tree can name one small directory at many
+//! paths and be vast with no file in it. Past either bound the answer is
+//! the first of the changes, marked truncated, with no renames paired:
+//! the other path of one may lie in what was not walked.
 
-use crate::object::{self, TreeEntry};
+use crate::object::{self, is_tree_mode, TreeEntry};
 use crate::store::{self, ObjectType, Oid};
 use std::collections::BTreeMap;
 
@@ -63,23 +72,49 @@ pub struct Change {
 pub struct TreeDiff {
     /// In path order.
     pub changes: Vec<Change>,
-    /// There were more than the cap: `changes` is the first of them, and
-    /// a rename whose other half lies past the cap shows as that half
-    /// alone.
+    /// The walk stopped at a bound: `changes` is the first of them, in
+    /// path order, and a rename among them shows as its two halves.
     pub truncated: bool,
 }
 
-fn is_dir(mode: &str) -> bool {
-    mode == "40000" || mode == "040000"
+/// The bounds of one walk.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    /// The changes listed.
+    pub changes: usize,
+    /// The directories opened, on either side.
+    pub dirs: usize,
 }
 
+/// A directory's entries by the name git orders them by: a directory's
+/// with a slash after it. So a file and a directory of one name are two
+/// entries, and the order of the walk is the order of the paths.
 fn entries(tree: Option<&Oid>) -> Result<BTreeMap<Vec<u8>, TreeEntry>, String> {
     let Some(oid) = tree else { return Ok(BTreeMap::new()) };
     let (ty, content) = store::get_object_parsed(oid).ok_or("tree object missing")?;
     if ty != ObjectType::Tree {
         return Err(format!("{} is not a tree", store::oid_hex(oid)));
     }
-    Ok(object::tree_entries(&content)?.into_iter().map(|e| (e.name.clone(), e)).collect())
+    Ok(object::tree_entries(&content)?
+        .into_iter()
+        .map(|e| {
+            let mut key = e.name.clone();
+            if is_tree_mode(&e.mode) {
+                key.push(b'/');
+            }
+            (key, e)
+        })
+        .collect())
+}
+
+/// What an entry that is not a directory is: a file (whatever its
+/// permission bits), a symlink, a submodule.
+fn file_kind(mode: &str) -> &str {
+    if mode.starts_with("100") {
+        "100"
+    } else {
+        mode
+    }
 }
 
 fn side(e: &TreeEntry) -> Side {
@@ -88,13 +123,14 @@ fn side(e: &TreeEntry) -> Side {
 
 struct Walk {
     changes: Vec<Change>,
-    cap: usize,
+    limits: Limits,
+    dirs: usize,
     truncated: bool,
 }
 
 impl Walk {
     fn push(&mut self, path: Vec<u8>, status: Status, old: Option<&TreeEntry>, new: Option<&TreeEntry>) {
-        if self.changes.len() >= self.cap {
+        if self.changes.len() >= self.limits.changes {
             self.truncated = true;
             return;
         }
@@ -107,56 +143,55 @@ impl Walk {
         if depth > MAX_DEPTH {
             return Err("tree nests too deep to compare".into());
         }
+        self.dirs += old.is_some() as usize + new.is_some() as usize;
+        if self.dirs > self.limits.dirs {
+            self.truncated = true;
+            return Ok(());
+        }
         let olds = entries(old)?;
         let news = entries(new)?;
-        let names: std::collections::BTreeSet<&Vec<u8>> = olds.keys().chain(news.keys()).collect();
-        for name in names {
+        let keys: std::collections::BTreeSet<&Vec<u8>> = olds.keys().chain(news.keys()).collect();
+        for key in keys {
             if self.truncated {
                 return Ok(());
             }
-            let mut path = prefix.to_vec();
-            if !path.is_empty() {
-                path.push(b'/');
-            }
-            path.extend_from_slice(name);
-            let (o, n) = (olds.get(name), news.get(name));
+            let (o, n) = (olds.get(key), news.get(key));
             if let (Some(o), Some(n)) = (o, n) {
                 if o.oid == n.oid && o.mode == n.mode {
                     continue;
                 }
             }
-            let (o_dir, n_dir) = (o.filter(|e| is_dir(&e.mode)), n.filter(|e| is_dir(&e.mode)));
-            let (o_file, n_file) = (o.filter(|e| !is_dir(&e.mode)), n.filter(|e| !is_dir(&e.mode)));
-            // A file on one side and a directory on the other is the file
-            // gone (or come) and the directory's files come (or gone).
-            match (o_file, n_file) {
-                (Some(o), Some(n)) => self.push(path.clone(), Status::Modified, Some(o), Some(n)),
-                (Some(o), None) => self.push(path.clone(), Status::Deleted, Some(o), None),
-                (None, Some(n)) => self.push(path.clone(), Status::Added, None, Some(n)),
-                (None, None) => {}
+            let mut path = prefix.to_vec();
+            path.extend_from_slice(key);
+            if key.last() == Some(&b'/') {
+                self.dir(&path, o.map(|e| &e.oid), n.map(|e| &e.oid), depth + 1)?;
+                continue;
             }
-            if o_dir.is_some() || n_dir.is_some() {
-                self.dir(&path, o_dir.map(|e| &e.oid), n_dir.map(|e| &e.oid), depth + 1)?;
-            }
+            let status = match (o, n) {
+                (Some(_), Some(_)) => Status::Modified,
+                (Some(_), None) => Status::Deleted,
+                _ => Status::Added,
+            };
+            self.push(path, status, o, n);
         }
         Ok(())
     }
 }
 
 /// The changes from tree `old` (none: the empty tree, as before a root
-/// commit) to tree `new`, at most `cap` of them.
-pub fn tree_diff(old: Option<&Oid>, new: &Oid, cap: usize) -> Result<TreeDiff, String> {
-    let mut walk = Walk { changes: Vec::new(), cap, truncated: false };
+/// commit) to tree `new`, within `limits`.
+pub fn tree_diff(old: Option<&Oid>, new: &Oid, limits: Limits) -> Result<TreeDiff, String> {
+    let mut walk = Walk { changes: Vec::new(), limits, dirs: 0, truncated: false };
     if old != Some(new) {
         walk.dir(b"", old, Some(new), 0)?;
     }
-    let mut changes = renames(walk.changes);
-    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    let changes = if walk.truncated { walk.changes } else { renames(walk.changes) };
     Ok(TreeDiff { changes, truncated: walk.truncated })
 }
 
-/// Pair a deletion with an addition of the same blob, where the blob was
-/// deleted at one path and added at one.
+/// Pair a deletion with an addition of the same blob and kind, where the
+/// blob was deleted at one path and added at one. The list is the whole
+/// of the changes: with some missing, "at one path" could not be said.
 fn renames(changes: Vec<Change>) -> Vec<Change> {
     let mut deleted: BTreeMap<Oid, Vec<usize>> = BTreeMap::new();
     let mut added: BTreeMap<Oid, Vec<usize>> = BTreeMap::new();
@@ -167,32 +202,36 @@ fn renames(changes: Vec<Change>) -> Vec<Change> {
             _ => {}
         }
     }
+    // Addition -> the deletion it is the other half of.
     let mut from: BTreeMap<usize, usize> = BTreeMap::new();
     for (oid, dels) in &deleted {
         if let (&[d], Some(&[a])) = (dels.as_slice(), added.get(oid).map(Vec::as_slice)) {
-            from.insert(a, d);
+            let kind = |s: &Option<Side>| s.as_ref().map(|s| file_kind(&s.mode).to_string());
+            if kind(&changes[d].old) == kind(&changes[a].new) {
+                from.insert(a, d);
+            }
         }
     }
-    let gone: std::collections::BTreeSet<usize> = from.values().copied().collect();
-    let mut out = Vec::with_capacity(changes.len() - gone.len());
-    for (i, c) in changes.iter().enumerate() {
-        if gone.contains(&i) {
-            continue;
-        }
-        let mut c = c.clone();
-        if let Some(&d) = from.get(&i) {
+    if from.is_empty() {
+        return changes;
+    }
+    let mut slots: Vec<Option<Change>> = changes.into_iter().map(Some).collect();
+    let halves: Vec<(usize, Change)> = from.iter().filter_map(|(&a, &d)| slots[d].take().map(|c| (a, c))).collect();
+    for (a, gone) in halves {
+        if let Some(c) = slots[a].as_mut() {
             c.status = Status::Renamed;
-            c.old_path = Some(changes[d].path.clone());
-            c.old = changes[d].old.clone();
+            c.old_path = Some(gone.path);
+            c.old = gone.old;
         }
-        out.push(c);
     }
-    out
+    slots.into_iter().flatten().collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WIDE: Limits = Limits { changes: 100, dirs: 100 };
 
     fn blob(content: &[u8]) -> Oid {
         store::put_object(ObjectType::Blob, content)
@@ -222,8 +261,8 @@ mod tests {
         let a = blob(b"a");
         let sub = tree(&[("100644", "b.txt", &a)]);
         let t = tree(&[("100644", "a.txt", &a), ("40000", "sub", &sub)]);
-        assert!(tree_diff(Some(&t), &t, 100).unwrap().changes.is_empty());
-        let d = tree_diff(None, &t, 100).unwrap();
+        assert!(tree_diff(Some(&t), &t, WIDE).unwrap().changes.is_empty());
+        let d = tree_diff(None, &t, WIDE).unwrap();
         assert_eq!(summary(&d), [row("added", "a.txt"), row("added", "sub/b.txt")]);
         assert!(!d.truncated);
         assert_eq!(d.changes[0].old, None);
@@ -240,7 +279,7 @@ mod tests {
         let deep_new = tree(&[("100644", "x.txt", &three), ("100644", "z.txt", &three)]);
         let old = tree(&[("40000", "deep", &deep_old), ("100644", "gone.txt", &one), ("40000", "same", &same), ("100644", "stay.txt", &two)]);
         let new = tree(&[("40000", "deep", &deep_new), ("100644", "new.txt", &blob(b"new")), ("40000", "same", &same), ("100644", "stay.txt", &two)]);
-        let d = tree_diff(Some(&old), &new, 100).unwrap();
+        let d = tree_diff(Some(&old), &new, WIDE).unwrap();
         assert_eq!(
             summary(&d),
             [
@@ -261,7 +300,7 @@ mod tests {
         let old = tree(&[("100644", "run.sh", &a), ("100644", "thing", &b)]);
         let inner = tree(&[("100644", "inside.txt", &b)]);
         let new = tree(&[("100755", "run.sh", &a), ("40000", "thing", &inner)]);
-        let d = tree_diff(Some(&old), &new, 100).unwrap();
+        let d = tree_diff(Some(&old), &new, WIDE).unwrap();
         // The file `thing` is gone and `thing/inside.txt` has come with its
         // content: one path each way, so it reads as the rename it is.
         assert_eq!(summary(&d), [row("modified", "run.sh"), ("renamed", "thing/inside.txt".to_string(), Some("thing".to_string()))]);
@@ -270,7 +309,7 @@ mod tests {
         assert_eq!(run.old.as_ref().unwrap().oid, run.new.as_ref().unwrap().oid);
         // And back: the directory gone, the file come, with other content.
         let back = tree(&[("100755", "run.sh", &a), ("100644", "thing", &a)]);
-        let d = tree_diff(Some(&new), &back, 100).unwrap();
+        let d = tree_diff(Some(&new), &back, WIDE).unwrap();
         assert_eq!(summary(&d), [row("added", "thing"), row("deleted", "thing/inside.txt")]);
     }
 
@@ -281,7 +320,7 @@ mod tests {
         let old = tree(&[("40000", "old", &old_dir), ("100644", "e1", &empty), ("100644", "e2", &empty), ("100644", "keep", &b)]);
         let new_dir = tree(&[("100644", "moved.txt", &a)]);
         let new = tree(&[("100644", "f1", &empty), ("100644", "f2", &empty), ("100644", "keep", &b), ("40000", "new", &new_dir)]);
-        let d = tree_diff(Some(&old), &new, 100).unwrap();
+        let d = tree_diff(Some(&old), &new, WIDE).unwrap();
         // The two empty files went and two came: nothing says which is
         // which, so they stay deletions and additions.
         assert_eq!(
@@ -304,24 +343,78 @@ mod tests {
         let names: Vec<String> = (0..10).map(|i| format!("f{i}")).collect();
         let all: Vec<(&str, &str, &Oid)> = names.iter().map(|n| ("100644", n.as_str(), &a)).collect();
         let t = tree(&all);
-        let d = tree_diff(None, &t, 4).unwrap();
+        let d = tree_diff(None, &t, Limits { changes: 4, dirs: 100 }).unwrap();
         assert!(d.truncated);
         assert_eq!(d.changes.len(), 4);
-        let d = tree_diff(None, &t, 10).unwrap();
+        let d = tree_diff(None, &t, Limits { changes: 10, dirs: 100 }).unwrap();
         assert!(!d.truncated);
         assert_eq!(d.changes.len(), 10);
     }
 
     #[test]
+    fn the_changes_come_in_path_order_and_a_cut_list_is_the_first_of_them() {
+        let a = blob(b"a");
+        let dir = tree(&[("100644", "1", &a), ("100644", "2", &a)]);
+        // In a tree git keeps `a` the directory after `a-b` and `a.txt`
+        // and before `a0`: as the paths under it sort.
+        let t = tree(&[("100644", "a-b", &a), ("100644", "a.txt", &a), ("40000", "a", &dir), ("100644", "a0", &a)]);
+        let d = tree_diff(None, &t, WIDE).unwrap();
+        let paths: Vec<String> = d.changes.iter().map(|c| String::from_utf8_lossy(&c.path).into_owned()).collect();
+        assert_eq!(paths, ["a-b", "a.txt", "a/1", "a/2", "a0"]);
+        let mut sorted = d.changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>();
+        sorted.sort();
+        assert_eq!(sorted, d.changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>());
+        let cut = tree_diff(None, &t, Limits { changes: 3, dirs: 100 }).unwrap();
+        assert!(cut.truncated);
+        assert_eq!(cut.changes, d.changes[..3]);
+    }
+
+    #[test]
+    fn a_cut_list_pairs_no_renames_and_kinds_do_not_pair() {
+        // X goes from a/x and comes at b/x and zz/x: no rename. Cut before
+        // zz/x, one of each is in view; they are not paired.
+        let x = blob(b"x");
+        let one = tree(&[("100644", "x", &x)]);
+        let old = tree(&[("40000", "a", &one)]);
+        let new = tree(&[("40000", "b", &one), ("40000", "zz", &one)]);
+        let whole = tree_diff(Some(&old), &new, WIDE).unwrap();
+        assert_eq!(summary(&whole), [row("deleted", "a/x"), row("added", "b/x"), row("added", "zz/x")]);
+        let cut = tree_diff(Some(&old), &new, Limits { changes: 2, dirs: 100 }).unwrap();
+        assert!(cut.truncated);
+        assert_eq!(summary(&cut), [row("deleted", "a/x"), row("added", "b/x")]);
+        // A symlink gone and a file come with the same bytes: not a rename.
+        // A file that moved and became executable: one.
+        let old = tree(&[("120000", "link", &x), ("100644", "tool", &blob(b"run"))]);
+        let new = tree(&[("100644", "notes", &x), ("100755", "bin", &blob(b"run"))]);
+        let d = tree_diff(Some(&old), &new, WIDE).unwrap();
+        assert_eq!(summary(&d), [("renamed", "bin".to_string(), Some("tool".to_string())), row("deleted", "link"), row("added", "notes")]);
+    }
+
+    #[test]
+    fn a_tree_that_is_vast_with_no_file_in_it_stops_at_the_bound_on_directories() {
+        // Each level names the one below at two paths: 2^24 directories
+        // from 25 objects, and not one file.
+        let mut t = tree(&[]);
+        for _ in 0..24 {
+            t = tree(&[("40000", "a", &t), ("40000", "b", &t)]);
+        }
+        let d = tree_diff(None, &t, Limits { changes: 100, dirs: 500 }).unwrap();
+        assert!(d.truncated);
+        assert!(d.changes.is_empty());
+        // The same on both sides is no walk at all.
+        assert!(!tree_diff(Some(&t), &t, Limits { changes: 100, dirs: 500 }).unwrap().truncated);
+    }
+
+    #[test]
     fn a_missing_tree_and_a_tree_too_deep_are_errors() {
         let missing = Oid::try_from([9u8; 20].as_slice()).unwrap();
-        assert!(tree_diff(None, &missing, 10).is_err());
+        assert!(tree_diff(None, &missing, WIDE).is_err());
         let a = blob(b"a");
-        assert!(tree_diff(None, &a, 10).is_err());
+        assert!(tree_diff(None, &a, WIDE).is_err());
         let mut t = tree(&[("100644", "f", &a)]);
         for _ in 0..MAX_DEPTH + 1 {
             t = tree(&[("40000", "d", &t)]);
         }
-        assert!(tree_diff(None, &t, 10).is_err());
+        assert!(tree_diff(None, &t, Limits { changes: 100, dirs: 1000 }).is_err());
     }
 }

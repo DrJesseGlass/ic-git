@@ -29,8 +29,10 @@
 //! with no parent, whose every file is then added. It names the blobs on
 //! each side and reads none: the page fetches the two with `/blob` at the
 //! `base` and `commit` this answers with, by `old_path` (or `path`) and
-//! `path`, and works out the lines itself. At most `MAX_DIFF_FILES` are
-//! listed; `truncated` says there were more.
+//! `path`, and works out the lines itself. The files come in path order,
+//! within `DIFF_LIMITS`; `truncated` says the list stops short. A name
+//! that is not UTF-8 is given as `/tree` gives it, with the replacement
+//! character, and cannot be fetched by it.
 
 use crate::diff;
 use crate::object;
@@ -42,8 +44,9 @@ use serde::Serialize;
 
 const DEFAULT_COMMITS: usize = 30;
 const MAX_COMMITS: usize = 200;
-/// How many changed files one `/diff` lists.
-const MAX_DIFF_FILES: usize = 1000;
+/// How many changed files one `/diff` lists, and how many directories it
+/// opens to find them.
+const DIFF_LIMITS: diff::Limits = diff::Limits { changes: 1000, dirs: 4000 };
 
 #[derive(Serialize)]
 struct RepoInfo {
@@ -221,18 +224,20 @@ pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
             })
         }
         ("diff", Some(rev), None) => {
-            let base = match query.get("base").map(|b| decode(b)) {
+            // An empty `base=` is no base named.
+            let base = match query.get("base").filter(|b| !b.is_empty()).map(|b| decode(b)) {
                 Some(Ok(b)) => Some(b),
                 Some(Err(e)) => return error(400, &e),
                 None => None,
             };
             with_rev(&repo, rev, |tip| {
+                let (tree, parents) = commit_tree(&tip)?;
                 let base = match base {
                     Some(b) => Some(resolve_rev(&repo, &b)?),
-                    None => commit_tree(&tip)?.1.first().copied(),
+                    None => parents.first().copied(),
                 };
                 let old = base.as_ref().map(|b| commit_tree(b).map(|(tree, _)| tree)).transpose()?;
-                let d = diff::tree_diff(old.as_ref(), &commit_tree(&tip)?.0, MAX_DIFF_FILES)?;
+                let d = diff::tree_diff(old.as_ref(), &tree, DIFF_LIMITS)?;
                 let text = |p: &[u8]| String::from_utf8_lossy(p).into_owned();
                 let side = |s: diff::Side| DiffSide { oid: store::oid_hex(&s.oid), kind: kind_of(&s.mode), mode: s.mode };
                 let files = d
@@ -361,7 +366,7 @@ fn ident(s: &str) -> Option<Ident> {
 
 fn kind_of(mode: &str) -> &'static str {
     match mode {
-        "40000" | "040000" => "tree",
+        m if object::is_tree_mode(m) => "tree",
         "160000" => "commit",
         "120000" => "symlink",
         _ => "blob",
@@ -405,6 +410,8 @@ mod tests {
         assert_eq!(back["base"], store::oid_hex(&c2));
         assert_eq!(back["files"][0]["status"], "deleted");
         assert!(back["files"][0]["new"].is_null());
+        // An empty base is none named: the first parent.
+        assert_eq!(body_json(&get("/api/api-diff/diff/HEAD?base="))["base"], store::oid_hex(&c1));
         // A commit against itself: nothing.
         let same = body_json(&get(&format!("/api/api-diff/diff/HEAD?base={}", store::oid_hex(&c2))));
         assert_eq!(same["files"].as_array().unwrap().len(), 0);
