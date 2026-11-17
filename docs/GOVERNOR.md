@@ -189,7 +189,10 @@ canister asks the authority to publish; before the cut (step 16.4) the
 authority did not take that message, so the trial's record publish
 failed as expected, and proposal 2, a same-module install after the
 cut, published the first `ic-git#git` record (2026-11-16, Sepolia tx
-`0x8cd09003...de7c`).
+`0x8cd09003...de7c`). Proposal 3 (2026-11-17) was its first real
+release, v0.3.12. `tools/governor.sh` names the governor it was run for
+in the next-step hints it prints: a vote cast without `GOVERNOR=` goes
+to ic-git's governor, which has no such proposal and says so.
 The clients pin it beside this one (`DEFAULTS.gitGovernor`);
 `verified.json` records it under `git_canister.governor`, and
 `tools/check-module-hash.sh` checks it as it checks this one.
