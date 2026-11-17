@@ -30,11 +30,16 @@
 //! page, the canister host answers the same path with something else
 //! (its index at `/`, a 404, a site under `/site/`), and that answer is
 //! certified beside it (a "shadow"), so neither host loses the path; the
-//! API has no fixed answer, so a domain page under `/api/` leaves the
-//! canister host's API uncertified at that one path. And a path that
-//! has an entry for one host and none for the other, such as a domain's
-//! 404 under `/site/`, where the canister host holds a wildcard, cannot
-//! be witnessed for the other and fails the gateway's check.
+//! API, the feeds and the git protocol have no fixed answer, so a domain
+//! page under `/api/`, `/feed/` or a `.git/` path leaves the canister
+//! host's answer there uncertified, as before (`canister_host_answer`).
+//! And a path that has an entry for one host and none for another
+//! cannot be witnessed for the other and fails the gateway's check: a
+//! domain's 404 under `/site/`, where the canister host holds a
+//! wildcard, and a domain's 404 at a path another domain's site has a
+//! page at, whose exact entry sits above the root wildcard the 404 is
+//! at. The shadows cover the canister host; between domains the edge
+//! stands.
 //!
 //! The tree is heap state: rebuilt from stable memory at install and
 //! upgrade (`rebuild`) and recomputed for a site whenever what it serves
@@ -408,18 +413,19 @@ fn site_entries(repo: &str) {
 
 /// What the canister host answers at a path a domain's site has, so
 /// that the path keeps an entry for both hosts: its index at `/`, a site
-/// under `/site/`, or its 404. `None` for the API, which has no fixed
-/// answer.
+/// under `/site/`, or its 404. `None` where the canisters' routers answer
+/// with something this module cannot certify ahead: the API, the feeds
+/// (`/feed`, `/feed/<repo>`: the combined build's), and the git protocol
+/// (`/<repo>.git/...`), whose answers depend on the request or the
+/// moment; those paths stay declared uncertified, as before.
 fn canister_host_answer(path: &str) -> Option<HttpResponse> {
     if path == "/" {
         return Some(site::index_response());
     }
-    if path.starts_with("/api/") {
+    if path.starts_with("/api/") || path == "/feed" || path.starts_with("/feed/") || path.contains(".git/") {
         return None;
     }
-    if let Some(rest) = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/')) {
-        let rest = rest.trim_start_matches('/');
-        let (repo, sub) = rest.split_once('/').unwrap_or((rest, ""));
+    if let Some((repo, sub)) = site::site_path(path) {
         return Some(site::serve(repo, sub));
     }
     Some(site::not_found())
@@ -473,8 +479,7 @@ fn lookup(path: &str, host: Option<&str>, method: &str) -> (HttpCertificationPat
         if let Some(c) = s.exact.get(path).or_else(|| s.shadow.get(path)) {
             return (HttpCertificationPath::exact(path.to_string()), *c, Kind::Response);
         }
-        if let Some(rest) = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/')) {
-            let repo = rest.trim_start_matches('/').split('/').next().unwrap_or("");
+        if let Some((repo, _)) = site::site_path(path) {
             if let Some(c) = s.sites.get(repo) {
                 let kind = if *c == HttpCertification::skip() { Kind::Skip } else { Kind::Response };
                 return (HttpCertificationPath::wildcard(format!("/site/{repo}")), *c, kind);
@@ -595,8 +600,7 @@ mod tests {
     /// The response the canister gives at `url` on its own host is the
     /// one certified there: its certification, recomputed, is the entry's.
     fn served_as_certified(url: &str) -> bool {
-        let rest = url.strip_prefix("/site/").unwrap();
-        let (repo, sub) = rest.split_once('/').unwrap_or((rest, ""));
+        let (repo, sub) = site::site_path(url).expect("a site URL");
         let res = site::serve(repo, sub);
         let hash = Some(Sha256::digest(&res.body).into());
         let (_, c, _) = lookup(url, None, "GET");
@@ -744,6 +748,20 @@ mod tests {
         repos_changed();
         assert_ne!(before, lookup("/", None, "GET").1);
         assert_eq!(certify(&site::index_response(), None), Some(lookup("/", None, "GET").1));
+        // What the routers answer otherwise gets no shadow: a domain page
+        // at /feed must not certify a 404 over the combined build's feed.
+        for path in ["/feed", "/feed/web", "/web.git/info/refs"] {
+            assert!(canister_host_answer(path).is_none(), "{path}");
+        }
+        // At a domain, a doubled slash is the miss the root wildcard holds
+        // for the host, as /site/<repo>//x is at the canister host: served
+        // and certified agree.
+        let mut res = site::serve("web", site::domain_path("//index.html"));
+        assert_eq!(res.status_code, 404);
+        set_expression(&mut res, full_text());
+        let (_, c, kind) = lookup("//index.html", Some("app.example"), "GET");
+        assert_eq!(kind, Kind::Full);
+        assert_eq!(certify_full("GET", "/", "app.example", &res, None), Some(c));
         // Domains off: the entries and the shadows go, the index is
         // declared again.
         site::set_domains("web", vec![]).unwrap();

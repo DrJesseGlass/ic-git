@@ -256,7 +256,7 @@ fn route(req: &HttpRequest) -> Route {
         }
         return Route::Site {
             repo,
-            path: path.trim_start_matches('/').to_string(),
+            path: site::domain_path(path).to_string(),
         };
     }
     if path == "/" {
@@ -273,11 +273,10 @@ fn route(req: &HttpRequest) -> Route {
     // included when it is empty: the answer for no such site is one
     // certified 404 (certify.rs), and the gateway holds that path family
     // to it.
-    if let Some(rest) = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/')) {
+    if let Some((repo, sub)) = site::site_path(path) {
         if !read {
             return Route::NotFound;
         }
-        let (repo, sub) = rest.trim_start_matches('/').split_once('/').unwrap_or((rest.trim_start_matches('/'), ""));
         return Route::Site {
             repo: repo.to_string(),
             path: sub.to_string(),

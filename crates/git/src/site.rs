@@ -1223,6 +1223,24 @@ pub fn resolve_entry(repo: &str, path: &str) -> Option<(store::Oid, String, Vec<
     Some((commit, r.path, r.body))
 }
 
+/// The repo and sub-path a URL path under `/site` names, as `serve` takes
+/// them: `/site` and `/site/` name the empty repo, `/site/<repo>` its
+/// root, `/site/<repo>/<sub>` the rest. `None` off `/site`. One parse for
+/// the routers and for the certifier's shadows (certify.rs), so what is
+/// certified at such a path is what is served there.
+pub fn site_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/'))?;
+    let rest = rest.trim_start_matches('/');
+    Some(rest.split_once('/').unwrap_or((rest, "")))
+}
+
+/// The sub-path a URL path names at a site's own domain, as `serve` takes
+/// it: one leading slash off, so `//x` keeps its empty component and is
+/// the miss the certifier holds for it, as `/site/<repo>//x` is.
+pub fn domain_path(path: &str) -> &str {
+    path.strip_prefix('/').unwrap_or(path)
+}
+
 /// GET /site/<repo>/<path>. `path` is "" for the root, a blob's path, or
 /// a directory's with or without its trailing slash.
 pub fn serve(repo: &str, path: &str) -> HttpResponse {
