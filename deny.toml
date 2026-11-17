@@ -36,6 +36,7 @@ yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 timing variability, via k256 0.13 in the authority. The canister never holds a secp256k1 private key: signatures come from the IC's threshold ECDSA, and k256 only parses public keys and recovers them from signatures (evm.rs). The fix is k256 0.14, which moves to digest 0.11 and would split sha2 until candid, ic-cdk and ic-multisig move too." },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; a proc-macro ic-cdk uses at build time, nothing of it is in the module. Goes when ic-cdk drops it." },
+    { id = "RUSTSEC-2021-0127", reason = "serde_cbor is unmaintained; ic-http-certification uses it for one thing, serializing the witness and the expression path of the IC-Certificate header (its response_header.rs), values this canister made. Nothing is decoded with it, so no input reaches it. Goes when ic-http-certification moves to another CBOR crate." },
 ]
 
 [licenses]

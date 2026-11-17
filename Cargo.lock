@@ -70,12 +70,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "base64"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
-
-[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -198,7 +192,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "combined_canister"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
+ "base64",
  "candid",
  "futures",
  "hex",
@@ -561,7 +555,7 @@ dependencies = [
 name = "git_canister"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
+ "base64",
  "candid",
  "hex",
  "ic-cdk",
@@ -748,7 +742,7 @@ dependencies = [
 name = "ic-git-authority"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
+ "base64",
  "candid",
  "futures",
  "hex",
@@ -800,7 +794,7 @@ dependencies = [
 name = "ic-git-git"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
+ "base64",
  "candid",
  "ed25519-dalek",
  "flate2",
@@ -839,7 +833,7 @@ version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3355e972897cf7a0c2a40321ed9d0dc48d8848f620335bec383dc8b8a4c32a02"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "candid",
  "http",
  "ic-certification",
