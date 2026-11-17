@@ -35,6 +35,39 @@ canister"), and `verified.json` records it under `git_canister`.
 | 2026-11-16 | `5c5c88e` | `v0.3.10` | `1e9ce2a185f3fa8366bfec8cd5146aa2daf5e9657ce7874c4492bfa4a02d8e57` (gz, the authority build) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760), identical hash; installed by governor proposal 8 at the cut, after proposal 7's combined build `b6868caa...d45b` (unrecorded on chain, an hour) |
 | 2026-11-16 | `ef7722f` | `v0.3.11` | `f90c5c03faf3877b7bf73329a0ab3f207bfbf9aecbef6bed94c103c5e2127225` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43924565432](https://github.com/DrJesseGlass/ic-git/actions/runs/43924565432), identical hash; installed by governor proposal 9 |
 
+## v0.3.13, the git canister -- 2026-11-17
+
+The sites are certified at their own domains (#146, #147;
+crates/git/src/certify.rs): a domain's entries carry the request's Host
+and method in their hash, so a domain's `/` is told from another's and
+from the canister host's index; the canister host keeps every path a
+domain's site took; and a domain's 404 is certified under `/site/` too,
+at the entries the canister host holds there. The HEAD fix found at
+v0.3.12 ships with it.
+
+The pinned container built `be2fd6f`, the merge of #147, to
+`ea7dc44f...1311` (gz; raw `ed9427b1...67b1`) for the git canister; CI
+built the tag on a GitHub Actions x86_64 runner
+([run 44162124208](https://github.com/DrJesseGlass/ic-git/actions/runs/44162124208))
+and agreed byte for byte on every module. The same runs built the
+authority to `56aa3419...196b`, the hash v0.3.12's commit gave: nothing
+of it changed, nothing installs it, and umobs keeps v0.3.11; and the
+combined build to `381b4f81...3889`, the rollback artifact. Git governor
+proposal 4 read the target's cycles first (1,049 G), staged the module
+in one chunk, and one approval executed it; the new code had the
+authority publish `ic-git#git` (commit `be2fd6f`, this module hash) in
+Sepolia tx `0x2b6d155c...9337`, block 12157125. The e2e ran on both
+builds against the local verifying gateway (split 196/0 before the
+merge of #147, combined 297/0 on the merge).
+
+Right after, at `34koz-jyaaa-aaaab-ahejq-cai.icp0.io`, the verifying
+gateway served `/site/ic-git/` 200 to GET and to HEAD (503 at v0.3.12),
+the site's miss and the no-site answer 404, and the index and the API
+as before. What it has not served is a site at a domain: no site has
+one yet, so the domain form is checked by the unit tests and by the
+e2e's reads of `http_request`, and by no gateway until the first live
+domain.
+
 ## v0.3.12, the git canister -- 2026-11-17
 
 The sites are certified (#144; VISION.md F0.5, crates/git/src/certify.rs):
@@ -158,6 +191,7 @@ sites are read from and keeps v0.3.8.
 | 2026-11-16 | `28288c9` | `v0.3.9` | `d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43806589563](https://github.com/DrJesseGlass/ic-git/actions/runs/43806589563), identical hash; installed by the operator's key, then again by governor proposal 1 |
 | 2026-11-16 | `5c5c88e` | `v0.3.10` | `d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7` (gz, byte for byte v0.3.9's) | MATCH, 2026-11-16 | deployer and GitHub Actions ([run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760)), identical hash; installed by governor proposal 2 after the cut, which published the first `ic-git#git` record |
 | 2026-11-17 | `483699d` | `v0.3.12` | `0be0bb4d9d52ce5b4503b232b0edc1ffc1377e6befa4293d010ea6c562c7335e` (gz) | MATCH, 2026-11-17 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43996412291](https://github.com/DrJesseGlass/ic-git/actions/runs/43996412291), identical hash; installed by git governor proposal 3 |
+| 2026-11-17 | `be2fd6f` | `v0.3.13` | `ea7dc44fcc6b120f5e790ee2152e7028786706cf75aebde4643278aa98f81311` (gz) | MATCH, 2026-11-17 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 44162124208](https://github.com/DrJesseGlass/ic-git/actions/runs/44162124208), identical hash; installed by git governor proposal 4 |
 
 The pinned container built `28288c9`, the merge of #135, to
 `d5b5bba7...49a7` (gz; raw `f25d202c...98fd`) for the git canister;
