@@ -104,6 +104,10 @@
         {
           "date": "2026-11-17",
           "what": "proposal 3 installed v0.3.12 (483699d, 0be0bb4d...335e; certified site responses) and published ic-git#git (tx 0x01937f20...93dc, block 12151353): the first release through this governor since the cut"
+        },
+        {
+          "date": "2026-11-17",
+          "what": "proposal 4 installed v0.3.13 (be2fd6f, ea7dc44f...1311; sites certified at their own domains, HEAD read as GET) and published ic-git#git (tx 0x2b6d155c...9337, block 12157125)"
         }
       ],
       "policy": {
@@ -228,6 +232,44 @@
           "note": "governor proposal 3 (1,058 G cycles read first), staged in one chunk, one approval executed it; the new code had the authority publish ic-git#git (commit 483699d, this module hash) in Sepolia tx 0x01937f202c82f0f825da23e44affe50e52c7e0d9f47f95a0fab541ded0eb93dc, block 12151353. First release through this governor since the cut. Every site response is certified: the verifying gateway (34koz-jyaaa-aaaab-ahejq-cai.icp0.io) serves /site/ic-git/ with the IC-Certificate header; the authority stays at v0.3.11, nothing it serves changed"
         },
         "wasm_sha256": "5245957b844f5daaf41a3c9fb5e83f11be503f528f7032e45d0476546cce3614"
+      },
+      {
+        "commit": "be2fd6fc59411fa7656fa4b5069a3a5459b83980",
+        "tag": "v0.3.13",
+        "module_hash": "ea7dc44fcc6b120f5e790ee2152e7028786706cf75aebde4643278aa98f81311",
+        "recipe": {
+          "dockerfile": "Dockerfile.build",
+          "platform": "linux/amd64",
+          "rustc": "1.94.1",
+          "dfx": "0.31.0",
+          "base_image": "rust:1.94.1-slim-bookworm",
+          "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+          "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+        },
+        "builders": [
+          {
+            "who": "deployer (DrJesseGlass)",
+            "lineage": "pinned-container",
+            "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+            "date": "2026-11-17",
+            "check": "built at be2fd6f, the merge of #147 (a domain's 404 under /site/), on top of #146 (certified domains)"
+          },
+          {
+            "who": "GitHub Actions (independent runner)",
+            "lineage": "pinned-container",
+            "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+            "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/44162124208",
+            "date": "2026-11-17",
+            "check": "identical hash"
+          }
+        ],
+        "deployed": {
+          "date": "2026-11-17",
+          "on_chain_match": "match",
+          "checked_by": "tools/check-module-hash.sh after the install: on-chain module hash ea7dc44f...1311, controllers 3hps4-taaaa-aaaab-ahela-cai",
+          "note": "governor proposal 4 (1,049 G cycles read first), staged in one chunk, one approval executed it; the new code had the authority publish ic-git#git (commit be2fd6f, this module hash) in Sepolia tx 0x2b6d155c1167e7428b2dfd06ee7d67d92a70a0486bda4fae7d2a4be1effd9337, block 12157125. A site at its own domains is certified by the request's Host and method, and its 404 under /site/ where the canister host holds its sites; no site has a domain yet, so no gateway has checked that form. A HEAD at a site URL on the verifying host answers 200 (503 at v0.3.12). The authority stays at v0.3.11: its build is byte for byte the one of v0.3.12's commit (56aa3419...196b), which nothing installs"
+        },
+        "wasm_sha256": "ed9427b19e32abc32f3e91defd5fbeacf1bb230d60571d3a65fad97d129c67b1"
       }
     ]
   },
