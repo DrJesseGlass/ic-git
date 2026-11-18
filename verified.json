@@ -112,6 +112,10 @@
         {
           "date": "2026-11-18",
           "what": "proposal 5 installed v0.3.14 (34f7fd9, c110f3c0...a775; the API's /diff) and published ic-git#git (tx 0x366c4333...a1d3, block 12158031)"
+        },
+        {
+          "date": "2026-11-18",
+          "what": "proposal 6 installed v0.3.15 (2f0e0f0, 60cef0fb...8c93; the API's /compare) and published ic-git#git (tx 0x0ecc5954...d1d0, block 12160419)"
         }
       ],
       "policy": {
@@ -312,6 +316,44 @@
           "note": "governor proposal 5 (1,042 G cycles read first), staged in one chunk, one approval executed it; the new code had the authority publish ic-git#git (commit 34f7fd9, this module hash) in Sepolia tx 0x366c43332f1ef0218c4130bd474d89d6a5dc1f405df4de5f0ba25c585fd8a1d3, block 12158031. GET /api/<repo>/diff/<rev> answers on the live canister: the files a commit changed, by object id. The repo browser's commit view that reads it (#150) is in this commit's source and came to the page the canister serves with a push the same day: main at b158e2c into the ic-git repo held there (a fast-forward from db8f2bd) and ic-git#site republished in Sepolia tx 0x95ef4176d7b5637c32be2535ec5f5017e98be283c81cd4299eff90647ef557df, block 12158080; tools/verify.mjs verifies the page at b158e2c. The authority stays at v0.3.11: its build is unchanged (56aa3419...196b)"
         },
         "wasm_sha256": "fda17a5d2e4488a7b3fb21062224265c7a6adc90f09f04a912ee8a365adf2081"
+      },
+      {
+        "commit": "2f0e0f059c748a1441c384617ec5c45484780542",
+        "tag": "v0.3.15",
+        "module_hash": "60cef0fb28beff3b69ca838529e1a8e604c80016ebe07eb2324856e53bbf8c93",
+        "recipe": {
+          "dockerfile": "Dockerfile.build",
+          "platform": "linux/amd64",
+          "rustc": "1.94.1",
+          "dfx": "0.31.0",
+          "base_image": "rust:1.94.1-slim-bookworm",
+          "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+          "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+        },
+        "builders": [
+          {
+            "who": "deployer (DrJesseGlass)",
+            "lineage": "pinned-container",
+            "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+            "date": "2026-11-18",
+            "check": "built at 2f0e0f0, the merge of #154 (the compare view), on top of #153 (the API's /compare)"
+          },
+          {
+            "who": "GitHub Actions (independent runner)",
+            "lineage": "pinned-container",
+            "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+            "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/44225760148",
+            "date": "2026-11-18",
+            "check": "identical hash"
+          }
+        ],
+        "deployed": {
+          "date": "2026-11-18",
+          "on_chain_match": "match",
+          "checked_by": "tools/check-module-hash.sh after the install: on-chain module hash 60cef0fb...8c93, controllers 3hps4-taaaa-aaaab-ahela-cai",
+          "note": "governor proposal 6, one approval executed it; the new code had the authority publish ic-git#git (commit 2f0e0f0, this module hash) in Sepolia tx 0x0ecc595492b042090ab97ea89b5310a7486f99a258db1571c2be7caf44bbd1d0, block 12160419. GET /api/<repo>/compare/<rev> answers on the live canister: the merge base of two revs, how far each is ahead of the other, and the head's own commits. The repo browser's compare view that reads it (#154) is in this commit's source and not yet in the page the canister serves, which comes from the ic-git repo held there (at b158e2c). The authority stays at v0.3.11: its build is unchanged (56aa3419...196b)"
+        },
+        "wasm_sha256": "04df6c95d1dc0151eda3d56e523a87443a0215866198c2939285e996198d8e14"
       }
     ]
   },
