@@ -14,10 +14,16 @@
 //! It is bounded by the commits it loads: past the bound there is no
 //! answer rather than a wrong one.
 //!
-//! Clocks lie: a commit dated before its parent is visited late, after
-//! the walk has counted its ancestors for one side alone. A second pass
-//! over what was visited carries each side's paint down to them, so the
-//! counts are right for every commit the walk saw.
+//! Clocks lie, and a walk that stops early trusts them: a commit dated
+//! before its ancestors is met late, after they were counted for one side
+//! alone or taken for the merge base. Two things are done about it, as
+//! git does. The walk goes on for `SLOP` commits past the point where it
+//! could stop, and a second pass carries each side's paint, and what lies
+//! under a common ancestor, down through every commit that was loaded.
+//! What is left is a commit dated before an ancestor more than `SLOP`
+//! commits further down than the walk went: there the counts can be over
+//! and the merge base an older common ancestor than the newest. Git
+//! without its commit graph has the same edge.
 
 use crate::object;
 use crate::store::{self, ObjectType, Oid};
@@ -28,6 +34,11 @@ const BASE: u8 = 2;
 const STALE: u8 = 4;
 const RESULT: u8 = 8;
 const BOTH: u8 = HEAD | BASE;
+
+/// How many commits the walk visits past the point where every one left
+/// is under a common ancestor: what a clock that ran backwards by that
+/// many commits cannot hide.
+const SLOP: usize = 64;
 
 pub struct Compared {
     /// The newest common ancestor; none for two histories that share
@@ -44,6 +55,8 @@ struct Node {
     parents: Vec<Oid>,
     time: u64,
     flags: u8,
+    /// How many times it is in the queue.
+    queued: usize,
 }
 
 /// A commit's parents and its committer's time (0 where there is none to
@@ -54,10 +67,7 @@ fn load(oid: &Oid) -> Result<(Vec<Oid>, u64), String> {
         return Err(format!("{} is not a commit", store::oid_hex(oid)));
     }
     let parents = object::commit_refs(&content)?.parents;
-    let time = object::commit_meta(&content)
-        .committer
-        .and_then(|c| c.rsplit_once('>').and_then(|(_, rest)| rest.split_whitespace().next().and_then(|t| t.parse().ok())))
-        .unwrap_or(0);
+    let time = object::commit_meta(&content).committer.as_deref().and_then(object::ident_time).unwrap_or(0);
     Ok((parents, time))
 }
 
@@ -70,6 +80,9 @@ pub fn compare(base: &Oid, head: &Oid, cap: usize) -> Result<Option<Compared>, S
     let mut queue: BinaryHeap<(u64, std::cmp::Reverse<usize>, Oid)> = BinaryHeap::new();
     let mut seq = 0usize;
     let mut results: Vec<Oid> = Vec::new();
+    // The entries in the queue whose commit is not behind a common
+    // ancestor: the walk has work while there are any.
+    let mut live = 0usize;
     // Paint `oid` with `flags` and queue it, if that is news to it.
     macro_rules! paint {
         ($oid:expr, $flags:expr) => {{
@@ -79,11 +92,18 @@ pub fn compare(base: &Oid, head: &Oid, cap: usize) -> Result<Option<Compared>, S
                     return Ok(None);
                 }
                 let (parents, time) = load(&oid)?;
-                nodes.insert(oid, Node { parents, time, flags: 0 });
+                nodes.insert(oid, Node { parents, time, flags: 0, queued: 0 });
             }
             let node = nodes.get_mut(&oid).expect("just inserted");
             if node.flags & flags != flags {
+                if node.flags & STALE == 0 && flags & STALE != 0 {
+                    live -= node.queued;
+                }
                 node.flags |= flags;
+                node.queued += 1;
+                if node.flags & STALE == 0 {
+                    live += 1;
+                }
                 seq += 1;
                 queue.push((node.time, std::cmp::Reverse(seq), oid));
             }
@@ -91,9 +111,13 @@ pub fn compare(base: &Oid, head: &Oid, cap: usize) -> Result<Option<Compared>, S
     }
     paint!(*head, HEAD);
     paint!(*base, BASE);
-    while queue.iter().any(|(_, _, oid)| nodes[oid].flags & STALE == 0) {
-        let Some((_, _, oid)) = queue.pop() else { break };
-        let node = &mut nodes.get_mut(&oid).expect("queued commits are loaded");
+    let mut slop = SLOP;
+    while let Some((_, _, oid)) = queue.pop() {
+        let node = nodes.get_mut(&oid).expect("queued commits are loaded");
+        node.queued -= 1;
+        if node.flags & STALE == 0 {
+            live -= 1;
+        }
         let mut down = node.flags & (BOTH | STALE);
         if down & BOTH == BOTH {
             if node.flags & RESULT == 0 {
@@ -106,22 +130,39 @@ pub fn compare(base: &Oid, head: &Oid, cap: usize) -> Result<Option<Compared>, S
         for parent in node.parents.clone() {
             paint!(parent, down);
         }
+        if live == 0 {
+            if slop == 0 {
+                break;
+            }
+            slop -= 1;
+        } else {
+            slop = SLOP;
+        }
     }
-    // Each side's paint, down to every commit the walk saw.
-    for side in [HEAD, BASE] {
-        let mut stack: Vec<Oid> = nodes.iter().filter(|(_, n)| n.flags & side != 0).map(|(oid, _)| *oid).collect();
+    // Each side's paint, and what is under a common ancestor, down to
+    // every commit that was loaded.
+    for mark in [HEAD, BASE, STALE] {
+        let mut stack: Vec<Oid> = nodes
+            .iter()
+            .filter(|(_, n)| if mark == STALE { n.flags & (STALE | RESULT) != 0 || n.flags & BOTH == BOTH } else { n.flags & mark != 0 })
+            .map(|(oid, _)| *oid)
+            .collect();
         while let Some(oid) = stack.pop() {
             for parent in nodes[&oid].parents.clone() {
                 if let Some(p) = nodes.get_mut(&parent) {
-                    if p.flags & side == 0 {
-                        p.flags |= side;
+                    if p.flags & mark == 0 {
+                        p.flags |= mark;
                         stack.push(parent);
                     }
                 }
             }
         }
     }
-    let merge_base = results.into_iter().find(|oid| nodes[oid].flags & STALE == 0);
+    // A common ancestor that no other is above; the newest of several.
+    let mut bases: Vec<(u64, Oid)> =
+        nodes.iter().filter(|(_, n)| n.flags & BOTH == BOTH && n.flags & STALE == 0).map(|(oid, n)| (n.time, *oid)).collect();
+    bases.sort_by(|a, b| b.0.cmp(&a.0));
+    let merge_base = results.iter().find(|oid| bases.iter().any(|(_, b)| b == *oid)).copied().or(bases.first().map(|(_, oid)| *oid));
     let mut ahead: Vec<(u64, Oid)> = nodes.iter().filter(|(_, n)| n.flags & BOTH == HEAD).map(|(oid, n)| (n.time, *oid)).collect();
     ahead.sort_by(|a, b| b.0.cmp(&a.0));
     let ahead = order(ahead, &nodes);
@@ -261,6 +302,38 @@ mod tests {
     }
 
     #[test]
+    fn a_common_ancestor_dated_after_the_merge_base_is_not_taken_for_it() {
+        // head and base both merge c2 and c1; c1 is the newer history
+        // (c1 -> m -> c2) and is dated long before c2, which the walk
+        // therefore meets first.
+        let c2 = commit("c2", &[], 50);
+        let m = commit("m", &[&c2], 4);
+        let c1 = commit("c1", &[&m], 5);
+        let h = commit("h", &[&c2, &c1], 100);
+        let b = commit("b", &[&c2, &c1], 90);
+        let r = cmp(&b, &h);
+        assert_eq!(r.merge_base, Some(c1));
+        assert_eq!((r.ahead, r.behind), (vec![h], 1));
+    }
+
+    #[test]
+    fn commits_reached_late_through_older_dated_ones_are_not_counted_ahead() {
+        // h merges y and c; base is on c; and c, dated before everything,
+        // leads down to y through q and q2: y and z are common, though
+        // the walk meets them long before it meets c.
+        let z = commit("z", &[], 70);
+        let y = commit("y", &[&z], 80);
+        let q2 = commit("q2", &[&y], 8);
+        let q = commit("q", &[&q2], 9);
+        let c = commit("c", &[&q], 10);
+        let h = commit("h", &[&y, &c], 100);
+        let b = commit("b", &[&c], 95);
+        let r = cmp(&b, &h);
+        assert_eq!(r.merge_base, Some(c));
+        assert_eq!((r.ahead, r.behind), (vec![h], 1));
+    }
+
+    #[test]
     fn the_walk_stops_near_where_they_part_and_past_its_bound_gives_no_answer() {
         // A long history, and two tips a commit each off its end.
         let mut tip = commit("root", &[], 1);
@@ -269,9 +342,9 @@ mod tests {
         }
         let left = commit("left", &[&tip], 500);
         let right = commit("right", &[&tip], 501);
-        // Four commits loaded would do; a bound of eight is plenty, and
-        // the 200 under them are never read.
-        let r = compare(&left, &right, 8).unwrap().expect("near the tips");
+        // Three commits decide it, and the walk looks SLOP further for a
+        // clock that ran backwards: the rest of the 200 are never read.
+        let r = compare(&left, &right, SLOP + 8).unwrap().expect("near the tips");
         assert_eq!((r.merge_base, r.ahead, r.behind), (Some(tip), vec![right], 1));
         // The root against a tip is the whole history.
         let root_side = commit("lonely", &[], 2);

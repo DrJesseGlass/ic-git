@@ -99,6 +99,14 @@ pub fn commit_meta(content: &[u8]) -> CommitMeta {
     meta
 }
 
+/// The time in an author or committer line, "Name <email> 1234567890
+/// +0000": what follows the address. None where there is none to read.
+pub fn ident_time(ident: &str) -> Option<u64> {
+    let (_, rest) = ident.split_once('<')?;
+    let (_, rest) = rest.split_once('>')?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
 /// The object an annotated tag points at.
 pub fn tag_target(content: &[u8]) -> Result<Oid, String> {
     for line in header_lines(content) {

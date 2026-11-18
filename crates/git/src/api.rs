@@ -43,7 +43,8 @@
 //! are more). What the head changed is then `/diff/<head>?base=` the
 //! merge base. Two histories that share nothing have a null merge base.
 //! The walk loads at most `COMPARE_COMMITS` commits; two revs further
-//! apart than that are answered 422.
+//! apart than that are answered 422. The commits listed are the newest
+//! `MAX_COMMITS`: there is no asking for the ones after.
 
 use crate::diff;
 use crate::graph;
@@ -58,7 +59,7 @@ const DEFAULT_COMMITS: usize = 30;
 const MAX_COMMITS: usize = 200;
 /// How many commits one `/compare` loads to find where two histories
 /// part.
-const COMPARE_COMMITS: usize = 5000;
+const COMPARE_COMMITS: usize = 2000;
 /// How many changed files one `/diff` lists, and how many directories it
 /// opens to find them.
 const DIFF_LIMITS: diff::Limits = diff::Limits { changes: 1000, dirs: 4000 };
@@ -252,15 +253,18 @@ pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
             })
         }
         ("compare", Some(rev), None) => {
-            let base = match query.get("base").filter(|b| !b.is_empty()).map(|b| decode(b)) {
-                Some(Ok(b)) => b,
-                Some(Err(e)) => return error(400, &e),
-                None => "HEAD".to_string(),
+            let base = match base_param(&query) {
+                Ok(b) => b.unwrap_or_else(|| "HEAD".to_string()),
+                Err(res) => return res,
             };
             with_rev(&repo, rev, |head| {
                 let base = resolve_rev(&repo, &base)?;
-                let Some(c) = graph::compare(&base, &head, COMPARE_COMMITS)? else {
-                    return Ok(error(422, "the two are too many commits apart to compare"));
+                // Both revs are there: what goes wrong from here is not
+                // "not found".
+                let c = match graph::compare(&base, &head, COMPARE_COMMITS) {
+                    Ok(Some(c)) => c,
+                    Ok(None) => return Ok(error(422, "the two are too many commits apart to compare")),
+                    Err(e) => return Ok(error(500, &e)),
                 };
                 let commits = c.ahead.iter().take(MAX_COMMITS).map(commit_info).collect::<Result<Vec<_>, _>>()?;
                 let info = CompareInfo {
@@ -276,11 +280,9 @@ pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
             })
         }
         ("diff", Some(rev), None) => {
-            // An empty `base=` is no base named.
-            let base = match query.get("base").filter(|b| !b.is_empty()).map(|b| decode(b)) {
-                Some(Ok(b)) => Some(b),
-                Some(Err(e)) => return error(400, &e),
-                None => None,
+            let base = match base_param(&query) {
+                Ok(b) => b,
+                Err(res) => return res,
             };
             with_rev(&repo, rev, |tip| {
                 let (tree, parents) = commit_tree(&tip)?;
@@ -308,6 +310,16 @@ pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
             })
         }
         _ => error(404, "not found"),
+    }
+}
+
+/// The rev the query names as `base`, decoded; none for none named or an
+/// empty one. A bad escape is a 400.
+fn base_param(query: &std::collections::HashMap<String, String>) -> Result<Option<String>, HttpResponse> {
+    match query.get("base").filter(|b| !b.is_empty()).map(|b| decode(b)) {
+        Some(Ok(b)) => Ok(Some(b)),
+        Some(Err(e)) => Err(error(400, &e)),
+        None => Ok(None),
     }
 }
 
