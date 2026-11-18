@@ -15,9 +15,9 @@
   (docs/TENANCY.md, "Console").
 -->
 <style>
-  :root { --fg:#1c1c1c; --muted:#6b6b6b; --bg:#fafaf8; --line:#e2e0da; --link:#0b57a4; --code:#f1efe9; }
+  :root { --fg:#1c1c1c; --muted:#6b6b6b; --bg:#fafaf8; --line:#e2e0da; --link:#0b57a4; --code:#f1efe9; --plus:#1a7f37; --minus:#b3261e; --added:#dff3e2; --removed:#fbe3e1; }
   @media (prefers-color-scheme: dark) {
-    :root { --fg:#e6e4dd; --muted:#9a978f; --bg:#161615; --line:#2c2b28; --link:#7fb3ea; --code:#1f1e1c; }
+    :root { --fg:#e6e4dd; --muted:#9a978f; --bg:#161615; --line:#2c2b28; --link:#7fb3ea; --code:#1f1e1c; --plus:#57b96b; --minus:#f0796f; --added:#1b3322; --removed:#40201e; }
   }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
@@ -62,6 +62,22 @@ button.danger:disabled { opacity:.45; cursor:not-allowed; }
 .confirm { border:1px solid #b3261e; border-radius:4px; padding:.6rem .8rem; margin:.5rem 0; }
 .confirm input { width:16rem; }
   .tok { user-select:all; }
+  .plus { color:var(--plus); } .minus { color:var(--minus); }
+  details.file { border:1px solid var(--line); border-radius:6px; margin:.6rem 0; }
+  details.file > summary { padding:.4rem .7rem; cursor:pointer; background:var(--code); border-radius:6px; display:flex; gap:.7rem; align-items:baseline; flex-wrap:wrap; }
+  details.file > summary::before { content:"\25B8"; color:var(--muted); }
+  details.file[open] > summary::before { content:"\25BE"; }
+  details.file[open] > summary { border-bottom:1px solid var(--line); border-radius:6px 6px 0 0; }
+  details.file .st { font-size:.8rem; min-width:4.2rem; }
+  details.file .path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.88em; overflow-wrap:anywhere; }
+  details.file .count { margin-left:auto; font-size:.85rem; white-space:nowrap; }
+  details.file .body { overflow-x:auto; }
+  details.file .body > p { margin:.5rem .7rem; }
+  table.diff { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.82rem; line-height:1.45; }
+  table.diff td { padding:0 .6rem; border:0; white-space:pre; }
+  table.diff td.n { width:1%; text-align:right; color:var(--muted); user-select:none; }
+  table.diff tr.add td { background:var(--added); } table.diff tr.del td { background:var(--removed); }
+  table.diff tr.hunk td { background:var(--code); color:var(--muted); padding-top:.15rem; padding-bottom:.15rem; }
 </style>
 </head>
 <body>
@@ -312,6 +328,123 @@ const IC = (() => {
 // === end candid ===
 </script>
 <script>
+// === diff ===
+// The lines that changed between two versions of a file, for the commit
+// view. The canister says which files differ and names the blobs
+// (/api/<repo>/diff, crates/git/src/diff.rs); the page fetches the two and
+// compares them here, so what is shown is worked out from the bytes the
+// page was served. Myers' algorithm (a shortest edit script, as git's
+// default is), then git's unified hunks around the changes. Where two
+// shortest scripts exist git may pick another, and it slides a hunk to
+// the nicer of two equal places, which this does not: the lines marked
+// can differ from `git diff`'s while saying the same change. Checked by
+// tools/browser-diff-test.mjs.
+const Diff = (() => {
+  'use strict';
+  // A text as its lines, and whether the last one ends without a newline.
+  function split(text) {
+    if (text === '') return { lines: [], noeol: false };
+    const lines = text.split('\n');
+    const noeol = lines[lines.length - 1] !== '';
+    if (!noeol) lines.pop();
+    return { lines, noeol };
+  }
+  // A shortest edit script from a to b (arrays compared with ===), as
+  // [op, i, j]: ' ' (a[i] is b[j]), '-' (a[i] goes, before b[j]) or '+'
+  // (b[j] comes, before a[i]). Null when it takes more than maxD edits.
+  function script(a, b, maxD) {
+    const n = a.length, m = b.length;
+    let pre = 0;
+    while (pre < n && pre < m && a[pre] === b[pre]) pre++;
+    let suf = 0;
+    while (suf < n - pre && suf < m - pre && a[n - 1 - suf] === b[m - 1 - suf]) suf++;
+    const N = n - pre - suf, M = m - pre - suf;
+    const out = [];
+    for (let i = 0; i < pre; i++) out.push([' ', i, i]);
+    const tail = () => { for (let i = 0; i < suf; i++) out.push([' ', n - suf + i, m - suf + i]); return out; };
+    // Lines only added or only taken away, a whole new file among them,
+    // are their own shortest script, however many.
+    if (!N || !M) {
+      for (let i = 0; i < N; i++) out.push(['-', pre + i, pre]);
+      for (let j = 0; j < M; j++) out.push(['+', pre, pre + j]);
+      return tail();
+    }
+    const max = Math.min(N + M, maxD), off = max + 1;
+    // v[off + k]: the furthest x reached on diagonal k (x - y = k). Each
+    // round's diagonals, -d-1..d+1, are kept for the walk back.
+    const v = new Int32Array(2 * max + 3), trace = [];
+    let found = -1;
+    for (let d = 0; d <= max && found < 0; d++) {
+      trace.push(v.slice(off - d - 1, off + d + 2));
+      for (let k = -d; k <= d; k += 2) {
+        let x = (k === -d || (k !== d && v[off + k - 1] < v[off + k + 1])) ? v[off + k + 1] : v[off + k - 1] + 1;
+        let y = x - k;
+        while (x < N && y < M && a[pre + x] === b[pre + y]) { x++; y++; }
+        v[off + k] = x;
+        if (x >= N && y >= M) { found = d; break; }
+      }
+    }
+    if (found < 0) return null;
+    const mid = [];
+    let x = N, y = M;
+    for (let d = found; d > 0; d--) {
+      const w = trace[d], at = k => w[k + d + 1], k = x - y;
+      const pk = (k === -d || (k !== d && at(k - 1) < at(k + 1))) ? k + 1 : k - 1;
+      const px = at(pk), py = px - pk;
+      while (x > px && y > py) { x--; y--; mid.push([' ', pre + x, pre + y]); }
+      if (pk === k + 1) { y--; mid.push(['+', pre + x, pre + y]); } else { x--; mid.push(['-', pre + x, pre + y]); }
+    }
+    while (x > 0 && y > 0) { x--; y--; mid.push([' ', pre + x, pre + y]); }
+    for (let i = mid.length - 1; i >= 0; i--) out.push(mid[i]);
+    return tail();
+  }
+  // git's unified hunks: each change with `ctx` lines around it, changes
+  // no further apart than twice that in one hunk. A hunk is
+  // { a, an, b, bn, lines }: a and b the first line on each side, from 1
+  // (for a side with no lines in the hunk, the line before it, as in
+  // "@@ -0,0 +1,3 @@"), and lines as [op, text, oldNo, newNo, bare], bare
+  // for a last line with no newline after it. Null when the two are more
+  // than maxD edits apart.
+  function hunks(oldText, newText, ctx = 3, maxD = 2000) {
+    const A = split(oldText), B = split(newText);
+    // A line is its text, and for a last line whether a newline ends it.
+    const ids = new Map();
+    const key = S => S.lines.map((s, i) => {
+      const k = (S.noeol && i === S.lines.length - 1 ? '1' : '0') + s;
+      let id = ids.get(k);
+      if (id === undefined) { id = ids.size; ids.set(k, id); }
+      return id;
+    });
+    const ops = script(key(A), key(B), maxD);
+    if (!ops) return null;
+    const spans = [];
+    let last = -1;
+    ops.forEach((op, at) => {
+      if (op[0] === ' ') return;
+      if (!spans.length || at - last - 1 > 2 * ctx) spans.push({ start: Math.max(at - ctx, 0) });
+      spans[spans.length - 1].end = Math.min(at + ctx, ops.length - 1);
+      last = at;
+    });
+    return spans.map(h => {
+      const lines = [];
+      let an = 0, bn = 0, a0 = ops[h.start][1], b0 = ops[h.start][2];
+      for (let at = h.start; at <= h.end; at++) {
+        const [op, i, j] = ops[at];
+        if (op !== '+' && !an++) a0 = i + 1;
+        if (op !== '-' && !bn++) b0 = j + 1;
+        const S = op === '+' ? B : A, at1 = op === '+' ? j : i;
+        lines.push([op, S.lines[at1], op === '+' ? null : i + 1, op === '-' ? null : j + 1, S.noeol && at1 === S.lines.length - 1]);
+      }
+      return { a: a0, an, b: b0, bn, lines };
+    });
+  }
+  // The hunk's header, as git writes it.
+  const header = h => '@@ -' + h.a + (h.an === 1 ? '' : ',' + h.an) + ' +' + h.b + (h.bn === 1 ? '' : ',' + h.bn) + ' @@';
+  return { split, script, hunks, header };
+})();
+// === end diff ===
+</script>
+<script>
 (() => {
   'use strict';
   const main = document.getElementById('main');
@@ -427,7 +560,7 @@ const IC = (() => {
 
   async function showBlob(repo, rev, path) {
     const { data, commit } = await api(enc(repo) + '/blob/' + encodeURIComponent(rev) + '/' + enc(path));
-    const binary = /[\x00-\x08\x0E-\x1F]/.test(data.slice(0, 8000));
+    const binary = isBinary(data);
     const body = binary
       ? '<p class="muted">binary file, ' + data.length + ' bytes</p>'
       : '<pre class="src">' + data.split('\n').map(l => '<span class="l">' + esc(l) + '</span>').join('') + '</pre>';
@@ -447,7 +580,10 @@ const IC = (() => {
     render(crumbs(repo, rev, 'commits', '') + '<div class="row">' + refPicker(repo, refs, rev, 'commits', '') + tabs(repo, rev, 'commits') + '</div>' + items);
   }
 
-  async function showCommit(repo, oid) {
+  // A commit, and under it what it changed: against its first parent, or
+  // against `base` when the address names one (#/<repo>/commit/<rev>/<base>),
+  // which is how any two revs are compared.
+  async function showCommit(repo, oid, base) {
     const { data: c } = await api(enc(repo) + '/commit/' + encodeURIComponent(oid));
     const who = (label, id) => id ? '<tr><th>' + label + '</th><td>' + esc(id.name) + ' &lt;' + esc(id.email) + '&gt; <span class="muted">' + esc(when(id.time)) + ' ' + esc(id.tz) + '</span></td></tr>' : '';
     render(crumbs(repo, c.oid, 'commits', '') +
@@ -456,8 +592,106 @@ const IC = (() => {
       '<tr><th>tree</th><td class="oid">' + esc(c.tree) + '</td></tr>' +
       (c.parents.length ? '<tr><th>parents</th><td class="oid">' + c.parents.map(p => '<a href=\"' + esc(H(repo, 'commit', p)) + '\">' + esc(p) + '</a>').join('<br>') + '</td></tr>' : '') +
       who('author', c.author) + who('committer', c.committer) +
-      '</table><pre>' + esc(c.message) + '</pre>');
+      '</table><pre>' + esc(c.message) + '</pre><div id="diff"><p class="muted">reading what changed&hellip;</p></div>');
     Console.mount('commit', repo, c.oid);
+    await showDiff(repo, c, base, document.getElementById('diff'));
+  }
+
+  // How many files open with their lines when the commit is shown; the
+  // rest are read when opened.
+  const OPEN_FILES = 10;
+  // A file past this is not compared here: its two blobs are still a
+  // click away.
+  const MAX_DIFF_CHARS = 1000000;
+  const isBinary = text => /[\x00-\x08\x0E-\x1F]/.test(text.slice(0, 8000));
+
+  async function showDiff(repo, c, base, box) {
+    let d;
+    try {
+      ({ data: d } = await api(enc(repo) + '/diff/' + encodeURIComponent(c.oid) + (base ? '?base=' + encodeURIComponent(base) : '')));
+    } catch (e) {
+      // A canister from before /diff answers 404 "not found": the commit
+      // is shown as it always was.
+      if (box.isConnected) box.innerHTML = '<p class="muted">what changed could not be read: ' + esc(e.message || e) + '</p>';
+      return;
+    }
+    if (!box.isConnected) return;
+    const n = d.files.length;
+    const against = !d.base ? '&middot; a first commit: every file is new'
+      : 'against <a class="oid" href="' + esc(H(repo, 'commit', d.base)) + '">' + esc(short(d.base)) + '</a>' +
+        (base ? '' : c.parents.length > 1 ? ', its first parent' + c.parents.slice(1).map((p, i) =>
+          ' &middot; <a href="' + esc(H(repo, 'commit', c.oid, p)) + '">against parent ' + (i + 2) + '</a>').join('') : '');
+    box.innerHTML = '<h3>' + n + (d.truncated ? ' or more' : '') + ' file' + (n === 1 && !d.truncated ? '' : 's') + ' changed <span class="muted" style="font-weight:400">' + against + '</span></h3>' +
+      (d.truncated ? '<p class="muted">The list stops here: there are more changes than one answer holds, and renames are not paired in a list cut short.</p>' : '') +
+      d.files.map((f, i) => {
+        const at = f.new ? d.commit : d.base;
+        const name = (f.old_path ? esc(f.old_path) + ' &rarr; ' : '') + esc(f.path);
+        const link = (f.new || f.old).kind === 'commit' ? name : '<a href="' + esc(H(repo, 'blob', at, f.path)) + '">' + name + '</a>';
+        const st = f.status === 'added' ? 'plus' : f.status === 'deleted' ? 'minus' : 'muted';
+        return '<details class="file" data-i="' + i + '"><summary><span class="st ' + st + '">' + esc(f.status) + '</span><span class="path">' + link + '</span><span class="count muted"></span></summary><div class="body"></div></details>';
+      }).join('');
+    box.querySelectorAll('details.file').forEach(el => {
+      const f = d.files[+el.dataset.i];
+      // Read once; a read that failed is tried again when the file is
+      // opened again.
+      let read = false;
+      const open = () => {
+        if (read || !el.open) return;
+        read = true;
+        fileDiff(repo, d, f).then(r => {
+          el.querySelector('.body').innerHTML = r.html;
+          if (r.count) el.querySelector('.count').innerHTML = r.count;
+        }).catch(e => {
+          read = false;
+          el.querySelector('.body').innerHTML = '<p class="err">' + esc(e.message || e) + ' <span class="muted">(close and open to try again)</span></p>';
+        });
+      };
+      el.addEventListener('toggle', open);
+      if (+el.dataset.i < OPEN_FILES) { el.open = true; open(); }
+    });
+  }
+
+  // One file's change: { html, count }. The two blobs are read at the
+  // commits the canister compared, by the paths it named.
+  async function fileDiff(repo, d, f) {
+    const note = text => ({ html: '<p class="muted">' + text + '</p>' });
+    const mode = f.old && f.new && f.old.mode !== f.new.mode ? 'mode ' + esc(f.old.mode) + ' &rarr; ' + esc(f.new.mode) : '';
+    // A submodule on either side: there is a commit of another repo to
+    // name and no blob to compare.
+    const sub = x => x && x.kind === 'commit';
+    if (sub(f.old) || sub(f.new)) {
+      const was = x => !x ? 'nothing' : sub(x) ? 'submodule at <span class="oid">' + esc(short(x.oid)) + '</span>' : 'a file';
+      return note(was(f.old) + ' &rarr; ' + was(f.new));
+    }
+    if (f.old && f.new && f.old.oid === f.new.oid) {
+      return note((f.status === 'renamed' ? 'renamed, the content unchanged' : 'the content unchanged') + (mode ? '; ' + mode : ''));
+    }
+    // A blob past what the canister gives in one answer is too large
+    // here as well: null.
+    const blob = (commit, path) => api(enc(repo) + '/blob/' + encodeURIComponent(commit) + '/' + enc(path)).then(r => r.data,
+      e => { if (/exceeds the single-response limit/.test(e.message || '')) return null; throw e; });
+    const [a, b] = await Promise.all([f.old ? blob(d.base, f.old_path || f.path) : '', f.new ? blob(d.commit, f.path) : '']);
+    const large = x => x === null || x.length > MAX_DIFF_CHARS;
+    if (large(a) || large(b)) return note('too large to compare here' + (mode ? '; ' + mode : ''));
+    if (isBinary(a) || isBinary(b)) return note('binary file' + (mode ? '; ' + mode : ''));
+    const hs = Diff.hunks(a, b);
+    if (!hs) return note('too many changed lines to show here');
+    // Nothing to mark: an empty file come or gone, or two blobs whose
+    // bytes differ and whose text, as the page reads it, does not.
+    if (!hs.length) return note((a === '' && b === '' ? 'an empty file' : 'no difference in the text; the bytes differ') + (mode ? '; ' + mode : ''));
+    let plus = 0, minus = 0, rows = '';
+    for (const h of hs) {
+      rows += '<tr class="hunk"><td class="n"></td><td class="n"></td><td>' + esc(Diff.header(h)) + '</td></tr>';
+      for (const [op, text, oldNo, newNo, bare] of h.lines) {
+        if (op === '+') plus++; else if (op === '-') minus++;
+        rows += '<tr class="' + (op === '+' ? 'add' : op === '-' ? 'del' : '') + '"><td class="n">' + (oldNo || '') + '</td><td class="n">' + (newNo || '') + '</td><td>' + op + esc(text) + '</td></tr>' +
+          (bare ? '<tr class="hunk"><td class="n"></td><td class="n"></td><td>\\ No newline at end of file</td></tr>' : '');
+      }
+    }
+    return {
+      html: (mode ? '<p class="muted">' + mode + '</p>' : '') + '<table class="diff">' + rows + '</table>',
+      count: '<span class="plus">+' + plus + '</span> <span class="minus">&minus;' + minus + '</span>',
+    };
   }
 
   async function route() {
@@ -473,7 +707,7 @@ const IC = (() => {
       if (kind === 'tree') return await showTree(repo, rev, path);
       if (kind === 'blob') return await showBlob(repo, rev, path);
       if (kind === 'commits') return await showCommits(repo, rev);
-      if (kind === 'commit') return await showCommit(repo, rev);
+      if (kind === 'commit') return await showCommit(repo, rev, path);
       throw new Error('unknown view: ' + kind);
     } catch (e) { fail(e); }
   }

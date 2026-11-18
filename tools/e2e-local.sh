@@ -1025,6 +1025,7 @@ done
 expect "the gateway serves the authority's /api with CORS for a page on another host" "$(curl -sI -H "Origin: http://$HOST" "http://$AHOST/api/pricing" | tr -d '\r' | tr 'A-Z' 'a-z')" '^access-control-allow-origin: \*$'
 if command -v node >/dev/null; then
   expect "console routes (tools/console-routes-test.mjs)" "$(node "$ROOT/tools/console-routes-test.mjs" 2>&1)" 'all passed'
+  expect "the browser's line diff (tools/browser-diff-test.mjs)" "$(node "$ROOT/tools/browser-diff-test.mjs" 2>&1)" 'checks passed'
 fi
 if command -v node >/dev/null; then
   cat >"$WORK/reads.mjs" <<'EOF'
