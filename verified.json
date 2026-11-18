@@ -108,6 +108,10 @@
         {
           "date": "2026-11-17",
           "what": "proposal 4 installed v0.3.13 (be2fd6f, ea7dc44f...1311; sites certified at their own domains, HEAD read as GET) and published ic-git#git (tx 0x2b6d155c...9337, block 12157125)"
+        },
+        {
+          "date": "2026-11-18",
+          "what": "proposal 5 installed v0.3.14 (34f7fd9, c110f3c0...a775; the API's /diff) and published ic-git#git (tx 0x366c4333...a1d3, block 12158031)"
         }
       ],
       "policy": {
@@ -270,6 +274,44 @@
           "note": "governor proposal 4 (1,049 G cycles read first), staged in one chunk, one approval executed it; the new code had the authority publish ic-git#git (commit be2fd6f, this module hash) in Sepolia tx 0x2b6d155c1167e7428b2dfd06ee7d67d92a70a0486bda4fae7d2a4be1effd9337, block 12157125. A site at its own domains is certified by the request's Host and method, and its 404 under /site/ where the canister host holds its sites; no site has a domain yet, so no gateway has checked that form. A HEAD at a site URL on the verifying host answers 200 (503 at v0.3.12). The authority stays at v0.3.11: its build is byte for byte the one of v0.3.12's commit (56aa3419...196b), which nothing installs"
         },
         "wasm_sha256": "ed9427b19e32abc32f3e91defd5fbeacf1bb230d60571d3a65fad97d129c67b1"
+      },
+      {
+        "commit": "34f7fd9242c59aa4c0e23e806dd8f87802122c9b",
+        "tag": "v0.3.14",
+        "module_hash": "c110f3c0d0a188cde060856dc91680e1c40c8f6b34160458de7d41f27e87a775",
+        "recipe": {
+          "dockerfile": "Dockerfile.build",
+          "platform": "linux/amd64",
+          "rustc": "1.94.1",
+          "dfx": "0.31.0",
+          "base_image": "rust:1.94.1-slim-bookworm",
+          "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+          "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+        },
+        "builders": [
+          {
+            "who": "deployer (DrJesseGlass)",
+            "lineage": "pinned-container",
+            "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+            "date": "2026-11-18",
+            "check": "built at 34f7fd9, the merge of #150 (the commit view), on top of #149 (the API's /diff)"
+          },
+          {
+            "who": "GitHub Actions (independent runner)",
+            "lineage": "pinned-container",
+            "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+            "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/44207996732",
+            "date": "2026-11-18",
+            "check": "identical hash"
+          }
+        ],
+        "deployed": {
+          "date": "2026-11-18",
+          "on_chain_match": "match",
+          "checked_by": "tools/check-module-hash.sh after the install: on-chain module hash c110f3c0...a775, controllers 3hps4-taaaa-aaaab-ahela-cai",
+          "note": "governor proposal 5 (1,042 G cycles read first), staged in one chunk, one approval executed it; the new code had the authority publish ic-git#git (commit 34f7fd9, this module hash) in Sepolia tx 0x366c43332f1ef0218c4130bd474d89d6a5dc1f405df4de5f0ba25c585fd8a1d3, block 12158031. GET /api/<repo>/diff/<rev> answers on the live canister: the files a commit changed, by object id. The repo browser's commit view that reads it (#150) is in this commit's source and not yet in the page the canister serves, which comes from the ic-git repo held there (at db8f2bd). The authority stays at v0.3.11: its build is unchanged (56aa3419...196b)"
+        },
+        "wasm_sha256": "fda17a5d2e4488a7b3fb21062224265c7a6adc90f09f04a912ee8a365adf2081"
       }
     ]
   },

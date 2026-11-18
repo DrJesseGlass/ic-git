@@ -35,6 +35,38 @@ canister"), and `verified.json` records it under `git_canister`.
 | 2026-11-16 | `5c5c88e` | `v0.3.10` | `1e9ce2a185f3fa8366bfec8cd5146aa2daf5e9657ce7874c4492bfa4a02d8e57` (gz, the authority build) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760), identical hash; installed by governor proposal 8 at the cut, after proposal 7's combined build `b6868caa...d45b` (unrecorded on chain, an hour) |
 | 2026-11-16 | `ef7722f` | `v0.3.11` | `f90c5c03faf3877b7bf73329a0ab3f207bfbf9aecbef6bed94c103c5e2127225` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43924565432](https://github.com/DrJesseGlass/ic-git/actions/runs/43924565432), identical hash; installed by governor proposal 9 |
 
+## v0.3.14, the git canister -- 2026-11-18
+
+The API says which files a commit changed (#149;
+crates/git/src/diff.rs): `GET /api/<repo>/diff/<rev>[?base=<rev>]`
+lists the files that differ between two commits' trees, compared by
+object id, with the blobs on each side and exact renames paired. The
+repo browser's commit view that shows the lines (#150) is in the same
+commit's source.
+
+The pinned container built `34f7fd9`, the merge of #150, to
+`c110f3c0...a775` (gz; raw `fda17a5d...2081`) for the git canister; CI
+built the tag on a GitHub Actions x86_64 runner
+([run 44207996732](https://github.com/DrJesseGlass/ic-git/actions/runs/44207996732))
+and agreed byte for byte on every module. The authority built to
+`56aa3419...196b` once more: nothing of it changed, nothing installs
+it, and umobs keeps v0.3.11; the combined build, the rollback artifact,
+to `677124a9...f615`. Git governor proposal 5 read the target's cycles
+first (1,042 G), staged the module in one chunk, and one approval
+executed it; the new code had the authority publish `ic-git#git`
+(commit `34f7fd9`, this module hash) in Sepolia tx `0x366c4333...a1d3`,
+block 12158031. The e2e ran on both builds (split 199/0 before the
+merge of #150, combined 300/0 on the merge).
+
+Right after, at `34koz-jyaaa-aaaab-ahejq-cai.icp0.io`,
+`/api/ic-git/diff/HEAD` answered with the 14 files of the commit the
+canister's ic-git repo is at (`db8f2bd`) against its parent, and a base
+that names nothing with 404; the site, its miss and the index answer as
+before. The commit view is not live by this: the page the canister
+serves is the one in the ic-git repo it holds, which is at `db8f2bd`,
+so the view arrives with a push of this repository there and a new
+site record.
+
 ## v0.3.13, the git canister -- 2026-11-17
 
 The sites are certified at their own domains (#146, #147;
@@ -192,6 +224,7 @@ sites are read from and keeps v0.3.8.
 | 2026-11-16 | `5c5c88e` | `v0.3.10` | `d5b5bba727500ef3f5446b6e8751e96a6f7d69185baf237407a702cfc32549a7` (gz, byte for byte v0.3.9's) | MATCH, 2026-11-16 | deployer and GitHub Actions ([run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760)), identical hash; installed by governor proposal 2 after the cut, which published the first `ic-git#git` record |
 | 2026-11-17 | `483699d` | `v0.3.12` | `0be0bb4d9d52ce5b4503b232b0edc1ffc1377e6befa4293d010ea6c562c7335e` (gz) | MATCH, 2026-11-17 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43996412291](https://github.com/DrJesseGlass/ic-git/actions/runs/43996412291), identical hash; installed by git governor proposal 3 |
 | 2026-11-17 | `be2fd6f` | `v0.3.13` | `ea7dc44fcc6b120f5e790ee2152e7028786706cf75aebde4643278aa98f81311` (gz) | MATCH, 2026-11-17 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 44162124208](https://github.com/DrJesseGlass/ic-git/actions/runs/44162124208), identical hash; installed by git governor proposal 4 |
+| 2026-11-18 | `34f7fd9` | `v0.3.14` | `c110f3c0d0a188cde060856dc91680e1c40c8f6b34160458de7d41f27e87a775` (gz) | MATCH, 2026-11-18 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 44207996732](https://github.com/DrJesseGlass/ic-git/actions/runs/44207996732), identical hash; installed by git governor proposal 5 |
 
 The pinned container built `28288c9`, the merge of #135, to
 `d5b5bba7...49a7` (gz; raw `f25d202c...98fd`) for the git canister;
