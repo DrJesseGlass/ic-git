@@ -366,11 +366,15 @@ commit away from the recorded one, and `tools/verify.mjs` check A then
 fails until the next publish.
 
 ```sh
-C=umobs-yiaaa-aaaab-agyrq-cai   # the authority: the repo, its site, its record
-G=34koz-jyaaa-aaaab-ahejq-cai   # the git canister: the token, the push, the served listing
-PKG=extension; REPO=ic-git-extension          # or extension-firefox, ic-git-extension-firefox
+# the authority: the repo, its site, its record
+C=umobs-yiaaa-aaaab-agyrq-cai
+# the git canister: the token, the push, the served listing
+G=34koz-jyaaa-aaaab-ahejq-cai
+# or extension-firefox, ic-git-extension-firefox
+PKG=extension; REPO=ic-git-extension
 
-node tools/extension-sums.mjs --check $PKG    # the listing is current
+# the listing is current
+node tools/extension-sums.mjs --check $PKG
 
 # First time only: the repo, with its site root at the listing.
 dfx canister --network ic call $C create_repo "(\"$REPO\")"
@@ -382,12 +386,12 @@ TOKEN=$(dfx canister --network ic call $G create_push_token "(\"$REPO\", opt (1 
 : "${TOKEN:?create_push_token returned no token}"
 git push "https://ic:$TOKEN@$G.raw.icp0.io/$REPO.git" main
 
-# The canister serves the listing in git (from a terminal, not a browser).
+# The canister serves the listing in git: from a terminal, not a browser.
 git show main:$PKG/SHA256SUMS | shasum -a 256
 curl -s "https://$G.raw.icp0.io/site/$REPO/" | shasum -a 256
 
 # Publish, then confirm once the transaction is mined: wait for the
-# receipt as for the loader (docs/LOADER.md, step 5), or verify.mjs still
+# receipt as for the loader, docs/LOADER.md step 5, or verify.mjs still
 # reads the old record.
 dfx canister --network ic call $C evm_registry_publish_site "(\"$REPO\")"
 node tools/verify.mjs $REPO / --record site

@@ -32,8 +32,10 @@ spend Sepolia gas from the canister's EOA
 Sepolia ETH.
 
 ```sh
-C=umobs-yiaaa-aaaab-agyrq-cai   # the authority: the repo, its site, its record
-G=34koz-jyaaa-aaaab-ahejq-cai   # the git canister: the token, the push, the served page
+# the authority: the repo, its site, its record
+C=umobs-yiaaa-aaaab-agyrq-cai
+# the git canister: the token, the push, the served page
+G=34koz-jyaaa-aaaab-ahejq-cai
 GW=https://$G.raw.icp0.io
 ```
 
@@ -91,14 +93,16 @@ if it reverted: the verifier run before then reports the new record as
 absent or stale.
 
 ```sh
-TX=0x...    # the tx hash step 4 returned
+# the tx hash step 4 returned
+TX=0x...
 until R=$(dfx canister --network ic call $C evm_receipt "(\"$TX\")") &&
       ! echo "$R" | grep -q 'Ok = null'; do
   sleep 15
 done
 echo "$R"
+# prints VERIFIED
 echo "$R" | grep -q 'status = "success"' &&
-  node tools/verify.mjs ic-git-loader index.html --record site    # VERIFIED
+  node tools/verify.mjs ic-git-loader index.html --record site
 ```
 
 The verifier runs only on a successful receipt. A reverted receipt (or an
@@ -129,7 +133,8 @@ the canister's `registry` repo. For the record, or for a successor
 contract, this is how:
 
 ```sh
-git clone https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/registry.git   # commit f3cd339
+# commit f3cd339
+git clone https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/registry.git
 ```
 
 On https://sepolia.etherscan.io/address/0xa1362DAda583c56a395D305a8C7A458E0B62A209#code,

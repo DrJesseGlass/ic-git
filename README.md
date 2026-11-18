@@ -24,8 +24,8 @@ dfx deploy git
 dfx canister call git create_repo '("hello")'
 TOKEN=$(dfx canister call git create_push_token '("hello", null, null)' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
 
-# Stock git against the local HTTP gateway (`.raw.`: the non-raw gateway
-# serves git traffic too, declared uncertified, and the sites certified):
+# Stock git against the local HTTP gateway, at its raw host: the non-raw
+# gateway serves git traffic too, declared uncertified, and the sites certified.
 git push "http://ic:$TOKEN@$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git" main
 git clone "http://$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git"
 ```
@@ -217,13 +217,13 @@ G=34koz-jyaaa-aaaab-ahejq-cai
 dfx canister --network https://icp-api.io call $C deposit_from_cycles_ledger '(2_000_000_000_000)'
 # 0.5 ICP, after icrc2_approve on the ICP ledger for it plus 0.0001 ICP
 dfx canister --network https://icp-api.io call $C deposit_from_icp '(50_000_000)'
-# finish_icp_deposit(id) completes one whose conversion did not finish
+# a deposit whose conversion did not finish is completed by finish_icp_deposit with its id
 dfx canister --network https://icp-api.io call $C pending_icp_deposits
 dfx canister --network https://icp-api.io call $C create_repo '("myapp")'
 dfx canister --network https://icp-api.io call $C add_member '("myapp", principal "<friend>", "voter")'
 dfx canister --network https://icp-api.io call $C set_required_votes '("myapp", 1)'
 # lifetime in days: default 30, max 365
-dfx canister --network https://icp-api.io call $G create_push_token '("myapp", opt 90, null)'
+dfx canister --network https://icp-api.io call $G create_push_token '("myapp", opt (90 : nat32), null)'
 dfx canister --network https://icp-api.io call $G list_push_tokens '("myapp")'
 # Signed pushes: bind the token to your SSH key, and have git sign with it
 dfx canister --network https://icp-api.io call $G create_push_token "(\"myapp\", null, opt \"$(cat ~/.ssh/id_ed25519.pub)\")"
