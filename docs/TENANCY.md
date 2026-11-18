@@ -210,7 +210,8 @@ from then they pay, the old owner has no right over it (their push
 tokens are revoked), and the members keep their roles. Until then the
 one it was offered to can decline and the owner can withdraw
 (`cancel_transfer(repo)`); a new offer replaces the last, and naming the
-owner withdraws it. `get_repo_info` and `/api/<repo>/info` show a
+owner withdraws it. Governing the repo withdraws an offer too: from then
+a new owner is the voters' to offer. `get_repo_info` and `/api/<repo>/info` show a
 standing offer as `pending_owner`. A caller who names themself has
 agreed by calling, which is how an operator takes a repo over. Until
 2026-11 a transfer applied at once and asked nobody: a repo handed to a

@@ -916,6 +916,10 @@ pub fn mark_governed(repo: &str, who: &Principal) -> Result<Principal, String> {
             .map_err(|e| format!("{e}; point the deploy config at a committed .wasm first"))?;
     }
     m.governed = true;
+    // An offer the owner made alone does not outlive the owner's say: from
+    // here a new owner is the voters' to offer. (It stays withdrawn if the
+    // controller call fails and the flag comes off.)
+    m.pending_owner = None;
     save_meta(repo, &m);
     Ok(app)
 }
@@ -1733,6 +1737,19 @@ mod tests {
         run(cancel_transfer("t-offer", &carol, false)).unwrap();
         assert_eq!(meta("t-offer").unwrap().pending_owner, None);
         assert!(run(super::transfer_repo("t-offer", &alice, false, Principal::anonymous())).is_err());
+
+        // Governing withdraws an offer the owner made alone: a governed
+        // repo's owner changes by the voters' offer and no other.
+        add_member("t-offer", &alice, false, carol, Role::Voter).unwrap();
+        set_required_votes("t-offer", &alice, false, 1).unwrap();
+        set_app_canister("t-offer", p(145)).unwrap();
+        run(super::transfer_repo("t-offer", &alice, false, bob)).unwrap();
+        mark_governed("t-offer", &alice).unwrap();
+        assert_eq!(meta("t-offer").unwrap().pending_owner, None);
+        assert!(run(accept_transfer("t-offer", &bob)).unwrap_err().contains("is not offered to"));
+        unmark_governed("t-offer");
+        remove_member("t-offer", &alice, false, carol).unwrap();
+        set_required_votes("t-offer", &alice, false, 0).unwrap();
 
         // Taken: the new owner pays and administers, their member row is
         // gone, and the offer with it.
