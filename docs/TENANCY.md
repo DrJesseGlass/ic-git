@@ -432,8 +432,9 @@ shows and the console edits. A domain is a DNS name as it would be looked
 up (lowercase, no trailing dot) of at least two labels, not an IP address,
 and not under the IC's own domains (`icp0.io`, `ic0.app`, `icp-api.io`,
 `icp.net`, `localhost` and the like), where a host names a canister by
-its id; nor, wherever it is, a name with a canister id for a label, since
-the gateways add domains and a site holding `<this canister>.<one of
+its id; nor, wherever it is, a name with a canister id for a label (alone
+or after a `--`, which a gateway takes as a prefix and drops), since the
+gateways add domains and a site holding `<this canister>.<one of
 them>` would be served there in the canister's place, index, git and
 API. One
 repo holds a domain at a time: a second repo is refused it until the first
