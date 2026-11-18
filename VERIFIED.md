@@ -72,6 +72,17 @@ the canister serves is the one in the ic-git repo it holds, which is at
 `b158e2c`, so the view arrives with a push of this repository there and
 a new site record.
 
+That push followed the same day: `main` at `c9b2009` (the merge of
+this release's record, #155) into the canister's `ic-git` repo, a
+fast-forward of four commits from `b158e2c`, and `ic-git#site`
+republished (Sepolia nonce 43, tx `0x674bb729...6901`, block 12162179).
+`tools/verify.mjs ic-git index.html` verifies at `c9b2009`, once the
+transaction is mined: run straight after the publish it still reads
+the record before. The compare view shows on the canister's own page:
+HEAD against `db8f2bd` is 79 commits ahead and none behind, all 79
+listed, 173 files changed, the counts `git rev-list --count` and
+`git diff --name-status -M100%` give.
+
 ## v0.3.14, the git canister -- 2026-11-18
 
 The API says which files a commit changed (#149;
