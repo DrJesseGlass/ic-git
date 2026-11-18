@@ -438,17 +438,44 @@ eight. Naming a domain does not turn serving on: `set_site` first.
 
 Reaching the canister at the domain is the IC's own custom-domain
 procedure, which the tenant drives (the boundary nodes' side is documented
-at internetcomputer.org under "custom domains"): DNS records for the
-domain (an ALIAS or CNAME to `icp1.io`, a `_canister-id` TXT record naming
-the canister, an `_acme-challenge` CNAME to
-`_acme-challenge.<domain>.icp2.io`), then a registration request to the
-boundary nodes, which read `GET /.well-known/ic-domains` on the canister
-and refuse a domain it does not list. That file is every domain any site
-here is served at, one per line, and `set_site_domains` is what puts a
-domain in it. The canister to name is the one serving the sites: the git
-canister, `34koz-jyaaa-aaaab-ahejq-cai`, since the cut
-(docs/CANISTER_SPLIT.md, step 16); a domain registered to umobs before it
-has to be registered again.
+at docs.internetcomputer.org under "custom domains", and is theirs to
+change: what follows is what it was on 2026-11-18). In order:
+
+1. `set_site_domains` with the domain. That puts it in
+   `GET /.well-known/ic-domains` on the canister: every domain any site
+   here is served at, one per line. The boundary nodes read that file and
+   refuse a domain it does not list.
+2. Three DNS records, where the domain's nameservers are (which need not
+   be the registrar):
+
+   | name | type | value |
+   |---|---|---|
+   | `<domain>` | CNAME (ALIAS or ANAME at a zone's apex) | `icp1.io` |
+   | `_canister-id.<domain>` | TXT | `34koz-jyaaa-aaaab-ahejq-cai` |
+   | `_acme-challenge.<domain>` | CNAME | `_acme-challenge.<domain>.icp2.io` |
+
+   The IC's page now writes the first value as `<domain>.icp1.io`; the
+   two resolve alike, and the plain one is accepted. One `_canister-id`
+   record only: a second fails the validation. A DNS host that proxies
+   or issues certificates of its own has to do neither for the name.
+3. Ask whether the boundary nodes would take it, which registers nothing:
+   `curl -sL https://icp.net/custom-domains/v1/<domain>/validate`.
+4. Register it: `curl -sL -X POST https://icp.net/custom-domains/v1/<domain>`.
+5. `curl -sL https://icp.net/custom-domains/v1/<domain>` reports
+   `registration_status`: `registering`, then `registered` (or `failed`
+   with the reason, or `expired`, which a second POST renews). The
+   gateways present the domain's certificate some minutes after
+   `registered`; until then a TLS client is refused the name.
+
+To take a domain down: `set_site_domains` without it, remove the
+`_canister-id` and `_acme-challenge` records, and
+`curl -sL -X DELETE https://icp.net/custom-domains/v1/<domain>`, after
+which the status request answers 404.
+
+The canister to name is the one serving the sites: the git canister,
+`34koz-jyaaa-aaaab-ahejq-cai`, since the cut (docs/CANISTER_SPLIT.md,
+step 16); a domain registered to umobs before it has to be registered
+again.
 There is no domain for the canister itself, only for sites: a domain a
 tenant names is that tenant's until an operator clears it, so an
 operator who wants one holds it on a repo of their own.
@@ -483,6 +510,20 @@ whose Host spells it otherwise (a port, capitals, a trailing dot) is
 answered without one, and fails the gateway's check at a page. A site past
 certify.rs's caps is served at its domains declared uncertified, as
 every domain was before this.
+
+The domain form was first served by the real gateways on 2026-11-18, at
+`evm-test.jesse.glass` for the `evm-demo` repo (v0.3.15): registered 45
+seconds after the request, and reachable a few minutes later. Each of
+these came back through the verifying gateway with a certificate: a file
+of the site, GET and HEAD, 200 with the bytes and `X-Ic-Git-Commit` of
+`/site/evm-demo/` at the canister host; a path nobody has, 404; under
+`/site/`, a 404 at a site file's URL, under a site's wildcard, at
+`/site/<no such repo>/` and at `/site/` itself; and a 404 at `/api/` and
+at a repo's git URL, so nothing of the canister but the site is reached
+there. The canister host answered as before at its index, its sites,
+their 404s and the API. The domain's `/` was a 404 too, that repo having
+no `index.html`: a page at a domain's root is the one case still seen
+only by the e2e.
 
 A domain is reached through the DNS its registrar serves, which nothing
 here checks. The clients (docs/EXTENSION.md) verify a site on the
