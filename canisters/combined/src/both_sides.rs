@@ -29,7 +29,8 @@ mod tenancy {
     }
 
     pub fn transfer_repo(repo: &str, who: &Principal, operator: bool, new_owner: Principal) -> Result<(), String> {
-        run(crate::tenancy::transfer_repo(repo, who, operator, new_owner))
+        run(crate::tenancy::transfer_repo(repo, who, operator, new_owner))?;
+        run(crate::tenancy::accept_transfer(repo, &new_owner))
     }
 
     pub fn set_required_votes(repo: &str, who: &Principal, operator: bool, k: u32) -> Result<(), String> {

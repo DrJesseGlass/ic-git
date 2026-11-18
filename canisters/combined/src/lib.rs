@@ -792,13 +792,27 @@ async fn remove_member(repo: String, principal: candid::Principal) -> Result<Vec
     tenancy::remove_member(&repo, &caller(), operator(), principal).await
 }
 
-/// Hand a repo to a new owner, who pays for it from then on.
+/// Offer a repo to a new owner, who owns and pays for it once they take
+/// it (`accept_transfer`); until then nothing changes. A caller naming
+/// themself takes it at once.
 #[ic_cdk::update]
 async fn transfer_repo(repo: String, new_owner: candid::Principal) -> Result<(), String> {
+    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner).await
+}
+
+/// Take a repo offered to the caller.
+#[ic_cdk::update]
+async fn accept_transfer(repo: String) -> Result<(), String> {
     // The owner is an approver, so a new owner changes whose ballots count.
     // The previous owner's push tokens go with the repo, unless they can
     // still write as an operator (mirror::set_push_policy).
-    tenancy::transfer_repo(&repo, &caller(), operator(), new_owner).await
+    tenancy::accept_transfer(&repo, &caller()).await
+}
+
+/// Withdraw a repo's offer: the one it was made to, or its owner.
+#[ic_cdk::update]
+async fn cancel_transfer(repo: String) -> Result<(), String> {
+    tenancy::cancel_transfer(&repo, &caller(), operator()).await
 }
 
 /// Approvals a commit needs from voters before the deploy queue runs it, and

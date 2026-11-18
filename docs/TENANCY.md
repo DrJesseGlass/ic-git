@@ -89,7 +89,7 @@ bound to a key. It is off by default.
 
 | Role | Granted by | May |
 |---|---|---|
-| Owner | creating the repo, or `transfer_repo` | everything below, plus manage members, config, deploys, and votes threshold; pays |
+| Owner | creating the repo, or accepting a transfer | everything below, plus manage members, config, deploys, and votes threshold; pays |
 | Writer | owner, `add_member(repo, p, "writer")` | push, mint and revoke tokens |
 | Voter | owner, `add_member(repo, p, "voter")` | cast ballots on commits |
 | Operator | controller or the legacy admin allowlist (never ic-git itself) | act on any repo; charged nothing |
@@ -202,6 +202,21 @@ it.
   with, so repointing never redirects one already under way.
 
 Balances are not refundable yet; that needs the reverse of the ledger flow.
+
+A transfer is an offer. `transfer_repo(repo, p)` names who the repo is
+offered to and changes nothing else: the owner still owns, pays and
+administers. It is theirs when they call `accept_transfer(repo)`, and
+from then they pay, the old owner has no right over it (their push
+tokens are revoked), and the members keep their roles. Until then the
+one it was offered to can decline and the owner can withdraw
+(`cancel_transfer(repo)`); a new offer replaces the last, and naming the
+owner withdraws it. Governing the repo withdraws an offer too: from then
+a new owner is the voters' to offer. `get_repo_info` and `/api/<repo>/info` show a
+standing offer as `pending_owner`. A caller who names themself has
+agreed by calling, which is how an operator takes a repo over. Until
+2026-11 a transfer applied at once and asked nobody: a repo handed to a
+funded stranger billed them its rent, and one handed to an operator went
+exempt with its writers still pushing.
 
 ## Votes
 
@@ -349,9 +364,9 @@ other canister only if the repo's owner is a controller of it (the owner
 made ic-git a controller of it and could install into it anyway). What
 it refuses, the deploy's status says. An ownerless repo, which only
 operators configure, has no owner to ask after and is held to the first
-two. One edge stays open while a transfer asks nothing of the new owner:
-a repo handed to someone deploys into that owner's other canisters, if
-ic-git is a controller of them, though not into their app canisters.
+two. A repo deploys into its owner's other canisters only once that
+owner has accepted the repo (a transfer is an offer; see Roles), and the
+wallet's message on accepting says so.
 Until 2026-11 nothing asked, and a repo's deploy could install
 into any app canister.
 

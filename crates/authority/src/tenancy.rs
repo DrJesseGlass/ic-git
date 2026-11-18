@@ -235,6 +235,11 @@ pub struct RepoMeta {
     /// name maps to no label, or to one an older repo holds.
     #[serde(default)]
     pub label: Option<String>,
+    /// Who the repo is offered to (`transfer_repo`), until they take it
+    /// (`accept_transfer`) or the offer is withdrawn (`cancel_transfer`).
+    /// An offer changes nothing else: the owner owns and pays until then.
+    #[serde(default)]
+    pub pending_owner: Option<Principal>,
 }
 
 pub fn meta(repo: &str) -> Option<RepoMeta> {
@@ -349,6 +354,7 @@ pub fn test_repo(name: &str) {
         governed: false,
         proposals: Vec::new(),
         label,
+        pending_owner: None,
     });
     // Its mirrors, as create_repo's flush leaves them.
     futures::executor::block_on(crate::mirrors::flush(name));
@@ -575,6 +581,7 @@ async fn settle(name: &str) -> Result<(), String> {
                         governed: false,
                         proposals: Vec::new(),
                         label: Some(r.label),
+                        pending_owner: None,
                     },
                 );
                 crate::mirrors::flush(name).await;
@@ -672,7 +679,15 @@ fn remove_member_in(m: &mut RepoMeta, repo: &str, target: Principal) -> Result<(
     check_policy(m)
 }
 
-/// Hand a repo to a new owner, who pays from then on.
+/// Offer a repo to a new owner. Nothing moves until they take it
+/// (`accept_transfer`): owning a repo is paying for it, and holding what
+/// its deploys and its members do, and nobody is given either unasked.
+/// Without that, a repo handed to a funded stranger billed them its rent,
+/// one handed to an operator went exempt with its writers still on it,
+/// and one handed to anyone deployed into the canisters they control
+/// (`may_install`). A new offer replaces the last one. Naming the owner
+/// withdraws the offer. A caller who names themself has agreed by
+/// calling: an operator taking a repo over takes it at once.
 pub async fn transfer_repo(
     repo: &str,
     who: &Principal,
@@ -681,9 +696,57 @@ pub async fn transfer_repo(
 ) -> Result<(), String> {
     let mut m = can_admin(repo, who, operator)?;
     locked(&m, "transferring the repo", Some("Transfer"))?;
-    transfer_in(&mut m, new_owner)?;
+    if new_owner == *who {
+        transfer_in(&mut m, new_owner)?;
+    } else {
+        offer_in(&mut m, new_owner)?;
+    }
     save_meta(repo, &m);
     crate::mirrors::flush(repo).await;
+    Ok(())
+}
+
+/// Record the offer, if the transfer could apply as the repo stands, so
+/// that nobody is offered (or votes on) one that could not.
+fn offer_in(m: &mut RepoMeta, new_owner: Principal) -> Result<(), String> {
+    if m.owner == Some(new_owner) {
+        m.pending_owner = None;
+        return Ok(());
+    }
+    transfer_in(&mut m.clone(), new_owner)?;
+    m.pending_owner = Some(new_owner);
+    Ok(())
+}
+
+/// Take a repo that was offered to the caller: they own it and pay for it
+/// from here. The policy is checked again, since it may have moved since
+/// the offer was made.
+pub async fn accept_transfer(repo: &str, who: &Principal) -> Result<(), String> {
+    let mut m = existing(repo)?;
+    if m.pending_owner != Some(*who) {
+        return Err(format!("{repo} is not offered to {who}"));
+    }
+    transfer_in(&mut m, *who)?;
+    save_meta(repo, &m);
+    crate::mirrors::flush(repo).await;
+    Ok(())
+}
+
+/// Withdraw a repo's offer: whoever it was made to may always decline it;
+/// the owner (or an operator) may take it back, except on a governed repo,
+/// where the voters made the offer and withdraw it the same way, by a
+/// Transfer naming the owner.
+pub async fn cancel_transfer(repo: &str, who: &Principal, operator: bool) -> Result<(), String> {
+    let mut m = existing(repo)?;
+    let Some(offered) = m.pending_owner else {
+        return Err(format!("{repo} is not offered to anyone"));
+    };
+    if offered != *who {
+        can_admin(repo, who, operator)?;
+        locked(&m, "withdrawing the offer of the repo", Some("Transfer, naming the owner"))?;
+    }
+    m.pending_owner = None;
+    save_meta(repo, &m);
     Ok(())
 }
 
@@ -692,6 +755,7 @@ fn transfer_in(m: &mut RepoMeta, new_owner: Principal) -> Result<(), String> {
         return Err("cannot transfer to the anonymous principal".into());
     }
     m.owner = Some(new_owner);
+    m.pending_owner = None;
     m.members.retain(|x| x.principal != new_owner);
     check_policy(m)
 }
@@ -749,7 +813,7 @@ impl PolicyChange {
             PolicyChange::RequiredVotes { k } => format!("require {k} vote{} per commit", if *k == 1 { "" } else { "s" }),
             PolicyChange::AddVoter { principal } => format!("add {principal} as a voter"),
             PolicyChange::RemoveVoter { principal } => format!("remove voter {principal}"),
-            PolicyChange::Transfer { new_owner } => format!("transfer the repo to {new_owner}"),
+            PolicyChange::Transfer { new_owner } => format!("offer the repo to {new_owner}"),
             PolicyChange::WasmDeploy { target, source_path } => format!("deploy {source_path} to canister {target}"),
             PolicyChange::DeployMode { mode } => format!("set the install mode to {mode}"),
         }
@@ -782,7 +846,8 @@ impl PolicyChange {
                 }
                 remove_member_in(m, repo, *principal)
             }
-            PolicyChange::Transfer { new_owner } => transfer_in(m, *new_owner),
+            // The voters offer; the one named takes it (accept_transfer).
+            PolicyChange::Transfer { new_owner } => offer_in(m, *new_owner),
             PolicyChange::WasmDeploy { target, source_path } => {
                 Principal::from_text(target).map_err(|e| format!("bad target principal: {e}"))?;
                 crate::deploy::SourceKind::for_repo(m.governed, source_path).map(|_| ())
@@ -851,6 +916,10 @@ pub fn mark_governed(repo: &str, who: &Principal) -> Result<Principal, String> {
             .map_err(|e| format!("{e}; point the deploy config at a committed .wasm first"))?;
     }
     m.governed = true;
+    // An offer the owner made alone does not outlive the owner's say: from
+    // here a new owner is the voters' to offer. (It stays withdrawn if the
+    // controller call fails and the flag comes off.)
+    m.pending_owner = None;
     save_meta(repo, &m);
     Ok(app)
 }
@@ -1364,6 +1433,7 @@ pub struct RepoInfo {
     pub exempt: bool,
     pub require_signed_push: bool,
     pub governed: bool,
+    pub pending_owner: Option<Principal>,
 }
 
 pub fn repo_info(repo: &str) -> Option<RepoInfo> {
@@ -1378,6 +1448,7 @@ pub fn repo_info(repo: &str) -> Option<RepoInfo> {
         app_canister: m.app_canister,
         require_signed_push: m.require_signed_push,
         governed: m.governed,
+        pending_owner: m.pending_owner,
     })
 }
 
@@ -1394,11 +1465,10 @@ pub fn is_governed(repo: &str) -> bool {
 ///
 /// - The repo's own app canister: yes.
 /// - Another repo's app canister: no, whoever owns either repo. Not left
-///   to the next rule, which a repo handed to the canister's owner would
-///   pass (a transfer asks nothing of who receives it), and which an
-///   ownerless repo has no owner for. A walk of the repos, made only for
-///   a target that is not the repo's app canister, which the console
-///   never sets.
+///   to the next rule, which an ownerless repo has no owner for, and
+///   which would let one owner's repo into their other repo's governed
+///   canister. A walk of the repos, made only for a target that is not
+///   the repo's app canister, which the console never sets.
 /// - Any other canister: only if the repo's owner is one of its
 ///   controllers -- the owner made this canister a controller of it, as
 ///   the deploy needs, and could install into it without us. An ownerless
@@ -1493,10 +1563,9 @@ mod tests {
         assert!(e.contains(&mallory.to_text()) && e.contains("is not a controller"), "{e}");
         assert!(may_install("t-attacker", &p(77), &[]).is_err());
 
-        // The repo handed to the victim, which asks nothing of the
-        // victim: its owner now controls the victim's app canister, and
-        // that is not what lets a repo in. A writer the attacker left on
-        // it would otherwise push the install.
+        // The repo handed to the victim and taken by them: its owner now
+        // controls the victim's app canister, and that is not what lets
+        // a repo in.
         transfer_repo("t-attacker", &mallory, false, alice).unwrap();
         let e = may_install("t-attacker", &alices_app, &[alice, me]).unwrap_err();
         assert!(e.contains("is t-victim's app canister"), "{e}");
@@ -1535,8 +1604,13 @@ mod tests {
         run(super::remove_member(repo, who, operator, target))
     }
 
+    /// An offer and its acceptance: what a transfer was before it asked.
     fn transfer_repo(repo: &str, who: &Principal, operator: bool, new_owner: Principal) -> Result<(), String> {
-        run(super::transfer_repo(repo, who, operator, new_owner))
+        run(super::transfer_repo(repo, who, operator, new_owner))?;
+        if new_owner == *who {
+            return Ok(());
+        }
+        run(super::accept_transfer(repo, &new_owner))
     }
 
     fn set_required_votes(repo: &str, who: &Principal, operator: bool, k: u32) -> Result<(), String> {
@@ -1624,6 +1698,79 @@ mod tests {
         assert_eq!(m.owner, Some(dave));
         assert!(m.members.iter().all(|x| x.principal != dave));
         assert!(can_admin("t-roles", &alice, false).is_err());
+    }
+
+    /// Owning a repo is paying for it: nobody is made an owner unasked.
+    #[test]
+    fn a_transfer_is_an_offer_until_the_new_owner_takes_it() {
+        let (alice, bob, carol, op) = (p(141), p(142), p(143), p(144));
+        credit(&alice, pricing().create_repo);
+        create_repo("t-offer", &alice, false).unwrap();
+        add_member("t-offer", &alice, false, bob, Role::Writer).unwrap();
+
+        // The offer moves nothing: alice owns, pays and administers; bob
+        // is the writer he was and no admin.
+        run(super::transfer_repo("t-offer", &alice, false, bob)).unwrap();
+        let m = meta("t-offer").unwrap();
+        assert_eq!((m.owner, m.pending_owner), (Some(alice), Some(bob)));
+        assert!(has_role(&m, &bob, Role::Writer));
+        assert!(can_admin("t-offer", &bob, false).is_err());
+        assert_eq!(repo_info("t-offer").unwrap().pending_owner, Some(bob));
+
+        // Only the one it was made to takes it; a new offer replaces it.
+        let e = run(accept_transfer("t-offer", &carol)).unwrap_err();
+        assert!(e.contains("is not offered to"), "{e}");
+        assert!(run(accept_transfer("t-offer", &alice)).is_err());
+        run(super::transfer_repo("t-offer", &alice, false, carol)).unwrap();
+        assert!(run(accept_transfer("t-offer", &bob)).is_err());
+
+        // Withdrawn by the owner, by naming themself, or declined by the
+        // one it was made to; not by anyone else.
+        assert!(run(cancel_transfer("t-offer", &bob, false)).is_err());
+        run(cancel_transfer("t-offer", &alice, false)).unwrap();
+        assert!(run(accept_transfer("t-offer", &carol)).is_err());
+        assert!(run(cancel_transfer("t-offer", &alice, false)).unwrap_err().contains("not offered to anyone"));
+        run(super::transfer_repo("t-offer", &alice, false, carol)).unwrap();
+        run(super::transfer_repo("t-offer", &alice, false, alice)).unwrap();
+        assert_eq!(meta("t-offer").unwrap().pending_owner, None);
+        run(super::transfer_repo("t-offer", &alice, false, carol)).unwrap();
+        run(cancel_transfer("t-offer", &carol, false)).unwrap();
+        assert_eq!(meta("t-offer").unwrap().pending_owner, None);
+        assert!(run(super::transfer_repo("t-offer", &alice, false, Principal::anonymous())).is_err());
+
+        // Governing withdraws an offer the owner made alone: a governed
+        // repo's owner changes by the voters' offer and no other.
+        add_member("t-offer", &alice, false, carol, Role::Voter).unwrap();
+        set_required_votes("t-offer", &alice, false, 1).unwrap();
+        set_app_canister("t-offer", p(145)).unwrap();
+        run(super::transfer_repo("t-offer", &alice, false, bob)).unwrap();
+        mark_governed("t-offer", &alice).unwrap();
+        assert_eq!(meta("t-offer").unwrap().pending_owner, None);
+        assert!(run(accept_transfer("t-offer", &bob)).unwrap_err().contains("is not offered to"));
+        unmark_governed("t-offer");
+        remove_member("t-offer", &alice, false, carol).unwrap();
+        set_required_votes("t-offer", &alice, false, 0).unwrap();
+
+        // Taken: the new owner pays and administers, their member row is
+        // gone, and the offer with it.
+        run(super::transfer_repo("t-offer", &alice, false, bob)).unwrap();
+        run(accept_transfer("t-offer", &bob)).unwrap();
+        let m = meta("t-offer").unwrap();
+        assert_eq!((m.owner, m.pending_owner), (Some(bob), None));
+        assert!(m.members.is_empty());
+        assert!(can_admin("t-offer", &alice, false).is_err());
+
+        // An operator is asked like anyone: handed a repo, it is not
+        // theirs (nor exempt) until they take it. One who names themself
+        // has agreed by calling.
+        set_test_controller(op, true);
+        run(super::transfer_repo("t-offer", &bob, false, op)).unwrap();
+        assert!(!repo_info("t-offer").unwrap().exempt);
+        run(cancel_transfer("t-offer", &op, true)).unwrap();
+        run(super::transfer_repo("t-offer", &op, true, op)).unwrap();
+        assert_eq!(meta("t-offer").unwrap().owner, Some(op));
+        assert!(repo_info("t-offer").unwrap().exempt);
+        set_test_controller(op, false);
     }
 
     #[test]
@@ -2060,6 +2207,11 @@ mod tests {
         assert!(!t.reached);
         let (t, _) = propose_policy_change("t-gov", &v1, PolicyChange::Transfer { new_owner: v1 }, Vote::Approve, None).unwrap();
         assert!(t.reached);
+        // The vote offers; v1 takes it. The owner cannot take the voters'
+        // offer back, and the one it was made to can.
+        assert_eq!(meta("t-gov").unwrap().owner, Some(alice));
+        assert!(locked(run(cancel_transfer("t-gov", &alice, false))));
+        run(accept_transfer("t-gov", &v1)).unwrap();
         assert_eq!(meta("t-gov").unwrap().owner, Some(v1));
         assert!(!meta("t-gov").unwrap().members.iter().any(|m| m.principal == v1));
         // alice is now a non-member: she cannot propose, and governance holds.
@@ -2081,6 +2233,7 @@ mod tests {
         for who in [&v1, &v2] {
             propose_policy_change("t-gov", who, PolicyChange::Transfer { new_owner: v2 }, Vote::Approve, None).unwrap();
         }
+        run(accept_transfer("t-gov", &v2)).unwrap();
         assert_eq!(meta("t-gov").unwrap().owner, Some(v2));
         let e = propose_policy_change("t-gov", &alice, PolicyChange::RemoveVoter { principal: v2 }, Vote::Approve, None).unwrap_err();
         assert!(e.contains("dropped"), "{e}");
@@ -2234,6 +2387,7 @@ mod tests {
                         governed: false,
                         proposals: Vec::new(),
                         label: Some(r.label),
+                        pending_owner: None,
                     },
                 );
                 if self.refuse.get() {

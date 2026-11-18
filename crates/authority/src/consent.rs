@@ -66,7 +66,7 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
                 PolicyChange::RequiredVotes { k } => format!("require {k} approval{} per commit", if *k == 1 { "" } else { "s" }),
                 PolicyChange::AddVoter { principal } => format!("add {} as a voter", prefix(&principal.to_text(), 11)),
                 PolicyChange::RemoveVoter { principal } => format!("remove voter {}", prefix(&principal.to_text(), 11)),
-                PolicyChange::Transfer { new_owner } => format!("transfer the repository to {}", prefix(&new_owner.to_text(), 11)),
+                PolicyChange::Transfer { new_owner } => format!("offer the repository to {} as its new owner", prefix(&new_owner.to_text(), 11)),
                 PolicyChange::WasmDeploy { target, source_path } => format!("deploy \"{source_path}\" to canister {target}"),
                 PolicyChange::DeployMode { mode } => match mode.as_str() {
                     "reinstall" => "set the install mode to REINSTALL, which WIPES ALL STATE of the target on every deploy".to_string(),
@@ -97,6 +97,21 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
             };
             format!("Add {who} to \"{repo}\" as a {role}: they will be able to {power}.")
         }),
+        "transfer_repo" => args::<(String, Principal)>(arg, m).map(|(repo, who)| {
+            format!(
+                "Offer \"{repo}\" to {who}. If they accept, they own it and pay for it, and you \
+                 lose every right you have over it. Nothing changes until they do."
+            )
+        }),
+        "accept_transfer" => args::<(String,)>(arg, m).map(|(repo,)| {
+            format!(
+                "Become the owner of \"{repo}\": its rent and its pushes and deploys are paid from \
+                 your ic-git balance, and its members keep their roles. Its deploy may install \
+                 into canisters you control."
+            )
+        }),
+        "cancel_transfer" => args::<(String,)>(arg, m)
+            .map(|(repo,)| format!("Withdraw the offer of \"{repo}\" to a new owner. Its owner stays as it is.")),
         "remove_member" => args::<(String, Principal)>(arg, m)
             .map(|(repo, who)| format!("Remove {who} from \"{repo}\". They lose every role they held there.")),
         "set_require_signed_push" => args::<(String, bool)>(arg, m).map(|(repo, on)| {
@@ -284,6 +299,9 @@ mod tests {
             ("set_require_signed_push", encode_args(("ic-vote", false)).unwrap(), &["Stop requiring"]),
             ("add_member", encode_args(("ic-vote", p, "voter")).unwrap(), &["3kq6u-eptpm", "voter", "approve, reject or object"]),
             ("remove_member", encode_args(("ic-vote", p)).unwrap(), &["Remove 3kq6u-eptpm", "every role"]),
+            ("transfer_repo", encode_args(("ic-vote", p)).unwrap(), &["Offer \"ic-vote\" to 3kq6u-eptpm", "Nothing changes until"]),
+            ("accept_transfer", encode_args(("ic-vote",)).unwrap(), &["Become the owner", "your ic-git balance", "canisters you control"]),
+            ("cancel_transfer", encode_args(("ic-vote",)).unwrap(), &["Withdraw the offer"]),
             ("set_required_votes", encode_args(("ic-vote", 2u32)).unwrap(), &["Require 2 approvals"]),
             ("set_required_votes", encode_args(("ic-vote", 0u32)).unwrap(), &["without any approvals"]),
             ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", true)).unwrap(), &["Approve commit 0123456789ab..."]),
@@ -295,7 +313,7 @@ mod tests {
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::RequiredVotes { k: 2 }, Vote::Approve, None::<String>)).unwrap(), &["Approve a policy change", "require 2 approvals", "applies once"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::AddVoter { principal: p }, Vote::Object, Some("not reviewed yet"))).unwrap(), &["Object to the policy change", "add 3kq6u-eptpm... as a voter", "Reason: not reviewed yet"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None::<String>)).unwrap(), &["REINSTALL", "WIPES ALL STATE"]),
-            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::Transfer { new_owner: p }, Vote::Reject, None::<String>)).unwrap(), &["Reject the policy change", "transfer the repository to 3kq6u-eptpm..."]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::Transfer { new_owner: p }, Vote::Reject, None::<String>)).unwrap(), &["Reject the policy change", "offer the repository to 3kq6u-eptpm..."]),
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
             ("set_deploy_mode", encode_args(("ic-vote", "upgrade")).unwrap(), &["keeps its state"]),

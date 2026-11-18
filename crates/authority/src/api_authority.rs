@@ -43,6 +43,7 @@ struct RepoTenancy {
     exempt: bool,
     require_signed_push: bool,
     governed: bool,
+    pending_owner: Option<String>,
 }
 
 /// What a deployed app can show about itself: the config that names its
@@ -184,6 +185,7 @@ pub fn handle(req: &ApiPath) -> Option<HttpResponse> {
                     exempt: i.exempt,
                     require_signed_push: i.require_signed_push,
                     governed: i.governed,
+                    pending_owner: i.pending_owner.map(|p| p.to_text()),
                 },
                 None,
             ),
