@@ -459,8 +459,8 @@ subnet's certificate over it, or with the canister's declaration that it
 has none. The git canister certifies every response at
 `/site/<repo>/...` on its own host (crates/git/src/certify.rs; VISION.md
 F0.5; live since v0.3.12, 2026-11-17) and every response at a site's
-own domains (live since v0.3.13, the same day): there the URL is the site's own, `/` and `/<path>`, which
-names no repo, and the certification tree is one tree for every host,
+own domains (live since v0.3.13, the same day): there the URL is the
+site's own, `/` and `/<path>`, which names no repo, and the certification tree is one tree for every host,
 so each such entry is certified with the request's Host and method
 (GET and HEAD), and a domain's `/` is told from another's, and from
 the canister host's own index at `/`, by the Host the certificate
