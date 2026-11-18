@@ -356,6 +356,15 @@ expect "tenant: evm_set_config refused" "$(ic "$TEN" evm_set_config '("x", "dfx_
 expect "tenant: evm_set_fee_fallback refused" "$(ic "$TEN" evm_set_fee_fallback '(opt record { max_fee_gwei = 50 : nat64; tip_gwei = 2 : nat64 })')" 'is not an operator'
 expect "tenant: sol_send refused" "$(ic "$TEN" sol_send '("x", 1 : nat64)')" 'is not an operator'
 expect "tenant: put_object refused" "$(ic "$TEN" put_object '("blob", blob "x")')" 'is not an operator'
+# The build spike's bench compiles, links and runs what the caller sends,
+# on the canister's cycles with no one charged: updates and queries alike.
+expect "tenant: run_wat refused" "$(ic "$TEN" run_wat '("(module (func (export \"_start\") (loop br 0)))")')" 'is not an operator'
+expect "tenant: measure_compile refused" "$(ic "$TEN" measure_compile '(4294967295 : nat32)')" 'is not an operator'
+expect "tenant: compile_job_start refused" "$(ic "$TEN" compile_job_start '("fn f() = 1;")')" 'is not an operator'
+expect "tenant: compile_distributed refused" "$(ic "$TEN" compile_distributed '(vec { "fn f() = 1;" })')" 'is not an operator'
+expect "tenant: compile_wat (a query) refused" "$(ic "$TEN" compile_wat '("(module)")' --query)" 'is not an operator'
+expect "  ...and as an update" "$(ic "$TEN" compile_wat '("(module)")')" 'is not an operator'
+expect "operator: compile_wat passes the guard" "$(ic "$OP" compile_wat '("(module)")' --query)" 'Ok = blob'
 refuse "operator: evm_reset_nonce passes the guard" "$(ic "$OP" evm_reset_nonce)" 'rror|not an operator'
 # The change itself: a controller that is not on the allowlist is an operator
 # here too (these calls used to check the allowlist alone). $OP is both, so
