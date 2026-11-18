@@ -22,10 +22,10 @@ dfx start --clean --background
 dfx deploy git
 
 dfx canister call git create_repo '("hello")'
-TOKEN=$(dfx canister call git create_push_token '("hello")' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
+TOKEN=$(dfx canister call git create_push_token '("hello", null, null)' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
 
-# Stock git against the local HTTP gateway (`.raw.`: the non-raw gateway
-# serves git traffic too, declared uncertified, and the sites certified):
+# Stock git against the local HTTP gateway, at its raw host: the non-raw
+# gateway serves git traffic too, declared uncertified, and the sites certified.
 git push "http://ic:$TOKEN@$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git" main
 git clone "http://$(dfx canister id git).raw.localhost:$(dfx info webserver-port)/hello.git"
 ```
@@ -145,10 +145,12 @@ are the authority's calls; the push token and the push are the git
 canister's.
 
 ```sh
-A=umobs-yiaaa-aaaab-agyrq-cai   # the authority
-G=34koz-jyaaa-aaaab-ahejq-cai   # the git canister
+# the authority
+A=umobs-yiaaa-aaaab-agyrq-cai
+# the git canister
+G=34koz-jyaaa-aaaab-ahejq-cai
 dfx canister --network ic call $A create_repo '("ic-git")'
-TOKEN=$(dfx canister --network ic call $G create_push_token '("ic-git")' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
+TOKEN=$(dfx canister --network ic call $G create_push_token '("ic-git", null, null)' | sed -n 's/.*Ok = "\([0-9a-f]*\)".*/\1/p')
 git push "https://ic:$TOKEN@$G.raw.icp0.io/ic-git.git" main
 dfx canister --network ic call $A set_site '("ic-git", "browser")'
 dfx canister --network ic call $A evm_registry_publish_site '("ic-git")'
@@ -207,20 +209,27 @@ line, the same calls through dfx; the push tokens are the git canister's,
 everything else the authority's:
 
 ```sh
-C=umobs-yiaaa-aaaab-agyrq-cai   # the authority
-G=34koz-jyaaa-aaaab-ahejq-cai   # the git canister
-dfx canister --network https://icp-api.io call $C deposit_from_cycles_ledger '(2_000_000_000_000)'   # after icrc2_approve on the cycles ledger
-dfx canister --network https://icp-api.io call $C deposit_from_icp '(50_000_000)'   # 0.5 ICP, after icrc2_approve on the ICP ledger for it plus 0.0001 ICP
-dfx canister --network https://icp-api.io call $C pending_icp_deposits   # finish_icp_deposit(id) completes one whose conversion did not finish
+# the authority
+C=umobs-yiaaa-aaaab-agyrq-cai
+# the git canister
+G=34koz-jyaaa-aaaab-ahejq-cai
+# after icrc2_approve on the cycles ledger
+dfx canister --network https://icp-api.io call $C deposit_from_cycles_ledger '(2_000_000_000_000)'
+# 0.5 ICP, after icrc2_approve on the ICP ledger for it plus 0.0001 ICP
+dfx canister --network https://icp-api.io call $C deposit_from_icp '(50_000_000)'
+# a deposit whose conversion did not finish is completed by finish_icp_deposit with its id
+dfx canister --network https://icp-api.io call $C pending_icp_deposits
 dfx canister --network https://icp-api.io call $C create_repo '("myapp")'
 dfx canister --network https://icp-api.io call $C add_member '("myapp", principal "<friend>", "voter")'
 dfx canister --network https://icp-api.io call $C set_required_votes '("myapp", 1)'
-dfx canister --network https://icp-api.io call $G create_push_token '("myapp", opt 90)'   # lifetime in days: default 30, max 365
+# lifetime in days: default 30, max 365
+dfx canister --network https://icp-api.io call $G create_push_token '("myapp", opt (90 : nat32), null)'
 dfx canister --network https://icp-api.io call $G list_push_tokens '("myapp")'
 # Signed pushes: bind the token to your SSH key, and have git sign with it
 dfx canister --network https://icp-api.io call $G create_push_token "(\"myapp\", null, opt \"$(cat ~/.ssh/id_ed25519.pub)\")"
 git config gpg.format ssh && git config user.signingkey ~/.ssh/id_ed25519.pub && git config push.gpgSign if-asked
-dfx canister --network https://icp-api.io call $C set_require_signed_push '("myapp", true)'   # optional: refuse unbound tokens
+# optional: refuse unbound tokens
+dfx canister --network https://icp-api.io call $C set_require_signed_push '("myapp", true)'
 ```
 
 `GET /api/account/<principal>`, `/api/<repo>/info`, `/api/<repo>/votes/<commit>`
@@ -245,7 +254,8 @@ issue.
 ```sh
 cargo check
 cargo test
-tools/e2e-local.sh   # before an upgrade: the whole user path on a local replica
+# before an upgrade: the whole user path on a local replica
+tools/e2e-local.sh
 ```
 
 `tools/e2e-local.sh` starts its own network (with the ICP ledger and the

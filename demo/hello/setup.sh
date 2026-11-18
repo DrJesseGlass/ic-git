@@ -80,7 +80,7 @@ say "point the deploy at it"
 echo "app.wasm in the pushed commit -> $app"
 
 say "push token"
-token=$("${dfxc[@]}" call git create_push_token "(\"$repo\")" 2>&1 | ok_text)
+token=$("${dfxc[@]}" call git create_push_token "(\"$repo\", null, null)" 2>&1 | ok_text)
 [ -n "$token" ] || { echo "create_push_token failed" >&2; exit 1; }
 echo "minted"
 
