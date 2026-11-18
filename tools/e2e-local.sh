@@ -487,6 +487,28 @@ done
 expect "approved: deployed" "$STATUS" 'ok = true'
 WASM_SHA=$(echo "$STATUS" | sed -n 's/.*wasm_sha256 = "\([0-9a-f]*\)".*/\1/p')
 expect "the IC's module hash is the deployed wasm's" "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)" "Module hash: 0x$WASM_SHA"
+# The authority controls every repo's app canister, so the management
+# canister would take an install into this one from any repo's deploy. A
+# repo of another owner names it as its target: the config is taken (any
+# id may be named), and the install is refused.
+ic "$OP" create_repo '("e2e-thief")' >/dev/null
+THIEF=$(ic "$OP" create_push_token '("e2e-thief", null, null)' | ok_text)
+TW=$WORK/thief
+git init -q -b main "$TW"
+printf '(module (func (export "canister_query stolen")))\n' >"$TW/evil.wat"
+git -C "$TW" add -A
+git -C "$TW" -c user.name=E2E -c user.email=thief@local commit -qm evil
+ic "$OP" set_wasm_deploy "(\"e2e-thief\", \"$APP\", \"evil.wat\")" >/dev/null
+GIT_TERMINAL_PROMPT=0 git -C "$TW" push "http://ic:$THIEF@$HOST/e2e-thief.git" main >/dev/null 2>&1 || true
+THIEVED=
+for _ in $(seq 1 30); do
+  THIEVED=$(ic "$OP" get_deploy_status '("e2e-thief")')
+  echo "$THIEVED" | grep -q 'refused' && break
+  sleep 1
+done
+expect "another owner's repo naming the app canister: its install is refused" "$THIEVED" "refused: .* is e2e-app.{1,3}s app canister.*not e2e-thief"
+expect "  ...by deploy_now too" "$(ic "$OP" deploy_now '("e2e-thief")')" "refused: .* is e2e-app.{1,3}s app canister.*not e2e-thief"
+expect "  ...and the app canister keeps its module" "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)" "Module hash: 0x$WASM_SHA"
 if [ -n "$NAMES_WASM" ]; then
   expect "announced" "$STATUS" 'announced as solo/e2e-app'
   REC=$(call "$OP" names get_record '("solo/e2e-app")' --query)

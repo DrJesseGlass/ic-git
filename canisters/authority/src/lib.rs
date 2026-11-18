@@ -844,8 +844,11 @@ async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeRepo
 /// Configure compile-and-deploy for a repo: on push to the deploy branch, the
 /// source at `source_path` (.wat or .lang, compiled here, or a committed
 /// .wasm, validated) is installed into `target`. A governed repo deploys
-/// .wasm only. The git canister must be a controller of `target`. Install mode
-/// defaults to upgrade; change it with set_deploy_mode.
+/// .wasm only. This canister must be a controller of `target`, and `target`
+/// the repo's own app canister or a canister the repo's owner controls:
+/// asked when the install goes out (tenancy::may_install), so any id is
+/// taken here. Install mode defaults to upgrade; change it with
+/// set_deploy_mode.
 #[ic_cdk::update]
 async fn set_wasm_deploy(repo: String, target: String, source_path: String) -> Result<(), String> {
     let m = tenancy::can_admin(&repo, &caller(), operator())?;

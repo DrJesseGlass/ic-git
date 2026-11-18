@@ -339,6 +339,22 @@ the repo, and `set_wasm_deploy(repo, "app", path)` then targets it by name.
 `top_up_app_canister(repo, cycles)` moves more balance into it. The owner
 can also top it up from any wallet, since it is theirs.
 
+A deploy config names its target by id, and any id may be named: ic-git
+is a controller of every repo's app canister, the only one of a governed
+repo's, so that it can install into a canister says nothing of whose the
+canister is. The install asks. As it goes out, the deploy reads the
+target's controllers from the IC and installs into the repo's own app
+canister; never into another repo's, whoever owns either; and into any
+other canister only if the repo's owner is a controller of it (the owner
+made ic-git a controller of it and could install into it anyway). What
+it refuses, the deploy's status says. An ownerless repo, which only
+operators configure, has no owner to ask after and is held to the first
+two. One edge stays open while a transfer asks nothing of the new owner:
+a repo handed to someone deploys into that owner's other canisters, if
+ic-git is a controller of them, though not into their app canisters.
+Until 2026-11 nothing asked, and a repo's deploy could install
+into any app canister.
+
 ## Governed app canisters
 
 docs/GOVERNANCE.md, section 2. With the owner a controller, the owner can
@@ -588,9 +604,9 @@ such method", and stopped.
 
 Reinstall is the one destructive control, and it is built to be hard to
 do by accident: a red button opens a box naming the configured deploy
-target (which is normally the app canister, but `set_wasm_deploy` accepts
-any canister, so the box names the one the config holds and says so when
-it is not the app canister) and what will be wiped, and the run button
+target (which is normally the app canister, but `set_wasm_deploy` takes
+any canister's id, so the box names the one the config holds and says so
+when it is not the app canister) and what will be wiped, and the run button
 stays disabled until the owner has typed the repository name. Because the
 install mode is a setting rather than an action, the control switches to
 reinstall, deploys, and switches back to upgrade, and reports in red if
