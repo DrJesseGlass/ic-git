@@ -124,7 +124,8 @@ unless named) part: their merge base (null for histories that share
 nothing), how many commits each has that the other has not, and the
 head's own, newest first (the newest 200; `truncated` says there are
 more). What a branch changed is then `/diff/<head>?base=<merge_base>`.
-Two revs more than 2000 commits apart are answered 422.
+The walk reads at most 2000 commits, counting both sides; two revs it
+cannot place within that are answered 422.
 
 `/diff` lists the files that differ between two commits' trees, from
 `base` (the first parent unless named; null for a commit without one) to

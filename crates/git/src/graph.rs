@@ -20,8 +20,9 @@
 //! git does. The walk goes on for `SLOP` commits past the point where it
 //! could stop, and a second pass carries each side's paint, and what lies
 //! under a common ancestor, down through every commit that was loaded.
-//! What is left is a commit dated before an ancestor more than `SLOP`
-//! commits further down than the walk went: there the counts can be over
+//! What is left is a commit dated before an ancestor, or in the same
+//! second as it (a rebase stamps a run of commits with one), more than
+//! `SLOP` commits further down than the walk went: there the counts can be over
 //! and the merge base an older common ancestor than the newest. Git
 //! without its commit graph has the same edge.
 
@@ -66,13 +67,14 @@ fn load(oid: &Oid) -> Result<(Vec<Oid>, u64), String> {
     if ty != ObjectType::Commit {
         return Err(format!("{} is not a commit", store::oid_hex(oid)));
     }
-    let parents = object::commit_refs(&content)?.parents;
-    let time = object::commit_meta(&content).committer.as_deref().and_then(object::ident_time).unwrap_or(0);
-    Ok((parents, time))
+    object::commit_parents_time(&content)
 }
 
-/// Compare `head` with `base`, loading at most `cap` commits: `None` past
-/// that.
+/// Compare `head` with `base`, loading at most `cap` commits: `None`
+/// where that is not enough to find where they part. The bound counts
+/// both sides' commits and the common ones the walk passes on its way;
+/// the look past the answer for a lying clock stops at it rather than
+/// fails.
 pub fn compare(base: &Oid, head: &Oid, cap: usize) -> Result<Option<Compared>, String> {
     let mut nodes: BTreeMap<Oid, Node> = BTreeMap::new();
     // Newest first; the counter keeps the order of equal times that of
@@ -87,15 +89,18 @@ pub fn compare(base: &Oid, head: &Oid, cap: usize) -> Result<Option<Compared>, S
     macro_rules! paint {
         ($oid:expr, $flags:expr) => {{
             let (oid, flags): (Oid, u8) = ($oid, $flags);
-            if !nodes.contains_key(&oid) {
-                if nodes.len() >= cap {
-                    return Ok(None);
-                }
+            let full = !nodes.contains_key(&oid) && nodes.len() >= cap;
+            // At the bound, a commit under a common ancestor is left
+            // unread: it could only have corrected for a clock. Any
+            // other is one the answer needs.
+            if full && flags & STALE == 0 {
+                return Ok(None);
+            }
+            if !full && !nodes.contains_key(&oid) {
                 let (parents, time) = load(&oid)?;
                 nodes.insert(oid, Node { parents, time, flags: 0, queued: 0 });
             }
-            let node = nodes.get_mut(&oid).expect("just inserted");
-            if node.flags & flags != flags {
+            if let Some(node) = nodes.get_mut(&oid).filter(|n| n.flags & flags != flags) {
                 if node.flags & STALE == 0 && flags & STALE != 0 {
                     live -= node.queued;
                 }
@@ -120,7 +125,9 @@ pub fn compare(base: &Oid, head: &Oid, cap: usize) -> Result<Option<Compared>, S
         }
         let mut down = node.flags & (BOTH | STALE);
         if down & BOTH == BOTH {
-            if node.flags & RESULT == 0 {
+            // A candidate, in the order met, unless already known to be
+            // under another.
+            if node.flags & (RESULT | STALE) == 0 {
                 node.flags |= RESULT;
                 results.push(oid);
             }
@@ -144,7 +151,7 @@ pub fn compare(base: &Oid, head: &Oid, cap: usize) -> Result<Option<Compared>, S
     for mark in [HEAD, BASE, STALE] {
         let mut stack: Vec<Oid> = nodes
             .iter()
-            .filter(|(_, n)| if mark == STALE { n.flags & (STALE | RESULT) != 0 || n.flags & BOTH == BOTH } else { n.flags & mark != 0 })
+            .filter(|(_, n)| if mark == STALE { n.flags & BOTH == BOTH } else { n.flags & mark != 0 })
             .map(|(oid, _)| *oid)
             .collect();
         while let Some(oid) = stack.pop() {
@@ -349,6 +356,11 @@ mod tests {
         // The root against a tip is the whole history.
         let root_side = commit("lonely", &[], 2);
         assert!(compare(&root_side, &right, 50).unwrap().is_none());
+        // A bound reached only while looking past the answer does not
+        // take the answer away: three commits decide this one.
+        let r = compare(&left, &right, 3).unwrap().expect("decided within the bound");
+        assert_eq!((r.merge_base, r.ahead, r.behind), (Some(tip), vec![right], 1));
+        assert!(compare(&left, &right, 2).unwrap().is_none());
         // Something that is no commit is an error.
         let blob = store::put_object(ObjectType::Blob, b"x");
         assert!(compare(&blob, &right, 50).is_err());

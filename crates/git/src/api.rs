@@ -42,8 +42,9 @@
 //! gives a commit, at most `MAX_COMMITS` of them (`truncated` says there
 //! are more). What the head changed is then `/diff/<head>?base=` the
 //! merge base. Two histories that share nothing have a null merge base.
-//! The walk loads at most `COMPARE_COMMITS` commits; two revs further
-//! apart than that are answered 422. The commits listed are the newest
+//! The walk loads at most `COMPARE_COMMITS` commits, both sides' and the
+//! common ones it passes on its way; where that does not find where the
+//! two part, the answer is 422. The commits listed are the newest
 //! `MAX_COMMITS`: there is no asking for the ones after.
 
 use crate::diff;
@@ -259,14 +260,17 @@ pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
             };
             with_rev(&repo, rev, |head| {
                 let base = resolve_rev(&repo, &base)?;
-                // Both revs are there: what goes wrong from here is not
-                // "not found".
+                // Both revs are there: what goes wrong from here, a commit
+                // under them missing or unreadable, is not "not found".
                 let c = match graph::compare(&base, &head, COMPARE_COMMITS) {
                     Ok(Some(c)) => c,
                     Ok(None) => return Ok(error(422, "the two are too many commits apart to compare")),
                     Err(e) => return Ok(error(500, &e)),
                 };
-                let commits = c.ahead.iter().take(MAX_COMMITS).map(commit_info).collect::<Result<Vec<_>, _>>()?;
+                let commits = match c.ahead.iter().take(MAX_COMMITS).map(commit_info).collect::<Result<Vec<_>, _>>() {
+                    Ok(commits) => commits,
+                    Err(e) => return Ok(error(500, &e)),
+                };
                 let info = CompareInfo {
                     head: store::oid_hex(&head),
                     base: store::oid_hex(&base),
@@ -418,8 +422,8 @@ fn ident(s: &str) -> Option<Ident> {
     let (name, rest) = s.split_once('<')?;
     let (email, rest) = rest.split_once('>')?;
     let mut it = rest.split_whitespace();
-    let time = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
-    let tz = it.next().unwrap_or("").to_string();
+    let time = object::ident_time(s).unwrap_or(0);
+    let tz = it.nth(1).unwrap_or("").to_string();
     Some(Ident {
         name: name.trim().to_string(),
         email: email.to_string(),
