@@ -1386,6 +1386,47 @@ pub fn is_governed(repo: &str) -> bool {
     meta(repo).is_some_and(|m| m.governed)
 }
 
+/// May `repo`'s deploy install into `target`, a canister with these
+/// controllers? This canister is a controller of every repo's app canister
+/// (the only one, of a governed repo's), so the management canister would
+/// take an install into any of them from any repo's deploy: the config
+/// names a canister, and nothing in it says whose. Three rules, in order:
+///
+/// - The repo's own app canister: yes.
+/// - Another repo's app canister: no, whoever owns either repo. Not left
+///   to the next rule, which a repo handed to the canister's owner would
+///   pass (a transfer asks nothing of who receives it), and which an
+///   ownerless repo has no owner for. A walk of the repos, made only for
+///   a target that is not the repo's app canister, which the console
+///   never sets.
+/// - Any other canister: only if the repo's owner is one of its
+///   controllers -- the owner made this canister a controller of it, as
+///   the deploy needs, and could install into it without us. An ownerless
+///   repo (from before tenancy) is the operators' to configure, and they
+///   answer for its target.
+///
+/// Asked with the controllers the IC reported in the same message that
+/// sends the install (deploy.rs `install`), not when the config is set: a
+/// canister's id can be named before the canister is made.
+pub fn may_install(repo: &str, target: &Principal, controllers: &[Principal]) -> Result<(), String> {
+    let m = existing(repo)?;
+    if m.app_canister.as_ref() == Some(target) {
+        return Ok(());
+    }
+    let holds = |(_, other): &(String, RepoMeta)| other.app_canister.as_ref() == Some(target);
+    if let Some((holder, _)) = crate::records::repo_meta_all::<RepoMeta>().into_iter().find(holds) {
+        return Err(format!("refused: {target} is {holder}'s app canister, and only {holder}'s deploy installs into it, not {repo}'s"));
+    }
+    match m.owner {
+        None => Ok(()),
+        Some(owner) if controllers.contains(&owner) => Ok(()),
+        Some(owner) => Err(format!(
+            "refused: {repo}'s owner ({owner}) is not a controller of {target}; \
+             a repo deploys into its own app canister or into a canister its owner controls"
+        )),
+    }
+}
+
 /// Whether an install into `target` is an install into the repo's governed
 /// app canister -- what the deploy queue records as `<repo>#app`. A governed
 /// repo whose deploy config points elsewhere installs nothing into the
@@ -1418,6 +1459,60 @@ mod tests {
 
     fn p(n: u8) -> Principal {
         Principal::from_slice(&[n; 8])
+    }
+
+    /// This canister controls every app canister, so the management
+    /// canister would install into any of them for any repo's deploy.
+    #[test]
+    fn a_repo_installs_into_its_own_app_canister_or_one_its_owner_controls() {
+        let (alice, mallory, me) = (p(71), p(72), p(73));
+        let (alices_app, mallorys_app, alices_own) = (p(74), p(75), p(76));
+        for who in [&alice, &mallory] {
+            credit(who, 10_000_000_000);
+        }
+        create_repo("t-victim", &alice, false).unwrap();
+        create_repo("t-attacker", &mallory, false).unwrap();
+        set_app_canister("t-victim", alices_app).unwrap();
+        set_app_canister("t-attacker", mallorys_app).unwrap();
+
+        // The repo's own app canister: as made (its owner and this
+        // canister), and governed (this canister alone).
+        assert!(may_install("t-victim", &alices_app, &[alice, me]).is_ok());
+        assert!(may_install("t-victim", &alices_app, &[me]).is_ok());
+        // A canister of the owner's, with this canister added to it.
+        assert!(may_install("t-victim", &alices_own, &[alice, me]).is_ok());
+
+        // Another repo's app canister, governed or not: named in the
+        // attacker's own deploy config, which any principal may be.
+        for controllers in [vec![alice, me], vec![me]] {
+            let e = may_install("t-attacker", &alices_app, &controllers).unwrap_err();
+            assert!(e.starts_with("refused: ") && e.contains("is t-victim's app canister"), "{e}");
+        }
+        // Any other canister this one controls and the owner does not.
+        let e = may_install("t-attacker", &alices_own, &[alice, me]).unwrap_err();
+        assert!(e.contains(&mallory.to_text()) && e.contains("is not a controller"), "{e}");
+        assert!(may_install("t-attacker", &p(77), &[]).is_err());
+
+        // The repo handed to the victim, which asks nothing of the
+        // victim: its owner now controls the victim's app canister, and
+        // that is not what lets a repo in. A writer the attacker left on
+        // it would otherwise push the install.
+        transfer_repo("t-attacker", &mallory, false, alice).unwrap();
+        let e = may_install("t-attacker", &alices_app, &[alice, me]).unwrap_err();
+        assert!(e.contains("is t-victim's app canister"), "{e}");
+        // What follows the owner does: the new owner's other canisters
+        // and no longer the old one's; the repo's own app canister still.
+        assert!(may_install("t-attacker", &alices_own, &[alice, me]).is_ok());
+        assert!(may_install("t-attacker", &p(78), &[mallory, me]).is_err());
+        assert!(may_install("t-attacker", &mallorys_app, &[mallory, me]).is_ok());
+
+        // An ownerless repo is the operators' to configure, and is no way
+        // into another repo's app canister either.
+        test_repo("t-legacy");
+        assert!(may_install("t-legacy", &p(79), &[me]).is_ok());
+        let e = may_install("t-legacy", &alices_app, &[me]).unwrap_err();
+        assert!(e.contains("is t-victim's app canister"), "{e}");
+        assert!(may_install("t-none", &alices_app, &[alice, me]).is_err());
     }
 
     // The flows that await the git side, driven to completion: in one

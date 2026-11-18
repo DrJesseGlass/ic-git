@@ -404,15 +404,22 @@ struct CanisterIdRecord {
     canister_id: Principal,
 }
 
-// Only the field we need; candid ignores the rest of canister_status's reply.
+// Only the fields we need; candid ignores the rest of canister_status's reply.
 #[derive(CandidType, Deserialize)]
 struct StatusReply {
     module_hash: Option<Vec<u8>>,
+    settings: StatusSettings,
 }
 
-/// Whether the target already has a module installed. Requires the git canister
-/// to be a controller of `target` (it must be, to install into it).
-async fn target_has_module(target: Principal) -> Result<bool, String> {
+#[derive(CandidType, Deserialize)]
+struct StatusSettings {
+    controllers: Vec<Principal>,
+}
+
+/// The target as the IC has it now: whether a module is installed, and who
+/// controls it. Requires this canister to be a controller of `target` (it
+/// must be, to install into it).
+async fn target_status(target: Principal) -> Result<(bool, Vec<Principal>), String> {
     let reply: StatusReply = intercanister::call(
         Principal::management_canister(),
         "canister_status",
@@ -421,24 +428,26 @@ async fn target_has_module(target: Principal) -> Result<bool, String> {
         },),
     )
     .await?;
-    Ok(reply.module_hash.is_some())
+    Ok((reply.module_hash.is_some(), reply.settings.controllers))
 }
 
 /// Install `wasm` into `target`. An empty target always gets a plain install;
 /// a target that already has a module gets `mode` (Upgrade preserves stable
 /// memory, Reinstall discards it). Returns the mode label actually used.
 ///
-/// `allowed` runs after the last await and before `install_code` goes out,
+/// `allowed` is given the target's controllers as the IC just reported
+/// them, and runs after the last await and before `install_code` goes out,
 /// with nothing in between: what it checks cannot change between its
 /// answer and the install.
 async fn install(
     target: Principal,
     wasm: Vec<u8>,
     mode: DeployMode,
-    allowed: impl Fn() -> Result<(), String>,
+    allowed: impl Fn(&[Principal]) -> Result<(), String>,
 ) -> Result<&'static str, String> {
     let fail = |e: String| format!("install_code failed: {e}");
-    let (install_mode, label) = if !target_has_module(target).await.map_err(fail)? {
+    let (has_module, controllers) = target_status(target).await.map_err(fail)?;
+    let (install_mode, label) = if !has_module {
         (CanisterInstallMode::Install, "install")
     } else {
         match mode {
@@ -452,7 +461,7 @@ async fn install(
         wasm_module: wasm,
         arg: vec![],
     };
-    allowed()?;
+    allowed(&controllers)?;
     // Unbounded wait on purpose: the reply (or reject) is definite, so the
     // deploy log never records an install whose outcome is unknown. The
     // names announce relies on that (see `run`).
@@ -490,7 +499,14 @@ async fn attempt(
     let info = compile::info_of(&wasm);
     st.wasm_len = info.wasm_len;
     st.wasm_sha256 = info.sha256_hex;
-    let label = install(target, wasm, cfg.mode, || kind_now().map(|_| ())).await?;
+    // This canister controls every repo's app canister, so that it controls
+    // the target says nothing of whose the target is: the repo's own, or
+    // one its owner controls, and no other (tenancy::may_install).
+    let label = install(target, wasm, cfg.mode, |controllers| {
+        kind_now()?;
+        crate::tenancy::may_install(repo, &target, controllers)
+    })
+    .await?;
     Ok(format!("{label} to {}", cfg.target))
 }
 
