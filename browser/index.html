@@ -498,22 +498,30 @@ const Diff = (() => {
 
   function tabs(repo, rev, on) {
     const t = (k, label) => '<a class="' + (on === k ? 'on' : '') + '" href="' + esc(H(repo, k, rev)) + '">' + label + '</a>';
-    return '<span class="tabs">' + t('tree', 'files') + t('commits', 'commits') + '</span>';
+    return '<span class="tabs">' + t('tree', 'files') + t('commits', 'commits') + t('compare', 'compare') + '</span>';
   }
 
-  function refPicker(repo, refs, rev, kind, path) {
+  // A select of the repo's refs with `rev` chosen (a rev that is no ref,
+  // a commit id, is listed as itself). Choosing one goes to `go(name)`.
+  // A ref is named the short way, main for refs/heads/main, unless a
+  // branch and a tag share the short name: then the branch has it, as
+  // the canister reads it, and the tag is named in full.
+  function refPicker(refs, rev, go, id = 'ref') {
     const names = refs.map(r => r.name).sort();
-    const opts = names.map(n => {
-      const s = n.replace(/^refs\/(heads|tags)\//, '');
-      return '<option value="' + esc(s) + '"' + (s === rev || n === rev ? ' selected' : '') + '>' + esc(n) + '</option>';
-    }).join('');
-    const sel = '<select id="ref">' + opts + (names.some(n => n.replace(/^refs\/(heads|tags)\//, '') === rev) ? '' : '<option selected value="' + esc(rev) + '">' + esc(rev) + '</option>') + '</select>';
-    setTimeout(() => {
-      const el = document.getElementById('ref');
-      if (el) el.onchange = () => { location.hash = H(repo, kind, el.value, path); };
-    }, 0);
-    return sel;
+    const shortOf = n => n.replace(/^refs\/(heads|tags)\//, '');
+    const value = n => n.startsWith('refs/tags/') && names.includes('refs/heads/' + shortOf(n)) ? n : shortOf(n);
+    const chosen = names.find(n => n === rev) || names.find(n => value(n) === rev);
+    const opts = names.map(n => '<option value="' + esc(value(n)) + '"' + (n === chosen ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
+    picked.set(id, go);
+    return '<select id="' + esc(id) + '">' + opts + (chosen ? '' : '<option selected value="' + esc(rev) + '">' + esc(rev) + '</option>') + '</select>';
   }
+  // Where each picker on the page goes; one listener, so a picker works
+  // whenever its markup reaches the page, and after it is rendered again.
+  const picked = new Map();
+  main.addEventListener('change', e => {
+    const go = e.target.tagName === 'SELECT' && picked.get(e.target.id);
+    if (go) location.hash = go(e.target.value);
+  });
 
   async function showRepos() {
     const { data } = await api('repos');
@@ -552,7 +560,7 @@ const Diff = (() => {
     }).join('');
     const up = path ? '<tr><td><a href="' + esc(H(repo, 'tree', rev, path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '')) + '">..</a></td><td></td><td></td></tr>' : '';
     render(crumbs(repo, rev, 'tree', path) +
-      '<div class="row">' + refPicker(repo, refs, rev, 'tree', path) + tabs(repo, rev, 'tree') +
+      '<div class="row">' + refPicker(refs, rev, v => H(repo, 'tree', v, path)) + tabs(repo, rev, 'tree') +
       '<span class="muted">at <a class="oid" href=\"' + esc(H(repo, 'commit', commit)) + '\">' + esc(short(commit)) + '</a></span></div>' +
       '<table>' + up + rows + '</table>');
     Console.mount('repo', repo);
@@ -570,14 +578,67 @@ const Diff = (() => {
       '<span class="muted"><code>git show ' + esc(short(commit)) + ':' + esc(path) + '</code> reproduces this</span></div>' + body);
   }
 
+  // A commit in a list: its first line, who, when, its tree.
+  function commitRow(repo, c) {
+    const title = (c.message || '').split('\n')[0];
+    return '<div class="commit"><a href=\"' + esc(H(repo, 'commit', c.oid)) + '\"><b>' + esc(title || '(no message)') + '</b></a>' +
+      '<div class="muted">' + esc(c.author ? c.author.name : '?') + ' &middot; ' + esc(when(c.author && c.author.time)) + ' &middot; <a class="oid" href=\"' + esc(H(repo, 'tree', c.oid)) + '\">' + esc(short(c.oid)) + '</a></div></div>';
+  }
+
   async function showCommits(repo, rev) {
     const [{ data: refs }, { data: list }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/commits/' + encodeURIComponent(rev) + '?n=50')]);
-    const items = list.map(c => {
-      const title = (c.message || '').split('\n')[0];
-      return '<div class="commit"><a href=\"' + esc(H(repo, 'commit', c.oid)) + '\"><b>' + esc(title || '(no message)') + '</b></a>' +
-        '<div class="muted">' + esc(c.author ? c.author.name : '?') + ' &middot; ' + esc(when(c.author && c.author.time)) + ' &middot; <a class="oid" href=\"' + esc(H(repo, 'tree', c.oid)) + '\">' + esc(short(c.oid)) + '</a></div></div>';
-    }).join('');
-    render(crumbs(repo, rev, 'commits', '') + '<div class="row">' + refPicker(repo, refs, rev, 'commits', '') + tabs(repo, rev, 'commits') + '</div>' + items);
+    const items = list.map(c => commitRow(repo, c)).join('');
+    render(crumbs(repo, rev, 'commits', '') + '<div class="row">' + refPicker(refs, rev, v => H(repo, 'commits', v)) + tabs(repo, rev, 'commits') + '</div>' + items);
+  }
+
+  // A branch against another (#/<repo>/compare/<head>/<base>, the base
+  // the repo's HEAD unless named): where the two part, the commits only
+  // the head has, and what they changed between them -- the head's tree
+  // against the merge base's, not against the base's tip, which has
+  // moved on since. What a pull request would bring.
+  async function showCompare(repo, head, base) {
+    base = base || 'HEAD';
+    // An answer that comes after the reader has gone elsewhere is not
+    // shown: this one can be a long walk.
+    const here = location.hash;
+    const comparing = api(enc(repo) + '/compare/' + encodeURIComponent(head) + '?base=' + encodeURIComponent(base));
+    comparing.catch(() => {});
+    const { data: refs } = await api(enc(repo) + '/refs');
+    const at = (h, b) => H(repo, 'compare', h, b === 'HEAD' ? '' : b);
+    // Built when it is rendered: a picker's markup and where it goes
+    // reach the page together.
+    const top = () => crumbs(repo, head, 'compare', '') +
+      '<div class="row"><span>' + refPicker(refs, head, v => at(v, base)) +
+      ' <span class="muted">against</span> ' + refPicker(refs, base, v => at(head, v), 'base') + '</span>' +
+      tabs(repo, head, 'compare') + '<a href="' + esc(at(base, head)) + '">the other way round</a></div>';
+    let d;
+    try {
+      ({ data: d } = await comparing);
+    } catch (e) {
+      if (location.hash !== here) return;
+      // Two revs too far apart, a rev that is not there, a canister from
+      // before /compare: the pickers stay, to choose again.
+      return render(top() + '<p class="err">' + esc(e.message || e) + '</p>');
+    }
+    if (location.hash !== here) return;
+    const oid = o => '<a class="oid" href="' + esc(H(repo, 'commit', o)) + '">' + esc(short(o)) + '</a>';
+    const n = (k, what) => k + ' ' + what + (k === 1 ? '' : 's');
+    const where = !d.merge_base
+      ? 'The two share no history: there is no commit both descend from.'
+      : d.head === d.base ? 'The two are the same commit, ' + oid(d.head) + '.'
+      : n(d.ahead, 'commit') + ' ahead of ' + esc(base) + ', ' + n(d.behind, 'commit') + ' behind it; they part at ' + oid(d.merge_base) + '.';
+    // The names are the reader's; the commits they were read as are the
+    // canister's, and what the numbers are of.
+    const read = d.head === d.base ? '' : ' <span class="muted">' + esc(head) + ' is ' + oid(d.head) + ', ' + esc(base) + ' is ' + oid(d.base) + '.</span>';
+    const none = d.ahead ? '' : d.head === d.base ? '' : d.merge_base
+      ? '<p class="muted">Nothing to bring: ' + esc(base) + ' already has every commit of ' + esc(head) + '.</p>' : '';
+    render(top() + '<p>' + where + read + '</p>' + none +
+      (d.ahead ? '<h3>' + n(d.ahead, 'commit') + '</h3>' + d.commits.map(c => commitRow(repo, c)).join('') +
+        (d.truncated ? '<p class="muted">The newest ' + d.commits.length + ' are listed.</p>' : '') : '') +
+      (d.merge_base && d.ahead ? '<div id="diff"><p class="muted">reading what changed&hellip;</p></div>'
+        : !d.merge_base ? '<p class="muted">With nothing in common there is no change to show between them; <a href="' + esc(H(repo, 'commit', d.head, d.base)) + '">the two trees can still be compared</a>.</p>' : ''));
+    const box = document.getElementById('diff');
+    if (box) await showDiff(repo, d.head, d.merge_base, box);
   }
 
   // A commit, and under it what it changed: against its first parent, or
@@ -594,7 +655,7 @@ const Diff = (() => {
       who('author', c.author) + who('committer', c.committer) +
       '</table><pre>' + esc(c.message) + '</pre><div id="diff"><p class="muted">reading what changed&hellip;</p></div>');
     Console.mount('commit', repo, c.oid);
-    await showDiff(repo, c, base, document.getElementById('diff'));
+    await showDiff(repo, c.oid, base, document.getElementById('diff'), c.parents);
   }
 
   // How many files open with their lines when the commit is shown; the
@@ -605,10 +666,13 @@ const Diff = (() => {
   const MAX_DIFF_CHARS = 1000000;
   const isBinary = text => /[\x00-\x08\x0E-\x1F]/.test(text.slice(0, 8000));
 
-  async function showDiff(repo, c, base, box) {
+  // What `oid` changed against `base`, or against its first parent where
+  // none is named: `parents` are then the commit's, for the links to the
+  // others.
+  async function showDiff(repo, oid, base, box, parents = []) {
     let d;
     try {
-      ({ data: d } = await api(enc(repo) + '/diff/' + encodeURIComponent(c.oid) + (base ? '?base=' + encodeURIComponent(base) : '')));
+      ({ data: d } = await api(enc(repo) + '/diff/' + encodeURIComponent(oid) + (base ? '?base=' + encodeURIComponent(base) : '')));
     } catch (e) {
       // A canister from before /diff answers 404 "not found": the commit
       // is shown as it always was.
@@ -619,8 +683,8 @@ const Diff = (() => {
     const n = d.files.length;
     const against = !d.base ? '&middot; a first commit: every file is new'
       : 'against <a class="oid" href="' + esc(H(repo, 'commit', d.base)) + '">' + esc(short(d.base)) + '</a>' +
-        (base ? '' : c.parents.length > 1 ? ', its first parent' + c.parents.slice(1).map((p, i) =>
-          ' &middot; <a href="' + esc(H(repo, 'commit', c.oid, p)) + '">against parent ' + (i + 2) + '</a>').join('') : '');
+        (base ? '' : parents.length > 1 ? ', its first parent' + parents.slice(1).map((p, i) =>
+          ' &middot; <a href="' + esc(H(repo, 'commit', oid, p)) + '">against parent ' + (i + 2) + '</a>').join('') : '');
     box.innerHTML = '<h3>' + n + (d.truncated ? ' or more' : '') + ' file' + (n === 1 && !d.truncated ? '' : 's') + ' changed <span class="muted" style="font-weight:400">' + against + '</span></h3>' +
       (d.truncated ? '<p class="muted">The list stops here: there are more changes than one answer holds, and renames are not paired in a list cut short.</p>' : '') +
       d.files.map((f, i) => {
@@ -708,6 +772,7 @@ const Diff = (() => {
       if (kind === 'blob') return await showBlob(repo, rev, path);
       if (kind === 'commits') return await showCommits(repo, rev);
       if (kind === 'commit') return await showCommit(repo, rev, path);
+      if (kind === 'compare') return await showCompare(repo, rev, path);
       throw new Error('unknown view: ' + kind);
     } catch (e) { fail(e); }
   }
