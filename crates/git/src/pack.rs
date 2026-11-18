@@ -322,10 +322,15 @@ impl Prepared {
         self.objects
             .into_iter()
             .map(|(oid, value)| {
-                // Another push may have stored it since `prepare`; the
-                // value is the same either way.
+                // Another push may have stored it since `prepare`, and the
+                // first value is the one kept: the same object, but its
+                // zlib stream may differ (a client's, or deflated here),
+                // and a fetch being streamed is rebuilt from the stored
+                // streams chunk by chunk, so one must not change under it.
                 if let Some(value) = value {
-                    store::put_stored(oid, value);
+                    if !store::has_object(&oid) {
+                        store::put_stored(oid, value);
+                    }
                 }
                 oid
             })
@@ -701,6 +706,33 @@ mod tests {
         assert_eq!(store::get_object_parsed(&made).unwrap().1.len(), 480_000);
         // What the store has adds nothing.
         assert_eq!(prepare(&pack).unwrap().stored_bytes(), 0);
+    }
+
+    /// Two pushes read before either is stored: the object keeps the
+    /// stream that was stored first.
+    #[test]
+    fn an_object_stored_meanwhile_keeps_its_first_stream() {
+        let content = b"overlap overlap overlap overlap overlap overlap".repeat(20);
+        let oid = store::oid_of(ObjectType::Blob, &content);
+        // The same object as a whole entry at another compression level,
+        // so its stream differs from the one the store would deflate.
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        pack.extend_from_slice(&2u32.to_be_bytes());
+        pack.extend_from_slice(&1u32.to_be_bytes());
+        push_entry_header(&mut pack, ObjectType::Blob as u8, content.len() as u64);
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::none());
+        std::io::Write::write_all(&mut enc, &content).unwrap();
+        pack.extend_from_slice(&enc.finish().unwrap());
+        let digest: [u8; 20] = Sha1::digest(&pack).into();
+        pack.extend_from_slice(&digest);
+
+        let late = prepare(&pack).unwrap();
+        assert!(late.stored_bytes() > 0);
+        store::put_object(ObjectType::Blob, &content);
+        let first = store::get_object_stored(&oid).unwrap().zlib().to_vec();
+        assert_eq!(late.store(), vec![oid]);
+        assert_eq!(store::get_object_stored(&oid).unwrap().zlib(), first.as_slice());
     }
 
     #[test]
