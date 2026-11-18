@@ -116,7 +116,16 @@ GET /api/<repo>/commit/<rev>            one commit
 GET /api/<repo>/tree/<rev>[/<path>]     {commit, path, entries: [{name, mode, kind, oid}]}
 GET /api/<repo>/blob/<rev>/<path>       raw bytes, text/plain, nosniff
 GET /api/<repo>/diff/<rev>[?base=<rev>] {commit, base, files: [{path, status, old_path, old, new}], truncated}
+GET /api/<repo>/compare/<rev>[?base=<rev>] {head, base, merge_base, ahead, behind, commits, truncated}
 ```
+
+`/compare` is where `<rev>` (the head) and `base` (the repo's HEAD
+unless named) part: their merge base (null for histories that share
+nothing), how many commits each has that the other has not, and the
+head's own, newest first (the newest 200; `truncated` says there are
+more). What a branch changed is then `/diff/<head>?base=<merge_base>`.
+The walk reads at most 2000 commits, counting both sides; two revs it
+cannot place within that are answered 422.
 
 `/diff` lists the files that differ between two commits' trees, from
 `base` (the first parent unless named; null for a commit without one) to

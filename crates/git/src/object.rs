@@ -99,6 +99,27 @@ pub fn commit_meta(content: &[u8]) -> CommitMeta {
     meta
 }
 
+/// A commit's parents and its committer's time, from its headers alone:
+/// the message is not read. The time is 0 where there is none to read (a
+/// hand-made commit).
+pub fn commit_parents_time(content: &[u8]) -> Result<(Vec<Oid>, u64), String> {
+    let parents = commit_refs(content)?.parents;
+    let time = header_lines(content)
+        .filter_map(|line| std::str::from_utf8(line).ok()?.strip_prefix("committer "))
+        .next()
+        .and_then(ident_time)
+        .unwrap_or(0);
+    Ok((parents, time))
+}
+
+/// The time in an author or committer line, "Name <email> 1234567890
+/// +0000": what follows the address. None where there is none to read.
+pub fn ident_time(ident: &str) -> Option<u64> {
+    let (_, rest) = ident.split_once('<')?;
+    let (_, rest) = rest.split_once('>')?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
 /// The object an annotated tag points at.
 pub fn tag_target(content: &[u8]) -> Result<Oid, String> {
     for line in header_lines(content) {

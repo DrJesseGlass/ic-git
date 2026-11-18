@@ -7,6 +7,7 @@
 //!   GET /api/<repo>/tree/<rev>[/<path>]
 //!   GET /api/<repo>/blob/<rev>/<path>
 //!   GET /api/<repo>/diff/<rev>[?base=<rev>]     the files that changed
+//!   GET /api/<repo>/compare/<rev>[?base=<rev>]  where two histories part
 //!
 //! The git side's half; the authority's routes (a repo's info, votes,
 //! proposals and deploys, accounts, pricing) are in api_authority.rs, which
@@ -33,8 +34,21 @@
 //! within `DIFF_LIMITS`; `truncated` says the list stops short. A name
 //! that is not UTF-8 is given as `/tree` gives it, with the replacement
 //! character, and cannot be fetched by it.
+//!
+//! `/compare` is `<rev>` (the head) against `base`, the repo's HEAD unless
+//! the query names another rev (graph.rs): their merge base, how many
+//! commits each has that the other has not (`ahead`, the head's;
+//! `behind`, the base's), and the head's own, newest first, as `/commits`
+//! gives a commit, at most `MAX_COMMITS` of them (`truncated` says there
+//! are more). What the head changed is then `/diff/<head>?base=` the
+//! merge base. Two histories that share nothing have a null merge base.
+//! The walk loads at most `COMPARE_COMMITS` commits, both sides' and the
+//! common ones it passes on its way; where that does not find where the
+//! two part, the answer is 422. The commits listed are the newest
+//! `MAX_COMMITS`: there is no asking for the ones after.
 
 use crate::diff;
+use crate::graph;
 use crate::object;
 use crate::site;
 use crate::store::{self, ObjectType, Oid};
@@ -44,6 +58,9 @@ use serde::Serialize;
 
 const DEFAULT_COMMITS: usize = 30;
 const MAX_COMMITS: usize = 200;
+/// How many commits one `/compare` loads to find where two histories
+/// part.
+const COMPARE_COMMITS: usize = 2000;
 /// How many changed files one `/diff` lists, and how many directories it
 /// opens to find them.
 const DIFF_LIMITS: diff::Limits = diff::Limits { changes: 1000, dirs: 4000 };
@@ -92,6 +109,19 @@ struct TreeInfo {
     commit: String,
     path: String,
     entries: Vec<Entry>,
+}
+
+#[derive(Serialize)]
+struct CompareInfo {
+    head: String,
+    base: String,
+    /// Null for two histories that share nothing.
+    merge_base: Option<String>,
+    ahead: usize,
+    behind: usize,
+    /// The head's own commits, newest first.
+    commits: Vec<CommitInfo>,
+    truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -223,12 +253,40 @@ pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
                 Ok(res)
             })
         }
+        ("compare", Some(rev), None) => {
+            let base = match base_param(&query) {
+                Ok(b) => b.unwrap_or_else(|| "HEAD".to_string()),
+                Err(res) => return res,
+            };
+            with_rev(&repo, rev, |head| {
+                let base = resolve_rev(&repo, &base)?;
+                // Both revs are there: what goes wrong from here, a commit
+                // under them missing or unreadable, is not "not found".
+                let c = match graph::compare(&base, &head, COMPARE_COMMITS) {
+                    Ok(Some(c)) => c,
+                    Ok(None) => return Ok(error(422, "the two are too many commits apart to compare")),
+                    Err(e) => return Ok(error(500, &e)),
+                };
+                let commits = match c.ahead.iter().take(MAX_COMMITS).map(commit_info).collect::<Result<Vec<_>, _>>() {
+                    Ok(commits) => commits,
+                    Err(e) => return Ok(error(500, &e)),
+                };
+                let info = CompareInfo {
+                    head: store::oid_hex(&head),
+                    base: store::oid_hex(&base),
+                    merge_base: c.merge_base.as_ref().map(store::oid_hex),
+                    ahead: c.ahead.len(),
+                    behind: c.behind,
+                    truncated: c.ahead.len() > commits.len(),
+                    commits,
+                };
+                Ok(json(200, &info, Some(&head)))
+            })
+        }
         ("diff", Some(rev), None) => {
-            // An empty `base=` is no base named.
-            let base = match query.get("base").filter(|b| !b.is_empty()).map(|b| decode(b)) {
-                Some(Ok(b)) => Some(b),
-                Some(Err(e)) => return error(400, &e),
-                None => None,
+            let base = match base_param(&query) {
+                Ok(b) => b,
+                Err(res) => return res,
             };
             with_rev(&repo, rev, |tip| {
                 let (tree, parents) = commit_tree(&tip)?;
@@ -256,6 +314,16 @@ pub fn handle(req: &ApiPath, url: &str) -> HttpResponse {
             })
         }
         _ => error(404, "not found"),
+    }
+}
+
+/// The rev the query names as `base`, decoded; none for none named or an
+/// empty one. A bad escape is a 400.
+fn base_param(query: &std::collections::HashMap<String, String>) -> Result<Option<String>, HttpResponse> {
+    match query.get("base").filter(|b| !b.is_empty()).map(|b| decode(b)) {
+        Some(Ok(b)) => Ok(Some(b)),
+        Some(Err(e)) => Err(error(400, &e)),
+        None => Ok(None),
     }
 }
 
@@ -354,8 +422,8 @@ fn ident(s: &str) -> Option<Ident> {
     let (name, rest) = s.split_once('<')?;
     let (email, rest) = rest.split_once('>')?;
     let mut it = rest.split_whitespace();
-    let time = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
-    let tz = it.next().unwrap_or("").to_string();
+    let time = object::ident_time(s).unwrap_or(0);
+    let tz = it.nth(1).unwrap_or("").to_string();
     Some(Ident {
         name: name.trim().to_string(),
         email: email.to_string(),
@@ -376,6 +444,49 @@ fn kind_of(mode: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_compare_is_against_head_or_the_base_named() {
+        let (c1, c2) = seed("api-compare");
+        // A branch off c1, one commit of its own: HEAD (c2) is the base.
+        let t = store::put_object(ObjectType::Tree, b"");
+        let side = store::put_object(
+            ObjectType::Commit,
+            format!("tree {}\nparent {}\nauthor Ann <ann@x> 1700000005 +0000\ncommitter Ann <ann@x> 1700000005 +0000\n\nside\n", store::oid_hex(&t), store::oid_hex(&c1)).as_bytes(),
+        );
+        store::set_ref("api-compare", "refs/heads/feature/side", side).unwrap();
+        let res = get("/api/api-compare/compare/feature%2Fside");
+        assert_eq!(res.status_code, 200);
+        assert_eq!(header(&res, "X-Ic-Git-Commit"), Some(store::oid_hex(&side).as_str()));
+        let v = body_json(&res);
+        assert_eq!(v["head"], store::oid_hex(&side));
+        assert_eq!(v["base"], store::oid_hex(&c2));
+        assert_eq!(v["merge_base"], store::oid_hex(&c1));
+        assert_eq!((v["ahead"].as_u64(), v["behind"].as_u64()), (Some(1), Some(1)));
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["commits"].as_array().unwrap().len(), 1);
+        assert_eq!(v["commits"][0]["oid"], store::oid_hex(&side));
+        assert_eq!(v["commits"][0]["message"], "side\n");
+        // What the branch changed is its diff against the merge base.
+        let d = body_json(&get(&format!("/api/api-compare/diff/feature%2Fside?base={}", v["merge_base"].as_str().unwrap())));
+        assert_eq!(d["files"][0]["path"], "a.txt");
+        assert_eq!(d["files"][0]["status"], "deleted");
+        // A base named; the head contained in it: nothing ahead.
+        let v = body_json(&get("/api/api-compare/compare/v1?base=feature%2Fside"));
+        assert_eq!(v["merge_base"], store::oid_hex(&c1));
+        assert_eq!((v["ahead"].as_u64(), v["behind"].as_u64()), (Some(0), Some(1)));
+        assert_eq!(v["commits"].as_array().unwrap().len(), 0);
+        // An empty base is none named.
+        assert_eq!(body_json(&get("/api/api-compare/compare/v1?base="))["base"], store::oid_hex(&c2));
+        for (url, status) in [
+            ("/api/api-compare/compare/nope", 404),
+            ("/api/api-compare/compare/HEAD?base=nope", 404),
+            ("/api/api-compare/compare/HEAD?base=%zz", 400),
+            ("/api/api-compare/compare", 404),
+        ] {
+            assert_eq!(get(url).status_code, status, "{url}");
+        }
+    }
 
     #[test]
     fn a_diff_is_against_the_first_parent_or_the_base_named() {

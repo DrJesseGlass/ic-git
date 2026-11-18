@@ -16,6 +16,7 @@ pub mod consent;
 pub mod diff;
 pub mod for_authority;
 pub mod gitproof;
+pub mod graph;
 pub mod jobs;
 pub mod mirror;
 pub mod object;
