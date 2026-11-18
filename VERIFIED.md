@@ -67,6 +67,15 @@ serves is the one in the ic-git repo it holds, which is at `db8f2bd`,
 so the view arrives with a push of this repository there and a new
 site record.
 
+That push followed the same day: `main` at `b158e2c` (the merge of
+this release's record, #151) into the canister's `ic-git` repo, a
+fast-forward of 75 commits from `db8f2bd`, and `ic-git#site`
+republished (Sepolia nonce 41, tx `0x95ef4176...57df`, block 12158080).
+`tools/verify.mjs ic-git index.html` verifies at `b158e2c`, and the
+commit view shows on the canister's own page: the merge of #150, four
+files against its parent, each file's count of lines the one
+`git show --numstat` gives.
+
 ## v0.3.13, the git canister -- 2026-11-17
 
 The sites are certified at their own domains (#146, #147;
