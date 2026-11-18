@@ -342,12 +342,22 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
             if let Err(e) = signed_push::check(&repo, grant.key.as_deref(), parsed.cert.as_ref(), required, now_s) {
                 return git_response(200, RESULT, receive::refuse(&request, &e));
             }
+            // The pack is read before it is charged, and stored after: its
+            // deltas are resolved here, so the charge is for what it will
+            // store. A pack that cannot be read is charged for its bytes,
+            // as a refused pack always was: reading it was the work.
+            let prepared = match receive::prepare(parsed, &req.body) {
+                Ok(p) => p,
+                Err(report) => {
+                    let _ = to_authority::charge_push(&repo, req.body.len() as u64).await;
+                    return git_response(200, RESULT, report);
+                }
+            };
             // Tenancy: the owner pays for the push before anything is
-            // ingested. The authority is asked and waited for. A charge it
+            // stored. The authority is asked and waited for. A charge it
             // did not answer refuses the push, and the pusher tries again:
-            // the charge is kept on a refused pack, so a lost answer may
-            // have charged this one (section 4).
-            match to_authority::charge_push(&repo, req.body.len() as u64).await {
+            // a lost answer may have charged this one (section 4).
+            match to_authority::charge_push(&repo, receive::billed_bytes(&req.body, &prepared)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => return git_response(200, RESULT, receive::refuse(&request, &e)),
                 Err(f) => {
@@ -371,7 +381,8 @@ async fn http_request_update(req: HttpRequest) -> HttpResponse {
                 return git_response(200, RESULT, receive::refuse(&request, &e));
             }
             let tip_before = store::head_target(&repo).and_then(|b| store::get_ref(&repo, &b));
-            let outcome = receive::handle(&repo, request, &req.body);
+            let Ok(request) = request else { unreachable!("an unparseable request was refused above") };
+            let outcome = receive::handle(&repo, request, prepared);
             // A votes-gated repo's feed tells of a tip nobody approved: the
             // authority hears of the push through the outbox. Only a gated
             // repo's (the approved-set mirror says which), since the feed

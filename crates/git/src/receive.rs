@@ -171,33 +171,41 @@ pub fn refuse(request: &Result<Request, String>, reason: &str) -> Vec<u8> {
     report
 }
 
+/// The request's pack, resolved and measured and not yet stored
+/// (pack::prepare), for the caller to charge by before `handle` stores it.
+/// `None` for a push of pure deletes, which carries no pack. An unreadable
+/// pack is the report-status that says so: `unpack <why>`, and `ng` for
+/// every command.
+pub fn prepare(request: &Request, body: &[u8]) -> Result<Option<pack::Prepared>, Vec<u8>> {
+    let pack_bytes = body.get(request.pack_start..).unwrap_or(&[]);
+    if pack_bytes.is_empty() {
+        return Ok(None);
+    }
+    pack::prepare(pack_bytes).map(Some).map_err(|e| {
+        let mut report = pkt_line(format!("unpack {}\n", e.replace('\n', " ")).as_bytes());
+        for cmd in &request.commands {
+            report.extend_from_slice(&pkt_line(format!("ng {} unpacker error\n", cmd.refname).as_bytes()));
+        }
+        report.extend_from_slice(FLUSH_PKT);
+        report
+    })
+}
+
+/// The bytes a push is charged for and its repo's rent counts: what its
+/// pack adds to the store, and never less than the request's own bytes.
+pub fn billed_bytes(body: &[u8], prepared: &Option<pack::Prepared>) -> u64 {
+    (body.len() as u64).max(prepared.as_ref().map_or(0, pack::Prepared::stored_bytes))
+}
+
 /// Handle an authenticated receive-pack request, already parsed by
-/// `parse_request` (an unparseable one is reported as an unpack error).
-pub fn handle(repo: &str, request: Result<Request, String>, body: &[u8]) -> Outcome {
+/// `parse_request`, with its pack already read by `prepare`: store the
+/// pack's objects and apply the commands.
+pub fn handle(repo: &str, request: Request, prepared: Option<pack::Prepared>) -> Outcome {
     let mut report = Vec::new();
     let mut deploy_commit = None;
-    let (commands, pack_start) = match request {
-        Ok(r) => (r.commands, r.pack_start),
-        Err(e) => {
-            report.extend_from_slice(&pkt_line(format!("unpack {e}\n").as_bytes()));
-            report.extend_from_slice(FLUSH_PKT);
-            return Outcome { report, deploy_commit };
-        }
-    };
-
-    // A push of pure deletes/no-ops carries no pack.
-    let pack_bytes = &body[pack_start..];
-    if !pack_bytes.is_empty() {
-        if let Err(e) = pack::ingest_pack(pack_bytes) {
-            report.extend_from_slice(&pkt_line(format!("unpack {e}\n").as_bytes()));
-            for cmd in &commands {
-                report.extend_from_slice(&pkt_line(
-                    format!("ng {} unpacker error\n", cmd.refname).as_bytes(),
-                ));
-            }
-            report.extend_from_slice(FLUSH_PKT);
-            return Outcome { report, deploy_commit };
-        }
+    let commands = request.commands;
+    if let Some(prepared) = prepared {
+        prepared.store();
     }
 
     // Hoisted out of the command loop: both are loop-invariant stable reads.
@@ -264,7 +272,10 @@ mod tests {
         assert!(signed_push::check("unsigned", Some(KEY), Some(cert), true, T + 5).is_err());
         assert!(signed_push::check("signed", Some(KEY), Some(cert), true, T + 601).is_err());
 
-        let outcome = handle("signed", Ok(request), &body);
+        let prepared = prepare(&request, &body).unwrap();
+        assert!(prepared.is_some());
+        assert_eq!(billed_bytes(&body, &prepared), body.len() as u64, "a pack of whole objects stores less than it sends");
+        let outcome = handle("signed", request, prepared);
         let report = String::from_utf8_lossy(&outcome.report);
         assert!(report.contains("unpack ok") && report.contains("ok refs/heads/main"), "{report}");
         assert_eq!(
