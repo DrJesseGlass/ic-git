@@ -214,8 +214,10 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
   Both extensions block any navigation, of a tab or of a frame, to a
   path under `/site` at a host whose first label is one of the two
   canisters' ids, with or without a prefix, under any domain, except the
-  checked host itself: a static rule (`rules.json`, in both packages),
-  which goes by the id and so needs no list of the gateways' domains and
+  checked host itself, and that host too when it is spelled as another
+  origin (with the root's trailing dot, where the gateways answer, or at
+  a port): static rules (`rules.json`, in both packages),
+  which go by the id and so need no list of the gateways' domains and
   no permission for them (measurement 14). The tab shows the browser's
   own "blocked" page, with no word from the extension: nothing of it may
   run on that host. The checked host over `http` is asked for over

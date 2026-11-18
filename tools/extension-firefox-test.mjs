@@ -266,6 +266,12 @@ const tamper = (only) => (path, text, headers) => {
       `https://${ID}.icp0.io/site/ic-git`,
       `https://${ID}.icp0.io/site`,
       `https://x--${ID}.raw.icp0.io/site/ic-git/`,
+      // A prefix a hostname may have and a DNS name may not.
+      `https://x_y--${ID}.icp0.io/site/ic-git/`,
+      // The checked host spelled as another origin: with the root's dot
+      // (the gateways answer there), or at another port.
+      `https://${ID}.raw.icp0.io./site/ic-git/`,
+      `https://${ID}.raw.icp0.io:8443/site/ic-git/`,
       `https://${ID}.gateway.example/site/ic-git/`,
       `https://user@${ID}.icp0.io/site/ic-git/`,
     ]) {

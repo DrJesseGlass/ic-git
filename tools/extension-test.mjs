@@ -344,6 +344,12 @@ const report = (name, ok, got) => {
       `https://${ID}.icp0.io/site`,
       // A prefix, which a gateway drops, at the checked domain too.
       `https://x--${ID}.raw.icp0.io/site/ic-git/`,
+      // A prefix a hostname may have and a DNS name may not.
+      `https://x_y--${ID}.icp0.io/site/ic-git/`,
+      // The checked host spelled as another origin: with the root's dot
+      // (the gateways answer there), or at another port.
+      `https://${ID}.raw.icp0.io./site/ic-git/`,
+      `https://${ID}.raw.icp0.io:8443/site/ic-git/`,
       `https://a--b--${ID}.icp0.io/site/ic-git/`,
       // A domain no list knows: the rule goes by the canister's id.
       `https://${ID}.gateway.example/site/ic-git/`,
