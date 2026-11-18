@@ -228,7 +228,8 @@ tokens are revoked), and the members keep their roles. Until then the
 one it was offered to can decline and the owner can withdraw
 (`cancel_transfer(repo)`); a new offer replaces the last, and naming the
 owner withdraws it. Governing the repo withdraws an offer too: from then
-a new owner is the voters' to offer. `get_repo_info` and `/api/<repo>/info` show a
+a new owner is offered by a vote the owner approves (see Governed app
+canisters). `get_repo_info` and `/api/<repo>/info` show a
 standing offer as `pending_owner`. A caller who names themself has
 agreed by calling, which is how an operator takes a repo over. Until
 2026-11 a transfer applied at once and asked nobody: a repo handed to a
@@ -446,7 +447,10 @@ themselves sole approver, and push anything:
   on the count would hold there, since under one required vote a voter
   adds voters alone and may name a principal that is not one. A
   `Transfer` naming the owner withdraws an offer, moves nothing, and
-  goes by its votes. The same holds on a repo that is not governed but
+  goes by its votes. When the owner changes, every pending `Transfer` is
+  dropped, ballots and all: they were cast under the last owner, and an
+  approval the new owner cast as a voter is not the owner's. The same
+  holds on a repo that is not governed but
   requires votes. `get_policy_proposals(repo)` and `GET /api/<repo>/proposals`
   list what is pending, with ballots and count. The console shows them
   with approve, reject and object controls, and a form to propose.

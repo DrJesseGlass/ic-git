@@ -698,6 +698,7 @@ pub async fn transfer_repo(
     locked(&m, "transferring the repo", Some("Transfer"))?;
     if new_owner == *who {
         transfer_in(&mut m, new_owner)?;
+        drop_pending_transfers(&mut m, repo);
     } else {
         offer_in(&mut m, new_owner)?;
     }
@@ -727,15 +728,31 @@ pub async fn accept_transfer(repo: &str, who: &Principal) -> Result<(), String> 
         return Err(format!("{repo} is not offered to {who}"));
     }
     transfer_in(&mut m, *who)?;
+    drop_pending_transfers(&mut m, repo);
     save_meta(repo, &m);
     crate::mirrors::flush(repo).await;
     Ok(())
 }
 
+/// The owner has changed: every pending Transfer goes, ballots and all.
+/// They were cast under the last owner, and one of them may be the new
+/// owner's own, cast as a voter: left standing it would read as the
+/// owner's approval (`awaits_owner`) of an offer they never made as owner,
+/// and the next ballot on it would offer the repo on.
+fn drop_pending_transfers(m: &mut RepoMeta, repo: &str) {
+    m.proposals.retain(|c| {
+        let transfer = matches!(c, PolicyChange::Transfer { .. });
+        if transfer {
+            VoteStore { repo }.save(&c.subject(), Vec::new());
+        }
+        !transfer
+    });
+}
+
 /// Withdraw a repo's offer: whoever it was made to may always decline it;
 /// the owner (or an operator) may take it back, except on a governed repo,
-/// where the voters made the offer and withdraw it the same way, by a
-/// Transfer naming the owner.
+/// where the offer was made by a vote and is withdrawn by one, a Transfer
+/// naming the owner.
 pub async fn cancel_transfer(repo: &str, who: &Principal, operator: bool) -> Result<(), String> {
     let mut m = existing(repo)?;
     let Some(offered) = m.pending_owner else {
@@ -846,7 +863,8 @@ impl PolicyChange {
                 }
                 remove_member_in(m, repo, *principal)
             }
-            // The voters offer; the one named takes it (accept_transfer).
+            // A vote the owner approves offers (awaits_owner); the one
+            // named takes it (accept_transfer).
             PolicyChange::Transfer { new_owner } => offer_in(m, *new_owner),
             PolicyChange::WasmDeploy { target, source_path } => {
                 Principal::from_text(target).map_err(|e| format!("bad target principal: {e}"))?;
@@ -943,7 +961,8 @@ pub fn mark_governed(repo: &str, who: &Principal) -> Result<Principal, String> {
     }
     m.governed = true;
     // An offer the owner made alone does not outlive the owner's say: from
-    // here a new owner is the voters' to offer. (It stays withdrawn if the
+    // here a new owner is offered by a vote, with the owner's approval in
+    // it (awaits_owner). (It stays withdrawn if the
     // controller call fails and the flag comes off.)
     m.pending_owner = None;
     save_meta(repo, &m);
@@ -2189,6 +2208,14 @@ mod tests {
         let (t, _) = propose_policy_change("t-seat", &alice, to(v1), Vote::Approve, None).unwrap();
         assert!(t.reached);
         run(accept_transfer("t-seat", &v1)).unwrap();
+        assert_eq!(seat(), (Some(v1), None));
+        // v1 approved the offer to the outsider as a voter, and it was
+        // still pending. It does not stand as the new owner's approval:
+        // pending transfers go with the owner they were cast under, and
+        // the outsider's ballot proposes it again from nothing.
+        assert!(proposals("t-seat").is_empty());
+        let (t, _) = propose_policy_change("t-seat", &out, to(out), Vote::Approve, None).unwrap();
+        assert_eq!((t.approvals, t.reached), (1, false));
         assert_eq!(seat(), (Some(v1), None));
         let (t, _) = propose_policy_change("t-seat", &v2, to(v2), Vote::Approve, None).unwrap();
         assert!(!t.reached);
