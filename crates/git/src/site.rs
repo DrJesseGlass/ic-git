@@ -1238,10 +1238,13 @@ pub fn resolve_entry(repo: &str, path: &str) -> Option<(store::Oid, String, Vec<
 /// them: `/site` and `/site/` name the empty repo, `/site/<repo>` its
 /// root, `/site/<repo>/<sub>` the rest. `None` off `/site`. One parse for
 /// the routers and for the certifier's shadows (certify.rs), so what is
-/// certified at such a path is what is served there.
+/// certified at such a path is what is served there. One slash is taken
+/// after `/site`, as the certification tree splits a path: `/site//<repo>`
+/// names the empty repo too, which has no site, and not `<repo>`, whose
+/// entries the gateway would not take for that path.
 pub fn site_path(path: &str) -> Option<(&str, &str)> {
     let rest = path.strip_prefix("/site").filter(|r| r.is_empty() || r.starts_with('/'))?;
-    let rest = rest.trim_start_matches('/');
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
     Some(rest.split_once('/').unwrap_or((rest, "")))
 }
 

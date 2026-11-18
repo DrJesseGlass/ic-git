@@ -505,12 +505,17 @@ path the canister host's answer stays declared uncertified, as before,
 and the declaration sits at the page's own entry, so the page there is
 no better certified than the API is; under `/site/`, where the canister
 host holds its sites, a domain's 404 is certified at each of the
-canister host's entries: always at the wildcards over the sites, and at
-every URL of every site up to certify.rs's `SITE_CROSS_CAP` entries for
-the canister as a whole, past which a domain's 404 at the very URL of a
-page at the canister host fails the gateway's check rather than passing
-certified; and the Host a certificate covers is the domain as it is
-written, which is what a browser sends, so a request
+canister host's entries, the wildcards over the sites and every URL of
+every site. These 404s beside other hosts' entries number every domain
+times every such path, and an entry costs about a million instructions
+to make, so certify.rs's `CROSS_CAP` (4,000) bounds them for the
+canister as a whole, whoever's domains and files they come from. What
+does not fit is left out by kind, each as a whole: first the 404s at the
+URLs of the canister host's sites, then those at the paths of other
+domains' sites, then those at the wildcards. A domain's 404 at a path
+left out fails the gateway's check rather than passing certified; its
+pages are not touched. And the Host a certificate covers is the domain
+as it is written, which is what a browser sends, so a request
 whose Host spells it otherwise (a port, capitals, a trailing dot) is
 answered without one, and fails the gateway's check at a page. A site past
 certify.rs's caps is served at its domains declared uncertified, as

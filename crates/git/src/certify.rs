@@ -42,10 +42,12 @@
 //! `/site/` the canister host holds its sites at exact leaves and under
 //! wildcards more specific than the root's, so a domain's 404 is
 //! certified at each of those too (crosses again: at each `/site/<repo>`
-//! wildcard and at the `/site` wildcard, and at every URL of every site,
-//! these up to `SITE_CROSS_CAP` entries; past it the wildcards alone are
-//! kept, and a domain's 404 at the very URL of a site's page at the
-//! canister host fails the gateway's check). And the Host
+//! wildcard and at the `/site` wildcard, and at every URL of every site).
+//! The crosses number every domain times every such path, so `CROSS_CAP`
+//! bounds them for the canister as a whole, and what does not fit is left
+//! out by kind, the last first: the sites' URLs, then the other domains'
+//! paths, then the wildcards. A domain's 404 at a path whose cross was
+//! left out fails the gateway's check; its pages do not. And the Host
 //! an entry covers is the domain as it is written, which is what a
 //! browser sends: a request whose Host spells it otherwise (a port,
 //! capitals, a trailing dot) is routed to the site and given no entry
@@ -84,18 +86,28 @@ pub const SITE_FILE_CAP: usize = 2000;
 /// How many entries a site's domains may add (its URLs, times its
 /// domains, times the two methods); past this the domain form is left
 /// as it was before it was certified: declared uncertified.
-pub const DOMAIN_ENTRY_CAP: usize = 16_000;
+///
+/// The caps here are measured (canbench 0.6, ic-http-certification
+/// 4.0.1, this workspace's release profile, 2026-11-18): an entry into
+/// the tree or out of it is about 1.1 million instructions, whatever it
+/// certifies, and a message has 40 billion. A push to a site replaces
+/// every entry it has (`site_entries`), so a site at this cap is 12,000
+/// of them, 14 billion; at 16,000, which this was, the push did not fit
+/// its message.
+pub const DOMAIN_ENTRY_CAP: usize = 6_000;
 
-/// How many entries the domains' 404s may add at the URLs of the sites
-/// at the canister host (the URLs of every site in the canister, times
-/// every domain, times the two methods). Each is a tree entry and no
-/// hash, recomputed in memory at every change of a site; past this they
-/// are left out as a whole, and a domain's 404 at such a URL fails the
-/// gateway's check rather than passing certified. The entries at the
-/// wildcards over the sites are few and always there, and those at the
-/// paths of other domains' sites are not counted here: `DOMAIN_ENTRY_CAP`
-/// bounds each site's.
-pub const SITE_CROSS_CAP: usize = 32_000;
+/// How many crosses there may be in the canister: every domain's 404, for
+/// the two methods, at the wildcards over the canister host's sites, at
+/// the paths of the other domains' sites, and at the URLs of the canister
+/// host's sites. Each is a tree entry and no hash, and all of them can
+/// come or go in one message (the first domain named, a domain's last
+/// given up, a cap crossed by a push): 4,000 are 3.5 billion instructions
+/// each way, beside the 370 million of comparing them at every change of
+/// a site. At 32,000, which the cap on the last kind alone was, entering
+/// them took 34 to 42 billion. What does not fit is left out by kind
+/// (`crosses`), and a domain's 404 at such a path fails the gateway's
+/// check rather than passing certified.
+pub const CROSS_CAP: usize = 4_000;
 
 /// The response headers the certificate covers: what a client reads. The
 /// body and the status are always covered.
@@ -215,7 +227,7 @@ struct State {
     bodies: BTreeMap<Vec<u8>, [u8; 32]>,
     /// In tests, a smaller cap.
     cap: usize,
-    /// `SITE_CROSS_CAP`; in tests, a smaller one.
+    /// `CROSS_CAP`; in tests, a smaller one.
     cross_cap: usize,
 }
 
@@ -231,7 +243,7 @@ fn wildcard_path(prefix: &str) -> HttpCertificationPath<'static> {
 
 thread_local! {
     static TREE: RefCell<HttpCertificationTree> = RefCell::new(HttpCertificationTree::default());
-    static STATE: RefCell<State> = RefCell::new(State { cap: SITE_FILE_CAP, cross_cap: SITE_CROSS_CAP, ..State::default() });
+    static STATE: RefCell<State> = RefCell::new(State { cap: SITE_FILE_CAP, cross_cap: CROSS_CAP, ..State::default() });
 }
 
 /// How many body hashes are kept before the cache starts over.
@@ -498,11 +510,12 @@ fn between(s: &mut State) {
 
 /// Recompute the shadows: the canister host's answers at every path a
 /// domain's site has and no exact entry covers, or the declaration that
-/// there is no certification where the answer is the routers'.
+/// there is no certification where the answer is the routers'. Only the
+/// ones that changed are touched in the tree: there is one for every
+/// path of every domain's site, and a change of one site is not a change
+/// of the others'.
 fn shadows(s: &mut State) {
-    for (path, c) in std::mem::take(&mut s.shadow) {
-        delete(&HttpCertificationPath::exact(path), &c);
-    }
+    let mut want = BTreeMap::new();
     for path in domain_paths(s) {
         if s.exact.contains_key(&path) {
             continue;
@@ -514,8 +527,18 @@ fn shadows(s: &mut State) {
             },
             None => HttpCertification::skip(),
         };
-        insert(&HttpCertificationPath::exact(path.clone()), &c);
-        s.shadow.insert(path, c);
+        want.insert(path, c);
+    }
+    let had = std::mem::replace(&mut s.shadow, want);
+    for (path, c) in &had {
+        if s.shadow.get(path) != Some(c) {
+            delete(&exact_path(path), c);
+        }
+    }
+    for (path, c) in &s.shadow {
+        if had.get(path) != Some(c) {
+            insert(&exact_path(path), c);
+        }
     }
 }
 
@@ -523,19 +546,35 @@ fn shadows(s: &mut State) {
 /// wherever another host has an entry more specific than the root
 /// wildcard the 404 is at, and the domain has no page: at every path
 /// another domain's site has, and, under `/site/`, at the wildcards over
-/// the canister host's sites and at every URL of every site there (these
-/// up to the cap), so that a leaf keeps an entry for every host and the
-/// gateway finds the 404 at the most specific path there is. The 404 is
-/// one certification per host and method, whatever the path (the request
-/// hash covers the method and the Host, not the path), so a cross is a
-/// tree entry and no hash; only the entries that changed are touched.
+/// the canister host's sites and at every URL of every site there, so
+/// that a leaf keeps an entry for every host and the gateway finds the
+/// 404 at the most specific path there is. The 404 is one certification
+/// per host and method, whatever the path (the request hash covers the
+/// method and the Host, not the path), so a cross is a tree entry and no
+/// hash; only the entries that changed are touched.
+///
+/// They are counted before they are made, against one cap for the
+/// canister, and kept by kind, each kind whole or not at all and none
+/// without the one before it: the wildcards (every 404 times every site),
+/// then the other domains' paths (every 404 times the paths it has no
+/// page at), then the sites' URLs (every 404 times every URL). The count
+/// of the last is its bound, as if no domain's site had a page at a
+/// site's URL. So no tenant's domains or files make more of them than
+/// the cap, whoever's they are, and the first to go is the least: a 404
+/// at the very URL of a page at the canister host.
 fn crosses(s: &mut State) {
     let paths = domain_paths(s);
     let wilds: Vec<String> =
         s.no_site.iter().map(|_| "/site".to_string()).chain(s.sites.keys().map(|repo| format!("/site/{repo}"))).collect();
     let site_urls = || s.exact.keys().filter(|url| *url != DOMAINS_URL);
     let misses: usize = s.domains.values().map(|d| d.miss.len()).sum();
-    let under_cap = misses.saturating_mul(site_urls().count()) <= s.cross_cap;
+    // A site's hosts and methods share its paths: its pages are its
+    // entries over its 404s.
+    let elsewhere = |d: &Domain| paths.len().saturating_sub(d.exact.len() / d.miss.len().max(1));
+    let wild_n = misses.saturating_mul(wilds.len());
+    let path_n = s.domains.values().fold(wild_n, |n, d| n.saturating_add(d.miss.len().saturating_mul(elsewhere(d))));
+    let url_n = path_n.saturating_add(misses.saturating_mul(site_urls().count()));
+    let (with_wilds, with_paths, with_urls) = (wild_n <= s.cross_cap, path_n <= s.cross_cap, url_n <= s.cross_cap);
     let mut want = Cross::new();
     let mut want_wild = Cross::new();
     for d in s.domains.values() {
@@ -546,12 +585,16 @@ fn crosses(s: &mut State) {
                     want.insert(key, *c);
                 }
             };
-            paths.iter().for_each(&mut at);
-            if under_cap {
+            if with_paths {
+                paths.iter().for_each(&mut at);
+            }
+            if with_urls {
                 site_urls().for_each(&mut at);
             }
-            for prefix in &wilds {
-                want_wild.insert((host.clone(), method.clone(), prefix.clone()), *c);
+            if with_wilds {
+                for prefix in &wilds {
+                    want_wild.insert((host.clone(), method.clone(), prefix.clone()), *c);
+                }
             }
         }
     }
@@ -1058,6 +1101,15 @@ mod tests {
             assert!(most_specific(url, None, "GET"), "{url}");
         }
         assert!(proves("/site/web/nope", &["http_expr", "site", "web", "<*>"]));
+        // A doubled slash after /site names the empty repo there, as the
+        // tree splits the path, and not the repo after it: the no-site 404,
+        // which is what is served.
+        for url in ["/site//web", "/site//web/", "/site//web/index.html", "/site//"] {
+            assert_eq!(site::site_path(url).map(|(repo, _)| repo), Some(""), "{url}");
+            assert!(served_as_certified(url), "{url}");
+            assert!(most_specific(url, None, "GET"), "{url}");
+            assert!(proves(url, &["http_expr", "site", "<*>"]), "{url}");
+        }
         assert!(proves("/site/bare/x", &["http_expr", "site", "<*>"]));
         // A site that comes and goes takes its crosses with it.
         site::set_config("bare", String::new()).unwrap();
@@ -1078,10 +1130,11 @@ mod tests {
         assert_eq!(lookup("/site/other/docs/a.txt", host, "GET").0.to_expr_path(), wild(&["site", "other"]));
         assert!(most_specific("/site/other/docs/a.txt", host, "GET"));
         // Past the cap the crosses at the sites' URLs are left out as a
-        // whole and the wildcards kept: the 404 passes but at the very
-        // URL of a page at the canister host, an exact leaf above the
-        // wildcard, where the gateway's rule refuses it.
-        set_cross_cap_for_tests(3);
+        // whole and the wildcards kept (two 404s at three of them): the
+        // 404 passes but at the very URL of a page at the canister host,
+        // an exact leaf above the wildcard, where the gateway's rule
+        // refuses it.
+        set_cross_cap_for_tests(6);
         site_changed("web");
         assert!(STATE.with(|s| s.borrow().cross.is_empty() && !s.borrow().cross_wild.is_empty()));
         assert!(most_specific("/site/web/nope", host, "GET"));
@@ -1089,7 +1142,7 @@ mod tests {
         assert!(most_specific("/nope", host, "GET"));
         assert_eq!(lookup("/site/web/index.html", host, "GET").0.to_expr_path(), wild(&["site", "web"]));
         assert!(!most_specific("/site/web/index.html", host, "GET"));
-        set_cross_cap_for_tests(SITE_CROSS_CAP);
+        set_cross_cap_for_tests(CROSS_CAP);
         site_changed("web");
         assert!(most_specific("/site/web/index.html", host, "GET"));
         // A push to a repo with no site recomputes nothing.
@@ -1100,6 +1153,109 @@ mod tests {
         site::set_domains("web", vec![]).unwrap();
         assert!(STATE.with(|s| s.borrow().cross.is_empty() && s.borrow().cross_wild.is_empty()));
         assert!(served_as_certified("/site/web/index.html"));
+    }
+
+    #[test]
+    fn the_crosses_of_every_kind_are_under_one_cap_and_go_by_kind() {
+        // Two sites, a domain each. `web` has seven paths, `other` three,
+        // two of them web's too and one its own.
+        for repo in ["web", "other"] {
+            store::create_repo(repo).unwrap();
+            crate::mirror::ungated_for_tests(repo);
+            site::set_config(repo, String::new()).unwrap();
+        }
+        site("web", b"<h1>web</h1>");
+        let index = store::put_object(ObjectType::Blob, b"<h1>other</h1>");
+        let only = store::put_object(ObjectType::Blob, b"only");
+        commit("other", &tree(&[("100644", "index.html", &index), ("100644", "only.txt", &only)]));
+        rebuild();
+        site::set_domains("web", vec!["app.example".into()]).unwrap();
+        site::set_domains("other", vec!["other.example".into()]).unwrap();
+        let (app, other) = (Some("app.example"), Some("other.example"));
+        let counts = || STATE.with(|s| (s.borrow().cross_wild.len(), s.borrow().cross.len()));
+        let at = |cap: usize| {
+            set_cross_cap_for_tests(cap);
+            site_changed("web");
+            counts()
+        };
+        // Four 404s (two hosts, two methods). The wildcards: three, so 12.
+        // The other's paths: one of the eight for web's two, five for
+        // other's two, so 12. The sites' URLs: twelve, so 48.
+        assert_eq!(counts(), (12, 60));
+        let pages = || {
+            served_at_domain_as_certified("web", "app.example", "GET", "docs/a.txt")
+                && most_specific("/docs/a.txt", app, "GET")
+                && served_at_domain_as_certified("other", "other.example", "HEAD", "only.txt")
+                && most_specific("/only.txt", other, "HEAD")
+                && most_specific("/nope", app, "GET")
+                && served_as_certified("/site/web/index.html")
+                && most_specific("/site/web/index.html", None, "GET")
+        };
+        // (a page of the other domain, a site's URL, under a site)
+        let misses = || {
+            (
+                most_specific("/only.txt", app, "GET") && most_specific("/docs/a.txt", other, "GET"),
+                most_specific("/site/web/index.html", app, "GET") && most_specific("/site/other/only.txt", other, "HEAD"),
+                most_specific("/site/web/nope", app, "GET") && most_specific("/site/bare", other, "GET"),
+            )
+        };
+        assert!(pages());
+        assert_eq!(misses(), (true, true, true));
+        // One short of them all: the sites' URLs go, as a whole.
+        assert_eq!(at(72), (12, 60));
+        assert_eq!(at(71), (12, 12));
+        assert_eq!(misses(), (true, false, true));
+        assert_eq!(at(24), (12, 12));
+        // Then the other domains' paths.
+        assert_eq!(at(23), (12, 0));
+        assert_eq!(misses(), (false, false, true));
+        assert_eq!(at(12), (12, 0));
+        // Then the wildcards, and no page is the worse for any of it.
+        assert_eq!(at(11), (0, 0));
+        assert_eq!(misses(), (false, false, false));
+        assert!(pages());
+        // A push that brings the count over the cap takes a kind out: by
+        // one more URL of `other`, six more crosses than 72.
+        assert_eq!(at(72), (12, 60));
+        let more = store::put_object(ObjectType::Blob, b"more");
+        commit("other", &tree(&[("100644", "index.html", &index), ("100644", "more.txt", &more), ("100644", "only.txt", &only)]));
+        site::advance("other");
+        assert_eq!(counts(), (12, 14));
+        assert!(pages());
+        assert_eq!(at(CROSS_CAP), (12, 66));
+        assert_eq!(misses(), (true, true, true));
+    }
+
+    #[test]
+    fn shadows_of_a_site_that_did_not_change_stay_in_the_tree_untouched() {
+        for repo in ["web", "other"] {
+            store::create_repo(repo).unwrap();
+            crate::mirror::ungated_for_tests(repo);
+            site(repo, format!("<h1>{repo}</h1>").as_bytes());
+            site::set_config(repo, String::new()).unwrap();
+        }
+        rebuild();
+        site::set_domains("web", vec!["app.example".into()]).unwrap();
+        let shadows = || STATE.with(|s| s.borrow().shadow.clone());
+        let (before, root_before) = (shadows(), root());
+        assert!(before.contains_key("/docs/a.txt") && before.contains_key("/"));
+        // A change of another site that changes none of them.
+        site_changed("other");
+        assert_eq!(shadows(), before);
+        assert_eq!(root(), root_before);
+        // The index changes: its shadow at / moves, the 404s stay, and
+        // each is still what the canister host answers there.
+        store::create_repo("third").unwrap();
+        repos_changed();
+        let after = shadows();
+        assert_ne!(after["/"], before["/"]);
+        assert_eq!(after["/docs/a.txt"], before["/docs/a.txt"]);
+        assert_eq!(certify(&site::index_response(), None), Some(after["/"]));
+        assert!(most_specific("/", None, "GET") && most_specific("/docs/a.txt", None, "GET"));
+        // Domains off: every shadow leaves the tree.
+        site::set_domains("web", vec![]).unwrap();
+        assert!(shadows().is_empty());
+        assert_eq!(kind_at("/", None, "GET"), Kind::Skip);
     }
 
     #[test]
