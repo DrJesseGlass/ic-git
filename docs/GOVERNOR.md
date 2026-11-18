@@ -190,8 +190,8 @@ authority did not take that message, so the trial's record publish
 failed as expected, and proposal 2, a same-module install after the
 cut, published the first `ic-git#git` record (2026-11-16, Sepolia tx
 `0x8cd09003...de7c`). Proposal 3 (2026-11-17) was its first real
-release, v0.3.12, proposal 4 the next, v0.3.13, and proposal 5
-v0.3.14 (2026-11-18). `tools/governor.sh`
+release, v0.3.12, proposal 4 the next, v0.3.13, proposal 5 v0.3.14
+and proposal 6 v0.3.15 (both 2026-11-18). `tools/governor.sh`
 names the governor it was run for in the next-step hints it prints: a
 vote cast without `GOVERNOR=` goes to ic-git's governor, which has no
 such proposal and says so.
