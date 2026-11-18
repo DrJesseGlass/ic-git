@@ -117,31 +117,69 @@ pub fn put_object(object_type: ObjectType, content: &[u8]) -> Oid {
     let oid = compute_oid(object_type, content);
     // contains_key is a keys-only probe; on a duplicate it skips the deflate,
     // which dominates the cost of the extra traversal on the miss path.
-    if !OBJECTS.with(|o| o.borrow().contains_key(&oid)) {
-        let mut value = Vec::with_capacity(5 + content.len() / 2);
-        value.push(object_type as u8);
-        value.extend_from_slice(&(content.len() as u32).to_le_bytes());
-        let mut enc = ZlibEncoder::new(value, Compression::default());
-        enc.write_all(content).expect("in-memory write");
-        let value = enc.finish().expect("in-memory finish");
-        OBJECTS.with(|o| o.borrow_mut().insert(oid, value));
+    if !has_object(&oid) {
+        put_stored(oid, stored_value(object_type, content));
     }
     oid
 }
 
-/// Store a git object whose zlib(content) stream is already at hand (a
-/// non-delta pack entry): the stream is persisted verbatim, skipping the
-/// deflate that dominates put_object. `zlib` must inflate to `content`.
+/// Store an object whose zlib(content) stream is already in hand (e.g. a pack
+/// entry), skipping the re-deflate. `zlib` must be a zlib stream of exactly
+/// `content`; the oid is still computed over `content`.
 pub fn put_object_zlib(object_type: ObjectType, content: &[u8], zlib: &[u8]) -> Oid {
     let oid = compute_oid(object_type, content);
-    if !OBJECTS.with(|o| o.borrow().contains_key(&oid)) {
-        let mut value = Vec::with_capacity(5 + zlib.len());
-        value.push(object_type as u8);
-        value.extend_from_slice(&(content.len() as u32).to_le_bytes());
-        value.extend_from_slice(zlib);
-        OBJECTS.with(|o| o.borrow_mut().insert(oid, value));
+    if !has_object(&oid) {
+        put_stored(oid, stored_value_zlib(object_type, content.len(), zlib));
     }
     oid
+}
+
+// An object in two steps, for a caller that has to know what it will store
+// before it stores it (pack::prepare): the oid, the value the store keeps
+// under it, and the write.
+
+/// The oid of an object: SHA-1 of its canonical form.
+pub fn oid_of(object_type: ObjectType, content: &[u8]) -> Oid {
+    compute_oid(object_type, content)
+}
+
+/// The value the store keeps for an object: type, inflated size, and
+/// zlib(content), deflated here.
+pub fn stored_value(object_type: ObjectType, content: &[u8]) -> Vec<u8> {
+    let mut value = Vec::with_capacity(5 + content.len() / 2);
+    value.push(object_type as u8);
+    value.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    let mut enc = ZlibEncoder::new(value, Compression::default());
+    enc.write_all(content).expect("in-memory write");
+    enc.finish().expect("in-memory finish")
+}
+
+/// The same, from a zlib stream of the content already in hand.
+pub fn stored_value_zlib(object_type: ObjectType, len: usize, zlib: &[u8]) -> Vec<u8> {
+    let mut value = Vec::with_capacity(5 + zlib.len());
+    value.push(object_type as u8);
+    value.extend_from_slice(&(len as u32).to_le_bytes());
+    value.extend_from_slice(zlib);
+    value
+}
+
+/// Write a value made by `stored_value` under the oid `oid_of` gave.
+pub fn put_stored(oid: Oid, value: Vec<u8>) {
+    OBJECTS.with(|o| o.borrow_mut().insert(oid, value));
+}
+
+/// (type, content) of a value made by `stored_value`.
+pub fn parse_stored(value: &[u8]) -> (ObjectType, Vec<u8>) {
+    let stored = stored_object(value.to_vec());
+    (stored.object_type, stored.content())
+}
+
+fn stored_object(value: Vec<u8>) -> StoredObject {
+    StoredObject {
+        object_type: ObjectType::from_pack_code(value[0]).expect("stored object has valid type code"),
+        size: u32::from_le_bytes(value[1..5].try_into().unwrap()),
+        value,
+    }
 }
 
 /// A stored object as read from stable memory - type and inflated size are
@@ -170,13 +208,7 @@ impl StoredObject {
 }
 
 pub fn get_object_stored(oid: &Oid) -> Option<StoredObject> {
-    let value = OBJECTS.with(|o| o.borrow().get(oid))?;
-    Some(StoredObject {
-        object_type: ObjectType::from_pack_code(value[0])
-            .expect("stored object has valid type code"),
-        size: u32::from_le_bytes(value[1..5].try_into().unwrap()),
-        value,
-    })
+    OBJECTS.with(|o| o.borrow().get(oid)).map(stored_object)
 }
 
 /// Fetch an object as (type, content).

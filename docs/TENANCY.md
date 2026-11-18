@@ -114,11 +114,28 @@ margin:
 | Charge | Default | When |
 |---|---|---|
 | create_repo | 1B cycles | on creation; also what "positive balance" means |
-| push | 100M + 5K per byte of the pack | before the pack is ingested (refused as `[remote rejected]`, with the reason) |
-| storage rent | 5K per byte-year of ingested pack data | hourly timer, pro rata |
+| push | 100M + 5K per byte the push stores (below) | after the pack is read and before it is stored (refused as `[remote rejected]`, with the reason) |
+| storage rent | 5K per byte-year of what the repo's pushes stored | hourly timer, pro rata |
 | EVM action | 50B | each deploy or registry publish (a t-ECDSA signature plus RPC outcalls) |
 | IC deploy | 5B | each install from the deploy queue |
 | git canister floor | 1T | not a charge: under it, the rent timer tops the git canister up (below); optional in `set_pricing`, null keeps the default |
+
+A push is charged for the bytes it stores, and never less than the bytes
+of the request. The pack is read first: every object is inflated and
+every delta resolved, nothing stored, and what its new objects come to
+as the store keeps them (zlib of each whole object; the store keeps no
+deltas) is what the push pays for and what the repo's rent counts.
+Objects the store already has add nothing. For a pack of whole objects
+that is the pack's own size, as before. A pack of deltas stores more
+than it sends -- a one-line change to a large file arrives as a few
+bytes and is stored as the file again -- and pays for that; until
+2026-11 it paid for the few bytes, and a delta copying a base many
+times over stored megabytes for the price of a hundred bytes. A pack
+that cannot be read is refused and charged for its own bytes, as
+before. Two limits bound the reading: no object over 64 MiB inflated,
+and no pack whose objects, with the bases its deltas are applied to,
+come to more than 256 MiB inflated; nothing is inflated or built past
+the size its entry declares.
 
 An EVM action is charged up front, and a failed one gives back what it did
 not use:

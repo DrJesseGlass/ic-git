@@ -208,14 +208,34 @@ fn parse_delta_size(delta: &[u8], mut pos: usize) -> Result<(u64, usize), String
     }
 }
 
+/// The largest object a pack may carry or a delta may make, inflated. A
+/// pack entry declares its size and a delta its result's, in a few bytes
+/// that cost nothing to send; nothing is inflated or built past either.
+pub const MAX_OBJECT: u64 = 64 << 20;
+
+/// The most reading a pack may inflate: its objects, all together, and
+/// every base a delta is applied to, each time it is (a base is inflated
+/// again for each delta on it, so a pack of tiny deltas on one large base
+/// is this much work without making this many bytes). A push is one
+/// request body (2 MB at the gateway), which a pack of ordinary files and
+/// deltas does not turn into this much. Chosen, not measured: it bounds
+/// the heap `prepare` holds and the work one push can ask for.
+pub const MAX_PACK_INFLATED: u64 = 256 << 20;
+
 /// Apply a git delta (copy/insert instruction stream) to `base`.
 pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
     let (src_size, pos) = parse_delta_size(delta, 0)?;
-    if src_size as usize != base.len() {
+    if src_size != base.len() as u64 {
         return Err("delta source size mismatch".into());
     }
     let (dst_size, mut pos) = parse_delta_size(delta, pos)?;
-    let mut out = Vec::with_capacity(dst_size as usize);
+    // The size is the delta's own word: asked before anything is reserved
+    // for it, and held to as the result is built.
+    if dst_size > MAX_OBJECT {
+        return Err(format!("delta makes an object of {dst_size} bytes; the most is {MAX_OBJECT}"));
+    }
+    let dst_size = dst_size as usize;
+    let mut out = Vec::with_capacity(dst_size);
     while pos < delta.len() {
         let op = delta[pos];
         pos += 1;
@@ -240,34 +260,83 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
             }
             let start = offset as usize;
             let end = start.checked_add(size as usize).ok_or("copy overflow")?;
+            if out.len() + size as usize > dst_size {
+                return Err("delta target size mismatch".into());
+            }
             out.extend_from_slice(base.get(start..end).ok_or("delta copy out of range")?);
         } else if op != 0 {
             // Insert literal bytes.
             let n = op as usize;
+            if out.len() + n > dst_size {
+                return Err("delta target size mismatch".into());
+            }
             out.extend_from_slice(delta.get(pos..pos + n).ok_or("delta insert out of range")?);
             pos += n;
         } else {
             return Err("delta opcode 0".into());
         }
     }
-    if out.len() as u64 != dst_size {
+    if out.len() != dst_size {
         return Err("delta target size mismatch".into());
     }
     Ok(out)
 }
 
-/// Inflate one zlib stream starting at `pos`; returns (content, bytes consumed).
-fn inflate_from(data: &[u8], pos: usize) -> Result<(Vec<u8>, usize), String> {
-    let mut decoder = flate2::read::ZlibDecoder::new(&data[pos..]);
+/// Inflate one zlib stream starting at `pos`, which the entry says is
+/// `size` bytes inflated; returns (content, bytes consumed). Nothing is
+/// inflated past the size: a stream that has more is refused there.
+fn inflate_from(data: &[u8], pos: usize, size: u64) -> Result<(Vec<u8>, usize), String> {
+    if size > MAX_OBJECT {
+        return Err(format!("pack entry of {size} bytes; the most is {MAX_OBJECT}"));
+    }
+    let mut decoder = flate2::read::ZlibDecoder::new(data.get(pos..).ok_or("truncated pack entry")?);
     let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).map_err(|e| format!("pack zlib: {e}"))?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut decoder, size + 1), &mut out).map_err(|e| format!("pack zlib: {e}"))?;
+    if out.len() as u64 != size {
+        return Err("entry size mismatch".into());
+    }
     Ok((out, decoder.total_in() as usize))
 }
 
-/// Parse a received pack, verify the trailer, resolve deltas (in-pack and
-/// thin-pack bases alike are read back from the store), and store every
-/// object. Returns the stored oids in pack order.
-pub fn ingest_pack(data: &[u8]) -> Result<Vec<Oid>, String> {
+/// A received pack with its deltas resolved and nothing stored yet: every
+/// object as the store would keep it, and what that comes to. Made before
+/// the push is charged, so the charge is for what the pack stores and not
+/// for its bytes on the wire, which a delta makes as small as it likes: a
+/// few bytes of delta copy a megabyte of base into a new object.
+pub struct Prepared {
+    /// In pack order. The value is `None` for an object the store or an
+    /// earlier entry already has.
+    objects: Vec<(Oid, Option<Vec<u8>>)>,
+    stored_bytes: u64,
+}
+
+impl Prepared {
+    /// The bytes storing this pack adds: the stored values of its objects
+    /// that the store does not have.
+    pub fn stored_bytes(&self) -> u64 {
+        self.stored_bytes
+    }
+
+    /// Store every object. Returns the oids in pack order.
+    pub fn store(self) -> Vec<Oid> {
+        self.objects
+            .into_iter()
+            .map(|(oid, value)| {
+                // Another push may have stored it since `prepare`; the
+                // value is the same either way.
+                if let Some(value) = value {
+                    store::put_stored(oid, value);
+                }
+                oid
+            })
+            .collect()
+    }
+}
+
+/// Parse a received pack, verify the trailer, and resolve deltas (bases in
+/// the pack are read back from what was prepared, a thin pack's from the
+/// store). Stores nothing.
+pub fn prepare(data: &[u8]) -> Result<Prepared, String> {
     if data.len() < 32 || &data[..4] != b"PACK" {
         return Err("bad pack header".into());
     }
@@ -281,30 +350,33 @@ pub fn ingest_pack(data: &[u8]) -> Result<Vec<Oid>, String> {
     if digest.as_slice() != &data[content_end..] {
         return Err("pack checksum mismatch".into());
     }
+    // An entry is at least a header byte and an empty zlib stream.
+    if count as usize > data.len() / 9 {
+        return Err("pack object count exceeds its length".into());
+    }
 
     let mut pos = 12;
-    // Entry start offset -> oid, for OFS_DELTA base resolution. Delta bases
-    // are read back from the store rather than pinned in heap: every earlier
-    // entry has already been persisted by the time a delta references it.
-    let mut by_offset: std::collections::BTreeMap<usize, Oid> = std::collections::BTreeMap::new();
-    let mut oids = Vec::with_capacity(count as usize);
+    // Entry start offset -> index, for OFS_DELTA base resolution, and oid ->
+    // index of the entry whose value is held here, for bases the store does
+    // not have yet. Bases are inflated again from the prepared value rather
+    // than kept inflated: the heap holds what will be stored and no more.
+    let mut by_offset: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    let mut held: std::collections::BTreeMap<Oid, usize> = std::collections::BTreeMap::new();
+    let mut objects: Vec<(Oid, Option<Vec<u8>>)> = Vec::with_capacity(count as usize);
+    let (mut inflated, mut stored_bytes) = (0u64, 0u64);
 
     for _ in 0..count {
         let entry_start = pos;
         let (type_code, size, p) = parse_entry_header(data, pos)?;
         pos = p;
-        let oid = match type_code {
+        let (object_type, content, zlib) = match type_code {
             1..=4 => {
-                let (content, consumed) = inflate_from(data, pos)?;
-                if content.len() as u64 != size {
-                    return Err("entry size mismatch".into());
-                }
+                let (content, consumed) = inflate_from(data, pos, size)?;
                 // The wire zlib stream is exactly what the store persists;
                 // reuse it instead of re-deflating the content.
-                let object_type = ObjectType::from_pack_code(type_code).unwrap();
-                let oid = store::put_object_zlib(object_type, &content, &data[pos..pos + consumed]);
+                let zlib = data.get(pos..pos + consumed).ok_or("truncated pack entry")?;
                 pos += consumed;
-                oid
+                (ObjectType::from_pack_code(type_code).unwrap(), content, Some(zlib))
             }
             OFS_DELTA | REF_DELTA => {
                 let base_oid = if type_code == OFS_DELTA {
@@ -313,9 +385,7 @@ pub fn ingest_pack(data: &[u8]) -> Result<Vec<Oid>, String> {
                     let base_start = entry_start
                         .checked_sub(offset as usize)
                         .ok_or("ofs delta offset out of range")?;
-                    *by_offset
-                        .get(&base_start)
-                        .ok_or("ofs delta base not found")?
+                    objects[*by_offset.get(&base_start).ok_or("ofs delta base not found")?].0
                 } else {
                     let oid =
                         Oid::try_from(data.get(pos..pos + 20).ok_or("truncated ref delta base")?)
@@ -323,26 +393,45 @@ pub fn ingest_pack(data: &[u8]) -> Result<Vec<Oid>, String> {
                     pos += 20;
                     oid
                 };
-                let (delta, consumed) = inflate_from(data, pos)?;
+                let (delta, consumed) = inflate_from(data, pos, size)?;
                 pos += consumed;
-                if delta.len() as u64 != size {
-                    return Err("delta size mismatch".into());
-                }
-                // In-pack bases were stored above; thin packs reference bases
-                // only the server has. The store covers both.
-                let (base_type, base) = store::get_object_parsed(&base_oid)
+                let held_base = held.get(&base_oid).and_then(|i| objects[*i].1.as_deref()).map(store::parse_stored);
+                let (base_type, base) = held_base
+                    .or_else(|| store::get_object_parsed(&base_oid))
                     .ok_or_else(|| format!("delta base {} missing", store::oid_hex(&base_oid)))?;
-                store::put_object(base_type, &apply_delta(&base, &delta)?)
+                inflated += base.len() as u64;
+                (base_type, apply_delta(&base, &delta)?, None)
             }
             t => return Err(format!("unsupported pack entry type {t}")),
         };
-        by_offset.insert(entry_start, oid);
-        oids.push(oid);
+        inflated += content.len() as u64;
+        if inflated > MAX_PACK_INFLATED {
+            return Err(format!("the pack's objects and delta bases come to more than {MAX_PACK_INFLATED} bytes inflated; push it in parts"));
+        }
+        let oid = store::oid_of(object_type, &content);
+        let value = if held.contains_key(&oid) || store::has_object(&oid) {
+            None
+        } else {
+            let value = match zlib {
+                Some(zlib) => store::stored_value_zlib(object_type, content.len(), zlib),
+                None => store::stored_value(object_type, &content),
+            };
+            stored_bytes += value.len() as u64;
+            held.insert(oid, objects.len());
+            Some(value)
+        };
+        by_offset.insert(entry_start, objects.len());
+        objects.push((oid, value));
     }
     if pos != content_end {
         return Err("pack length mismatch".into());
     }
-    Ok(oids)
+    Ok(Prepared { objects, stored_bytes })
+}
+
+/// `prepare` and store, for a pack nobody is charged for.
+pub fn ingest_pack(data: &[u8]) -> Result<Vec<Oid>, String> {
+    Ok(prepare(data)?.store())
 }
 
 /// A version-2 packfile with no deltas: stored zlib streams are emitted
@@ -540,6 +629,162 @@ mod tests {
         let (t, content) = store::get_object_parsed(&oids[0]).unwrap();
         assert_eq!(t, ObjectType::Blob); // delta inherits the base's type
         assert_eq!(content, b"the quick brown fox jumps over the lazy dog!");
+    }
+
+    /// A pack of the given entries: (type code, base oid for a REF_DELTA,
+    /// declared size, inflated bytes).
+    fn pack_of(entries: &[(u8, Option<Oid>, u64, &[u8])]) -> Vec<u8> {
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        pack.extend_from_slice(&2u32.to_be_bytes());
+        pack.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (code, base, size, bytes) in entries {
+            push_entry_header(&mut pack, *code, *size);
+            if let Some(base) = base {
+                pack.extend_from_slice(base.as_slice());
+            }
+            let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            std::io::Write::write_all(&mut enc, bytes).unwrap();
+            pack.extend_from_slice(&enc.finish().unwrap());
+        }
+        let digest: [u8; 20] = Sha1::digest(&pack).into();
+        pack.extend_from_slice(&digest);
+        pack
+    }
+
+    fn size_varint(mut n: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (n & 0x7F) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// Bytes that do not deflate: what a delta's copies cost to store.
+    fn noise(n: usize, seed: u8) -> Vec<u8> {
+        let mut block: [u8; 20] = Sha1::digest([seed]).into();
+        let mut out = Vec::with_capacity(n + 20);
+        while out.len() < n {
+            out.extend_from_slice(&block);
+            block = Sha1::digest(block).into();
+        }
+        out.truncate(n);
+        out
+    }
+
+    /// The charge is for what a pack stores: a delta of a few bytes makes
+    /// an object of any size out of a base, and the wire size says nothing
+    /// of it.
+    #[test]
+    fn a_pack_is_measured_by_what_it_stores() {
+        let base_content = noise(60_000, 1);
+        let base = store::put_object(ObjectType::Blob, &base_content);
+        // Copy the base (offset 0, size 60000 = 0xEA60) eight times over.
+        let mut delta = size_varint(60_000);
+        delta.extend(size_varint(480_000));
+        for _ in 0..8 {
+            delta.extend_from_slice(&[0b1011_0000, 0x60, 0xEA]);
+        }
+        let pack = pack_of(&[(REF_DELTA, Some(base), delta.len() as u64, &delta)]);
+        assert!(pack.len() < 100, "{} bytes on the wire", pack.len());
+
+        let prepared = prepare(&pack).unwrap();
+        assert!(prepared.stored_bytes() > 400_000, "{} bytes to store", prepared.stored_bytes());
+        let made = prepared.objects[0].0;
+        assert!(!store::has_object(&made), "nothing is stored until it is asked for");
+        assert_eq!(prepared.store(), vec![made]);
+        assert_eq!(store::get_object_parsed(&made).unwrap().1.len(), 480_000);
+        // What the store has adds nothing.
+        assert_eq!(prepare(&pack).unwrap().stored_bytes(), 0);
+    }
+
+    #[test]
+    fn a_delta_resolves_against_an_entry_not_yet_stored() {
+        let whole = noise(3_000, 2);
+        let mut delta = size_varint(3_000);
+        delta.extend(size_varint(3_001));
+        delta.extend_from_slice(&[0b1011_0000, 0xB8, 0x0B, 1, b'!']);
+        let base = store::oid_of(ObjectType::Blob, &whole);
+        // The same whole object twice: held once, counted once.
+        let pack = pack_of(&[
+            (ObjectType::Blob as u8, None, 3_000, &whole),
+            (ObjectType::Blob as u8, None, 3_000, &whole),
+            (REF_DELTA, Some(base), delta.len() as u64, &delta),
+        ]);
+        let prepared = prepare(&pack).unwrap();
+        assert!(!store::has_object(&base));
+        assert!((6_000..6_200).contains(&prepared.stored_bytes()), "{}", prepared.stored_bytes());
+        let oids = prepared.store();
+        assert_eq!((oids[0], oids[1]), (base, base));
+        let mut expected = whole.clone();
+        expected.push(b'!');
+        assert_eq!(store::get_object_parsed(&oids[2]).unwrap().1, expected);
+    }
+
+    /// The sizes a pack declares cost a few bytes to send: nothing is
+    /// inflated, reserved or built past what is allowed.
+    #[test]
+    fn a_pack_is_held_to_its_sizes() {
+        // More inflated than the entry says: stopped at the size.
+        let zeros = vec![0u8; 1 << 20];
+        let e = prepare(&pack_of(&[(ObjectType::Blob as u8, None, 10, &zeros)])).err().unwrap();
+        assert!(e.contains("entry size mismatch"), "{e}");
+        // An entry over the cap is refused by its header.
+        let e = prepare(&pack_of(&[(ObjectType::Blob as u8, None, MAX_OBJECT + 1, b"x")])).err().unwrap();
+        assert!(e.contains("the most is"), "{e}");
+        // A delta that says it makes more than the cap: refused before
+        // anything is reserved for it.
+        let base = store::put_object(ObjectType::Blob, b"base");
+        let mut delta = size_varint(4);
+        delta.extend(size_varint(u64::MAX >> 1));
+        let e = prepare(&pack_of(&[(REF_DELTA, Some(base), delta.len() as u64, &delta)])).err().unwrap();
+        assert!(e.contains("delta makes an object"), "{e}");
+        // One that copies past the size it gave: refused as it gets there.
+        let mut delta = size_varint(4);
+        delta.extend(size_varint(6));
+        delta.extend_from_slice(&[0b1001_0000, 4, 0b1001_0000, 4]);
+        assert!(apply_delta(b"base", &delta).unwrap_err().contains("target size mismatch"));
+        // More objects than the pack has bytes for.
+        let mut pack = pack_of(&[(ObjectType::Blob as u8, None, 1, b"x")]);
+        pack.truncate(pack.len() - 20);
+        pack[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        let digest: [u8; 20] = Sha1::digest(&pack).into();
+        pack.extend_from_slice(&digest);
+        assert!(prepare(&pack).err().unwrap().contains("object count"));
+    }
+
+    /// Small objects, each within the cap, that come to more than a pack
+    /// may: refused where the total passes it.
+    #[test]
+    fn a_pack_is_held_to_a_total() {
+        let base_content = vec![7u8; 1 << 20];
+        let base = store::put_object(ObjectType::Blob, &base_content);
+        // Each delta copies the megabyte 60 times and ends in its own byte.
+        // Four are 244 MiB of objects and bases, and the fifth's base passes
+        // the total.
+        let deltas: Vec<Vec<u8>> = (0..5u8)
+            .map(|i| {
+                let mut d = size_varint(1 << 20);
+                d.extend(size_varint(60 * (1 << 20) + 1));
+                for _ in 0..60 {
+                    for chunk in 0..16u8 {
+                        d.extend_from_slice(&[0b1000_0100, chunk]); // offset chunk << 16, size 0x10000
+                    }
+                }
+                d.extend_from_slice(&[1, i]);
+                d
+            })
+            .collect();
+        let entries: Vec<(u8, Option<Oid>, u64, &[u8])> = deltas.iter().map(|d| (REF_DELTA, Some(base), d.len() as u64, d.as_slice())).collect();
+        let pack = pack_of(&entries);
+        assert!(pack.len() < 2_000, "{}", pack.len());
+        let e = prepare(&pack).err().unwrap();
+        assert!(e.contains("inflated; push it in parts"), "{e}");
     }
 
     #[test]

@@ -515,7 +515,9 @@ The steps in one canister:
        reserved, so nothing else can have taken it.
      - **The push path** checks the certificate, then awaits
        `charge_push`, then checks `may_write` again before it ingests.
-       The charge is kept on a refused pack, as it is today.
+       The charge is kept on a refused pack, as it is today. (Since
+       2026-11 the pack is read before the charge, which is for what
+       it stores; an unreadable pack is charged for its bytes.)
      - **A ballot** awaits `has_commit` before it counts.
      - **Mirror writes** are full state, sequence-numbered, and kept in a
        per-repo dirty set until the git side acknowledges them, retried
