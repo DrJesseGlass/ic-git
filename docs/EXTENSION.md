@@ -205,6 +205,26 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
 - `/site/<repo>` (no slash) is redirected to `/site/<repo>/` before it
   loads: the canister serves the page at both, but relative URLs only
   resolve at the second.
+- A site is checked at one host, `<canister>.raw.icp0.io`, and the
+  gateways serve the same canister at others: the certified host
+  (`<canister>.icp0.io`), every other domain of theirs (`ic0.app`,
+  `icp1.io`, `icp.net`, and whatever they add), and the same with a
+  prefix, `x--<canister>`, which a gateway drops. A page there is another
+  origin's, with none of the extension on it, so it would load unchecked.
+  Both extensions block any navigation, of a tab or of a frame, to a
+  path under `/site` at a host whose first label is one of the two
+  canisters' ids, with or without a prefix, under any domain, except the
+  checked host itself: a static rule (`rules.json`, in both packages),
+  which goes by the id and so needs no list of the gateways' domains and
+  no permission for them (measurement 14). The tab shows the browser's
+  own "blocked" page, with no word from the extension: nothing of it may
+  run on that host. The checked host over `http` is asked for over
+  `https` by the same means. What the rule leaves alone at those hosts
+  is what is not under `/site`: the canister's index, its API, the git
+  protocol, none of them a site's page. A site at a domain of its own
+  (docs/TENANCY.md, "Custom domains") has no canister id in its host
+  and is not covered: it loads unchecked, at that domain, until the
+  extensions know the domain.
 - Check E refuses what the pinned policy would refuse or could not pin:
   inline event handlers (any `on...` attribute), `style=` attributes,
   `javascript:` URLs, external stylesheets, `@import` in an inline
@@ -252,7 +272,8 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
   the man in the middle: first and second visits, the slash-less address,
   ic-vote, tampering of only the page's response (script injected, text
   changed), tampering of everything, recovery once tampering stops,
-  "Open anyway" (Chrome), and a page no record covers. On Firefox the
+  "Open anyway" (Chrome), a page no record covers, and the same sites at
+  the gateways' other hosts, which must not load. On Firefox the
   tampered page's injected script and image are shown never to be
   requested.
 - `node tools/loader-test.mjs` covers the core, check E and `derivePolicy`
@@ -323,6 +344,19 @@ Measured on 2026-10-02, in the same Chromium (153.0.8010) and Firefox 157:
     9,049,755 pages -- every context of up to two structural tags, then
     text the walk skips -- did the parser build an element the walk had
     skipped. The canister's port gave the 100,000 the same verdicts.
+
+Measured on 2026-11-18, in Chrome for Testing 158.0.8127 and Firefox 160:
+
+14. A static `block` rule, and an `upgradeScheme` one, act on a host the
+    manifest names no permission for, in both (contrast 9, which is of a
+    rule that changes headers): `tools/extension-test.mjs` and
+    `tools/extension-firefox-test.mjs`, the last case of each. In Chrome
+    a blocked tab is `net::ERR_BLOCKED_BY_CLIENT` and a blocked frame an
+    error page inside it; in Firefox the navigation ends in
+    `NS_ERROR_ABORT`. Firefox needs the `declarativeNetRequest`
+    permission for it, which Chrome's package had; the tests load each
+    package unpacked, so neither has shown how a store update that adds
+    it is offered to the user.
 
 ## The extension's own package, on chain
 

@@ -1,0 +1,38 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?([a-z0-9-]+--)?(umobs-yiaaa-aaaab-agyrq-cai|34koz-jyaaa-aaaab-ahejq-cai)([.:][^/?#]*)?/site([/?#]|$)",
+      "excludedRequestDomains": [
+        "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io",
+        "34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "upgradeScheme"
+    },
+    "condition": {
+      "urlFilter": "|http://",
+      "requestDomains": [
+        "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io",
+        "34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  }
+]

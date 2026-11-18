@@ -15,6 +15,7 @@
     }
   },
   "permissions": [
+    "declarativeNetRequest",
     "webRequest",
     "webRequestBlocking",
     "webRequestFilterResponse",
@@ -51,6 +52,15 @@
       "run_at": "document_start"
     }
   ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "default",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
   "action": {
     "default_title": "ic-git verifier"
   }
