@@ -957,6 +957,8 @@ async fn govern_app_canister(repo: String) -> Result<candid::Principal, String> 
 /// the change applies the moment approvals minus objections reach the
 /// required votes. Any voter may. On a governed repo this is the only way
 /// to make such a change; on another, the owner could also make it directly.
+/// A Transfer to a new owner also takes the owner's own approval, and is
+/// reported as not reached until it has it.
 #[ic_cdk::update]
 async fn propose_policy_change(
     repo: String,

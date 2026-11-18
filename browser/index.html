@@ -1326,7 +1326,7 @@ const Console = (() => {
     return kind === 'RequiredVotes' ? 'require ' + v.k + ' approval' + (v.k === 1 ? '' : 's') + ' per commit'
       : kind === 'AddVoter' ? 'add voter ' + short(v.principal)
       : kind === 'RemoveVoter' ? 'remove voter ' + short(v.principal)
-      : kind === 'Transfer' ? 'offer the repository to ' + short(v.new_owner) + ', theirs once they accept'
+      : kind === 'Transfer' ? 'offer the repository to ' + short(v.new_owner) + ', theirs once they accept (takes the owner\'s approval as well as the votes)'
       : kind === 'WasmDeploy' ? 'deploy ' + v.source_path + ' into ' + short(v.target)
       : kind === 'DeployMode' ? 'install mode ' + v.mode + (v.mode === 'reinstall' ? ' (WIPES the target\'s state on every deploy)' : '')
       : JSON.stringify(c);

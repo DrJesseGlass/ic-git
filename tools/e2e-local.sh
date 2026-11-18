@@ -636,6 +636,16 @@ expect "owner: install mode locked" "$(ic "$TEN" set_deploy_mode '("e2e-app", "r
 OPP=$(dfx identity get-principal --identity "$OP")
 expect "writers are still the owner's to manage" "$(ic "$TEN" add_member "(\"e2e-app\", principal \"$OPP\", \"writer\")")" 'Ok'
 ic "$TEN" remove_member "(\"e2e-app\", principal \"$OPP\")" >/dev/null
+# The owner's seat is not the votes' to hand on alone: under K = 1 a
+# voter's own ballot reaches any change, and a Transfer waits for the owner.
+expect "a voter's Transfer to themself has its vote and waits for the owner" "$(flat "$(ic "$V1" propose_policy_change "(\"e2e-app\", variant { Transfer = record { new_owner = principal \"$P1\" } }, variant { Approve }, null)")")" 'reached = false'
+expect "  ...listed as not reached" "$(curl -s "http://$AHOST/api/e2e-app/proposals")" '"approvals":1,"objections":0,"required":1,"reached":false'
+refuse "  ...nothing is offered" "$(curl -s "http://$AHOST/api/e2e-app/info")" '"pending_owner":"'
+expect "  ...and nothing is theirs to take" "$(ic "$V1" accept_transfer '("e2e-app")')" 'is not offered to'
+expect "with the owner's approval the offer is made" "$(flat "$(ic "$TEN" propose_policy_change "(\"e2e-app\", variant { Transfer = record { new_owner = principal \"$P1\" } }, variant { Approve }, null)")")" 'reached = true'
+expect "  ...and shows" "$(curl -s "http://$AHOST/api/e2e-app/info")" "\"pending_owner\":\"$P1\""
+expect "a Transfer naming the owner withdraws it on one vote" "$(flat "$(ic "$V2" propose_policy_change "(\"e2e-app\", variant { Transfer = record { new_owner = principal \"$T\" } }, variant { Approve }, null)")")" 'reached = true'
+refuse "  ...the offer is gone" "$(curl -s "http://$AHOST/api/e2e-app/info")" '"pending_owner":"'
 # Policy changes by vote. K is 1 of 3, so the proposer's approval applies.
 expect "required votes 1 -> 2 by vote: applied at once under K = 1" "$(flat "$(ic "$TEN" propose_policy_change '("e2e-app", variant { RequiredVotes = record { k = 2 : nat32 } }, variant { Approve }, null)')")" 'reached = true'
 expect "  ...and in effect" "$(curl -s "http://$AHOST/api/e2e-app/info")" '"required_votes":2'

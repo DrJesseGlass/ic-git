@@ -864,6 +864,32 @@ impl PolicyChange {
     }
 }
 
+/// Whether a change that has its votes still waits on the owner. A Transfer
+/// that would move the repo takes the owner's own approval among its
+/// ballots, whatever the count: the votes decide what a repo deploys and
+/// who votes on it, and the owner's seat is the one thing they cannot hand
+/// on alone. Without it one voter of a repo requiring one vote named
+/// themself, was reached by their own ballot, and accepted: the repo was
+/// theirs and its owner was nobody on it. No rule on the count holds there
+/// (no ballot from the one named, a second approval): under one required
+/// vote a voter adds voters alone, and may name a principal that is not
+/// one. A Transfer naming the owner moves nothing -- it withdraws an
+/// offer -- and goes by its votes, as does one on a repo with no owner.
+fn awaits_owner(m: &RepoMeta, repo: &str, change: &PolicyChange) -> bool {
+    let PolicyChange::Transfer { new_owner } = change else {
+        return false;
+    };
+    let Some(owner) = m.owner else { return false };
+    if *new_owner == owner {
+        return false;
+    }
+    let owner = Approver::from(owner);
+    !VoteStore { repo }
+        .load(&change.subject())
+        .iter()
+        .any(|a| a.approver == owner && a.decision == Decision::Approve)
+}
+
 /// How many pending policy changes one approver may hold an approval on. A
 /// change is pending by approval: the ballot that proposes it is an
 /// approval, and a change nobody approves any more is dropped. So the
@@ -939,7 +965,10 @@ pub fn unmark_governed(repo: &str) {
 /// applied -- to the metadata here, to the deploy config by the caller when
 /// `apply_deploy` is returned -- the moment approvals minus objections reach
 /// the threshold. Its ballots are then cleared, so proposing the same change
-/// again later starts from nothing.
+/// again later starts from nothing. A Transfer to a new owner is the one
+/// change the count does not decide alone: it waits, pending and reported
+/// as not reached, until the owner's approval is among its ballots
+/// (`awaits_owner`).
 ///
 /// A change is proposed by approving it: the first ballot on a change not
 /// pending must be an approval (there is nothing to reject yet), and a
@@ -991,8 +1020,12 @@ pub async fn propose_policy_change(
     let reason = ballot_reason(decision, reason)?;
     let mut approval = Approval::new(Approver::from(*who), decision.into(), now_ns());
     approval.reason = reason;
-    let tally = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subj, approval)
+    let mut tally = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subj, approval)
         .map_err(|e| e.to_string())?;
+    // Read after the ballot is recorded, so the owner's own counts.
+    if tally.reached && awaits_owner(&m, repo, &change) {
+        tally.reached = false;
+    }
     let mut apply_deploy = None;
     if tally.reached {
         // `check` just passed on this same `m`, so this applies.
@@ -1046,7 +1079,7 @@ pub fn proposals(repo: &str) -> Vec<Proposal> {
                 approvals: t.approvals,
                 objections: t.objections,
                 required: t.required,
-                reached: t.reached,
+                reached: t.reached && !awaits_owner(&m, repo, change),
             }
         })
         .collect()
@@ -2089,6 +2122,77 @@ mod tests {
         let change = PolicyChange::WasmDeploy { target: target.clone(), source_path: "v2.wasm".into() };
         let (t, apply) = propose_policy_change("t-wasm", &alice, change, Vote::Approve, None).unwrap();
         assert!(t.reached && apply.is_some());
+    }
+
+    /// The votes cannot move the owner's seat without the owner: under one
+    /// required vote a voter's own ballot reaches any change, and a Transfer
+    /// to a new owner waits for the owner's approval all the same.
+    #[test]
+    fn voted_transfer_waits_for_the_owner() {
+        let (alice, v1, v2, out, app) = (p(171), p(172), p(173), p(174), p(175));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-seat", &alice, false).unwrap();
+        add_member("t-seat", &alice, false, v1, Role::Voter).unwrap();
+        add_member("t-seat", &alice, false, v2, Role::Voter).unwrap();
+        set_required_votes("t-seat", &alice, false, 1).unwrap();
+        let to = |new_owner| PolicyChange::Transfer { new_owner };
+        let seat = || {
+            let m = meta("t-seat").unwrap();
+            (m.owner, m.pending_owner)
+        };
+
+        // Not governed yet, and the rule already holds: the ballot path is
+        // open to a voter wherever votes are required.
+        let (t, _) = propose_policy_change("t-seat", &v1, to(v1), Vote::Approve, None).unwrap();
+        assert_eq!((t.approvals, t.required, t.reached), (1, 1, false));
+        assert_eq!(seat(), (Some(alice), None));
+        assert!(run(accept_transfer("t-seat", &v1)).is_err());
+
+        set_app_canister("t-seat", app).unwrap();
+        mark_governed("t-seat", &alice).unwrap();
+
+        // Naming a principal that is no voter is no way around it, and
+        // neither is every other voter's approval.
+        let (t, _) = propose_policy_change("t-seat", &v1, to(out), Vote::Approve, None).unwrap();
+        assert!(!t.reached);
+        let (t, _) = propose_policy_change("t-seat", &v2, to(v1), Vote::Approve, None).unwrap();
+        assert_eq!((t.approvals, t.reached), (2, false));
+        assert_eq!(seat(), (Some(alice), None));
+        // Both wait, listed as not reached.
+        let pending = proposals("t-seat");
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|p| !p.reached && p.approvals >= p.required));
+
+        // What one vote does decide, it still decides alone.
+        let (t, _) = propose_policy_change("t-seat", &v1, PolicyChange::AddVoter { principal: out }, Vote::Approve, None).unwrap();
+        assert!(t.reached);
+        let (t, _) = propose_policy_change("t-seat", &out, to(v1), Vote::Approve, None).unwrap();
+        assert_eq!((t.approvals, t.reached), (3, false));
+
+        // The owner's ballot has to be an approval.
+        let (t, _) = propose_policy_change("t-seat", &alice, to(v1), Vote::Reject, None).unwrap();
+        assert!(!t.reached);
+        assert_eq!(seat(), (Some(alice), None));
+        // With it the offer is made, and v1 takes it as before.
+        let (t, _) = propose_policy_change("t-seat", &alice, to(v1), Vote::Approve, None).unwrap();
+        assert!(t.reached);
+        assert_eq!(seat(), (Some(alice), Some(v1)));
+        assert_eq!(proposals("t-seat").len(), 1, "the offer to the outsider still waits");
+
+        // Withdrawing an offer moves nothing, and goes by its votes.
+        let (t, _) = propose_policy_change("t-seat", &v2, to(alice), Vote::Approve, None).unwrap();
+        assert!(t.reached);
+        assert_eq!(seat(), (Some(alice), None));
+
+        // The owner alone offers, under one required vote, and the seat
+        // the new owner holds is held the same way.
+        let (t, _) = propose_policy_change("t-seat", &alice, to(v1), Vote::Approve, None).unwrap();
+        assert!(t.reached);
+        run(accept_transfer("t-seat", &v1)).unwrap();
+        assert_eq!(seat(), (Some(v1), None));
+        let (t, _) = propose_policy_change("t-seat", &v2, to(v2), Vote::Approve, None).unwrap();
+        assert!(!t.reached);
+        assert_eq!(seat(), (Some(v1), None));
     }
 
     /// Governing locks the policy: the owner's mutators refuse what is now

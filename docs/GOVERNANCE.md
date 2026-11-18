@@ -53,7 +53,8 @@ and for good:
 
 The lock is a vote on the change itself: `propose_policy_change` takes a
 ballot on "require K", "add or remove this voter", "offer the repo to"
-(the one named still has to accept it, `accept_transfer`), or "what
+(the owner has to be among its approvals, and the one named still has to
+accept it, `accept_transfer`), or "what
 the deploy installs" (the deploy config is part of it, since a source path
 or an install mode changed by the owner alone would put unapproved code,
 or a wipe, into the governed canister), counted over the current approvers

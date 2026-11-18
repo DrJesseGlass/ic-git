@@ -436,7 +436,18 @@ themselves sole approver, and push anything:
   once, so there is nothing to vote on and the owner changes it directly.
   The same change proposed by two approvers is one subject, so approvals
   accumulate; once applied its ballots are cleared, so proposing it again
-  starts from nothing. `get_policy_proposals(repo)` and `GET /api/<repo>/proposals`
+  starts from nothing. A `Transfer` to a new owner is the one change the
+  count does not decide alone: it also takes the owner's own approval
+  among its ballots, and until then it stays pending and is reported as
+  not reached, whatever its count. The votes decide what the repo deploys
+  and who votes on it; they do not hand the owner's seat on without the
+  owner. Until 2026-11 they did, and under one required vote a voter
+  named themself, was reached by their own ballot, and accepted. No rule
+  on the count would hold there, since under one required vote a voter
+  adds voters alone and may name a principal that is not one. A
+  `Transfer` naming the owner withdraws an offer, moves nothing, and
+  goes by its votes. The same holds on a repo that is not governed but
+  requires votes. `get_policy_proposals(repo)` and `GET /api/<repo>/proposals`
   list what is pending, with ballots and count. The console shows them
   with approve, reject and object controls, and a form to propose.
 - `k` can never return to 0 on a governed repo, by vote or otherwise.
