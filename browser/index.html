@@ -498,22 +498,29 @@ const Diff = (() => {
 
   function tabs(repo, rev, on) {
     const t = (k, label) => '<a class="' + (on === k ? 'on' : '') + '" href="' + esc(H(repo, k, rev)) + '">' + label + '</a>';
-    return '<span class="tabs">' + t('tree', 'files') + t('commits', 'commits') + '</span>';
+    return '<span class="tabs">' + t('tree', 'files') + t('commits', 'commits') + t('compare', 'compare') + '</span>';
   }
 
-  function refPicker(repo, refs, rev, kind, path) {
+  // A select of the repo's refs with `rev` chosen (a rev that is no ref,
+  // a commit id, is listed as itself). Choosing one goes to `go(name)`:
+  // the same view at that ref, unless the caller says otherwise.
+  function refPicker(repo, refs, rev, kind, path, id = 'ref', go = v => H(repo, kind, v, path)) {
     const names = refs.map(r => r.name).sort();
     const opts = names.map(n => {
       const s = n.replace(/^refs\/(heads|tags)\//, '');
       return '<option value="' + esc(s) + '"' + (s === rev || n === rev ? ' selected' : '') + '>' + esc(n) + '</option>';
     }).join('');
-    const sel = '<select id="ref">' + opts + (names.some(n => n.replace(/^refs\/(heads|tags)\//, '') === rev) ? '' : '<option selected value="' + esc(rev) + '">' + esc(rev) + '</option>') + '</select>';
-    setTimeout(() => {
-      const el = document.getElementById('ref');
-      if (el) el.onchange = () => { location.hash = H(repo, kind, el.value, path); };
-    }, 0);
+    const sel = '<select id="' + id + '">' + opts + (names.some(n => n.replace(/^refs\/(heads|tags)\//, '') === rev) ? '' : '<option selected value="' + esc(rev) + '">' + esc(rev) + '</option>') + '</select>';
+    picked[id] = go;
     return sel;
   }
+  // Where each picker on the page goes; one listener, so a picker works
+  // whenever its markup reaches the page, and after it is rendered again.
+  const picked = {};
+  main.addEventListener('change', e => {
+    const go = e.target.tagName === 'SELECT' && picked[e.target.id];
+    if (go) location.hash = go(e.target.value);
+  });
 
   async function showRepos() {
     const { data } = await api('repos');
@@ -570,14 +577,57 @@ const Diff = (() => {
       '<span class="muted"><code>git show ' + esc(short(commit)) + ':' + esc(path) + '</code> reproduces this</span></div>' + body);
   }
 
+  // A commit in a list: its first line, who, when, its tree.
+  function commitRow(repo, c) {
+    const title = (c.message || '').split('\n')[0];
+    return '<div class="commit"><a href=\"' + esc(H(repo, 'commit', c.oid)) + '\"><b>' + esc(title || '(no message)') + '</b></a>' +
+      '<div class="muted">' + esc(c.author ? c.author.name : '?') + ' &middot; ' + esc(when(c.author && c.author.time)) + ' &middot; <a class="oid" href=\"' + esc(H(repo, 'tree', c.oid)) + '\">' + esc(short(c.oid)) + '</a></div></div>';
+  }
+
   async function showCommits(repo, rev) {
     const [{ data: refs }, { data: list }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/commits/' + encodeURIComponent(rev) + '?n=50')]);
-    const items = list.map(c => {
-      const title = (c.message || '').split('\n')[0];
-      return '<div class="commit"><a href=\"' + esc(H(repo, 'commit', c.oid)) + '\"><b>' + esc(title || '(no message)') + '</b></a>' +
-        '<div class="muted">' + esc(c.author ? c.author.name : '?') + ' &middot; ' + esc(when(c.author && c.author.time)) + ' &middot; <a class="oid" href=\"' + esc(H(repo, 'tree', c.oid)) + '\">' + esc(short(c.oid)) + '</a></div></div>';
-    }).join('');
+    const items = list.map(c => commitRow(repo, c)).join('');
     render(crumbs(repo, rev, 'commits', '') + '<div class="row">' + refPicker(repo, refs, rev, 'commits', '') + tabs(repo, rev, 'commits') + '</div>' + items);
+  }
+
+  // A branch against another (#/<repo>/compare/<head>/<base>, the base
+  // the repo's HEAD unless named): where the two part, the commits only
+  // the head has, and what they changed between them -- the head's tree
+  // against the merge base's, not against the base's tip, which has
+  // moved on since. What a pull request would bring.
+  async function showCompare(repo, head, base) {
+    base = base || 'HEAD';
+    const { data: refs } = await api(enc(repo) + '/refs');
+    const at = (h, b) => H(repo, 'compare', h, b === 'HEAD' ? '' : b);
+    // Built when it is rendered: a picker's markup and where it goes
+    // reach the page together.
+    const top = () => crumbs(repo, head, 'compare', '') +
+      '<div class="row"><span>' + refPicker(repo, refs, head, 'compare', '', 'ref', v => at(v, base)) +
+      ' <span class="muted">against</span> ' + refPicker(repo, refs, base, 'compare', '', 'base', v => at(head, v)) + '</span>' +
+      tabs(repo, head, 'compare') + '<a href="' + esc(at(base, head)) + '">the other way round</a></div>';
+    let d;
+    try {
+      ({ data: d } = await api(enc(repo) + '/compare/' + encodeURIComponent(head) + '?base=' + encodeURIComponent(base)));
+    } catch (e) {
+      // Two revs too far apart, a rev that is not there, a canister from
+      // before /compare: the pickers stay, to choose again.
+      return render(top() + '<p class="err">' + esc(e.message || e) + '</p>');
+    }
+    const oid = o => '<a class="oid" href="' + esc(H(repo, 'commit', o)) + '">' + esc(short(o)) + '</a>';
+    const n = (k, what) => k + ' ' + what + (k === 1 ? '' : 's');
+    const where = !d.merge_base
+      ? 'The two share no history: there is no commit both descend from.'
+      : d.head === d.base ? 'The two are the same commit, ' + oid(d.head) + '.'
+      : n(d.ahead, 'commit') + ' ahead of ' + esc(base) + ', ' + n(d.behind, 'commit') + ' behind it; they part at ' + oid(d.merge_base) + '.';
+    const none = d.ahead ? '' : d.head === d.base ? '' : d.merge_base
+      ? '<p class="muted">Nothing to bring: ' + esc(base) + ' already has every commit of ' + esc(head) + '.</p>' : '';
+    render(top() + '<p>' + where + '</p>' + none +
+      (d.ahead ? '<h3>' + n(d.ahead, 'commit') + '</h3>' + d.commits.map(c => commitRow(repo, c)).join('') +
+        (d.truncated ? '<p class="muted">The newest ' + d.commits.length + ' are listed.</p>' : '') : '') +
+      (d.merge_base && d.ahead ? '<div id="diff"><p class="muted">reading what changed&hellip;</p></div>'
+        : !d.merge_base ? '<p class="muted">With nothing in common there is no change to show between them; <a href="' + esc(H(repo, 'commit', d.head, d.base)) + '">the two trees can still be compared</a>.</p>' : ''));
+    const box = document.getElementById('diff');
+    if (box) await showDiff(repo, { oid: d.head, parents: [] }, d.merge_base, box);
   }
 
   // A commit, and under it what it changed: against its first parent, or
@@ -708,6 +758,7 @@ const Diff = (() => {
       if (kind === 'blob') return await showBlob(repo, rev, path);
       if (kind === 'commits') return await showCommits(repo, rev);
       if (kind === 'commit') return await showCommit(repo, rev, path);
+      if (kind === 'compare') return await showCompare(repo, rev, path);
       throw new Error('unknown view: ' + kind);
     } catch (e) { fail(e); }
   }

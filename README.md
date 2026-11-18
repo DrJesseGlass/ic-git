@@ -144,6 +144,12 @@ changed, compared in the page itself (the "diff" block of
 binary file, a file over a megabyte and two versions more than 2000
 changed lines apart are named and not compared.
 
+The compare view, `#/<repo>/compare/<head>/<base>` (the base is HEAD
+unless named), is a branch against another: how far each is ahead of
+the other, the commit they part at, the commits only the head has, and
+under them what those changed -- the head against the merge base, the
+way the commit view shows a commit against its parent.
+
 `<rev>` is `HEAD`, a 40-hex oid, or a bare branch/tag name. Every response
 that resolved a commit carries `X-Ic-Git-Commit`.
 
