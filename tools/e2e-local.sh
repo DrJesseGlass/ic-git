@@ -401,6 +401,10 @@ expect "  ...and a clone over it" "$(git clone -q "http://$NHOST/e2e-app.git" "$
 DIFF=$(curl -s "http://$HOST/api/e2e-app/diff/$TIP")
 expect "the API's diff of the tip is against its parent" "$DIFF" "\"base\":\"$(git -C "$W" rev-parse "$TIP~1")\""
 expect "  ...and names the files git names" "$(echo "$DIFF" | grep -o '"path":"[^"]*"' | sed 's/"path":"\(.*\)"/\1/' | sort | tr '\n' ' ')" "^$(git -C "$W" diff-tree -r -M100% --no-commit-id --name-only "$TIP" | sort | tr '\n' ' ')\$"
+# Where the tip and its parent part (crates/git/src/graph.rs): at the
+# parent, the tip one commit ahead of it.
+PARENT=$(git -C "$W" rev-parse "$TIP~1")
+expect "the API compares the tip with its parent: the merge base, one commit ahead" "$(curl -s "http://$HOST/api/e2e-app/compare/$TIP?base=$PARENT")" "\"merge_base\":\"$PARENT\",\"ahead\":1,\"behind\":0"
 
 section "custom domains"
 # docs/TENANCY.md, "Custom domains": a site at its own domain, which is
