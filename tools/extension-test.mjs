@@ -63,7 +63,9 @@ async function open({ mitm } = {}) {
   const server = mitm ? await proxy(dir, mitm) : null;
   const net = server ? [`--host-resolver-rules=MAP ${new URL(GW).host}:443 127.0.0.1:${server.address().port}`, '--ignore-certificate-errors'] : [];
   const port = 9600 + Math.floor(Math.random() * 300);
-  const chrome = spawn(bin, ['--headless=new', '--window-size=1280,900', ...net, `--remote-debugging-port=${port}`, `--user-data-dir=${dir}`,
+  // --use-mock-keychain: a fresh profile otherwise asks the macOS keychain
+  // for a password at every launch.
+  const chrome = spawn(bin, ['--headless=new', '--window-size=1280,900', '--use-mock-keychain', '--password-store=basic', ...net, `--remote-debugging-port=${port}`, `--user-data-dir=${dir}`,
     `--load-extension=${EXT}`, `--disable-extensions-except=${EXT}`, 'about:blank'], { stdio: 'ignore' });
   let version;
   for (let i = 0; i < 60 && !version; i++) {
@@ -310,6 +312,92 @@ const report = (name, ok, got) => {
     await b.go(GW + '/site/ic-vote/nope.html', 8_000);
     const s = await b.state();
     report('a page no record covers: stop page, nothing runs', s.overlay && s.pwned === 0, s);
+  } finally { await b.close(); }
+}
+
+// 7. The same canisters at any other host: no page under /site/ loads.
+// The rule needs no permission for those hosts, and the manifest has none.
+{
+  const b = await open();
+  const ID = '34koz-jyaaa-aaaab-ahejq-cai', OLD = 'umobs-yiaaa-aaaab-agyrq-cai';
+  // What a navigation comes to: 'blocked' when the extension's rule
+  // cancels it, else the network's error, or 'loaded'.
+  const nav = async url => {
+    const r = await b.send('Page.navigate', { url }, b.page);
+    await sleep(300);
+    return r.errorText === 'net::ERR_BLOCKED_BY_CLIENT' ? 'blocked' : r.errorText || 'loaded';
+  };
+  try {
+    const stopped = [
+      // The gateways' other domains, certified and raw.
+      `https://${ID}.icp0.io/site/ic-git/`,
+      `https://${ID}.ic0.app/site/ic-git/`,
+      `https://${ID}.raw.ic0.app/site/ic-git/`,
+      `https://${ID}.icp1.io/site/ic-git/`,
+      `https://${ID}.raw.icp1.io/site/ic-vote/`,
+      `https://${ID}.icp.net/site/ic-git/`,
+      `https://${ID}.raw.icp.net/site/ic-git/index.html?x=1#y`,
+      `https://${OLD}.icp0.io/site/ic-git/`,
+      `http://${ID}.icp0.io/site/ic-git/`,
+      // The slash-less address, and /site itself.
+      `https://${ID}.icp0.io/site/ic-git`,
+      `https://${ID}.icp0.io/site`,
+      // A prefix, which a gateway drops, at the checked domain too.
+      `https://x--${ID}.raw.icp0.io/site/ic-git/`,
+      // A prefix a hostname may have and a DNS name may not.
+      `https://x_y--${ID}.icp0.io/site/ic-git/`,
+      // The checked host spelled as another origin: with the root's dot
+      // (the gateways answer there), or at another port.
+      `https://${ID}.raw.icp0.io./site/ic-git/`,
+      `https://${ID}.raw.icp0.io:8443/site/ic-git/`,
+      `https://a--b--${ID}.icp0.io/site/ic-git/`,
+      // A domain no list knows: the rule goes by the canister's id.
+      `https://${ID}.gateway.example/site/ic-git/`,
+      `https://${ID}.raw.gateway.example:8443/site/ic-git/`,
+      `https://user@${ID}.icp0.io/site/ic-git/`,
+    ];
+    for (const url of stopped) {
+      const got = await nav(url);
+      report('blocked: ' + url, got === 'blocked', got);
+    }
+    const passed = [
+      // Not under /site/: the canister's index and its API are not pages.
+      `https://${ID}.icp0.io/`,
+      `https://${ID}.icp0.io/api/repos`,
+      `https://${ID}.icp0.io/sites/x`,
+      // Another canister.
+      'https://ryjl3-tyaaa-aaaaa-aaaba-cai.icp0.io/site/x/',
+      // The canister's id elsewhere than the host's first label.
+      `https://example.com/site/${ID}.icp0.io/`,
+    ];
+    for (const url of passed) {
+      const got = await nav(url);
+      report('not blocked: ' + url, got !== 'blocked', got);
+    }
+    // The checked host over http is asked for over https.
+    await b.send('Page.navigate', { url: `http://${ID}.raw.icp0.io/site/ic-git/` }, b.page);
+    await sleep(15_000);
+    const at = await b.evaluate('location.href');
+    const s = await b.state();
+    report('the checked host over http: upgraded, checked, runs', at === CONSOLE && !s.overlay && s.badge === 'OK', { at, ...s });
+    // In a frame, inside a page of anyone's: the canister's index at
+    // that host loads there, a page under /site/ does not.
+    await b.send('Page.navigate', { url: 'https://example.com/' }, b.page);
+    await sleep(3_000);
+    await b.evaluate(`for (const path of ['/', '/site/ic-git/']) {
+      const f = document.createElement('iframe');
+      f.src = 'https://${ID}.icp0.io' + path;
+      document.body.append(f);
+    }`);
+    await sleep(8_000);
+    // A frame of another site is a target of its own, and keeps the
+    // address it was given: where it is says whether it loaded.
+    const frames = {};
+    for (const t of (await b.send('Target.getTargets')).targetInfos.filter(t => t.type === 'iframe')) {
+      const { sessionId } = await b.send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
+      frames[new URL(t.url).pathname] = await b.evaluate('location.href', sessionId);
+    }
+    report('blocked in a frame', frames['/'] === `https://${ID}.icp0.io/` && frames['/site/ic-git/'] === 'chrome-error://chromewebdata/', frames);
   } finally { await b.close(); }
 }
 

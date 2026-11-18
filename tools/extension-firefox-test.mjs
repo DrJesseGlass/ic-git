@@ -148,7 +148,11 @@ async function open({ rewrite = () => null } = {}) {
   // What a call from the page to the IC's API comes to: an HTTP status, or
   // "blocked" when the extension's listener cancels it.
   const call = url => evaluate(`fetch(${JSON.stringify(url)}, { method: 'POST', headers: { 'content-type': 'application/cbor' }, body: new Uint8Array([0]) }).then(r => 'http ' + r.status, e => 'blocked')`);
-  return { go, state, evaluate, log, close, call, set rewrite(f) { rewrite = f; } };
+  // What a navigation comes to: 'loaded', or the error it ended in.
+  const nav = async url => {
+    try { await send('browsingContext.navigate', { context, url, wait: 'complete' }); return 'loaded'; } catch (e) { return String(e.message); }
+  };
+  return { go, nav, state, evaluate, log, close, call, set rewrite(f) { rewrite = f; } };
 }
 
 let failed = 0;
@@ -242,6 +246,51 @@ const tamper = (only) => (path, text, headers) => {
     await b.go(GW + '/site/ic-vote/nope.html', 10_000);
     const s = await b.state();
     report('a page no record covers: stop page, nothing runs', s.overlay && s.pwned === 0, s);
+  } finally { await b.close(); }
+}
+
+// 8. The same canisters at any other host: no page under /site/ loads.
+// A navigation the extension's rule cancels ends in NS_ERROR_ABORT.
+{
+  const b = await open();
+  const ID = '34koz-jyaaa-aaaab-ahejq-cai', OLD = 'umobs-yiaaa-aaaab-agyrq-cai';
+  try {
+    for (const url of [
+      `https://${ID}.icp0.io/site/ic-git/`,
+      `https://${ID}.raw.ic0.app/site/ic-git/`,
+      `https://${ID}.raw.icp1.io/site/ic-vote/`,
+      `https://${ID}.icp.net/site/ic-git/`,
+      `https://${ID}.raw.icp.net/site/ic-git/index.html?x=1#y`,
+      `https://${OLD}.icp0.io/site/ic-git/`,
+      `http://${ID}.icp0.io/site/ic-git/`,
+      `https://${ID}.icp0.io/site/ic-git`,
+      `https://${ID}.icp0.io/site`,
+      `https://x--${ID}.raw.icp0.io/site/ic-git/`,
+      // A prefix a hostname may have and a DNS name may not.
+      `https://x_y--${ID}.icp0.io/site/ic-git/`,
+      // The checked host spelled as another origin: with the root's dot
+      // (the gateways answer there), or at another port.
+      `https://${ID}.raw.icp0.io./site/ic-git/`,
+      `https://${ID}.raw.icp0.io:8443/site/ic-git/`,
+      `https://${ID}.gateway.example/site/ic-git/`,
+      `https://user@${ID}.icp0.io/site/ic-git/`,
+    ]) {
+      const got = await b.nav(url);
+      report('blocked: ' + url, /NS_ERROR_ABORT/.test(got), got);
+    }
+    for (const url of [
+      `https://${ID}.icp0.io/`,
+      `https://${ID}.icp0.io/api/repos`,
+      `https://${ID}.icp0.io/sites/x`,
+      'https://ryjl3-tyaaa-aaaaa-aaaba-cai.icp0.io/site/x/',
+    ]) {
+      const got = await b.nav(url);
+      report('not blocked: ' + url, got === 'loaded', got);
+    }
+    await b.go(`http://${ID}.raw.icp0.io/site/ic-git/`, 20_000);
+    const at = await b.evaluate('location.href');
+    const s = await b.state();
+    report('the checked host over http: upgraded, checked, runs', at === CONSOLE && !s.overlay && /repositories/.test(s.text), { at, ...s });
   } finally { await b.close(); }
 }
 

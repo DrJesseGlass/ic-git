@@ -87,5 +87,55 @@
         "main_frame"
       ]
     }
+  },
+  {
+    "id": 6,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?([^/?#@.:]*--)?(umobs-yiaaa-aaaab-agyrq-cai|34koz-jyaaa-aaaab-ahejq-cai)([.:][^/?#]*)?/site([/?#]|$)",
+      "excludedRequestDomains": [
+        "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io",
+        "34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 7,
+    "priority": 4,
+    "action": {
+      "type": "upgradeScheme"
+    },
+    "condition": {
+      "urlFilter": "|http://",
+      "requestDomains": [
+        "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io",
+        "34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 8,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?(umobs-yiaaa-aaaab-agyrq-cai|34koz-jyaaa-aaaab-ahejq-cai)\\.raw\\.icp0\\.io(\\.|\\.?:[0-9]+)/site([/?#]|$)",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
   }
 ]

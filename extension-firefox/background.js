@@ -28,7 +28,9 @@
 //
 // Two hosts serve sites (docs/CANISTER_SPLIT.md): ic-git until the canister
 // split, the git canister after, when ic-git's /site/ URLs redirect there.
-// A site is a repo on one host, checked as that host serves it.
+// A site is a repo on one host, checked as that host serves it. The
+// gateways serve the same canisters at other hosts, where nothing here
+// runs: rules.json blocks every navigation to a page under /site there.
 
 const HOSTS = [Verifier.DEFAULTS.canister, Verifier.DEFAULTS.git];
 const originOf = host => 'https://' + host + '.raw.icp0.io';
