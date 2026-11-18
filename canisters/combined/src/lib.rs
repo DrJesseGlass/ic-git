@@ -975,17 +975,27 @@ fn stranded_deposits() -> Vec<ledger::Stranded> {
 }
 
 // --- on-chain build spike (Track B rung R0; see ROADMAP.md) -----------------
+//
+// The compile, link, measure and job calls from here to the deploy
+// section, and the interpreter below (run_wasm, run_wat), are the build
+// spike's bench: they compile, link, meter and run whatever the caller
+// sends, on this canister's cycles, with no one charged. Operators only. Open, each was a full message of
+// instructions, or heap that nothing frees (the compile jobs), for any
+// caller, the anonymous one included. The deploy path does not come
+// through these: it calls the compiler itself, for a repo that is charged.
+// A worker's compile_module is called by its coordinator, which the
+// worker's operators authorize.
 
 /// Compile WebAssembly text (WAT) to a wasm binary, in-canister. The smallest
 /// real compiler that proves the source -> artifact pipeline on-chain.
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "is_admin")]
 fn compile_wat(text: String) -> Result<Vec<u8>, String> {
     compile::compile_wat(&text)
 }
 
 /// Same compile, but returns size + sha256 instead of the bytes -- convenient
 /// to inspect over `dfx canister call`.
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "is_admin")]
 fn compile_wat_info(text: String) -> Result<compile::CompileInfo, String> {
     compile::compile_wat_info(&text)
 }
@@ -994,13 +1004,13 @@ fn compile_wat_info(text: String) -> Result<compile::CompileInfo, String> {
 
 /// Compile R1 language source to a wasm binary, in-canister. Unlike compile_wat
 /// (an assembler), this is a real compiler: lexer + parser + wasm codegen.
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "is_admin")]
 fn compile_lang(text: String) -> Result<Vec<u8>, String> {
     lang::compile_checked(&text)
 }
 
 /// Compile R1 source, returning size + sha256 instead of the bytes.
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "is_admin")]
 fn compile_lang_info(text: String) -> Result<compile::CompileInfo, String> {
     let wasm = lang::compile_checked(&text)?;
     Ok(compile::info_of(&wasm))
@@ -1039,7 +1049,7 @@ struct JobProgress {
 
 /// Compile R1 source and report how many wasm instructions the compile itself
 /// cost. An update call so the measurement gets the full ~40B budget.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 fn compile_lang_metered(text: String) -> Result<MeteredCompile, String> {
     let (wasm, instructions) = metered(|| lang::compile_checked(&text));
     let info = compile::info_of(&wasm?);
@@ -1052,7 +1062,7 @@ fn compile_lang_metered(text: String) -> Result<MeteredCompile, String> {
 
 /// Compile a generated `funcs`-function program in one call and report the
 /// instruction cost -- used to chart the single-message compile ceiling.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 fn measure_compile(funcs: u32) -> Result<MeasureResult, String> {
     if funcs == 0 {
         return Err("funcs must be >= 1".into());
@@ -1067,13 +1077,13 @@ fn measure_compile(funcs: u32) -> Result<MeasureResult, String> {
 }
 
 /// Start a resumable compile; returns a job id. Codegen happens in later steps.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 fn compile_job_start(text: String) -> Result<u64, String> {
     lang::job::start(&text)
 }
 
 /// Codegen up to `batch` more functions of a job, reporting progress + cost.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 fn compile_job_step(id: u64, batch: u32) -> Result<JobProgress, String> {
     let (progress, instructions) = metered(|| lang::job::step(id, batch as usize));
     let (done, done_funcs, total_funcs) = progress?;
@@ -1086,7 +1096,7 @@ fn compile_job_step(id: u64, batch: u32) -> Result<JobProgress, String> {
 }
 
 /// Finish a fully-stepped job: assemble, validate, and return the wasm bytes.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 fn compile_job_take(id: u64) -> Result<Vec<u8>, String> {
     lang::job::take(id)
 }
@@ -1097,7 +1107,7 @@ fn compile_job_take(id: u64) -> Result<Vec<u8>, String> {
 /// object records the module's exports and the imports it expects, with call
 /// sites left as unresolved relocations. This is the unit R4 will distribute:
 /// one module per canister.
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "is_admin")]
 fn compile_module(source: String) -> Result<Vec<u8>, String> {
     let obj = lang::link::compile_module(&source)?;
     serde_json::to_vec(&obj).map_err(|e| e.to_string())
@@ -1105,7 +1115,7 @@ fn compile_module(source: String) -> Result<Vec<u8>, String> {
 
 /// Link separately-compiled module objects (as returned by compile_module) into
 /// one validated wasm binary, resolving cross-module calls.
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "is_admin")]
 fn link_module_objects(objects: Vec<Vec<u8>>) -> Result<Vec<u8>, String> {
     let objs: Result<Vec<_>, String> = objects
         .iter()
@@ -1116,7 +1126,7 @@ fn link_module_objects(objects: Vec<Vec<u8>>) -> Result<Vec<u8>, String> {
 
 /// Convenience: separately compile each source, then link -- the whole R3
 /// pipeline in one call. Returns size + sha256 of the linked wasm.
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "is_admin")]
 fn compile_and_link_info(sources: Vec<String>) -> Result<compile::CompileInfo, String> {
     let objs: Result<Vec<_>, String> = sources
         .iter()
@@ -1150,14 +1160,14 @@ fn get_compiler_workers() -> Vec<candid::Principal> {
 
 /// Distribute each module's compile across the worker fleet (concurrently),
 /// then link the results into one wasm binary.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 async fn compile_distributed(sources: Vec<String>) -> Result<Vec<u8>, String> {
     fleet::compile_distributed(&fleet::get_workers(), sources).await
 }
 
 /// Same as compile_distributed, reporting size/sha256 plus how many modules
 /// were fanned out across how many workers.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 async fn compile_distributed_info(sources: Vec<String>) -> Result<DistributeReport, String> {
     let module_count = sources.len() as u32;
     let workers = fleet::get_workers();
@@ -1596,7 +1606,7 @@ fn run_and_measure(wasm: &[u8]) -> Result<RunReport, String> {
 /// Interpret a wasm32-wasip1 module (as bytes) with wasmi + a minimal WASI host,
 /// returning captured stdout/stderr, exit code, and the instruction cost of the
 /// interpretation. This is the harness rustc.wasm will eventually run in.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 fn run_wasm(module: Vec<u8>) -> Result<RunReport, String> {
     run_and_measure(&module)
 }
@@ -1604,7 +1614,7 @@ fn run_wasm(module: Vec<u8>) -> Result<RunReport, String> {
 /// Self-contained demo: compile WAT (R0) to a wasip1 module in-canister, then
 /// interpret it (R6) -- source -> wasm -> interpreted-run, all on-chain, with
 /// the interpretation cost measured.
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "is_admin")]
 fn run_wat(text: String) -> Result<RunReport, String> {
     let wasm = compile::compile_wat_checked(&text)?;
     run_and_measure(&wasm)

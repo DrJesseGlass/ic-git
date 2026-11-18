@@ -636,7 +636,12 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   controller and the attestation work, and is the strongest argument yet for
   docs/CANISTER_SPLIT.md: the ledger belongs in the small, stable canister.
 - Every operator-only endpoint uses the one guard, `is_admin`: the admin
-  API, pricing and ledgers, the names hook, the compiler workers, the legacy
+  API, pricing and ledgers, the names hook, the compiler workers, the
+  build spike's bench (`compile_*`, `link_module_objects`,
+  `measure_compile`, `run_wasm`, `run_wat`: they compile and run what
+  the caller sends on the canister's cycles, and until 2026-11 anyone
+  could call them; a worker authorizes its coordinator for
+  `compile_module`), the legacy
   `put_object`/`set_ref` seeding calls, and the EVM and Solana operator calls
   (`evm_set_config`, `evm_send`, `evm_deploy`, `sol_set_config`, ...). Before
   v0.3.1 the last three groups checked the allowlist alone, so a controller
