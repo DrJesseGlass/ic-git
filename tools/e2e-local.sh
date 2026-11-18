@@ -530,6 +530,21 @@ section "objections"
 # objections reach the threshold (docs/TENANCY.md, "Votes"). The site and the
 # app are on $A1; the tenant is the only voter so far, with 1 required.
 P1=$(dfx identity get-principal --identity "$V1")
+# A transfer is an offer: nothing moves until the one named takes it. On
+# a repo of its own, since a transfer revokes the old owner's push tokens.
+expect "a repo to hand over" "$(ic "$TEN" create_repo '("e2e-offer")')" 'Ok'
+expect "owner: a transfer is offered" "$(ic "$TEN" transfer_repo "(\"e2e-offer\", principal \"$P1\")")" 'Ok'
+INFO=$(ic "$OP" get_repo_info '("e2e-offer")')
+expect "  ...the owner is who it was" "$INFO" "owner = opt principal \"$T\""
+expect "  ...and the offer shows" "$INFO" "pending_owner = opt principal \"$P1\""
+expect "  ...in /api too" "$(curl -s "http://$AHOST/api/e2e-offer/info")" "\"pending_owner\":\"$P1\""
+expect "another principal cannot take it" "$(ic anonymous accept_transfer '("e2e-offer")')" 'is not offered to'
+expect "the one it was offered to declines" "$(ic "$V1" cancel_transfer '("e2e-offer")')" 'Ok'
+expect "  ...and can no longer take it" "$(ic "$V1" accept_transfer '("e2e-offer")')" 'is not offered to'
+ic "$TEN" transfer_repo "(\"e2e-offer\", principal \"$P1\")" >/dev/null
+expect "offered again and taken" "$(ic "$V1" accept_transfer '("e2e-offer")')" 'Ok'
+expect "  ...the new owner owns it" "$(ic "$OP" get_repo_info '("e2e-offer")')" "owner = opt principal \"$P1\""
+expect "  ...and the old one administers nothing" "$(ic "$TEN" set_required_votes '("e2e-offer", 0 : nat32)')" 'does not own'
 P2=$(dfx identity get-principal --identity "$V2")
 ic "$TEN" add_member "(\"e2e-app\", principal \"$P1\", \"voter\")" >/dev/null
 ic "$TEN" add_member "(\"e2e-app\", principal \"$P2\", \"voter\")" >/dev/null

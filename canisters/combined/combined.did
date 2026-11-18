@@ -59,6 +59,7 @@ type RepoInfo = record {
   exempt : bool;
   require_signed_push : bool;
   governed : bool;
+  pending_owner : opt principal;
 };
 type Vote = variant { Approve; Reject; Object };
 type Ballot = record {
@@ -351,6 +352,8 @@ service : {
   add_member : (text, principal, text) -> (ResultMembers);
   remove_member : (text, principal) -> (ResultMembers);
   transfer_repo : (text, principal) -> (Result);
+  accept_transfer : (text) -> (Result);
+  cancel_transfer : (text) -> (Result);
   set_required_votes : (text, nat32) -> (Result);
   vote : (text, text, bool) -> (ResultVote);
   cast_ballot : (text, text, Vote, opt text) -> (ResultBallot);

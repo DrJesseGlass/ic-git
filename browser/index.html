@@ -1116,12 +1116,18 @@ const Console = (() => {
       (info.governed ? ' &middot; <b>GOVERNED</b>: ic-git is the app canister\'s only controller' : '') +
       (info.require_signed_push ? ' &middot; <b>pushes must be signed</b>' : '') + '</p>' +
       '<p>on push, deploys <b id="cfg-deploy">...</b> &middot; site <b id="cfg-site">...</b></p>';
+    // A transfer is an offer until the one it names takes it.
+    const offered = info.pending_owner, mine = me && offered === me;
+    if (offered) html += '<p>offered to <span class="oid" title="' + esc(offered) + '">' + esc(short(offered)) + '</span>, who owns and pays for it once they accept</p>' +
+      (mine ? form('f-accept', [], 'accept: own this repository and pay for it') + '<p id="f-accept-st" class="status"></p>' : '') +
+      (mine || (isOwner && !info.governed) ? form('f-cancel', [], mine ? 'decline' : 'withdraw the offer') + '<p id="f-cancel-st" class="status"></p>' : '');
     // On a governed repo a voter is the policy: removed by vote (below), not here.
     if (info.members.length) html += '<table><tr><th>member</th><th>role</th>' + (isOwner ? '<th></th>' : '') + '</tr>' + info.members.map(m => '<tr><td class="oid">' + esc(m.principal) + '</td><td>' + esc(m.role) + '</td>' + (isOwner ? '<td>' + (info.governed && m.role === 'voter' ? '<span class="muted">by vote</span>' : '<button class="rm" data-p="' + esc(m.principal) + '">remove</button>') + '</td>' : '') + '</tr>').join('') + '</table>';
     if (isWriter) html += form('f-token', [{ name: 'days', placeholder: 'lifetime in days (1-365, default 30)' }, { name: 'key', placeholder: 'bind to an SSH key: contents of ~/.ssh/id_ed25519.pub' + (info.require_signed_push ? ' (required here)' : ' (optional)') }], 'mint push token') + '<p id="f-token-st" class="status tok"></p>' +
       '<div id="tok-list"><p class="muted">push tokens: ...</p></div><p id="tok-list-st" class="status"></p>';
     if (isOwner) html += form('f-member', [{ name: 'principal', placeholder: 'principal' }, { name: 'role', placeholder: info.governed ? 'writer (voters are added by vote)' : 'writer or voter', value: 'writer' }], 'add member') + '<p id="f-member-st" class="status"></p>' +
       (info.governed ? '' : form('f-votes', [{ name: 'k', placeholder: 'approvals required before deploy', value: String(info.required_votes) }], 'set required votes') + '<p id="f-votes-st" class="status"></p>') +
+      (info.governed ? '' : form('f-transfer', [{ name: 'principal', placeholder: 'offer the repository to: a principal' }], 'offer to a new owner') + '<p id="f-transfer-st" class="status"></p>') +
       form('f-signed', [], info.require_signed_push ? 'stop requiring signed pushes' : 'require signed pushes (key-bound tokens only)') + '<p id="f-signed-st" class="status"></p>' +
       (info.app_canister
         ? form('f-topup', [{ name: 'amount', placeholder: 'T cycles to add' }], 'top up app canister') + '<p id="f-topup-st" class="status"></p>'
@@ -1185,6 +1191,8 @@ const Console = (() => {
         return ts;
       }, e => { const el = document.getElementById('tok-list'); if (el) el.innerHTML = '<p class="muted">push tokens: could not be read (' + esc(e.message) + ')</p>'; });
       if (isWriter) tokens();
+      onsubmit('f-accept', async () => { await write('accept_transfer', ['text'], [repo]); setTimeout(() => location.reload(), 800); return 'accepted: the repository is yours'; });
+      onsubmit('f-cancel', async () => { await write('cancel_transfer', ['text'], [repo]); setTimeout(() => location.reload(), 800); return 'the offer is withdrawn'; });
       onsubmit('f-token', async v => {
         const d = v.days.trim();
         const days = d ? Number(d) : null;
@@ -1204,6 +1212,7 @@ const Console = (() => {
         return 'token (shown once' + (mine ? ', valid until ' + nsDate(mine.expires_ns) : '') + '): ' + token + '  -> git push https://ic:<token>@' + location.host + '/' + repo + '.git main' +
           (key ? '  -- bound to that key, so sign pushes with it: git config gpg.format ssh; git config user.signingkey <path to that .pub>; git config push.gpgSign if-asked' : '');
       });
+      onsubmit('f-transfer', async v => { await write('transfer_repo', ['text', 'principal'], [repo, v.principal.trim()]); setTimeout(() => location.reload(), 800); return 'offered: it is theirs once they accept'; });
       onsubmit('f-signed', async () => {
         await write('set_require_signed_push', ['text', 'bool'], [repo, !info.require_signed_push]);
         setTimeout(() => location.reload(), 800);
@@ -1317,7 +1326,7 @@ const Console = (() => {
     return kind === 'RequiredVotes' ? 'require ' + v.k + ' approval' + (v.k === 1 ? '' : 's') + ' per commit'
       : kind === 'AddVoter' ? 'add voter ' + short(v.principal)
       : kind === 'RemoveVoter' ? 'remove voter ' + short(v.principal)
-      : kind === 'Transfer' ? 'transfer the repository to ' + short(v.new_owner)
+      : kind === 'Transfer' ? 'offer the repository to ' + short(v.new_owner) + ', theirs once they accept'
       : kind === 'WasmDeploy' ? 'deploy ' + v.source_path + ' into ' + short(v.target)
       : kind === 'DeployMode' ? 'install mode ' + v.mode + (v.mode === 'reinstall' ? ' (WIPES the target\'s state on every deploy)' : '')
       : JSON.stringify(c);
