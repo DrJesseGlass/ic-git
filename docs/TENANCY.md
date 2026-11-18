@@ -431,7 +431,11 @@ checks each name and keeps the list in the site config, which `get_site`
 shows and the console edits. A domain is a DNS name as it would be looked
 up (lowercase, no trailing dot) of at least two labels, not an IP address,
 and not under the IC's own domains (`icp0.io`, `ic0.app`, `icp-api.io`,
-`localhost` and the like), where a host names a canister by its id. One
+`icp.net`, `localhost` and the like), where a host names a canister by
+its id; nor, wherever it is, a name with a canister id for a label, since
+the gateways add domains and a site holding `<this canister>.<one of
+them>` would be served there in the canister's place, index, git and
+API. One
 repo holds a domain at a time: a second repo is refused it until the first
 gives it up, which an operator may do on any repo. A site has at most
 eight. Naming a domain does not turn serving on: `set_site` first.

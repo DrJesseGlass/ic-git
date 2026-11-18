@@ -71,12 +71,18 @@ pub fn get_config(repo: &str) -> Option<SiteConfig> {
 pub const MAX_DOMAINS: usize = 8;
 
 /// The IC's own domains, under which a host names a canister by its id,
-/// and the local one. No site's domain is under them.
-const RESERVED: [&str; 7] = ["icp0.io", "ic0.app", "icp-api.io", "icp1.io", "icp2.io", "internetcomputer.org", "localhost"];
+/// and the local one. No site's domain is under them. The list is what
+/// the gateways answered at when it was written, and they add to it
+/// (`icp.net` came after the first six), so `check_domain` also refuses
+/// any name with a canister id for a label, whatever it is under.
+const RESERVED: [&str; 8] = ["icp0.io", "ic0.app", "icp-api.io", "icp1.io", "icp2.io", "icp.net", "internetcomputer.org", "localhost"];
 
 /// A domain a site may be served at: a DNS name as it would be looked up
 /// (lowercase, no trailing dot), of at least two labels, that is no IP
-/// address and is under none of `RESERVED`.
+/// address, is under none of `RESERVED`, and has no label that is a
+/// principal as text: a host with one is how a gateway names a canister,
+/// this one included, and a site that held it would be served in the
+/// canister's place there.
 pub fn check_domain(d: &str) -> Result<(), String> {
     if d.len() > 253 {
         return Err("a domain is at most 253 characters".to_string());
@@ -101,6 +107,9 @@ pub fn check_domain(d: &str) -> Result<(), String> {
     }
     if RESERVED.iter().any(|r| d == *r || d.strip_suffix(r).is_some_and(|rest| rest.ends_with('.'))) {
         return Err(format!("{d:?} is under one of the IC's own domains, where a host names a canister by its id"));
+    }
+    if let Some(id) = labels.iter().find(|l| candid::Principal::from_text(l).is_ok()) {
+        return Err(format!("{d:?} has a canister id for a label ({id}): such a host names a canister, and is no site's domain"));
     }
     Ok(())
 }
@@ -1381,6 +1390,13 @@ mod tests {
             "a.b.ic0.app",
             "x.raw.icp0.io",
             "icp-api.io",
+            "icp.net",
+            "x.icp.net",
+            "34koz-jyaaa-aaaab-ahejq-cai.icp.net",
+            "34koz-jyaaa-aaaab-ahejq-cai.raw.icp.net",
+            // A canister id under a domain the list does not know.
+            "34koz-jyaaa-aaaab-ahejq-cai.gateway.example",
+            "raw.umobs-yiaaa-aaaab-agyrq-cai.example",
             "1.2.3.4",
             "-a.example",
             "a-.example",
@@ -1400,6 +1416,9 @@ mod tests {
         assert_eq!(check_domain("a.b.c.d.e.f.example"), Ok(()));
         assert_eq!(check_domain("notlocalhost.example"), Ok(()), "only the reserved names themselves and what is under them");
         assert_eq!(check_domain("icp0.io.example"), Ok(()));
+        assert_eq!(check_domain("icp.net.example"), Ok(()));
+        assert_eq!(check_domain("hello-world-app.example"), Ok(()), "shaped like an id, and not one: the checksum says");
+        assert_eq!(check_domain("34koz-jyaaa-aaaab-ahejq-caj.example"), Ok(()));
         let many: Vec<String> = (0..=MAX_DOMAINS).map(|i| format!("d{i}.example")).collect();
         assert!(set_domains("dom-b", many).unwrap_err().contains("at most"));
         assert_eq!(get_config("dom-b").unwrap().domains, ["app.example"], "the list before stays");
@@ -1411,6 +1430,8 @@ mod tests {
         for none in [
             "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io",
             "umobs-yiaaa-aaaab-agyrq-cai.icp0.io",
+            "34koz-jyaaa-aaaab-ahejq-cai.icp.net",
+            "34koz-jyaaa-aaaab-ahejq-cai.raw.icp.net",
             "umobs-yiaaa-aaaab-agyrq-cai.raw.localhost:4950",
             "localhost:4950",
             "127.0.0.1:4950",

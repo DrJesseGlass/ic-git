@@ -441,6 +441,7 @@ expect "  ...not its JSON API" "$(at_host app.example /api/e2e-app/info)" 'not f
 expect "  ...nor a write" "$(at_host app.example /e2e-app.git/git-receive-pack POST)" 'status_code = 404'
 refuse "another host is not the site" "$(at_host other.example /)" '"X-Ic-Git-Commit"; "'
 expect "a domain under the IC's own is refused" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "x.icp0.io" })')" 'own domains, where a host names a canister'
+expect "  ...and one naming a canister under any other" "$(ic "$TEN" set_site_domains "(\"e2e-app\", vec { \"$G.gateway.example\" })")" 'has a canister id for a label'
 expect "  ...and the list before it stays" "$(curl -s "http://$HOST/.well-known/ic-domains")" '^app.example$'
 expect "one domain is kept for the cut" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "app.example" })')" 'Ok'
 refuse "  ...the other is gone" "$(curl -s "http://$HOST/.well-known/ic-domains")" 'www'
