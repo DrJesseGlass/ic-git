@@ -175,14 +175,22 @@ pub fn paginate(text: &str, width: usize, per_page: usize) -> Vec<Page> {
     let mut line = String::new();
     let mut line_chars = 0usize;
     for word in text.split_whitespace() {
-        let mut word: Vec<char> = word.chars().collect();
-        while word.len() > width {
+        let chars: Vec<char> = word.chars().collect();
+        // A word longer than a line goes out in whole lines, and what is
+        // left of it, a line's worth or less, is laid out as a word. The
+        // whole lines are counted, not cut off the front one at a time:
+        // each cut moved the rest of the word, so a long word on a narrow
+        // display cost the square of its length, and the request names
+        // both (until 2026-11).
+        let mut word = &chars[..];
+        if word.len() > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
                 line_chars = 0;
             }
-            lines.push(word[..width].iter().collect());
-            word.drain(..width);
+            let (whole, rest) = word.split_at((word.len() - 1) / width * width);
+            lines.extend(whole.chunks(width).map(|c| c.iter().collect::<String>()));
+            word = rest;
         }
         if line.is_empty() {
             line.extend(word.iter());
@@ -261,6 +269,15 @@ mod tests {
         // A word longer than a line is split, not dropped.
         let pages = paginate("abcdefghijklmnopqrstuvwxyz end", 10, 5);
         assert_eq!(pages[0].lines, vec!["abcdefghij", "klmnopqrst", "uvwxyz end"]);
+        // One of exactly so many lines leaves no empty line behind, and
+        // one met mid-line starts on a line of its own.
+        assert_eq!(paginate("abcdef", 3, 5)[0].lines, vec!["abc", "def"]);
+        assert_eq!(paginate("ab abcdefg h", 3, 9)[0].lines, vec!["ab", "abc", "def", "g h"]);
+        // A long word on the narrowest display is its length in work: at
+        // the square of it this one is some hundred billion bytes moved.
+        let long = "x".repeat(400_000);
+        let pages = paginate(&long, 1, 1000);
+        assert_eq!((pages.len(), pages.iter().map(|p| p.lines.len()).sum::<usize>()), (400, 400_000));
         // The request's device spec picks the form.
         let arg = candid::encode_args(("a longer name than a line",)).unwrap();
         let info = consent_message(request("ping", arg, Some(DeviceSpec::LineDisplay { characters_per_line: 8, lines_per_page: 2 })), &[only_ping]).unwrap();
