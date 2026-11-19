@@ -158,6 +158,9 @@ pub(crate) mod flaky {
         pub calls: RefCell<Vec<&'static str>>,
         /// The `retry` of each `set_approved`, in order.
         pub retries: RefCell<Vec<Option<Retry>>>,
+        /// What happens at this side while the next call of a name is
+        /// on its way: another call of the canister, landing first.
+        meanwhile: RefCell<Option<(&'static str, Box<dyn FnOnce()>)>>,
     }
 
     impl Flaky {
@@ -169,7 +172,13 @@ pub(crate) mod flaky {
                 queue: RefCell::new(Vec::new()),
                 calls: RefCell::new(Vec::new()),
                 retries: RefCell::new(Vec::new()),
+                meanwhile: RefCell::new(None),
             }
+        }
+
+        /// While the next call named `call` is awaited, `what` happens.
+        pub fn meanwhile(&self, call: &'static str, what: impl FnOnce() + 'static) {
+            *self.meanwhile.borrow_mut() = Some((call, Box::new(what)));
         }
 
         /// The next call named `call` does `what`.
@@ -184,6 +193,10 @@ pub(crate) mod flaky {
         /// Run `real` under what was injected for `call`, if anything.
         fn go<'a, T: 'a>(&'a self, call: &'static str, real: impl FnOnce() -> Fut<'a, Reply<T>> + 'a, refusal: Option<T>) -> Fut<'a, Reply<T>> {
             self.calls.borrow_mut().push(call);
+            let meanwhile = self.meanwhile.borrow_mut().take_if(|(c, _)| *c == call);
+            if let Some((_, what)) = meanwhile {
+                what();
+            }
             let next = {
                 let mut q = self.queue.borrow_mut();
                 q.iter().position(|(c, _)| *c == call).map(|i| q.remove(i).1)

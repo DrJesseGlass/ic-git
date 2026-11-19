@@ -1448,19 +1448,28 @@ pub async fn cast_ballot(
     // With the list of counted commits full and this commit not on it,
     // the one question becomes where every commit on the list stands,
     // this one with them: the ballot is cast only with room made for it,
-    // so the list keeps its end whatever the git side does.
-    let list = counted(repo);
-    let standings = if counted_full(&list, &key) {
-        let keys: Vec<String> = list.into_iter().map(|c| c.key).chain([key.clone()]).collect();
-        match crate::to_git::standings(repo, keys.clone()).await {
-            Ok(s) if s.len() != keys.len() => return Err(unanswered(&"it answered for another number of commits")),
-            Ok(s) if s.last() == Some(&Standing::Gone) => return Err(no_such()),
-            Ok(s) => Some(keys.into_iter().zip(s).collect::<BTreeMap<_, _>>()),
-            Err(f) => return Err(unanswered(&f)),
+    // so the list keeps its end whatever the git side does. The list is
+    // read again after the plain question is answered: other ballots are
+    // cast while it is awaited, and one that took the last room leaves
+    // this one to ask for the standings after all. Nothing is awaited
+    // between the last look at the list and the ballot's place on it.
+    let mut held = false;
+    let standings = loop {
+        let list = counted(repo);
+        if counted_full(&list, &key) {
+            let keys: Vec<String> = list.into_iter().map(|c| c.key).chain([key.clone()]).collect();
+            match crate::to_git::standings(repo, keys.clone()).await {
+                Ok(s) if s.len() != keys.len() => return Err(unanswered(&"it answered for another number of commits")),
+                Ok(s) if s.last() == Some(&Standing::Gone) => return Err(no_such()),
+                Ok(s) => break Some(keys.into_iter().zip(s).collect::<BTreeMap<_, _>>()),
+                Err(f) => return Err(unanswered(&f)),
+            }
         }
-    } else {
+        if held {
+            break None;
+        }
         match crate::to_git::has_commit(repo, &oid).await {
-            Ok(true) => None,
+            Ok(true) => held = true,
             Ok(false) => return Err(no_such()),
             Err(f) => return Err(unanswered(&f)),
         }
@@ -3008,6 +3017,27 @@ mod tests {
         assert!(two.iter().all(|c| keys.contains(&subject(c).key())));
         assert!(!side.iter().any(|c| keys.contains(&subject(c).key())));
 
+        // Two ballots on new commits with room for one: the second to
+        // land finds the list full once the git side has answered its
+        // plain question, and asks for the standings before it is cast.
+        let room = COUNTED_APPROVED + COUNTED_OTHER - counted(repo).len();
+        let three = branch("refs/heads/three", room - 1, false);
+        let (first, second) = (commit("race first", three.last().copied()), commit("race second", three.last().copied()));
+        store::set_ref(repo, "refs/heads/race-first", first).unwrap();
+        store::set_ref(repo, "refs/heads/race-second", second).unwrap();
+        let asked = git.count("standings");
+        git.meanwhile("has_commit", move || {
+            // Polled once, not run: this is inside the other ballot's
+            // executor, and every answer here is ready.
+            use futures::FutureExt;
+            super::vote(repo, &p(43), &store::oid_hex(&first), false).now_or_never().expect("ready").unwrap();
+        });
+        vote(repo, &alice, &store::oid_hex(&second), false).unwrap();
+        assert_eq!(git.count("standings"), asked + 1, "the second asked once the first had the room");
+        assert_eq!(votes(repo, &store::oid_hex(&first)).len(), 1);
+        assert_eq!(votes(repo, &store::oid_hex(&second)).len(), 1);
+        assert!(counted(repo).len() <= COUNTED_APPROVED + COUNTED_OTHER);
+
         // A repo from before the list: every commit with a ballot, cut to
         // what fits, and written by its next ballot.
         crate::kv::remove(&counted_key(repo));
@@ -3015,7 +3045,7 @@ mod tests {
         vote(repo, &alice, &store::oid_hex(&two[0]), false).unwrap();
         let written: Vec<Counted> = crate::kv::get_json(&counted_key(repo)).expect("the ballot wrote the list");
         assert!(written.len() <= COUNTED_APPROVED + COUNTED_OTHER);
-        assert_eq!(written[0].key, subject(&two[0]).key());
+        assert!(written.iter().any(|c| c.key == subject(&two[0]).key()));
         assert!(served(main.last().unwrap()));
         crate::to_git::set_test_side(None);
     }
