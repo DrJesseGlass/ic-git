@@ -20,7 +20,9 @@
 
 use crate::clock::now_ns;
 use crate::mirrors::Mirror;
+use ic_git_types::git_side::Standing;
 use ic_git_types::oid::{parse_oid, Oid};
+use std::collections::BTreeMap;
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::auth;
 use serde::{Deserialize, Serialize};
@@ -308,26 +310,121 @@ fn mirrored(m: &RepoMeta) -> (crate::to_git::PushPolicy, u32, Vec<Principal>) {
 }
 
 /// The repo's commits that reach its threshold, by ballot key; `None` when
-/// it requires no votes. Every commit with a ballot is counted, so this is
-/// as current as the ballots and the policy.
+/// it requires no votes. The commits counted are the repo's list of them
+/// (`counted`), which has an end, so this is as current as the ballots
+/// and the policy and costs no more for a repo with a long past.
 fn approved_keys(repo: &str, m: &RepoMeta) -> Option<Vec<String>> {
     if m.required_votes == 0 {
         return None;
     }
     let pol = policy(m);
-    let commits = crate::records::vote_subject_keys(repo, "commit:");
-    Some(
-        commits
-            .into_iter()
-            .filter(|key| {
-                let hash = key
-                    .strip_prefix("commit:")
-                    .and_then(|h| hex::decode(h).ok())
-                    .and_then(|h| <[u8; 32]>::try_from(h).ok());
-                hash.is_some_and(|h| count_subject(repo, &pol, &Subject::new("commit", h)).reached)
-            })
-            .collect(),
-    )
+    Some(counted(repo).into_iter().map(|c| c.key).filter(|key| key_reaches(repo, &pol, key)).collect())
+}
+
+/// Does the commit under this ballot key reach the threshold?
+fn key_reaches(repo: &str, pol: &Policy, key: &str) -> bool {
+    key.strip_prefix("commit:")
+        .and_then(|h| hex::decode(h).ok())
+        .and_then(|h| <[u8; 32]>::try_from(h).ok())
+        .is_some_and(|h| count_subject(repo, pol, &Subject::new("commit", h)).reached)
+}
+
+// --- the commits whose ballots are counted ----------------------------------------
+//
+// Ballots are kept for as long as the repo is: who approved what is the
+// record. What they are counted for is the approved set, and every ballot
+// and every change of threshold or voters counts it again and sends it
+// whole. Until 2026-11 that was over every commit the repo had ever taken
+// a ballot on, so the work of one ballot grew with the repo's whole past,
+// and past some size would not fit in a message.
+//
+// So a repo has a list of the commits it counts, by ballot key, and the
+// list has an end. A ballot puts its commit at the front. When the list is
+// full and a ballot comes on a commit not in it, the git side, which has
+// the history, says where each commit stands (`GitSide::standings`), and
+// the list keeps:
+//
+// - the approved commits on the deploy branch, the `COUNTED_APPROVED`
+//   nearest its tip: what is served, and what a withdrawn approval falls
+//   back to;
+// - of every other commit (one still being voted on, one on another
+//   branch), the `COUNTED_OTHER` with the newest ballots.
+//
+// A commit no ref reaches any more leaves it. Leaving the list is not
+// leaving the record: `votes` still shows the ballots, and the next
+// ballot on the commit counts them all again.
+
+/// How many approved commits on the deploy branch stay counted: how far
+/// back a withdrawn approval can fall.
+pub const COUNTED_APPROVED: usize = 100;
+/// How many other commits with ballots stay counted.
+pub const COUNTED_OTHER: usize = 100;
+
+/// A commit on the list: its ballot key, and when its last ballot came.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct Counted {
+    key: String,
+    at_ns: u64,
+}
+
+fn counted_key(repo: &str) -> String {
+    format!("votes:counted:{repo}")
+}
+
+/// The repo's counted commits, newest ballot first. A repo from before
+/// the list has none written: its list is every commit with a ballot,
+/// read once more as it always was, cut to the newest that fit, and
+/// written by the repo's next ballot.
+fn counted(repo: &str) -> Vec<Counted> {
+    if let Some(list) = crate::kv::get_json(&counted_key(repo)) {
+        return list;
+    }
+    let mut all: Vec<Counted> = crate::records::vote_subject_keys(repo, "commit:")
+        .into_iter()
+        .map(|key| {
+            let ballots: Vec<Approval> = crate::records::votes_get(repo, &key).unwrap_or_default();
+            Counted { at_ns: ballots.iter().map(|a| a.at_ns).max().unwrap_or(0), key }
+        })
+        .collect();
+    all.sort_by(|a, b| b.at_ns.cmp(&a.at_ns));
+    all.truncate(COUNTED_APPROVED + COUNTED_OTHER);
+    all
+}
+
+/// Would a ballot on this commit find the list full: is it not on it, with
+/// no room left? Then the git side is asked where every commit stands
+/// before the ballot is cast, and `count_in` makes room by the answer.
+fn counted_full(list: &[Counted], key: &str) -> bool {
+    list.len() >= COUNTED_APPROVED + COUNTED_OTHER && !list.iter().any(|c| c.key == key)
+}
+
+/// A ballot was cast on the commit: it goes to the front of the list.
+/// With `standings` (the list was full), the list is cut to what it
+/// keeps, counted under the policy as it is now. A commit the git side
+/// was not asked about (a ballot cast while it answered) stays, as one
+/// of the others.
+fn count_in(repo: &str, m: &RepoMeta, key: &str, at_ns: u64, standings: Option<&BTreeMap<String, Standing>>) {
+    let mut list = counted(repo);
+    list.retain(|c| c.key != key);
+    list.insert(0, Counted { key: key.to_string(), at_ns });
+    if let Some(standings) = standings {
+        let pol = policy(m);
+        let (mut approved, mut other) = (Vec::new(), Vec::new());
+        for c in list {
+            match standings.get(&c.key) {
+                Some(Standing::Gone) => {}
+                Some(Standing::Deploy(depth)) if key_reaches(repo, &pol, &c.key) => approved.push((*depth, c)),
+                _ => other.push(c),
+            }
+        }
+        approved.sort_by_key(|(depth, _)| *depth);
+        approved.truncate(COUNTED_APPROVED);
+        other.sort_by(|a, b| b.at_ns.cmp(&a.at_ns));
+        other.truncate(COUNTED_OTHER);
+        list = approved.into_iter().map(|(_, c)| c).chain(other).collect();
+        list.sort_by(|a, b| b.at_ns.cmp(&a.at_ns));
+    }
+    crate::kv::set_json(&counted_key(repo), &list);
 }
 
 /// The repo's push policy as the git side mirrors it; `None` for a repo
@@ -1345,15 +1442,29 @@ pub async fn cast_ballot(
 ) -> Result<Cast, String> {
     can_vote(repo, who)?;
     let oid = parse_oid(commit_hex)?;
-    match crate::to_git::has_commit(repo, &oid).await {
-        Ok(true) => {}
-        Ok(false) => return Err(format!("no such commit in {repo}: {commit_hex} (a ballot is on a commit within reach of one of the repo's refs)")),
-        Err(f) => {
-            return Err(format!(
-                "the git side did not say whether it holds {commit_hex} ({f}); the ballot is not cast, try again"
-            ))
+    let key = subject(&oid).key();
+    let no_such = || format!("no such commit in {repo}: {commit_hex} (a ballot is on a commit within reach of one of the repo's refs)");
+    let unanswered = |f: &dyn std::fmt::Display| format!("the git side did not say whether it holds {commit_hex} ({f}); the ballot is not cast, try again");
+    // With the list of counted commits full and this commit not on it,
+    // the one question becomes where every commit on the list stands,
+    // this one with them: the ballot is cast only with room made for it,
+    // so the list keeps its end whatever the git side does.
+    let list = counted(repo);
+    let standings = if counted_full(&list, &key) {
+        let keys: Vec<String> = list.into_iter().map(|c| c.key).chain([key.clone()]).collect();
+        match crate::to_git::standings(repo, keys.clone()).await {
+            Ok(s) if s.len() != keys.len() => return Err(unanswered(&"it answered for another number of commits")),
+            Ok(s) if s.last() == Some(&Standing::Gone) => return Err(no_such()),
+            Ok(s) => Some(keys.into_iter().zip(s).collect::<BTreeMap<_, _>>()),
+            Err(f) => return Err(unanswered(&f)),
         }
-    }
+    } else {
+        match crate::to_git::has_commit(repo, &oid).await {
+            Ok(true) => None,
+            Ok(false) => return Err(no_such()),
+            Err(f) => return Err(unanswered(&f)),
+        }
+    };
     // The policy may have changed while the git side answered.
     let m = can_vote(repo, who)?;
     let was_reached = ungated(count(repo, &policy(&m), &oid), &m).reached;
@@ -1362,6 +1473,7 @@ pub async fn cast_ballot(
     let tally = ic_multisig::record(&mut VoteStore { repo }, &policy(&m), &subject(&oid), approval)
         .map(|t| ungated(t, &m))
         .map_err(|e| e.to_string())?;
+    count_in(repo, &m, &key, now_ns(), standings.as_ref());
     // The write asks the git side to retry the served commit's deploy
     // (mirrors::mark_ballot): the site and the app follow the approvals
     // there (phase 3, step 9).
@@ -2786,6 +2898,9 @@ mod tests {
         fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a ic_git_types::oid::Oid) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<bool>> {
             self.real.has_commit(repo, oid)
         }
+        fn standings<'a>(&'a self, repo: &'a str, keys: Vec<String>) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Vec<ic_git_types::git_side::Standing>>> {
+            self.real.standings(repo, keys)
+        }
         fn record_artifact<'a>(&'a self, repo: &'a str, kind: ic_git_types::git_side::RecordKind) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<ic_git_types::git_side::Attested, String>>> {
             self.real.record_artifact(repo, kind)
         }
@@ -2814,6 +2929,94 @@ mod tests {
         create_repo("t-meanwhile-2", &alice, false).unwrap();
         assert_eq!(balance(&alice), 8 * fee, "the other call's settlement stands: no refund");
         assert_eq!(meta("t-meanwhile-2").unwrap().owner, Some(alice));
+        crate::to_git::set_test_side(None);
+    }
+
+    /// The commits a repo counts ballots for have an end. When the list is
+    /// full a ballot on a new commit asks the git side where each stands,
+    /// and is not cast unanswered; the list keeps the approved commits
+    /// nearest the deploy branch's tip and the others with the newest
+    /// ballots, and drops what no ref reaches. The ballots themselves stay
+    /// on record, and a commit that left is counted again with its next.
+    #[test]
+    fn the_commits_counted_have_an_end() {
+        use crate::mirror;
+        let git = Rc::new(Flaky::new());
+        crate::to_git::set_test_side(Some(git.clone()));
+        let alice = p(43);
+        credit(&alice, 10_000_000_000);
+        let repo = "t-counted";
+        create_repo(repo, &alice, false).unwrap();
+        set_required_votes(repo, &alice, false, 1).unwrap();
+        let commit = |tag: &str, parent: Option<store::Oid>| {
+            let tree = store::put_object(store::ObjectType::Tree, b"");
+            let parent = parent.map_or(String::new(), |p| format!("parent {}\n", store::oid_hex(&p)));
+            store::put_object(store::ObjectType::Commit, format!("tree {}\n{parent}\n{repo} {tag}\n", store::oid_hex(&tree)).as_bytes())
+        };
+        // A branch of `n` commits, each given a ballot as it is pushed.
+        let branch = |name: &str, n: usize, approve: bool| {
+            let mut line: Vec<store::Oid> = Vec::new();
+            for i in 0..n {
+                let c = commit(&format!("{name} {i}"), line.last().copied());
+                store::set_ref(repo, name, c).unwrap();
+                vote(repo, &alice, &store::oid_hex(&c), approve).unwrap();
+                line.push(c);
+            }
+            line
+        };
+        let served = |c: &store::Oid| mirror::approved(repo).unwrap().contains(c);
+
+        // Five more approved commits on the deploy branch than are kept,
+        // and others to fill the list exactly.
+        let main = branch(&store::head_target(repo).unwrap(), COUNTED_APPROVED + 5, true);
+        let side = branch("refs/heads/side", COUNTED_OTHER - 5, false);
+        assert_eq!(counted(repo).len(), COUNTED_APPROVED + COUNTED_OTHER);
+        assert!(main.iter().all(served), "nothing has left yet");
+
+        // Full: a ballot on a new commit waits for the git side.
+        let more = commit("side more", side.last().copied());
+        store::set_ref(repo, "refs/heads/side", more).unwrap();
+        git.inject("standings", Inject::Lost);
+        let e = vote(repo, &alice, &store::oid_hex(&more), false).unwrap_err();
+        assert!(e.contains("not cast"), "{e}");
+        assert!(votes(repo, &store::oid_hex(&more)).is_empty());
+        assert_eq!(counted(repo).len(), COUNTED_APPROVED + COUNTED_OTHER);
+        // And one that is no commit of the repo is refused as before.
+        let stray = commit("stray", None);
+        let e = vote(repo, &alice, &store::oid_hex(&stray), true).unwrap_err();
+        assert!(e.contains("no such commit"), "{e}");
+
+        // Answered: the five approved commits furthest from the tip leave.
+        vote(repo, &alice, &store::oid_hex(&more), false).unwrap();
+        assert_eq!(counted(repo).len(), COUNTED_APPROVED + COUNTED_OTHER - 4);
+        assert!(!main[..5].iter().any(served));
+        assert!(main[5..].iter().all(served));
+        // Their ballots are on record, and one's next ballot counts it
+        // again while there is room.
+        assert_eq!(votes(repo, &store::oid_hex(&main[0])).len(), 1);
+        vote(repo, &alice, &store::oid_hex(&main[0]), true).unwrap();
+        assert!(served(&main[0]));
+
+        // The side branch is deleted. The list fills, and the next ballot
+        // drops what no ref reaches, and the approved commit past the end.
+        store::delete_ref(repo, "refs/heads/side");
+        let two = branch("refs/heads/two", 4, false);
+        assert_eq!(counted(repo).len(), COUNTED_APPROVED + two.len());
+        assert!(!served(&main[0]));
+        assert!(main[5..].iter().all(served));
+        let keys: Vec<String> = counted(repo).into_iter().map(|c| c.key).collect();
+        assert!(two.iter().all(|c| keys.contains(&subject(c).key())));
+        assert!(!side.iter().any(|c| keys.contains(&subject(c).key())));
+
+        // A repo from before the list: every commit with a ballot, cut to
+        // what fits, and written by its next ballot.
+        crate::kv::remove(&counted_key(repo));
+        assert_eq!(counted(repo).len(), COUNTED_APPROVED + COUNTED_OTHER);
+        vote(repo, &alice, &store::oid_hex(&two[0]), false).unwrap();
+        let written: Vec<Counted> = crate::kv::get_json(&counted_key(repo)).expect("the ballot wrote the list");
+        assert!(written.len() <= COUNTED_APPROVED + COUNTED_OTHER);
+        assert_eq!(written[0].key, subject(&two[0]).key());
+        assert!(served(main.last().unwrap()));
         crate::to_git::set_test_side(None);
     }
 

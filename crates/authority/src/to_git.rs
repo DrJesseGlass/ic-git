@@ -6,7 +6,7 @@
 //! authority calls; each is awaited and answers a `Reply` (phase 3, step
 //! 8). The mirror writes are made only by mirrors.rs, which numbers them.
 
-use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, RecordKind, Release, Retry};
+use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, RecordKind, Release, Retry, Standing};
 pub use ic_git_types::git_side::PushPolicy;
 use ic_git_types::oid::Oid;
 use ic_git_types::side::Reply;
@@ -113,6 +113,11 @@ pub async fn create_repo(name: &str) -> Reply<Result<(), String>> {
 /// Does the git side hold this commit?
 pub async fn has_commit(repo: &str, oid: &Oid) -> Reply<bool> {
     via!(has_commit(repo, oid))
+}
+
+/// Where each commit stands in the repo, by its ballot key.
+pub async fn standings(repo: &str, keys: Vec<String>) -> Reply<Vec<Standing>> {
+    via!(standings(repo, keys))
 }
 
 /// The artifact behind a registry record, with its proof (provenance.rs
@@ -227,6 +232,10 @@ pub(crate) mod flaky {
 
         fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
             self.go("has_commit", move || self.real.has_commit(repo, oid), None)
+        }
+
+        fn standings<'a>(&'a self, repo: &'a str, keys: Vec<String>) -> Fut<'a, Reply<Vec<Standing>>> {
+            self.go("standings", move || self.real.standings(repo, keys), None)
         }
 
         fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>> {

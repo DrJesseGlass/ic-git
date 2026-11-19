@@ -97,6 +97,8 @@ type SetSiteDomains = record { repo : text; domains : vec text };
 type CheckNewRepo = record { name : text };
 type CreateRepo = record { name : text };
 type HasCommit = record { oid : blob; repo : text };
+type Standings = record { repo : text; keys : vec text };
+type Standing = variant { Gone; Held; Deploy : nat32 };
 type RecordKind = variant { Site; Release : record { path : text } };
 type RecordArtifact = record { repo : text; kind : RecordKind };
 type ReleaseJob = record { repo : text };
@@ -164,6 +166,7 @@ service : (InitArg) -> {
   check_new_repo : (CheckNewRepo) -> (ResultText);
   create_repo : (CreateRepo) -> (Result);
   has_commit : (HasCommit) -> (bool);
+  standings : (Standings) -> (vec Standing);
   record_artifact : (RecordArtifact) -> (ResultStaged);
   release_job : (ReleaseJob) -> (ResultStaged);
   reply_chunk : (ReplyChunk) -> (ResultBlob);

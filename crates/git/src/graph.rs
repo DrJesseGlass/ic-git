@@ -28,6 +28,7 @@
 
 use crate::object;
 use crate::store::{self, ObjectType, Oid};
+use ic_git_types::git_side::{Standing, MAX_STANDINGS};
 use std::collections::{BTreeMap, BinaryHeap};
 
 const HEAD: u8 = 1;
@@ -252,9 +253,116 @@ pub fn commit_of(repo: &str, oid: &Oid, cap: usize) -> bool {
     false
 }
 
+/// A commit and its first parents, nearest first: the line the deploy
+/// branch's own history runs along, which is where the served commit is
+/// looked for (site.rs) and what `standings` measures a depth on.
+pub fn first_parents(tip: Oid) -> impl Iterator<Item = Oid> {
+    std::iter::successors(Some(tip), |c| match store::get_object_parsed(c) {
+        Some((ObjectType::Commit, body)) => object::commit_refs(&body).ok().and_then(|r| r.parents.first().copied()),
+        _ => None,
+    })
+}
+
+/// Where each of `keys` stands in `repo` (`GitSide::standings`), a key
+/// being the one a commit's ballots are stored under (`mirror::commit_key`).
+/// Two walks, each bounded as the question it answers already is: the
+/// deploy branch's first parents for as far as the served commit is looked
+/// for (`site::APPROVAL_WALK`), and every ref's history for as far as a
+/// ballot's commit is (`COMMIT_OF_WALK`). Each stops once every key is
+/// placed. A key neither walk meets is `Gone`: past `MAX_STANDINGS` in
+/// the ask, no commit of the repo, or further back than a ballot is
+/// taken on.
+pub fn standings(repo: &str, keys: &[String]) -> Vec<Standing> {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    let mut out = vec![Standing::Gone; keys.len()];
+    let mut wanted: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, k) in keys.iter().enumerate().take(MAX_STANDINGS) {
+        wanted.entry(k.as_str()).or_default().push(i);
+    }
+    let mut left = wanted.len();
+    let place = |oid: &Oid, standing: Standing, left: &mut usize, out: &mut Vec<Standing>| {
+        if let Some(at) = wanted.get(crate::mirror::commit_key(oid.as_slice()).as_str()) {
+            if out[at[0]] == Standing::Gone {
+                *left -= 1;
+                for i in at {
+                    out[*i] = standing;
+                }
+            }
+        }
+    };
+    let tip = store::head_target(repo).and_then(|branch| store::get_ref(repo, &branch));
+    for (depth, oid) in tip.into_iter().flat_map(first_parents).take(crate::site::APPROVAL_WALK).enumerate() {
+        if left == 0 {
+            return out;
+        }
+        place(&oid, Standing::Deploy(depth as u32), &mut left, &mut out);
+    }
+    let mut queue: VecDeque<Oid> = store::list_refs(repo).into_iter().map(|(_, tip)| tip).collect();
+    let mut seen: BTreeSet<Oid> = BTreeSet::new();
+    while let Some(at) = queue.pop_front() {
+        if left == 0 || seen.len() >= COMMIT_OF_WALK {
+            break;
+        }
+        if !seen.insert(at) {
+            continue;
+        }
+        match store::get_object_parsed(&at) {
+            Some((ObjectType::Commit, content)) => {
+                place(&at, Standing::Held, &mut left, &mut out);
+                if let Ok(refs) = object::commit_refs(&content) {
+                    queue.extend(refs.parents);
+                }
+            }
+            Some((ObjectType::Tag, content)) => queue.extend(object::tag_target(&content).ok()),
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where a commit with ballots stands: on the deploy branch by its
+    /// depth along first parents, elsewhere in the repo, or nowhere. A
+    /// merge's second parent is off the line, and a key asked twice is
+    /// answered twice.
+    #[test]
+    fn standings_place_a_commit_on_the_deploy_branch_off_it_or_nowhere() {
+        store::create_repo("stand").unwrap();
+        store::create_repo("stand-other").unwrap();
+        let main = store::head_target("stand").unwrap();
+        let a = commit("stand-a", &[], 1);
+        let side = commit("stand-side", &[&a], 2);
+        let merged = commit("stand-merged", &[&a], 2);
+        let b = commit("stand-b", &[&a, &merged], 3);
+        let c = commit("stand-c", &[&b], 4);
+        let gone = commit("stand-gone", &[&a], 5);
+        let theirs = commit("stand-theirs", &[], 6);
+        store::set_ref("stand", &main, c).unwrap();
+        store::set_ref("stand", "refs/heads/side", side).unwrap();
+        store::set_ref("stand-other", "refs/heads/main", theirs).unwrap();
+        let key = |o: &Oid| crate::mirror::commit_key(o.as_slice());
+        let asked = [key(&c), key(&a), key(&side), key(&merged), key(&gone), key(&theirs), key(&a), "commit:nonsense".to_string()];
+        assert_eq!(
+            standings("stand", &asked),
+            [
+                Standing::Deploy(0),
+                Standing::Deploy(2),
+                Standing::Held,
+                Standing::Held,
+                Standing::Gone,
+                Standing::Gone,
+                Standing::Deploy(2),
+                Standing::Gone
+            ]
+        );
+        // The side branch deleted: its commit is no commit of the repo.
+        store::delete_ref("stand", "refs/heads/side");
+        assert_eq!(standings("stand", &[key(&side)]), [Standing::Gone]);
+        assert!(standings("stand-none", &asked).iter().all(|s| *s == Standing::Gone));
+    }
 
     /// A commit of `parents` at `time`; `tag` tells two apart.
     fn commit(tag: &str, parents: &[&Oid], time: u64) -> Oid {

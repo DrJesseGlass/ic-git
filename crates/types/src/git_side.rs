@@ -47,6 +47,27 @@ pub struct Retry {
     pub running: Option<String>,
 }
 
+/// Where a commit with ballots stands in its repo, as the git side sees
+/// it (`GitSide::standings`). The authority keeps the ballots; only the
+/// git side has the history, so it is asked which of them can still come
+/// to anything.
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// No commit of the repo: no ref reaches it (a branch was deleted),
+    /// or it never was one. It cannot be served.
+    Gone,
+    /// A commit of the repo, off the deploy branch's first parents: on
+    /// another branch, or brought in by a merge.
+    Held,
+    /// On the deploy branch, this many first parents from its tip (the
+    /// tip is 0), within the walk the served commit is looked for along.
+    Deploy(u32),
+}
+
+/// The most commits one `standings` ask may name. The authority's list is
+/// shorter (tenancy.rs); a longer ask is answered `Gone` past here.
+pub const MAX_STANDINGS: usize = 1_000;
+
 /// Which registry record the authority asks the git side to resolve
 /// (phase 3, step 10: `record_artifact`).
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
@@ -137,6 +158,12 @@ pub trait GitSide {
     /// objects are one store for every repo, so "held" alone was any
     /// blob or tree, and any other repo's commit.
     fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>>;
+
+    /// Where each of these commits stands in the repo, in the order asked,
+    /// by the key its ballots are stored under (the approved set's keys).
+    /// The authority asks when the list of commits it counts ballots for
+    /// is full, to choose what leaves it. Read-only.
+    fn standings<'a>(&'a self, repo: &'a str, keys: Vec<String>) -> Fut<'a, Reply<Vec<Standing>>>;
 
     /// The artifact behind a registry record, with its proof (phase 3,
     /// step 10). The git side picks the commit -- the release commit, which
