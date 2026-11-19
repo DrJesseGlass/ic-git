@@ -157,8 +157,8 @@ impl<T: Transport> GitSide for Git<T> {
         Box::pin(send(&self.transport, wire::CreateRepo { name: name.into() }))
     }
 
-    fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
-        Box::pin(send(&self.transport, wire::HasCommit { oid: oid.as_slice().to_vec() }))
+    fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
+        Box::pin(send(&self.transport, wire::HasCommit { oid: oid.as_slice().to_vec(), repo: repo.into() }))
     }
 
     /// A staged reply: the head, then each further chunk under its
@@ -356,7 +356,7 @@ mod tests {
             m if m == wire::HasCommit::METHOD => {
                 let m: wire::HasCommit = dec(arg);
                 let oid = Oid::try_from(m.oid.as_slice()).expect("20 bytes");
-                enc(GIT.has_commit(&oid).await.unwrap())
+                enc(GIT.has_commit(&m.repo, &oid).await.unwrap())
             }
             m if m == wire::RecordArtifact::METHOD => {
                 let m: wire::RecordArtifact = dec(arg);
@@ -512,9 +512,10 @@ mod tests {
         assert_eq!(block_on(git.set_site_domains(name, vec![])), Ok(Ok(())));
 
         let tip = push(name, b"module");
-        assert_eq!(block_on(git.has_commit(&tip)), Ok(true));
+        assert_eq!(block_on(git.has_commit(name, &tip)), Ok(true));
         let none = parse_oid("0000000000000000000000000000000000000001").unwrap();
-        assert_eq!(block_on(git.has_commit(&none)), Ok(false));
+        assert_eq!(block_on(git.has_commit(name, &none)), Ok(false));
+        assert_eq!(block_on(git.has_commit("peer-none", &tip)), Ok(false), "another repo's commit is not this one's");
 
         // The write is followed: the served commit's job goes to the
         // authority through the outbox, here this crate's own.
@@ -534,7 +535,7 @@ mod tests {
 
         let refused = block_on(git.record_artifact("peer-none", RecordKind::Site)).unwrap();
         assert!(refused.is_err(), "a repo that does not exist is refused, not answered");
-        assert_eq!(git.transport.count(wire::HasCommit::METHOD), 2);
+        assert_eq!(git.transport.count(wire::HasCommit::METHOD), 3);
     }
 
     /// A release job larger than a chunk comes back as a head and the

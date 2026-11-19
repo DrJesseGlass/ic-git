@@ -1329,9 +1329,13 @@ pub struct Cast {
 /// Cast or replace a ballot. An objection must give a reason (at most 1 KB);
 /// a reason on an approval or rejection is kept but not required.
 ///
-/// The git side is asked whether it holds the commit before the ballot is
-/// counted; one it does not answer for is not cast, and the voter asks
-/// again.
+/// The git side is asked whether this is a commit of the repo before the
+/// ballot is counted (`GitSide::has_commit`); one it does not answer for is
+/// not cast, and the voter asks again. Until 2026-11 it was asked only
+/// whether it held the object, so a ballot was taken on any blob or tree
+/// in the store and on any other repo's commits: each a record kept for
+/// good, and with one required vote an entry in the approved set that is
+/// sent to the git side whole.
 pub async fn cast_ballot(
     repo: &str,
     who: &Principal,
@@ -1341,9 +1345,9 @@ pub async fn cast_ballot(
 ) -> Result<Cast, String> {
     can_vote(repo, who)?;
     let oid = parse_oid(commit_hex)?;
-    match crate::to_git::has_commit(&oid).await {
+    match crate::to_git::has_commit(repo, &oid).await {
         Ok(true) => {}
-        Ok(false) => return Err(format!("no such commit in {repo}: {commit_hex}")),
+        Ok(false) => return Err(format!("no such commit in {repo}: {commit_hex} (a ballot is on a commit within reach of one of the repo's refs)")),
         Err(f) => {
             return Err(format!(
                 "the git side did not say whether it holds {commit_hex} ({f}); the ballot is not cast, try again"
@@ -2143,8 +2147,7 @@ mod tests {
         let (alice, v1, v2, w) = (p(41), p(42), p(43), p(44));
         credit(&alice, 10_000_000_000);
         create_repo("t-vote", &alice, false).unwrap();
-        let blob = store::put_object(store::ObjectType::Blob, b"x");
-        let commit = store::oid_hex(&blob); // any stored object stands in for a commit here
+        let commit = store::oid_hex(&store::commit_file_for_tests("t-vote", "f", b"x", None));
         // No threshold: approved by default.
         assert!(approved("t-vote", &commit));
         // A threshold nobody could reach is refused; add voters first.
@@ -2187,8 +2190,7 @@ mod tests {
         let (alice, v1, v2) = (p(61), p(62), p(63));
         credit(&alice, 10_000_000_000);
         create_repo("t-obj", &alice, false).unwrap();
-        let blob = store::put_object(store::ObjectType::Blob, b"y");
-        let commit = store::oid_hex(&blob);
+        let commit = store::oid_hex(&store::commit_file_for_tests("t-obj", "f", b"y", None));
         add_member("t-obj", &alice, false, v1, Role::Voter).unwrap();
         add_member("t-obj", &alice, false, v2, Role::Voter).unwrap();
         // With no votes required an objection is recorded and gates
@@ -2252,7 +2254,7 @@ mod tests {
         let (alice, v1, w) = (p(91), p(92), p(93));
         credit(&alice, 10_000_000_000);
         create_repo("t-mirror", &alice, false).unwrap();
-        let c = store::put_object(store::ObjectType::Blob, b"mirrored");
+        let c = store::commit_file_for_tests("t-mirror", "f", b"mirrored", None);
         let hex = store::oid_hex(&c);
         assert_eq!(mirror::commit_key(c.as_slice()), subject(&c).key(), "both sides name a commit alike");
 
@@ -2781,8 +2783,8 @@ mod tests {
                 }
             })
         }
-        fn has_commit<'a>(&'a self, oid: &'a ic_git_types::oid::Oid) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<bool>> {
-            self.real.has_commit(oid)
+        fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a ic_git_types::oid::Oid) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<bool>> {
+            self.real.has_commit(repo, oid)
         }
         fn record_artifact<'a>(&'a self, repo: &'a str, kind: ic_git_types::git_side::RecordKind) -> ic_git_types::side::Fut<'a, ic_git_types::side::Reply<Result<ic_git_types::git_side::Attested, String>>> {
             self.real.record_artifact(repo, kind)
@@ -2825,7 +2827,7 @@ mod tests {
         credit(&alice, 10_000_000_000);
         create_repo("t-ballot", &alice, false).unwrap();
         set_required_votes("t-ballot", &alice, false, 1).unwrap();
-        let c = store::put_object(store::ObjectType::Blob, b"ballot");
+        let c = store::commit_file_for_tests("t-ballot", "f", b"ballot", None);
         let hex = store::oid_hex(&c);
 
         git.inject("has_commit", Inject::Lost);
@@ -2836,6 +2838,19 @@ mod tests {
 
         vote("t-ballot", &alice, &hex, true).unwrap();
         assert!(crate::mirror::approved("t-ballot").unwrap().contains(&c));
+
+        // A ballot is on a commit of the repo: not on a blob the store
+        // holds, and not on another repo's commit, which it holds too.
+        let blob = store::put_object(store::ObjectType::Blob, b"ballot");
+        create_repo("t-ballot-other", &alice, false).unwrap();
+        let theirs = store::commit_file_for_tests("t-ballot-other", "f", b"theirs", None);
+        for not_ours in [blob, theirs] {
+            let hex = store::oid_hex(&not_ours);
+            let e = vote("t-ballot", &alice, &hex, true).unwrap_err();
+            assert!(e.contains("no such commit in t-ballot"), "{e}");
+            assert!(votes("t-ballot", &hex).is_empty());
+            assert!(!crate::mirror::approved("t-ballot").unwrap().contains(&not_ours));
+        }
         crate::to_git::set_test_side(None);
     }
 
@@ -2876,7 +2891,7 @@ mod tests {
         // taken one; a change that is no ballot does not ask.
         set_required_votes("t-retry", &alice, false, 1).unwrap();
         assert_eq!(git.retries.borrow().last(), Some(&None));
-        let c = store::put_object(store::ObjectType::Blob, b"retry");
+        let c = store::commit_file_for_tests("t-retry", "f", b"retry", None);
         let writes = git.retries.borrow().len();
         git.inject("set_approved", Inject::NotDelivered);
         vote("t-retry", &alice, &store::oid_hex(&c), true).unwrap();

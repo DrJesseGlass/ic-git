@@ -111,8 +111,8 @@ pub async fn create_repo(name: &str) -> Reply<Result<(), String>> {
 }
 
 /// Does the git side hold this commit?
-pub async fn has_commit(oid: &Oid) -> Reply<bool> {
-    via!(has_commit(oid))
+pub async fn has_commit(repo: &str, oid: &Oid) -> Reply<bool> {
+    via!(has_commit(repo, oid))
 }
 
 /// The artifact behind a registry record, with its proof (provenance.rs
@@ -225,8 +225,8 @@ pub(crate) mod flaky {
             self.go("create_repo", move || self.real.create_repo(name), Some(Err("refused by the git side".into())))
         }
 
-        fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
-            self.go("has_commit", move || self.real.has_commit(oid), None)
+        fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
+            self.go("has_commit", move || self.real.has_commit(repo, oid), None)
         }
 
         fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>> {

@@ -282,6 +282,17 @@ refused, and so is removing a voter or transferring the repo when that
 would leave `k` out of reach: lower `k` first. `k = 0`, the default,
 deploys on push as before.
 
+A ballot is on a commit of the repo: a commit object that one of the
+repo's refs reaches, among the 20,000 nearest them, which the git side
+is asked before the ballot counts. Every repo's objects are in one
+store, and until 2026-11 the question was only whether the store held
+the object: a ballot was taken on any blob or tree and on any other
+repo's commit, each a record kept for good and, with one vote required,
+an entry in the approved set the git side is sent whole. A commit a
+forced push left behind takes no new ballots; the ones it has stay on
+record. Ballots are still kept for as long as the repo is: on a commit of
+the repo, which a push paid for.
+
 With `k` at 0 a repo trusts the git canister for what deploys. After the
 canister split (docs/CANISTER_SPLIT.md, decision 6.5.4) the git canister
 holds the branches and the authority holds the accounts, the ballots and

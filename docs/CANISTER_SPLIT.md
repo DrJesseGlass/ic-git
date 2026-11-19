@@ -179,7 +179,7 @@ acts.**
     set_site(repo, root)
 
     // authority -> git (asked from update calls; phase 3, steps 7 and 10)
-    check_new_repo(name) -> label; create_repo(name); has_commit(oid)
+    check_new_repo(name) -> label; create_repo(name); has_commit(repo, oid)
     release_job(repo)                      // deploy_now: the job, in the reply
                                            // (staged in chunks, step 12)
     record_artifact(repo, kind)            // a registry publish: Artifact + proof
@@ -518,7 +518,9 @@ The steps in one canister:
        The charge is kept on a refused pack, as it is today. (Since
        2026-11 the pack is read before the charge, which is for what
        it stores; an unreadable pack is charged for its bytes.)
-     - **A ballot** awaits `has_commit` before it counts.
+     - **A ballot** awaits `has_commit` before it counts: whether the
+       commit is the repo's (since 2026-11; before, whether the store
+       held the object).
      - **Mirror writes** are full state, sequence-numbered, and kept in a
        per-repo dirty set until the git side acknowledges them, retried
        by a timer.
