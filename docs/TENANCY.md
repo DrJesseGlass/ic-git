@@ -157,8 +157,10 @@ branch (the repo's HEAD, `main`), which a push cannot delete. What the
 site serves and the app runs follow that branch, and with votes required
 the approvals are looked for along it, so its history is the one that
 is kept. Until 2026-11 it could be deleted like any other, and a delete
-and a create in one push replaced its history outright. An operator can
-still move a ref by hand where one has to be.
+and a create in one push replaced its history outright. Nothing but a
+push moves a ref, an operator's hand included, so what is pushed to the
+deploy branch stays in its history: a commit there is undone by a commit
+on top of it.
 
 A push whose request cannot be read is refused and charged nothing, and
 a command naming a ref outside `refs/` (`HEAD`, a bare `main`) is such a
