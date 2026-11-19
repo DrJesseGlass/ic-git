@@ -96,28 +96,76 @@ fn parse_command(line: &str) -> Result<Command, String> {
     })
 }
 
-/// Is `old` an ancestor of `new`? Parents-only walk; non-commit objects end
-/// their branch of the walk.
-fn is_ancestor(old: &Oid, new: &Oid) -> bool {
-    let mut visited: BTreeSet<Oid> = BTreeSet::new();
-    let mut queue = vec![*new];
-    while let Some(oid) = queue.pop() {
-        if oid == *old {
-            return true;
-        }
-        if !visited.insert(oid) {
-            continue;
-        }
-        if let Some((ObjectType::Commit, content)) = store::get_object_parsed(&oid) {
-            if let Ok(refs) = object::commit_refs(&content) {
-                queue.extend(refs.parents);
-            }
-        }
-    }
-    false
+/// How many commits one push's fast-forward checks may load between them.
+/// A fast-forward is found within the commits the push brought; it is a
+/// push that is none, or one of a ref far behind, that walks on, and a
+/// push may name any number of refs.
+pub const ANCESTRY_WALK: usize = 100_000;
+
+/// What one push's commands share (`check_command`), so that the work of
+/// a push is that of what it brings and not of what the repo holds times
+/// the refs it names.
+///
+/// Until 2026-11 each command walked every object the repo's refs reach,
+/// trees and blobs with the commits, to know where its own walk could
+/// stop, and each walked the new tip's history again to see the old one
+/// in it. A push of a thousand refs, which is a few kilobytes and is
+/// charged as that, was a thousand walks of the whole repo.
+struct Walk<'a> {
+    repo: &'a str,
+    /// Objects known to be whole: the history the repo's refs reach, read
+    /// at the first command that needs it (a push of deletes never
+    /// does), and what this push's commands have walked since.
+    known: Option<BTreeSet<Oid>>,
+    /// What is left of `ANCESTRY_WALK`.
+    ancestry: usize,
 }
 
-fn check_command(repo: &str, cmd: &Command) -> Result<(), String> {
+impl<'a> Walk<'a> {
+    fn new(repo: &'a str) -> Self {
+        Walk { repo, known: None, ancestry: ANCESTRY_WALK }
+    }
+
+    /// Is everything `new` reaches in the store?
+    fn connected(&mut self, new: &Oid) -> Result<(), String> {
+        let repo = self.repo;
+        let known = self.known.get_or_insert_with(|| {
+            let tips: Vec<Oid> = store::list_refs(repo).into_iter().map(|(_, o)| o).collect();
+            pack::history(&tips)
+        });
+        pack::connected(new, known)
+    }
+
+    /// Is `old` an ancestor of `new`? Parents only, nearest first, so the
+    /// tip a fast-forward builds on is met within the commits it adds;
+    /// non-commit objects end their branch of the walk. `None` when the
+    /// push's walks ran out before it was found.
+    fn is_ancestor(&mut self, old: &Oid, new: &Oid) -> Option<bool> {
+        let mut visited: BTreeSet<Oid> = BTreeSet::new();
+        let mut queue: std::collections::VecDeque<Oid> = [*new].into();
+        while let Some(oid) = queue.pop_front() {
+            if oid == *old {
+                return Some(true);
+            }
+            if !visited.insert(oid) {
+                continue;
+            }
+            if self.ancestry == 0 {
+                return None;
+            }
+            self.ancestry -= 1;
+            if let Some((ObjectType::Commit, content)) = store::get_object_parsed(&oid) {
+                if let Ok(refs) = object::commit_refs(&content) {
+                    queue.extend(refs.parents);
+                }
+            }
+        }
+        Some(false)
+    }
+}
+
+fn check_command(walk: &mut Walk, cmd: &Command) -> Result<(), String> {
+    let repo = walk.repo;
     let current = store::get_ref(repo, &cmd.refname);
     if current != cmd.old {
         return Err("ref changed since advertisement".into());
@@ -135,9 +183,9 @@ fn check_command(repo: &str, cmd: &Command) -> Result<(), String> {
         return Ok(());
     };
     // Connectivity: everything reachable from the new tip must exist now;
-    // current tips bound the walk to what this push introduced.
-    let tips: Vec<Oid> = store::list_refs(repo).into_iter().map(|(_, o)| o).collect();
-    pack::closure(&[new], &tips).map_err(|e| format!("missing objects: {e}"))?;
+    // the history the refs reach bounds the walk to what this push
+    // introduced.
+    walk.connected(&new).map_err(|e| format!("missing objects: {e}"))?;
     // Branch tips must be commits (git refuses e.g. `push <blob>:refs/heads/x`;
     // an advertised head that isn't a commit breaks clone/fetch clients).
     if cmd.refname.starts_with("refs/heads/") {
@@ -150,8 +198,14 @@ fn check_command(repo: &str, cmd: &Command) -> Result<(), String> {
         }
     }
     if let Some(old) = cmd.old {
-        if !is_ancestor(&old, &new) {
-            return Err("non-fast-forward".into());
+        match walk.is_ancestor(&old, &new) {
+            Some(true) => {}
+            Some(false) => return Err("non-fast-forward".into()),
+            None => {
+                return Err(format!(
+                    "not found to be a fast-forward within the {ANCESTRY_WALK} commits a push's checks may walk; push fewer refs at once"
+                ))
+            }
         }
     }
     Ok(())
@@ -230,6 +284,7 @@ pub fn handle(repo: &str, request: Request, prepared: Option<pack::Prepared>) ->
     let deploy_configured = jobs::any_config(repo);
 
     report.extend_from_slice(&pkt_line(b"unpack ok\n"));
+    let mut walk = Walk::new(repo);
     for cmd in &commands {
         // A ref the store will not take is that command's refusal, not a
         // trap: by here the push is charged, and a trap would keep the
@@ -237,7 +292,7 @@ pub fn handle(repo: &str, request: Request, prepared: Option<pack::Prepared>) ->
         // outside refs/, which `parse_command` has refused already, and
         // any write once this side is frozen for its move, which can
         // begin while the charge is awaited.)
-        let applied = check_command(repo, cmd).and_then(|()| match cmd.new {
+        let applied = check_command(&mut walk, cmd).and_then(|()| match cmd.new {
             Some(new) => store::set_ref(repo, &cmd.refname, new).map(|()| Some(new)),
             None => {
                 store::delete_ref(repo, &cmd.refname);
@@ -421,6 +476,60 @@ mod tests {
         assert_eq!(store::get_ref("ff-rule", side), Some(other));
     }
 
+    /// A push's commands share what they have walked: the history the
+    /// refs reach is read once, a command builds on what an earlier one
+    /// of the same push brought, and an object that is not there is still
+    /// found missing. The fast-forward checks share a number of commits
+    /// they may load, and a command past it is refused for that, not let
+    /// through.
+    #[test]
+    fn the_commands_of_a_push_share_one_walk() {
+        store::create_repo("one-walk").unwrap();
+        let branch = store::head_target("one-walk").unwrap();
+        let tree = store::put_object(ObjectType::Tree, b"");
+        let commit = |tag: &str, tree: &Oid, parent: Option<&Oid>| {
+            let parent = parent.map_or(String::new(), |p| format!("parent {}\n", store::oid_hex(p)));
+            store::put_object(ObjectType::Commit, format!("tree {}\n{parent}\none-walk {tag}\n", store::oid_hex(tree)).as_bytes())
+        };
+        let mut line = vec![commit("0", &tree, None)];
+        for i in 1..12 {
+            line.push(commit(&i.to_string(), &tree, line.last()));
+        }
+        store::set_ref("one-walk", &branch, line[5]).unwrap();
+        let cmd = |old: Option<Oid>, new: Oid, name: &str| Command { old, new: Some(new), refname: name.into() };
+
+        let mut walk = Walk::new("one-walk");
+        assert!(walk.known.is_none(), "nothing is read before a command needs it");
+        // A fast-forward, and a second ref on top of what the first brought.
+        check_command(&mut walk, &cmd(Some(line[5]), line[8], &branch)).unwrap();
+        let known = walk.known.clone().unwrap();
+        assert!(line[..=8].iter().all(|c| known.contains(c)) && !known.contains(&line[9]));
+        check_command(&mut walk, &cmd(None, line[11], "refs/heads/next")).unwrap();
+        assert!(walk.known.as_ref().unwrap().contains(&line[11]));
+        // A commit whose tree the store does not hold is missing objects,
+        // whatever is known beside it, and adds nothing to what is known.
+        let absent = Oid::try_from([7u8; 20].as_slice()).unwrap();
+        let broken = commit("broken", &absent, Some(&line[11]));
+        let e = check_command(&mut walk, &cmd(None, broken, "refs/heads/broken")).unwrap_err();
+        assert!(e.contains("missing objects"), "{e}");
+        assert!(!walk.known.as_ref().unwrap().contains(&broken));
+
+        // The fast-forward checks: the tip a push builds on is met first,
+        // so it costs the commits the push adds.
+        let before = walk.ancestry;
+        assert_eq!(walk.is_ancestor(&line[8], &line[11]), Some(true));
+        assert_eq!(before - walk.ancestry, 3);
+        // One that is none walks to the root, and the next finds nothing
+        // left to walk with.
+        let other = commit("other", &tree, None);
+        walk.ancestry = 12;
+        assert_eq!(walk.is_ancestor(&other, &line[11]), Some(false));
+        assert_eq!(walk.ancestry, 0);
+        let e = check_command(&mut walk, &cmd(Some(line[5]), line[11], &branch)).unwrap_err();
+        assert!(e.contains("not found to be a fast-forward within"), "{e}");
+        assert_eq!(walk.is_ancestor(&line[11], &line[11]), Some(true), "the tip itself costs nothing");
+    }
+
     #[test]
     fn branch_tip_must_be_commit() {
         store::create_repo("tip-check").unwrap();
@@ -430,7 +539,7 @@ mod tests {
             new: Some(blob),
             refname: "refs/heads/main".to_string(),
         };
-        let err = check_command("tip-check", &cmd).unwrap_err();
+        let err = check_command(&mut Walk::new("tip-check"), &cmd).unwrap_err();
         assert!(err.contains("must be a commit"), "{err}");
 
         // Non-branch refs may point at any object type.
@@ -438,6 +547,6 @@ mod tests {
             refname: "refs/tags/raw".to_string(),
             ..cmd
         };
-        assert!(check_command("tip-check", &cmd).is_ok());
+        assert!(check_command(&mut Walk::new("tip-check"), &cmd).is_ok());
     }
 }

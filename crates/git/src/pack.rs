@@ -142,6 +142,44 @@ pub fn closure(wants: &[Oid], haves: &[Oid]) -> Result<Vec<(Oid, ObjectType)>, S
     reachable(wants, &have_set, true)
 }
 
+/// The commits and tags within reach of `tips`, and the tips themselves:
+/// the history a push's connectivity check may stop at (`connected`). No
+/// tree and no blob is read. Whatever a ref reaches was whole when the
+/// ref was set, so reaching one of these is reaching objects that are all
+/// there. A tip the store does not hold is skipped.
+pub fn history(tips: &[Oid]) -> BTreeSet<Oid> {
+    let mut seen: BTreeSet<Oid> = BTreeSet::new();
+    let mut queue: Vec<Oid> = tips.to_vec();
+    while let Some(oid) = queue.pop() {
+        if !seen.insert(oid) {
+            continue;
+        }
+        match store::get_object_parsed(&oid) {
+            Some((ObjectType::Commit, content)) => {
+                if let Ok(refs) = object::commit_refs(&content) {
+                    queue.extend(refs.parents);
+                }
+            }
+            Some((ObjectType::Tag, content)) => queue.extend(object::tag_target(&content).ok()),
+            Some(_) => {}
+            None => {
+                seen.remove(&oid);
+            }
+        }
+    }
+    seen
+}
+
+/// Is everything `new` reaches in the store? The walk stops at `known`,
+/// objects already shown to be whole, and on success adds what it
+/// visited to them: a push's commands share one `known`, so each walks
+/// only what the ones before it did not.
+pub fn connected(new: &Oid, known: &mut BTreeSet<Oid>) -> Result<(), String> {
+    let visited = reachable(&[*new], known, true)?;
+    known.extend(visited.into_iter().map(|(oid, _)| oid));
+    Ok(())
+}
+
 // --- pack format ------------------------------------------------------------
 // Encoder (upload-pack) and decoder (receive-pack) of the same wire layout,
 // kept adjacent so they cannot drift apart.
@@ -841,6 +879,20 @@ mod tests {
         // Everything the client already has drops out.
         let objects = closure(&[commit], &[commit]).unwrap();
         assert!(objects.is_empty());
+
+        // The history a push's check stops at is commits and tags, no
+        // tree or blob, and a tip the store does not hold is not in it.
+        let tag = store::put_object(ObjectType::Tag, format!("object {}\ntype commit\ntag v\n", store::oid_hex(&commit)).as_bytes());
+        let absent = Oid::try_from([9u8; 20].as_slice()).unwrap();
+        assert_eq!(history(&[tag, absent]), BTreeSet::from([tag, commit]));
+        // A walk from the commit stops there at once; from nothing known
+        // it visits the three, and they are known after.
+        let mut known = history(&[tag]);
+        connected(&commit, &mut known).unwrap();
+        assert_eq!(known.len(), 2);
+        let mut known = BTreeSet::new();
+        connected(&commit, &mut known).unwrap();
+        assert_eq!(known.len(), 3);
 
         let pack = build_pack(&closure(&[commit], &[]).unwrap());
         assert_eq!(&pack[..4], b"PACK");
