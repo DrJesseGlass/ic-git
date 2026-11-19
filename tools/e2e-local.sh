@@ -619,7 +619,7 @@ expect "  ...and the count" "$VOTES" '"approvals":1,"objections":1,"required":1,
 # it to the signer. The encoded argument comes from the codec vectors.
 ARG=$(cd "$ROOT" && cargo test -q -p combined_canister --test candid_vectors -- --nocapture 2>/dev/null | awk '$1 == "args:cast_ballot_object" { print $2 }' | sed 's/../\\&/g')
 CONSENT=$(ic anonymous icrc21_canister_call_consent_message "(record { method = \"cast_ballot\"; arg = blob \"$ARG\"; user_preferences = record { metadata = record { language = \"en\"; utc_offset_minutes = null }; device_spec = null } })")
-expect "consent message: an objection, with its reason" "$CONSENT" 'Object to commit 0123456789ab.*Reason: skips the migration'
+expect "consent message: an objection, with its reason" "$CONSENT" 'Object to commit 0123456789abcdef0123456789abcdef01234567 in .*Reason: skips the migration'
 OUT=$(ic "$V2" cast_ballot "(\"e2e-app\", \"$A2\", variant { Approve }, null)")
 expect "a second approval outweighs the objection" "$OUT" 'reached = true'
 for _ in $(seq 1 30); do
