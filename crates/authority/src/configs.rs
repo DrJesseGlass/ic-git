@@ -252,6 +252,12 @@ mod tests {
         assert!(set_wasm("bad", "not a principal".into(), "app.wasm".into()).is_err());
         assert!(set_mode("bad", DeployMode::Reinstall).is_err(), "no config to set the mode of");
         assert!(set_evm("bad", "c.bin".into(), 100_000).unwrap_err().contains(".hex"));
+        // A gas limit no CREATE could run on, or more than a deploy may
+        // be given: the EOA that pays it is every tenant's.
+        crate::evm::set_config("aaaaa-aa".into(), "key".into(), 11155111, Vec::new()).unwrap();
+        assert!(set_evm("bad", "c.hex".into(), 52_999).unwrap_err().contains("floor"));
+        let e = set_evm("bad", "c.hex".into(), crate::evm::MAX_DEPLOY_GAS + 1).unwrap_err();
+        assert!(e.contains("above"), "{e}");
         assert_eq!(get("bad"), DeployConfigs::default());
     }
 }
