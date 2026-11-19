@@ -454,7 +454,16 @@ refuse "another host is not the site" "$(at_host other.example /)" '"X-Ic-Git-Co
 expect "a domain under the IC's own is refused" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "x.icp0.io" })')" 'own domains, where a host names a canister'
 expect "  ...and one naming a canister under any other" "$(ic "$TEN" set_site_domains "(\"e2e-app\", vec { \"$G.gateway.example\" })")" 'has a canister id for a label'
 expect "  ...and the list before it stays" "$(curl -s "http://$HOST/.well-known/ic-domains")" '^app.example$'
+MANY=$(python3 -c 'print("; ".join("\"d%d.example\"" % i for i in range(9)))')
+# The owner pays for a change of domains, and for nothing the canister
+# refuses: a list longer than a site may have is refused for its length.
+ten_balance() { ic "$TEN" get_account "(principal \"$T\")" --query | sed -n 's/.*balance = \([0-9_]*\).*/\1/p' | tr -d _; }
+BAL0=$(ten_balance)
+expect "a list of more than eight is refused" "$(ic "$TEN" set_site_domains "(\"e2e-app\", vec { $MANY })")" 'at most 8 domains'
+expect "  ...and costs nothing" "$(ten_balance)" "^$BAL0\$"
 expect "one domain is kept for the cut" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "app.example" })')" 'Ok'
+BAL1=$(ten_balance)
+expect "  ...and the owner paid for the change" "$([ "$BAL1" -lt "$BAL0" ] && echo paid)" 'paid'
 refuse "  ...the other is gone" "$(curl -s "http://$HOST/.well-known/ic-domains")" 'www'
 
 ic "$TEN" set_required_votes '("e2e-app", 1 : nat32)' >/dev/null
