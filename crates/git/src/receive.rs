@@ -154,8 +154,10 @@ impl<'a> Walk<'a> {
                 return None;
             }
             self.ancestry -= 1;
-            if let Some((ObjectType::Commit, content)) = store::get_object_parsed(&oid) {
-                if let Ok(refs) = object::commit_refs(&content) {
+            // The type is read off the stored value, so a blob a ref is
+            // moved to is not inflated to learn it is no commit.
+            if let Some(stored) = store::get_object_stored(&oid).filter(|s| s.object_type == ObjectType::Commit) {
+                if let Ok(refs) = object::commit_refs(&stored.content()) {
                     queue.extend(refs.parents);
                 }
             }
@@ -203,7 +205,7 @@ fn check_command(walk: &mut Walk, cmd: &Command) -> Result<(), String> {
             Some(false) => return Err("non-fast-forward".into()),
             None => {
                 return Err(format!(
-                    "not found to be a fast-forward within the {ANCESTRY_WALK} commits a push's checks may walk; push fewer refs at once"
+                    "not found to be a fast-forward within the {ANCESTRY_WALK} commits a push's checks may walk; if it is one, push fewer refs or fewer commits at once"
                 ))
             }
         }

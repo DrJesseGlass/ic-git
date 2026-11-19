@@ -154,17 +154,20 @@ pub fn history(tips: &[Oid]) -> BTreeSet<Oid> {
         if !seen.insert(oid) {
             continue;
         }
-        match store::get_object_parsed(&oid) {
-            Some((ObjectType::Commit, content)) => {
-                if let Ok(refs) = object::commit_refs(&content) {
+        // The type is read off the stored value: a tree or a blob a ref
+        // or a tag names is not inflated to learn it is neither.
+        let Some(stored) = store::get_object_stored(&oid) else {
+            seen.remove(&oid);
+            continue;
+        };
+        match stored.object_type {
+            ObjectType::Commit => {
+                if let Ok(refs) = object::commit_refs(&stored.content()) {
                     queue.extend(refs.parents);
                 }
             }
-            Some((ObjectType::Tag, content)) => queue.extend(object::tag_target(&content).ok()),
-            Some(_) => {}
-            None => {
-                seen.remove(&oid);
-            }
+            ObjectType::Tag => queue.extend(object::tag_target(&stored.content()).ok()),
+            ObjectType::Tree | ObjectType::Blob => {}
         }
     }
     seen
