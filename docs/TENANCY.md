@@ -118,6 +118,7 @@ margin:
 | site domains | 100M (the push base) | each `set_site_domains` by the owner that the git side takes; refunded when it refuses |
 | storage rent | 5K per byte-year of what the repo's pushes stored | hourly timer, pro rata |
 | EVM action | 50B | each deploy or registry publish (a t-ECDSA signature plus RPC outcalls) |
+| EVM gas | 0 per unit of gas limit | with each EVM action, for its transaction's limit (below); optional in `set_pricing`, null is 0 |
 | IC deploy | 5B | each install from the deploy queue |
 | git canister floor | 1T | not a charge: under it, the rent timer tops the git canister up (below); optional in `set_pricing`, null keeps the default |
 
@@ -138,12 +139,27 @@ and no pack whose objects, with the bases its deltas are applied to,
 come to more than 256 MiB inflated; nothing is inflated or built past
 the size its entry declares.
 
+The gas of an EVM transaction is paid on the other chain by the
+canister's EOA, which the operators fund and every tenant's deploys draw
+on. Two things keep one tenant from spending it for the rest. A deploy's
+gas limit, which is its owner's to set (`set_evm_deploy`), is at least
+53,000 and at most 10,000,000: enough for a contract of the largest size
+the chain takes, with room for its constructor. And an EVM action costs
+`evm_action` plus `evm_gas` for each unit of its transaction's gas limit:
+the deploy's own limit, or the 1M a registry write carries. It is charged
+by the limit, which is what the EOA must hold at the send, and not by
+the gas used, which is known only once the transaction is mined: a
+tighter limit is a cheaper deploy. The rate is the operators' judgment
+of what that chain's gas is worth in cycles, and 0 by default, which is
+right on a testnet and wrong on a chain whose gas costs money. Until
+2026-11 the limit had a floor and no ceiling, and no rate existed.
+
 An EVM action is charged up front, and a failed one gives back what it did
 not use:
 
 - **Failed before any outcall** (no config, no registry, send lock held,
   artifact would not decode) or a deploy skipped as already deployed: the
-  whole 50B comes back.
+  whole charge comes back, gas and all.
 - **No provider can hold the transaction** (a nonce or fee read failed, the
   signature failed, or a provider refused it: nonce too low or too high,
   insufficient funds, a JSON-RPC error, a 429): the owner pays the cycles

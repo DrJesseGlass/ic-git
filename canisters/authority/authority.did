@@ -96,6 +96,10 @@ type Pricing = record {
   // what tenants paid for git-side work (get_git_funding). Optional on
   // the way in (null keeps the default), always given on the way out
   git_canister_floor : opt nat64;
+  // cycles per unit of an EVM transaction's gas limit, charged with
+  // evm_action. Optional on the way in (null is 0), always given on the
+  // way out
+  evm_gas : opt nat64;
 };
 // The git canister's funding (docs/CANISTER_SPLIT.md, phase 3 step 12d).
 type TopUp = record { at_ns : nat64; cycles : nat64; balance_before : opt nat64 };
