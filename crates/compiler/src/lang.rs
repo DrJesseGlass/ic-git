@@ -132,9 +132,37 @@ struct Func {
 
 // --- parser (recursive descent) ---------------------------------------------
 
+/// How deep an expression may go: the height of its tree, and so of every
+/// recursion over it -- the parser's, the code generator's (`emit`), and
+/// the drop of its boxes. Parentheses, call arguments and negations nest
+/// by recursion, and a chain of operators (`a + b + c ...`) leans left,
+/// one level per operator, so both count: a sum of more than this many
+/// terms has to be split. Past it the source is refused. Unbounded, a
+/// source of a few hundred kilobytes of `(` overflowed the stack, which
+/// in a canister is a trap and not an error. Measured natively, a release
+/// build at this limit fits a 64 KiB stack and at 256 levels needed
+/// about 256 KiB; a canister's is 1 MiB, and its frames were not
+/// measured.
+pub const MAX_EXPR_DEPTH: usize = 64;
+
+fn too_deep() -> String {
+    format!("expression nested too deeply (the limit is {MAX_EXPR_DEPTH} levels)")
+}
+
+/// The height of a node over children of height `below`, if allowed.
+fn over(below: usize) -> Result<usize, String> {
+    if below >= MAX_EXPR_DEPTH {
+        return Err(too_deep());
+    }
+    Ok(below + 1)
+}
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Open parentheses and call arguments the parser is inside of: its
+    /// own recursion, which builds no node until it returns.
+    nest: usize,
 }
 
 impl Parser {
@@ -178,13 +206,16 @@ impl Parser {
         }
         self.eat(&Tok::RParen)?;
         self.eat(&Tok::Eq)?;
-        let body = self.expr()?;
+        let (body, _) = self.expr()?;
         self.eat(&Tok::Semi)?;
         Ok(Func { name, params, body })
     }
 
-    fn expr(&mut self) -> Result<Expr, String> {
-        let mut left = self.term()?;
+    // Each of these returns the expression with the height of its tree,
+    // which no node is built past (`over`).
+
+    fn expr(&mut self) -> Result<(Expr, usize), String> {
+        let (mut left, mut depth) = self.term()?;
         loop {
             let op = match self.peek() {
                 Tok::Plus => BinOp::Add,
@@ -192,14 +223,15 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
-            let right = self.term()?;
+            let (right, d) = self.term()?;
+            depth = over(depth.max(d))?;
             left = Expr::Bin(op, Box::new(left), Box::new(right));
         }
-        Ok(left)
+        Ok((left, depth))
     }
 
-    fn term(&mut self) -> Result<Expr, String> {
-        let mut left = self.factor()?;
+    fn term(&mut self) -> Result<(Expr, usize), String> {
+        let (mut left, mut depth) = self.factor()?;
         loop {
             let op = match self.peek() {
                 Tok::Star => BinOp::Mul,
@@ -207,25 +239,49 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
-            let right = self.factor()?;
+            let (right, d) = self.factor()?;
+            depth = over(depth.max(d))?;
             left = Expr::Bin(op, Box::new(left), Box::new(right));
         }
-        Ok(left)
+        Ok((left, depth))
     }
 
-    fn factor(&mut self) -> Result<Expr, String> {
-        if self.peek() == &Tok::Minus {
+    /// Negations are counted and applied in a loop: a run of `-` recursed
+    /// once per sign before it had anything to measure.
+    fn factor(&mut self) -> Result<(Expr, usize), String> {
+        let mut signs = 0usize;
+        while self.peek() == &Tok::Minus {
             self.pos += 1;
-            return Ok(Expr::Neg(Box::new(self.factor()?)));
+            signs += 1;
+            if signs > MAX_EXPR_DEPTH {
+                return Err(too_deep());
+            }
         }
-        self.primary()
+        let (mut e, mut depth) = self.primary()?;
+        for _ in 0..signs {
+            depth = over(depth)?;
+            e = Expr::Neg(Box::new(e));
+        }
+        Ok((e, depth))
     }
 
-    fn primary(&mut self) -> Result<Expr, String> {
+    /// Into a parenthesis or a call's arguments, which is this parser
+    /// calling itself.
+    fn enter(&mut self) -> Result<(), String> {
+        if self.nest >= MAX_EXPR_DEPTH {
+            return Err(too_deep());
+        }
+        self.nest += 1;
+        Ok(())
+    }
+
+    fn primary(&mut self) -> Result<(Expr, usize), String> {
         match self.bump() {
-            Tok::Int(n) => Ok(Expr::Int(n)),
+            Tok::Int(n) => Ok((Expr::Int(n), 1)),
             Tok::LParen => {
+                self.enter()?;
                 let e = self.expr()?;
+                self.nest -= 1;
                 self.eat(&Tok::RParen)?;
                 Ok(e)
             }
@@ -233,20 +289,25 @@ impl Parser {
                 if self.peek() == &Tok::LParen {
                     self.pos += 1;
                     let mut args = Vec::new();
+                    let mut below = 0;
                     if self.peek() != &Tok::RParen {
+                        self.enter()?;
                         loop {
-                            args.push(self.expr()?);
+                            let (arg, d) = self.expr()?;
+                            below = below.max(d);
+                            args.push(arg);
                             if self.peek() == &Tok::Comma {
                                 self.pos += 1;
                             } else {
                                 break;
                             }
                         }
+                        self.nest -= 1;
                     }
                     self.eat(&Tok::RParen)?;
-                    Ok(Expr::Call(name, args))
+                    Ok((Expr::Call(name, args), over(below)?))
                 } else {
-                    Ok(Expr::Var(name))
+                    Ok((Expr::Var(name), 1))
                 }
             }
             t => Err(format!("unexpected token in expression: {t:?}")),
@@ -271,7 +332,7 @@ struct ParsedModule {
 /// special at the start of a declaration.
 fn parse_module(src: &str) -> Result<ParsedModule, String> {
     let toks = lex(src)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, nest: 0 };
     let mut imports = Vec::new();
     while matches!(p.peek(), Tok::Ident(s) if s == "use") {
         p.pos += 1; // 'use'
@@ -778,6 +839,53 @@ mod tests {
             "arity"
         );
         assert!(compile_checked("").is_err(), "empty program");
+    }
+
+    /// A source nested past `MAX_EXPR_DEPTH` is an error, by each way an
+    /// expression deepens, and one at the limit compiles. Run on a stack
+    /// the size of a canister's: unbounded, each of the refused sources
+    /// overflows it. A debug build's frames are several times a release
+    /// build's, so passing here leaves room.
+    #[test]
+    fn nesting_is_bounded() {
+        const STACK: usize = 1024 * 1024;
+        let run = || {
+            let n = 200_000;
+            let deep = [
+                format!("fn f() = {}1{};", "(".repeat(n), ")".repeat(n)),
+                format!("fn f() = {}1;", "-".repeat(n)),
+                format!("fn f() = 1{};", " + 1".repeat(n)),
+                format!("fn f() = 1{};", " * 1".repeat(n)),
+                format!("fn g(a) = a; fn f() = {}1{};", "g(".repeat(n), ")".repeat(n)),
+                format!("fn f() = {}1{};", "-(".repeat(n), ")".repeat(n)),
+            ];
+            for src in &deep {
+                let e = compile_checked(src).unwrap_err();
+                assert!(e.contains("nested too deeply"), "{e}");
+                assert!(job::start(src).unwrap_err().contains("nested too deeply"));
+            }
+            // At the limit: a tree MAX_EXPR_DEPTH high, each way.
+            let m = MAX_EXPR_DEPTH - 1;
+            let at = [
+                format!("fn f() = {}1{};", "(".repeat(MAX_EXPR_DEPTH), ")".repeat(MAX_EXPR_DEPTH)),
+                format!("fn f() = {}1;", "-".repeat(m)),
+                format!("fn f() = 1{};", " + 1".repeat(m)),
+                format!("fn g(a) = a; fn f() = {}1{};", "g(".repeat(m), ")".repeat(m)),
+            ];
+            for src in &at {
+                compile_checked(src).unwrap();
+            }
+            assert_eq!(super::tests::run(&at[2], "f", &[]), MAX_EXPR_DEPTH as i32);
+            // One more level is refused.
+            for src in [
+                format!("fn f() = {}1;", "-".repeat(m + 1)),
+                format!("fn f() = 1{};", " + 1".repeat(m + 1)),
+                format!("fn g(a) = a; fn f() = {}1{};", "g(".repeat(m + 1), ")".repeat(m + 1)),
+            ] {
+                assert!(compile_checked(&src).unwrap_err().contains("nested too deeply"));
+            }
+        };
+        std::thread::Builder::new().stack_size(STACK).spawn(run).unwrap().join().unwrap();
     }
 
     #[test]

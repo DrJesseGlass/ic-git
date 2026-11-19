@@ -115,6 +115,32 @@ mod tests {
           (export "add" (func $add)))
     "#;
 
+    /// Deeply nested text is an answer, not a stack overflow, on a stack
+    /// the size of a canister's: the assembler bounds its own nesting and
+    /// the validator keeps its control stack on the heap. What each
+    /// answers is theirs; only that they answer is checked.
+    #[test]
+    fn deep_nesting_does_not_overflow_the_stack() {
+        let run = || {
+            let n = 200_000;
+            let sources = [
+                // Folded operands.
+                format!("(module (func (result i32) {}(i32.const 1){}))", "(i32.eqz ".repeat(n), ")".repeat(n)),
+                // Folded blocks.
+                format!("(module (func {}{}))", "(block ".repeat(n), ")".repeat(n)),
+                // Flat blocks: deep in the binary, not in the text.
+                format!("(module (func {}{}))", "block ".repeat(n), "end ".repeat(n)),
+                // Parentheses that are nothing.
+                format!("{}{}", "(".repeat(n), ")".repeat(n)),
+                "(".repeat(n),
+            ];
+            for src in &sources {
+                let _ = compile_wat_checked(src);
+            }
+        };
+        std::thread::Builder::new().stack_size(1024 * 1024).spawn(run).unwrap().join().unwrap();
+    }
+
     #[test]
     fn emits_wasm_magic_and_version() {
         let wasm = compile_wat(ADD_WAT).expect("valid WAT should compile");
