@@ -84,6 +84,7 @@ pub async fn set_evm(repo: &str, source_path: String, gas_limit: u64) -> Result<
     if !crate::tenancy::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
+    ic_git_types::deploy::check_config_path("source_path", &source_path)?;
     if !source_path.ends_with(".hex") {
         return Err("source_path must end in .hex (creation bytecode as hex text)".into());
     }
@@ -252,6 +253,11 @@ mod tests {
         assert!(set_wasm("bad", "not a principal".into(), "app.wasm".into()).is_err());
         assert!(set_mode("bad", DeployMode::Reinstall).is_err(), "no config to set the mode of");
         assert!(set_evm("bad", "c.bin".into(), 100_000).unwrap_err().contains(".hex"));
+        // A path longer than a config's may be: it is kept with the repo
+        // on both sides.
+        let long = |ext: &str| "a".repeat(ic_git_types::deploy::MAX_CONFIG_PATH) + ext;
+        assert!(set_wasm("bad", app(4), long(".wasm")).unwrap_err().contains("at most 512 bytes"));
+        assert!(set_evm("bad", long(".hex"), 100_000).unwrap_err().contains("at most 512 bytes"));
         // A gas limit no CREATE could run on, or more than a deploy may
         // be given: the EOA that pays it is every tenant's.
         crate::evm::set_config("aaaaa-aa".into(), "key".into(), 11155111, Vec::new()).unwrap();

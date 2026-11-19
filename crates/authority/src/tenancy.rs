@@ -661,12 +661,24 @@ pub async fn add_member(
     Ok(m.members)
 }
 
+/// How many members (writers and voters) a repo may have besides its
+/// owner. The list is part of the repo's metadata, read on every call
+/// that touches the repo and by the rent tick for every repo, and sent to
+/// the git side whole; adding a member costs nothing. It also bounds the
+/// pending policy changes, which are `MAX_HELD_PROPOSALS` for each
+/// approver. A member already on the list can always change role. Until
+/// 2026-11 there was no limit.
+pub const MAX_MEMBERS: usize = 32;
+
 fn add_member_in(m: &mut RepoMeta, target: Principal, role: Role) -> Result<(), String> {
     if target == Principal::anonymous() {
         return Err("the anonymous principal cannot be a member".into());
     }
     if is_owner(m, &target) {
         return Err("the owner already has every role".into());
+    }
+    if m.members.len() >= MAX_MEMBERS && !m.members.iter().any(|x| x.principal == target) {
+        return Err(format!("a repo has at most {MAX_MEMBERS} members; remove one first"));
     }
     m.members.retain(|x| x.principal != target);
     m.members.push(Member {
@@ -1854,6 +1866,23 @@ mod tests {
         assert!(can_vote("t-roles", &bob).is_ok());
         remove_member("t-roles", &alice, false, bob).unwrap();
         assert!(remove_member("t-roles", &alice, false, bob).is_err());
+        // The list has an end: a member on it changes role, a new one
+        // waits for a place.
+        let extra = |i: usize| Principal::from_slice(&[200, i as u8]);
+        let had = meta("t-roles").unwrap().members.len();
+        for i in had..MAX_MEMBERS {
+            add_member("t-roles", &alice, false, extra(i), Role::Writer).unwrap();
+        }
+        let e = add_member("t-roles", &alice, false, bob, Role::Writer).unwrap_err();
+        assert!(e.contains("at most 32 members"), "{e}");
+        add_member("t-roles", &alice, false, extra(had), Role::Voter).unwrap();
+        assert_eq!(meta("t-roles").unwrap().members.len(), MAX_MEMBERS);
+        remove_member("t-roles", &alice, false, extra(had)).unwrap();
+        add_member("t-roles", &alice, false, bob, Role::Writer).unwrap();
+        for i in had + 1..MAX_MEMBERS {
+            remove_member("t-roles", &alice, false, extra(i)).unwrap();
+        }
+        remove_member("t-roles", &alice, false, bob).unwrap();
         // Transfer: the new owner pays and loses any member row.
         add_member("t-roles", &alice, false, dave, Role::Writer).unwrap();
         transfer_repo("t-roles", &alice, false, dave).unwrap();
@@ -2515,6 +2544,11 @@ mod tests {
         let wasm = |i: usize| PolicyChange::WasmDeploy { target: app.to_text(), source_path: format!("{i}.wasm") };
         let e = propose_policy_change("t-gov", &v2, wasm(0), Vote::Reject, None).unwrap_err();
         assert!(e.contains("proposed by approving"), "{e}");
+        // A change is kept with the repo while it is pending: its path is
+        // no longer than a config's may be.
+        let long = PolicyChange::WasmDeploy { target: app.to_text(), source_path: "a".repeat(600) + ".wasm" };
+        let e = propose_policy_change("t-gov", &v2, long, Vote::Approve, None).unwrap_err();
+        assert!(e.contains("at most 512 bytes"), "{e}");
         assert_eq!(proposals("t-gov").len(), 1);
         let (t, _) = propose_policy_change("t-gov", &v2, PolicyChange::RequiredVotes { k: 1 }, Vote::Reject, None).unwrap();
         assert_eq!(t.approvals, 0);

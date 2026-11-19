@@ -71,8 +71,25 @@ pub enum SourceKind {
     Wasm,
 }
 
+/// How long a path a repo's config may name: a deploy's source, a site's
+/// root. Each is kept with the repo on both sides, and a deploy's source
+/// in every pending policy change that names one, so a path of any
+/// length was a repo's metadata of any size, written for nothing and read
+/// on every call that touches the repo. Far more than a path in a tree
+/// needs.
+pub const MAX_CONFIG_PATH: usize = 512;
+
+/// A config's path, if it is no longer than `MAX_CONFIG_PATH`.
+pub fn check_config_path(what: &str, path: &str) -> Result<(), String> {
+    if path.len() > MAX_CONFIG_PATH {
+        return Err(format!("{what} is at most {MAX_CONFIG_PATH} bytes; this one is {}", path.len()));
+    }
+    Ok(())
+}
+
 impl SourceKind {
     pub fn from_path(path: &str) -> Result<Self, String> {
+        check_config_path("source_path", path)?;
         if path.ends_with(".wat") {
             Ok(Self::Wat)
         } else if path.ends_with(".lang") {
