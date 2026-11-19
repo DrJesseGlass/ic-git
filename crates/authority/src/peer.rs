@@ -11,7 +11,7 @@
 use candid::Principal;
 use ic_git_common::call::Canister;
 use ic_git_common::peer::Peer;
-use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry};
+use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry, Standing};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{Fut, Reply};
 use ic_git_types::wire::{self, send, Staged, Transport};
@@ -159,6 +159,10 @@ impl<T: Transport> GitSide for Git<T> {
 
     fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
         Box::pin(send(&self.transport, wire::HasCommit { oid: oid.as_slice().to_vec(), repo: repo.into() }))
+    }
+
+    fn standings<'a>(&'a self, repo: &'a str, keys: Vec<String>) -> Fut<'a, Reply<Vec<Standing>>> {
+        Box::pin(send(&self.transport, wire::Standings { repo: repo.into(), keys }))
     }
 
     /// A staged reply: the head, then each further chunk under its
@@ -357,6 +361,10 @@ mod tests {
                 let m: wire::HasCommit = dec(arg);
                 let oid = Oid::try_from(m.oid.as_slice()).expect("20 bytes");
                 enc(GIT.has_commit(&m.repo, &oid).await.unwrap())
+            }
+            m if m == wire::Standings::METHOD => {
+                let m: wire::Standings = dec(arg);
+                enc(GIT.standings(&m.repo, m.keys).await.unwrap())
             }
             m if m == wire::RecordArtifact::METHOD => {
                 let m: wire::RecordArtifact = dec(arg);

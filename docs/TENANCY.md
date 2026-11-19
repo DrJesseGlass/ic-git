@@ -314,6 +314,23 @@ forced push left behind takes no new ballots; the ones it has stay on
 record. Ballots are still kept for as long as the repo is: on a commit of
 the repo, which a push paid for.
 
+What the ballots are counted for has an end. Every ballot, and every
+change of the threshold or the voters, counts the approved set again and
+sends it to the git side whole; until 2026-11 that was over every commit
+the repo had ever taken a ballot on, so one ballot's work grew with the
+repo's whole past. A repo now counts at most 200 commits: the 100
+approved commits on the deploy branch nearest its tip, and the 100
+others (one still being voted on, one on another branch) with the newest
+ballots. Nothing leaves while there is room. When the list is full and a
+ballot comes on a commit not on it, the git side is asked where each
+commit stands, and the ballot is not cast until it answers; a commit no
+ref reaches any more leaves first. So a withdrawn approval falls back as
+far as the 100th approved commit behind the tip and no further, and an
+approval given to a commit further back than that is recorded and serves
+nothing. Leaving the list is not leaving the record: `votes` shows the
+ballots as before, and the next ballot on the commit counts them all
+again if the list keeps it.
+
 With `k` at 0 a repo trusts the git canister for what deploys. After the
 canister split (docs/CANISTER_SPLIT.md, decision 6.5.4) the git canister
 holds the branches and the authority holds the accounts, the ballots and

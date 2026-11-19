@@ -1197,14 +1197,9 @@ fn advance_served(repo: &str) -> Option<store::Oid> {
     };
     let prev = prev.unwrap_or_default();
     let next = tip_of(repo).ok().and_then(|tip| {
-        std::iter::successors(Some(tip), |c| match store::get_object_parsed(c) {
-            Some((ObjectType::Commit, body)) => object::commit_refs(&body)
-                .ok()
-                .and_then(|r| r.parents.first().copied()),
-            _ => None,
-        })
-        .take(APPROVAL_WALK)
-        .find(|c| approved.contains(c))
+        crate::graph::first_parents(tip)
+            .take(APPROVAL_WALK)
+            .find(|c| approved.contains(c))
     });
     let now = Served {
         commit: next.as_ref().map(store::oid_hex),

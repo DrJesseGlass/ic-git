@@ -15,7 +15,7 @@ use ic_git_common::{clock, httpjson, kv};
 // The git side (crates/git).
 use ic_git_git::{api, certify, for_authority, jobs, mirror, outbox, pack, peer, receive, signed_push, site, smart_http, store, to_authority, tokens, transfer};
 use ic_git_types::authority_side::{Event, Published};
-use ic_git_types::git_side::GitSide;
+use ic_git_types::git_side::{GitSide, Standing};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::Reply;
 use ic_git_types::wire::{self, Staged};
@@ -194,6 +194,12 @@ async fn has_commit(m: wire::HasCommit) -> bool {
         Ok(oid) => answered(GIT.has_commit(&m.repo, &oid).await),
         Err(_) => false,
     }
+}
+
+/// `GitSide::standings`.
+#[ic_cdk::update(guard = "from_authority")]
+async fn standings(m: wire::Standings) -> Vec<Standing> {
+    answered(GIT.standings(&m.repo, m.keys).await)
 }
 
 /// `GitSide::record_artifact`, staged: the head of the encoded `Attested`

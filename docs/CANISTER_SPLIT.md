@@ -180,6 +180,8 @@ acts.**
 
     // authority -> git (asked from update calls; phase 3, steps 7 and 10)
     check_new_repo(name) -> label; create_repo(name); has_commit(repo, oid)
+    standings(repo, keys)                  // where commits with ballots stand
+                                           // (2026-11; docs/TENANCY.md, "Votes")
     release_job(repo)                      // deploy_now: the job, in the reply
                                            // (staged in chunks, step 12)
     record_artifact(repo, kind)            // a registry publish: Artifact + proof
@@ -809,7 +811,7 @@ The two canisters:
           `stage_job`, `submit_job` and `notify` (`peer::GIT.check_caller`);
           on the git canister the three mirror writes, `set_site`,
           `set_site_domains` (docs/TENANCY.md, "Custom domains"),
-          `check_new_repo`, `create_repo`, `has_commit`,
+          `check_new_repo`, `create_repo`, `has_commit`, `standings`,
           `record_artifact`, `release_job` and `reply_chunk`
           (`peer::AUTHORITY.check_caller`). A stranger gets "only the
           authority may call this", or "only the git canister".

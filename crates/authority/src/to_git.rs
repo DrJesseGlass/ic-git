@@ -6,7 +6,7 @@
 //! authority calls; each is awaited and answers a `Reply` (phase 3, step
 //! 8). The mirror writes are made only by mirrors.rs, which numbers them.
 
-use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, RecordKind, Release, Retry};
+use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, RecordKind, Release, Retry, Standing};
 pub use ic_git_types::git_side::PushPolicy;
 use ic_git_types::oid::Oid;
 use ic_git_types::side::Reply;
@@ -115,6 +115,11 @@ pub async fn has_commit(repo: &str, oid: &Oid) -> Reply<bool> {
     via!(has_commit(repo, oid))
 }
 
+/// Where each commit stands in the repo, by its ballot key.
+pub async fn standings(repo: &str, keys: Vec<String>) -> Reply<Vec<Standing>> {
+    via!(standings(repo, keys))
+}
+
 /// The artifact behind a registry record, with its proof (provenance.rs
 /// checks it).
 pub async fn record_artifact(repo: &str, kind: RecordKind) -> Reply<Result<Attested, String>> {
@@ -153,6 +158,9 @@ pub(crate) mod flaky {
         pub calls: RefCell<Vec<&'static str>>,
         /// The `retry` of each `set_approved`, in order.
         pub retries: RefCell<Vec<Option<Retry>>>,
+        /// What happens at this side while the next call of a name is
+        /// on its way: another call of the canister, landing first.
+        meanwhile: RefCell<Option<(&'static str, Box<dyn FnOnce()>)>>,
     }
 
     impl Flaky {
@@ -164,7 +172,13 @@ pub(crate) mod flaky {
                 queue: RefCell::new(Vec::new()),
                 calls: RefCell::new(Vec::new()),
                 retries: RefCell::new(Vec::new()),
+                meanwhile: RefCell::new(None),
             }
+        }
+
+        /// While the next call named `call` is awaited, `what` happens.
+        pub fn meanwhile(&self, call: &'static str, what: impl FnOnce() + 'static) {
+            *self.meanwhile.borrow_mut() = Some((call, Box::new(what)));
         }
 
         /// The next call named `call` does `what`.
@@ -179,6 +193,10 @@ pub(crate) mod flaky {
         /// Run `real` under what was injected for `call`, if anything.
         fn go<'a, T: 'a>(&'a self, call: &'static str, real: impl FnOnce() -> Fut<'a, Reply<T>> + 'a, refusal: Option<T>) -> Fut<'a, Reply<T>> {
             self.calls.borrow_mut().push(call);
+            let meanwhile = self.meanwhile.borrow_mut().take_if(|(c, _)| *c == call);
+            if let Some((_, what)) = meanwhile {
+                what();
+            }
             let next = {
                 let mut q = self.queue.borrow_mut();
                 q.iter().position(|(c, _)| *c == call).map(|i| q.remove(i).1)
@@ -227,6 +245,10 @@ pub(crate) mod flaky {
 
         fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
             self.go("has_commit", move || self.real.has_commit(repo, oid), None)
+        }
+
+        fn standings<'a>(&'a self, repo: &'a str, keys: Vec<String>) -> Fut<'a, Reply<Vec<Standing>>> {
+            self.go("standings", move || self.real.standings(repo, keys), None)
         }
 
         fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>> {

@@ -7,7 +7,7 @@
 //! canister. The two-canister build (step 12c) installs
 //! `AUTHORITY_CANISTER` at init and upgrade and guards each
 //! authority-facing endpoint (the mirror writes, `check_new_repo`,
-//! `create_repo`, `has_commit`, `record_artifact`, `release_job`,
+//! `create_repo`, `has_commit`, `standings`, `record_artifact`, `release_job`,
 //! `reply_chunk`) with `AUTHORITY.check_caller`.
 
 use candid::Principal;

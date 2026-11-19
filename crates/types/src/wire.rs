@@ -19,7 +19,7 @@
 //! rest are fetched by (`Staged`, `ReplyChunk`).
 
 use crate::authority_side::{Event, Published};
-use crate::git_side::{DeployConfigs, PushPolicy, RecordKind, Retry};
+use crate::git_side::{DeployConfigs, PushPolicy, RecordKind, Retry, Standing};
 use crate::side::{Failure, Fut, Reply};
 use candid::CandidType;
 use serde::Deserialize;
@@ -113,6 +113,9 @@ messages! {
     /// before it ignores the field and answers for the whole store, and
     /// one from after refuses a message without it.
     HasCommit = "has_commit" -> bool { oid: Vec<u8>, repo: String }
+    /// `GitSide::standings` (2026-11). A git side from before it has no
+    /// such method, and the authority's ask goes unanswered.
+    Standings = "standings" -> Vec<Standing> { repo: String, keys: Vec<String> }
     /// `GitSide::record_artifact`; the body is the encoded `Attested`.
     RecordArtifact = "record_artifact" -> Result<Staged, String> { repo: String, kind: RecordKind }
     /// `GitSide::release_job`; the body is the encoded `Release`.

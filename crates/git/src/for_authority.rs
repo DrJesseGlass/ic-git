@@ -15,7 +15,7 @@
 
 use crate::{mirror, store};
 use candid::Principal;
-use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry};
+use ic_git_types::git_side::{Attested, DeployConfigs, GitSide, PushPolicy, RecordKind, Release, Retry, Standing};
 use ic_git_types::oid::Oid;
 use ic_git_types::side::{ready, Fut, Reply};
 use ic_git_types::wire::{pieces, Staged, MAX_CHUNK};
@@ -160,6 +160,10 @@ impl GitSide for Git {
 
     fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
         ready(Ok(crate::graph::commit_of(repo, oid, crate::graph::COMMIT_OF_WALK)))
+    }
+
+    fn standings<'a>(&'a self, repo: &'a str, keys: Vec<String>) -> Fut<'a, Reply<Vec<Standing>>> {
+        ready(Ok(crate::graph::standings(repo, &keys)))
     }
 
     fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>> {
