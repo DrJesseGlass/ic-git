@@ -185,6 +185,13 @@ of what that chain's gas is worth in cycles, and 0 by default, which is
 right on a testnet and wrong on a chain whose gas costs money. Until
 2026-11 the limit had a floor and no ceiling, and no rate existed.
 
+A deploy's EVM leg is two actions when a registry is set: the deploy,
+and the registry record of it that follows, each a signature and a
+transaction, each charged with its own gas limit. The record's charge
+comes back whole when the deploy is skipped or fails, since nothing is
+published then. Until 2026-11 the leg was charged the deploy alone and
+the record's transaction, a million gas of limit, came free with it.
+
 An EVM action is charged up front, and a failed one gives back what it did
 not use:
 

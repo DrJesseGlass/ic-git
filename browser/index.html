@@ -1273,16 +1273,19 @@ const Console = (() => {
         const evmNote = e ? 'a new CREATE transaction for ' + e.source_path + ' on the EVM chain (gas limit ' + e.gas_limit + '): a fresh contract at a new address; ' + gasNote(pr) : '';
         // A governed repo's install into its app canister also publishes the
         // <repo>#app record, one more evm_action, where a registry is set.
+        // The EVM deploy's own registry record is a second transaction and
+        // a second evm_action, likewise where a registry is set.
+        const evmRecordNote = e ? ' The deploy is then recorded in the registry, ' + fmtT(evmCost(pr, REGISTRY_GAS)) + ' more where one is configured.' : '';
         const appNote = w && info.governed && w.target === info.app_canister ? ' Governed: the install is recorded on chain as ' + repo + '#app, ' + fmtT(evmCost(pr, REGISTRY_GAS)) + ' more where a registry is configured.' : '';
         cost.textContent = !w && !e ? 'nothing is configured to deploy.'
-          : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote : '') + appNote;
+          : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote + evmRecordNote : '') + appNote;
         if (!btn) return;
         if (!w) { btn.title = 'nothing is configured to deploy into a canister'; return; }
         const target = w.target === info.app_canister
           ? 'app canister ' + w.target
           : 'canister ' + w.target + ', the configured deploy target, which is NOT this repo\'s app canister (' + info.app_canister + ')';
         what.innerHTML = '<b>Reinstall wipes every byte of state in ' + esc(target) + '</b> and installs ' + esc(w.source_path) + ' from ' + release + '. Ballots, balances, anything the app stored: gone. There is no undo.' +
-          (e ? '<br><b>It also redeploys the EVM contract</b>, broadcasting ' + esc(evmNote) : '') + '<br>ic-git charges ' + esc(fmtT(fee)) + ' for the deploy.';
+          (e ? '<br><b>It also redeploys the EVM contract</b>, broadcasting ' + esc(evmNote) : '') + '<br>ic-git charges ' + esc(fmtT(fee)) + ' for the deploy.' + esc(evmRecordNote);
         btn.disabled = false;
       });
       if (btn) btn.onclick = () => { box.hidden = false; inp.value = ''; go.disabled = true; inp.focus(); };

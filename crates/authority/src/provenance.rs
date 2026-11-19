@@ -159,9 +159,10 @@ pub async fn publish_commit(
     repo: &str,
     commit_oid: &Oid,
     bundle: [u8; 32],
-) -> Result<TxOutcome, String> {
-    evm::require_publish_target()?;
-    Ok(publish(&Record::artifact(repo, commit_oid, bundle)?).await?)
+) -> Result<TxOutcome, evm::SendError> {
+    evm::require_publish_target().map_err(evm::SendError::before)?;
+    let record = Record::artifact(repo, commit_oid, bundle).map_err(evm::SendError::before)?;
+    publish(&record).await
 }
 
 #[cfg(test)]
