@@ -6,7 +6,20 @@
 
 use crate::tenancy::{PolicyChange, Vote};
 use candid::Principal;
-use ic_git_common::consent::{args, prefix, unavailable, Icrc21Error};
+use ic_git_common::consent::{args, unavailable, Icrc21Error};
+
+/// A commit as a consent message names it: whole. A ballot is on one
+/// commit, and the id is all that says which; the first 12 characters,
+/// which these messages showed until 2026-11, are 48 bits, few enough
+/// that a second commit can be made to begin with them, and the signer
+/// who read them could not tell the two apart. The same goes for the
+/// principals of a policy change, once cut to 11 characters. An id the
+/// call would refuse is not described.
+fn whole_commit(method: &str, commit: &str) -> Result<String, Icrc21Error> {
+    ic_git_types::oid::parse_oid(commit)
+        .map(|oid| ic_git_types::oid::oid_hex(&oid))
+        .map_err(|e| unavailable(method, e))
+}
 
 /// The text for `method` called with the candid-encoded `arg`, or `None`
 /// for a method that is not the authority's.
@@ -64,9 +77,9 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
         "propose_policy_change" => args::<(String, PolicyChange, Vote, Option<String>)>(arg, m).map(|(repo, change, decision, reason)| {
             let what = match &change {
                 PolicyChange::RequiredVotes { k } => format!("require {k} approval{} per commit", if *k == 1 { "" } else { "s" }),
-                PolicyChange::AddVoter { principal } => format!("add {} as a voter", prefix(&principal.to_text(), 11)),
-                PolicyChange::RemoveVoter { principal } => format!("remove voter {}", prefix(&principal.to_text(), 11)),
-                PolicyChange::Transfer { new_owner } => format!("offer the repository to {} as its new owner", prefix(&new_owner.to_text(), 11)),
+                PolicyChange::AddVoter { principal } => format!("add {principal} as a voter"),
+                PolicyChange::RemoveVoter { principal } => format!("remove voter {principal}"),
+                PolicyChange::Transfer { new_owner } => format!("offer the repository to {new_owner} as its new owner"),
                 PolicyChange::WasmDeploy { target, source_path } => format!("deploy \"{source_path}\" to canister {target}"),
                 PolicyChange::DeployMode { mode } => match mode.as_str() {
                     "reinstall" => "set the install mode to REINSTALL, which WIPES ALL STATE of the target on every deploy".to_string(),
@@ -136,17 +149,17 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
                 )
             }
         }),
-        "vote" => args::<(String, String, bool)>(arg, m).map(|(repo, commit, approve)| {
-            let commit = prefix(&commit, 12);
-            if approve {
+        "vote" => args::<(String, String, bool)>(arg, m).and_then(|(repo, commit, approve)| {
+            let commit = whole_commit(m, &commit)?;
+            Ok(if approve {
                 format!("Approve commit {commit} in \"{repo}\" for deployment and for serving as its site.")
             } else {
                 rejection(&commit, &repo)
-            }
+            })
         }),
         "cast_ballot" => (|| {
             let (repo, commit, decision, reason): (String, String, Vote, Option<String>) = args(arg, m)?;
-            let commit = prefix(&commit, 12);
+            let commit = whole_commit(m, &commit)?;
             // Describe only a ballot the call would accept: an objection
             // has a reason, and no reason is longer than the call allows.
             let reason = crate::tenancy::ballot_reason(decision, reason).map_err(|e| unavailable(m, e))?;
@@ -286,6 +299,22 @@ mod tests {
         describe(method, &arg).unwrap_or_else(|| panic!("{method} is the authority's"))
     }
 
+    /// A ballot's message names its commit whole, and one whose commit
+    /// is no id (a short one, as the messages used to show) has none.
+    #[test]
+    fn a_ballot_is_described_by_its_whole_commit_or_not_at_all() {
+        let whole = "0123456789ABCDEF0123456789abcdef01234567";
+        let said = text("vote", encode_args(("ic-vote", whole, true)).unwrap()).unwrap();
+        assert!(said.contains(&format!("commit {} in", whole.to_lowercase())), "{said}");
+        for short in ["0123456789ab", "0123456789ab...", ""] {
+            assert!(matches!(text("vote", encode_args(("ic-vote", short, true)).unwrap()), Err(Icrc21Error::ConsentMessageUnavailable(_))), "{short:?}");
+            assert!(
+                matches!(text("cast_ballot", encode_args(("ic-vote", short, Vote::Approve, None::<String>)).unwrap()), Err(Icrc21Error::ConsentMessageUnavailable(_))),
+                "{short:?}"
+            );
+        }
+    }
+
     #[test]
     fn every_console_method_has_a_message_with_its_arguments_in_it() {
         let p = Principal::from_text("3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe").unwrap();
@@ -299,23 +328,23 @@ mod tests {
             ("top_up_app_canister", encode_args(("ic-vote", 500_000_000_000u64)).unwrap(), &["0.500 T cycles", "app canister"]),
             ("set_require_signed_push", encode_args(("ic-vote", true)).unwrap(), &["Require every push", "refused"]),
             ("set_require_signed_push", encode_args(("ic-vote", false)).unwrap(), &["Stop requiring"]),
-            ("add_member", encode_args(("ic-vote", p, "voter")).unwrap(), &["3kq6u-eptpm", "voter", "approve, reject or object"]),
-            ("remove_member", encode_args(("ic-vote", p)).unwrap(), &["Remove 3kq6u-eptpm", "every role"]),
-            ("transfer_repo", encode_args(("ic-vote", p)).unwrap(), &["Offer \"ic-vote\" to 3kq6u-eptpm", "Nothing changes until"]),
+            ("add_member", encode_args(("ic-vote", p, "voter")).unwrap(), &["Add 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe to", "voter", "approve, reject or object"]),
+            ("remove_member", encode_args(("ic-vote", p)).unwrap(), &["Remove 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe from", "every role"]),
+            ("transfer_repo", encode_args(("ic-vote", p)).unwrap(), &["Offer \"ic-vote\" to 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe.", "Nothing changes until"]),
             ("accept_transfer", encode_args(("ic-vote",)).unwrap(), &["Become the owner", "your ic-git balance", "canisters you control"]),
             ("cancel_transfer", encode_args(("ic-vote",)).unwrap(), &["Withdraw the offer"]),
             ("set_required_votes", encode_args(("ic-vote", 2u32)).unwrap(), &["Require 2 approvals"]),
             ("set_required_votes", encode_args(("ic-vote", 0u32)).unwrap(), &["without any approvals"]),
-            ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", true)).unwrap(), &["Approve commit 0123456789ab..."]),
-            ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", false)).unwrap(), &["Reject commit 0123456789ab...", "not count you", "objection is withdrawn", "may then be deployed"]),
-            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Approve, None::<String>)).unwrap(), &["Approve commit 0123456789ab..."]),
-            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Reject, None::<String>)).unwrap(), &["Reject commit 0123456789ab...", "not count you", "objection is withdrawn", "may then be deployed"]),
-            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Object, Some("skips the schema migration"))).unwrap(), &["Object to commit 0123456789ab...", "one more approval", "Reason: skips the schema migration"]),
+            ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", true)).unwrap(), &["Approve commit 0123456789abcdef0123456789abcdef01234567 in"]),
+            ("vote", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", false)).unwrap(), &["Reject commit 0123456789abcdef0123456789abcdef01234567 in", "not count you", "objection is withdrawn", "may then be deployed"]),
+            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Approve, None::<String>)).unwrap(), &["Approve commit 0123456789abcdef0123456789abcdef01234567 in"]),
+            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Reject, None::<String>)).unwrap(), &["Reject commit 0123456789abcdef0123456789abcdef01234567 in", "not count you", "objection is withdrawn", "may then be deployed"]),
+            ("cast_ballot", encode_args(("ic-vote", "0123456789abcdef0123456789abcdef01234567", Vote::Object, Some("skips the schema migration"))).unwrap(), &["Object to commit 0123456789abcdef0123456789abcdef01234567 in", "one more approval", "Reason: skips the schema migration"]),
             ("govern_app_canister", encode_args(("ic-vote",)).unwrap(), &["GOVERN", "ONLY controller", "CANNOT BE UNDONE"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::RequiredVotes { k: 2 }, Vote::Approve, None::<String>)).unwrap(), &["Approve a policy change", "require 2 approvals", "applies once"]),
-            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::AddVoter { principal: p }, Vote::Object, Some("not reviewed yet"))).unwrap(), &["Object to the policy change", "add 3kq6u-eptpm... as a voter", "Reason: not reviewed yet"]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::AddVoter { principal: p }, Vote::Object, Some("not reviewed yet"))).unwrap(), &["Object to the policy change", "add 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe as a voter", "Reason: not reviewed yet"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None::<String>)).unwrap(), &["REINSTALL", "WIPES ALL STATE"]),
-            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::Transfer { new_owner: p }, Vote::Reject, None::<String>)).unwrap(), &["Reject the policy change", "offer the repository to 3kq6u-eptpm..."]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::Transfer { new_owner: p }, Vote::Reject, None::<String>)).unwrap(), &["Reject the policy change", "offer the repository to 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe as its new owner"]),
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
             ("set_deploy_mode", encode_args(("ic-vote", "upgrade")).unwrap(), &["keeps its state"]),
