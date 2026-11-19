@@ -108,8 +108,11 @@ messages! {
     CheckNewRepo = "check_new_repo" -> Result<String, String> { name: String }
     /// `GitSide::create_repo`.
     CreateRepo = "create_repo" -> Result<(), String> { name: String }
-    /// `GitSide::has_commit`; `oid` is the 20 bytes.
-    HasCommit = "has_commit" -> bool { oid: Vec<u8> }
+    /// `GitSide::has_commit`; `oid` is the 20 bytes. `repo` came with the
+    /// rule that the commit is the repo's (2026-11): a git side from
+    /// before it ignores the field and answers for the whole store, and
+    /// one from after refuses a message without it.
+    HasCommit = "has_commit" -> bool { oid: Vec<u8>, repo: String }
     /// `GitSide::record_artifact`; the body is the encoded `Attested`.
     RecordArtifact = "record_artifact" -> Result<Staged, String> { repo: String, kind: RecordKind }
     /// `GitSide::release_job`; the body is the encoded `Release`.

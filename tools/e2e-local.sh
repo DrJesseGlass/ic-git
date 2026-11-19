@@ -722,6 +722,9 @@ WASM_SHA=$(echo "$STATUS" | sed -n 's/.*wasm_sha256 = "\([0-9a-f]*\)".*/\1/p')
 expect "  ...to the module the status names" "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)" "Module hash: 0x$WASM_SHA"
 refuse "  ...no app record here: no registry on this network" "$STATUS" 'app record'
 expect "  ...and served" "$(served)" "^200 $A3"
+# A ballot is on a commit of the repo: another repo's, which the store
+# holds as well, is not one.
+expect "a ballot on another repo's commit is refused" "$(ic "$TEN" cast_ballot "(\"e2e-app\", \"$T2\", variant { Approve }, null)")" 'no such commit in e2e-app'
 # A module larger than a message (docs/CANISTER_SPLIT.md, step 12b): the
 # job crosses to the authority in chunks, and deploy_now's job comes back
 # the same way. A valid module: the header and one custom section of

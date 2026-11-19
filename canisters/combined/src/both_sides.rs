@@ -125,9 +125,12 @@ fn tenancy_views() {
     assert_eq!(get("/api/api-ten-owned/votes/not-an-oid").status_code, 400);
 
     // On the owned repo: an approval and an objection with its reason,
-    // and the count they leave: 1 - 1 against a threshold of 1. Objects
-    // are shared across repos, so the seeded commit stands in.
-    let hex = store::oid_hex(&c2);
+    // and the count they leave: 1 - 1 against a threshold of 1, on a
+    // commit of the repo's own: the seeded repo's, though the store holds
+    // it, is not one a ballot here is taken on.
+    let hex = store::oid_hex(&store::commit_file_for_tests("api-ten-owned", "f", b"owned", None));
+    let other = tenancy::cast_ballot("api-ten-owned", &owner, &store::oid_hex(&c2), tenancy::Vote::Approve, None);
+    assert!(other.unwrap_err().contains("no such commit in api-ten-owned"));
     tenancy::set_required_votes("api-ten-owned", &owner, false, 1).unwrap();
     tenancy::cast_ballot("api-ten-owned", &owner, &hex, tenancy::Vote::Approve, None).unwrap();
     tenancy::cast_ballot("api-ten-owned", &voter, &hex, tenancy::Vote::Object, Some("needs a test".into())).unwrap();

@@ -158,8 +158,8 @@ impl GitSide for Git {
         })))
     }
 
-    fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
-        ready(Ok(store::has_object(oid)))
+    fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>> {
+        ready(Ok(crate::graph::commit_of(repo, oid, crate::graph::COMMIT_OF_WALK)))
     }
 
     fn record_artifact<'a>(&'a self, repo: &'a str, kind: RecordKind) -> Fut<'a, Reply<Result<Attested, String>>> {

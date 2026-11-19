@@ -191,7 +191,7 @@ async fn create_repo(m: wire::CreateRepo) -> Result<(), String> {
 #[ic_cdk::update(guard = "from_authority")]
 async fn has_commit(m: wire::HasCommit) -> bool {
     match Oid::try_from(m.oid.as_slice()) {
-        Ok(oid) => answered(GIT.has_commit(&oid).await),
+        Ok(oid) => answered(GIT.has_commit(&m.repo, &oid).await),
         Err(_) => false,
     }
 }

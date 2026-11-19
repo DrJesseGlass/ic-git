@@ -208,6 +208,50 @@ fn order(by_time: Vec<(u64, Oid)>, nodes: &BTreeMap<Oid, Node>) -> Vec<Oid> {
     out
 }
 
+/// How many commits `commit_of` loads from a repo's refs before it says
+/// no: a ballot is on a commit the repo may come to serve, which is at or
+/// near a tip, and a walk of a whole long history is not owed to every
+/// caller with a vote. Past it a commit is not found, and the answer is
+/// no rather than a guess.
+pub const COMMIT_OF_WALK: usize = 20_000;
+
+/// Whether `oid` is a commit of `repo`: a commit object, within reach of
+/// one of the repo's refs by parents, among the first `cap` commits met
+/// from them (nearest first). The objects are one store for every repo,
+/// so holding the object says nothing of whose it is, and a commit no
+/// ref of the repo reaches is no commit of it: another repo's, or one a
+/// forced push left behind.
+pub fn commit_of(repo: &str, oid: &Oid, cap: usize) -> bool {
+    if !matches!(store::get_object_stored(oid), Some(o) if o.object_type == ObjectType::Commit) {
+        return false;
+    }
+    let mut queue: std::collections::VecDeque<Oid> = store::list_refs(repo).into_iter().map(|(_, tip)| tip).collect();
+    let mut seen: std::collections::BTreeSet<Oid> = std::collections::BTreeSet::new();
+    while let Some(at) = queue.pop_front() {
+        if at == *oid {
+            return true;
+        }
+        if !seen.insert(at) {
+            continue;
+        }
+        if seen.len() > cap {
+            return false;
+        }
+        // An annotated tag is followed to what it names; anything else
+        // that is no commit ends there.
+        match store::get_object_parsed(&at) {
+            Some((ObjectType::Commit, content)) => {
+                if let Ok(refs) = object::commit_refs(&content) {
+                    queue.extend(refs.parents);
+                }
+            }
+            Some((ObjectType::Tag, content)) => queue.extend(object::tag_target(&content).ok()),
+            _ => {}
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +269,51 @@ mod tests {
 
     fn cmp(base: &Oid, head: &Oid) -> Compared {
         compare(base, head, 1000).unwrap().expect("within the bound")
+    }
+
+    /// A commit is a repo's when one of the repo's refs reaches it: not
+    /// for being held, which every repo's objects are, and not past the
+    /// bound.
+    #[test]
+    fn a_commit_is_a_repos_by_its_refs() {
+        store::create_repo("of-a").unwrap();
+        store::create_repo("of-b").unwrap();
+        let a1 = commit("of a1", &[], 10);
+        let a2 = commit("of a2", &[&a1], 20);
+        let side = commit("of side", &[&a1], 25);
+        let a3 = commit("of a3", &[&a2, &side], 30);
+        let b1 = commit("of b1", &[], 10);
+        store::set_ref("of-a", "refs/heads/main", a3).unwrap();
+        store::set_ref("of-b", "refs/heads/main", b1).unwrap();
+        for c in [&a3, &a2, &side, &a1] {
+            assert!(commit_of("of-a", c, 100));
+            assert!(!commit_of("of-b", c, 100), "held, and another repo's");
+        }
+        assert!(commit_of("of-b", &b1, 100) && !commit_of("of-a", &b1, 100));
+        assert!(!commit_of("of-none", &a3, 100), "a repo with no refs has no commits");
+        // What is no commit is no repo's, though a commit names it.
+        let tree = store::put_object(ObjectType::Tree, b"");
+        let blob = store::put_object(ObjectType::Blob, b"of a blob");
+        assert!(!commit_of("of-a", &tree, 100) && !commit_of("of-a", &blob, 100));
+        let absent = store::parse_oid("00000000000000000000000000000000000000aa").unwrap();
+        assert!(!commit_of("of-a", &absent, 100));
+        // Any ref will do, and an annotated tag is followed to its commit.
+        let lone = commit("of lone", &[], 5);
+        assert!(!commit_of("of-a", &lone, 100));
+        let tag = store::put_object(ObjectType::Tag, format!("object {}\ntype commit\ntag v1\n\nv1\n", store::oid_hex(&lone)).as_bytes());
+        store::set_ref("of-a", "refs/tags/v1", tag).unwrap();
+        assert!(commit_of("of-a", &lone, 100));
+        assert!(!commit_of("of-a", &tag, 100), "the tag itself is no commit");
+        // A commit a moved ref left behind is the repo's no longer.
+        store::set_ref("of-a", "refs/heads/main", a2).unwrap();
+        assert!(commit_of("of-a", &a1, 100) && !commit_of("of-a", &a3, 100) && !commit_of("of-a", &side, 100));
+        // The bound: nearest first, and past it no.
+        store::set_ref("of-a", "refs/heads/main", a3).unwrap();
+        store::delete_ref("of-a", "refs/tags/v1");
+        assert!(commit_of("of-a", &a3, 1));
+        assert!(commit_of("of-a", &a2, 2) && commit_of("of-a", &side, 2));
+        assert!(!commit_of("of-a", &a1, 2));
+        assert!(commit_of("of-a", &a1, 3));
     }
 
     #[test]

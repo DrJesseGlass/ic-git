@@ -132,9 +132,11 @@ pub trait GitSide {
     /// name is its own earlier call having landed.
     fn create_repo<'a>(&'a self, name: &'a str) -> Fut<'a, Reply<Result<(), String>>>;
 
-    /// Does the git side hold this commit? A ballot on one it does not is
-    /// refused.
-    fn has_commit<'a>(&'a self, oid: &'a Oid) -> Fut<'a, Reply<bool>>;
+    /// Is this a commit of the repo: a commit object, within reach of one
+    /// of the repo's refs? A ballot on anything else is refused. The
+    /// objects are one store for every repo, so "held" alone was any
+    /// blob or tree, and any other repo's commit.
+    fn has_commit<'a>(&'a self, repo: &'a str, oid: &'a Oid) -> Fut<'a, Reply<bool>>;
 
     /// The artifact behind a registry record, with its proof (phase 3,
     /// step 10). The git side picks the commit -- the release commit, which
