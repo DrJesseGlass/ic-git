@@ -81,6 +81,11 @@ pub struct Release {
     pub job: Job,
 }
 
+/// How many domains one site may have, and so how long a list
+/// `set_site_domains` takes: both sides refuse a longer one before doing
+/// anything with it.
+pub const MAX_SITE_DOMAINS: usize = 8;
+
 pub trait GitSide {
     /// Write the deploy-config mirror: the repo's configs as the authority
     /// holds them.
@@ -109,9 +114,11 @@ pub trait GitSide {
 
     /// Name the site's own domains (docs/TENANCY.md, "Custom domains"),
     /// replacing what it had: the whole list, so a lost answer is settled
-    /// by asking again. The authority decides who may; the git side
-    /// checks each name, refuses one another repo holds, and serves a
-    /// request whose Host is one of them as the site.
+    /// by asking again. The authority decides who may and charges for it;
+    /// the git side refuses a list of more than `MAX_SITE_DOMAINS`
+    /// before it reads anything, checks each name, refuses one another
+    /// repo holds, and serves a request whose Host is one of them as the
+    /// site.
     fn set_site_domains<'a>(&'a self, repo: &'a str, domains: Vec<String>) -> Fut<'a, Reply<Result<(), String>>>;
 
     /// Would a repo of this name be created? Returns its label. The

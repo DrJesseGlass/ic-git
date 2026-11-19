@@ -1407,6 +1407,57 @@ pub fn charge_action(repo: &str, cycles: u64, what: &str) -> Result<Option<Princ
     Ok(Some(owner))
 }
 
+/// Name a site's own domains (docs/TENANCY.md, "Custom domains"), which
+/// the git side keeps: owner or operator. The owner pays a push's base
+/// fee for it, as for a push that stores nothing: like a push it has the
+/// git side certify the site again, at each domain, and the fee funds
+/// the git canister. An operator's call, and an exempt repo, pay nothing.
+/// A list longer than a site may have is refused here, before the fee
+/// and the call. A refusal by the git side, and a call that never
+/// reached it, are refunded; one whose answer is lost may have been
+/// carried out, and keeps its fee.
+///
+/// Until 2026-11 the call was free and the list unbounded.
+pub async fn set_site_domains(repo: &str, who: &Principal, operator: bool, domains: Vec<String>) -> Result<(), String> {
+    use ic_git_types::git_side::MAX_SITE_DOMAINS;
+    use ic_git_types::side::Failure;
+    let m = can_admin(repo, who, operator)?;
+    if domains.len() > MAX_SITE_DOMAINS {
+        return Err(format!("a site has at most {MAX_SITE_DOMAINS} domains"));
+    }
+    let fee = pricing().push_base;
+    let payer = if operator || exempt(&m) {
+        None
+    } else {
+        let owner = m.owner.expect("non-exempt repo has an owner");
+        debit(&owner, fee, "naming a site's domains")?;
+        Some(owner)
+    };
+    let earned = || {
+        if payer.is_some() {
+            crate::funding::earn(fee);
+        }
+    };
+    match crate::to_git::set_site_domains(repo, domains).await {
+        Ok(Ok(())) => {
+            earned();
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            refund_action(payer, fee);
+            Err(e)
+        }
+        Err(f @ Failure::NotDelivered(_)) => {
+            refund_action(payer, fee);
+            Err(format!("the site's domains could not be set ({f}); nothing was charged, try again"))
+        }
+        Err(f @ Failure::Lost(_)) => {
+            earned();
+            Err(format!("the site's domains may have been set ({f}); get_site shows them, and the fee is kept"))
+        }
+    }
+}
+
 /// Give back part of a `charge_action` charge. `payer` is what it returned;
 /// an exempt repo (`None`) paid nothing and gets nothing.
 pub fn refund_action(payer: Option<Principal>, cycles: u64) {
@@ -2465,6 +2516,63 @@ mod tests {
         assert_eq!(balance(&alice), 8 * fee);
         create_repo("t-unasked", &alice, false).unwrap();
         assert_eq!(balance(&alice), 7 * fee);
+        crate::to_git::set_test_side(None);
+    }
+
+    /// Naming a site's domains is the owner's to pay for, at a push's
+    /// base fee, into the git canister's pool: a list longer than a site
+    /// may have is refused before the fee or the call, a refusal and an
+    /// undelivered call are refunded, a lost answer keeps its fee, and
+    /// an operator's call is free.
+    #[test]
+    fn naming_a_sites_domains_is_charged_and_bounded() {
+        use ic_git_types::git_side::MAX_SITE_DOMAINS;
+        let git = Rc::new(Flaky::new());
+        crate::to_git::set_test_side(Some(git.clone()));
+        let (alice, op) = (p(46), p(47));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-domains", &alice, false).unwrap();
+        run(crate::to_git::set_site("t-domains", String::new())).unwrap().unwrap();
+        let fee = pricing().push_base;
+        let name = |repo: &str, who: &Principal, operator: bool, domains: &[&str]| {
+            run(super::set_site_domains(repo, who, operator, domains.iter().map(|d| d.to_string()).collect()))
+        };
+        let (before, pool) = (balance(&alice), crate::funding::pool());
+
+        let e = name("t-domains", &p(48), false, &["t-domains.example"]).unwrap_err();
+        assert!(e.contains("does not own"), "{e}");
+        let many = vec!["not a domain"; MAX_SITE_DOMAINS + 1];
+        assert!(name("t-domains", &alice, false, &many).unwrap_err().contains("at most"));
+        assert_eq!(git.count("set_site_domains"), 0, "refused before the git side is asked");
+        assert_eq!(balance(&alice), before);
+
+        name("t-domains", &alice, false, &["T-Domains.Example."]).unwrap();
+        assert_eq!(balance(&alice), before - fee);
+        assert_eq!(crate::funding::pool(), pool + fee, "git-side work funds the git canister");
+
+        // What the git side refuses costs nothing, and neither does a
+        // call that did not reach it.
+        assert!(name("t-domains", &alice, false, &["x.icp0.io"]).unwrap_err().contains("own domains"));
+        git.inject("set_site_domains", Inject::Refuse);
+        assert!(name("t-domains", &alice, false, &[]).unwrap_err().contains("refused"));
+        git.inject("set_site_domains", Inject::NotDelivered);
+        assert!(name("t-domains", &alice, false, &[]).unwrap_err().contains("nothing was charged"));
+        assert_eq!((balance(&alice), crate::funding::pool()), (before - fee, pool + fee));
+
+        // A lost answer was work all the same.
+        git.inject("set_site_domains", Inject::Lost);
+        assert!(name("t-domains", &alice, false, &[]).unwrap_err().contains("the fee is kept"));
+        assert_eq!((balance(&alice), crate::funding::pool()), (before - 2 * fee, pool + 2 * fee));
+
+        // An operator's call is not the owner's to pay for.
+        name("t-domains", &op, true, &["t-domains.example"]).unwrap();
+        assert_eq!((balance(&alice), crate::funding::pool()), (before - 2 * fee, pool + 2 * fee));
+
+        // No balance, no change.
+        let a = account(&alice);
+        debit(&alice, a.balance, "test").unwrap();
+        assert!(name("t-domains", &alice, false, &[]).unwrap_err().contains("insufficient balance"));
+        assert_eq!(git.count("set_site_domains"), 6);
         crate::to_git::set_test_side(None);
     }
 

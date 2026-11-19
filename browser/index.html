@@ -1138,7 +1138,7 @@ const Console = (() => {
         ? form('f-deploy', [{ name: 'path', placeholder: 'path in the commit, e.g. app.wasm (.wasm, .wat or .lang)' }], 'deploy on push into the app canister') + '<p id="f-deploy-st" class="status"></p>'
         : '<p class="muted">create the app canister above, then choose what each push deploys into it.</p>') +
       form('f-site', [{ name: 'root', placeholder: 'directory to serve, e.g. site (empty = repo root)' }], 'serve as site') + '<p id="f-site-st" class="status"></p>' +
-      form('f-domains', [{ name: 'domains', placeholder: 'its own domains, space-separated, e.g. app.example www.app.example (empty = none)' }], 'serve at these domains') + '<p id="f-domains-st" class="status"></p>' +
+      form('f-domains', [{ name: 'domains', placeholder: 'its own domains, space-separated, e.g. app.example www.app.example (empty = none)' }], 'serve at these domains') + '<p class="muted">at most 8; each change is charged to the owner as a push that stores nothing.</p><p id="f-domains-st" class="status"></p>' +
       // Shown once the site config lands and says the repo is served: the
       // record attests the served entrypoint, so there is nothing to publish
       // for a repo that serves no site.

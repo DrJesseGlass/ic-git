@@ -68,7 +68,7 @@ pub fn get_config(repo: &str) -> Option<SiteConfig> {
 }
 
 /// How many domains one site may have.
-pub const MAX_DOMAINS: usize = 8;
+pub const MAX_DOMAINS: usize = ic_git_types::git_side::MAX_SITE_DOMAINS;
 
 /// The IC's own domains, under which a host names a canister by its id,
 /// and the local one. No site's domain is under them. The list is what
@@ -121,6 +121,14 @@ pub fn check_domain(d: &str) -> Result<(), String> {
 /// off every domain. A domain another repo holds is refused until that
 /// repo gives it up (an operator may, on any repo). The site must be
 /// configured already: naming a domain does not turn serving on.
+///
+/// The work is bounded by the limit and not by the list: a list longer
+/// than `MAX_DOMAINS` is refused before anything is read (a repeat
+/// counts), the names are checked before any other site's config is
+/// read, the configs are walked once for all of them, and a list that is
+/// what the site has already changes and certifies nothing. Until
+/// 2026-11 the limit was checked last, after a walk of every site config
+/// for each element of a list of any length.
 pub fn set_domains(repo: &str, domains: Vec<String>) -> Result<(), String> {
     let Some(mut cfg) = get_config(repo) else {
         return Err(if store::repo_exists(repo) {
@@ -129,19 +137,29 @@ pub fn set_domains(repo: &str, domains: Vec<String>) -> Result<(), String> {
             format!("no such repo: {repo}")
         });
     };
+    if domains.len() > MAX_DOMAINS {
+        return Err(format!("a site has at most {MAX_DOMAINS} domains"));
+    }
     let mut names: Vec<String> = Vec::new();
     for d in domains {
         let d = d.trim().trim_end_matches('.').to_ascii_lowercase();
         check_domain(&d)?;
-        if let Some(holder) = repo_for_domain(&d).filter(|h| h != repo) {
-            return Err(format!("{d:?} is held by {holder}; it must be given up there first"));
-        }
         if !names.contains(&d) {
             names.push(d);
         }
     }
-    if names.len() > MAX_DOMAINS {
-        return Err(format!("a site has at most {MAX_DOMAINS} domains"));
+    if names == cfg.domains {
+        return Ok(());
+    }
+    if !names.is_empty() {
+        for (holder, other) in all_configs() {
+            if holder == repo {
+                continue;
+            }
+            if let Some(d) = names.iter().find(|d| other.domains.contains(d)) {
+                return Err(format!("{d:?} is held by {holder}; it must be given up there first"));
+            }
+        }
     }
     cfg.domains = names;
     crate::kv::set_json(&site_key(repo), &cfg);
@@ -1432,6 +1450,24 @@ mod tests {
         let many: Vec<String> = (0..=MAX_DOMAINS).map(|i| format!("d{i}.example")).collect();
         assert!(set_domains("dom-b", many).unwrap_err().contains("at most"));
         assert_eq!(get_config("dom-b").unwrap().domains, ["app.example"], "the list before stays");
+        // The limit is on the list as sent, and comes before its names
+        // are looked at: a long list of what is no domain, or of one
+        // domain over and over, is refused for its length.
+        let junk = vec!["not a domain".to_string(); MAX_DOMAINS + 1];
+        assert!(set_domains("dom-b", junk).unwrap_err().contains("at most"));
+        let repeats = vec!["app.example".to_string(); MAX_DOMAINS + 1];
+        assert!(set_domains("dom-b", repeats).unwrap_err().contains("at most"));
+        let full: Vec<String> = (0..MAX_DOMAINS).map(|i| format!("d{i}.example")).collect();
+        set_domains("dom-b", full.clone()).unwrap();
+        assert_eq!(get_config("dom-b").unwrap().domains, full);
+        // A held domain anywhere in the list refuses the whole of it.
+        let held = set_domains("dom-a", vec!["new.example".into(), "d3.example".into()]).unwrap_err();
+        assert!(held.contains("\"d3.example\" is held by dom-b"), "{held}");
+        assert_eq!(get_config("dom-a").unwrap().domains, ["www.app.example"]);
+        // The list the site has, named again, is taken and changes nothing.
+        set_domains("dom-b", full.iter().map(|d| d.to_uppercase() + ".").collect()).unwrap();
+        assert_eq!(get_config("dom-b").unwrap().domains, full);
+        set_domains("dom-b", vec!["app.example".into()]).unwrap();
 
         // A request's Host: the domain with its port, case and trailing dot
         // gone; a gateway host, the local one, an IP are nobody's.

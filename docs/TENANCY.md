@@ -115,6 +115,7 @@ margin:
 |---|---|---|
 | create_repo | 1B cycles | on creation; also what "positive balance" means |
 | push | 100M + 5K per byte the push stores (below) | after the pack is read and before it is stored (refused as `[remote rejected]`, with the reason) |
+| site domains | 100M (the push base) | each `set_site_domains` by the owner that the git side takes; refunded when it refuses |
 | storage rent | 5K per byte-year of what the repo's pushes stored | hourly timer, pro rata |
 | EVM action | 50B | each deploy or registry publish (a t-ECDSA signature plus RPC outcalls) |
 | IC deploy | 5B | each install from the deploy queue |
@@ -517,6 +518,17 @@ API. One
 repo holds a domain at a time: a second repo is refused it until the first
 gives it up, which an operator may do on any repo. A site has at most
 eight. Naming a domain does not turn serving on: `set_site` first.
+
+The owner pays a push's base fee for each call the git side takes, as
+for a push that stores nothing: like a push, it has the git canister
+certify the site again, here at every domain, and the fee goes to the
+git canister's pool. A call the git side refuses, or that does not reach
+it, is refunded; an operator's call and an exempt repo pay nothing. A
+list of more than eight is refused by both sides before anything else is
+done with it, a repeat counting, and the list the site already has is
+taken without certifying anything. Until 2026-11 the call was free and
+the list unbounded: the limit was checked last, after every site's
+config had been read once for each element.
 
 Reaching the canister at the domain is the IC's own custom-domain
 procedure, which the tenant drives (the boundary nodes' side is documented

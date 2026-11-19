@@ -208,8 +208,10 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
             )
         }),
         "set_site_domains" => args::<(String, Vec<String>)>(arg, m).map(|(repo, domains)| {
+            // What the owner pays; an operator's call is free.
+            const FEE: &str = "A push's base fee is charged to the owner's ic-git balance.";
             if domains.is_empty() {
-                format!("Serve the website of \"{repo}\" at no domain of its own any more: only at /site/{repo}/.")
+                format!("Serve the website of \"{repo}\" at no domain of its own any more: only at /site/{repo}/. {FEE}")
             } else {
                 // As the git side will keep them: lowercase, no trailing dot.
                 let at = domains
@@ -220,7 +222,7 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
                 format!(
                     "Serve the website of \"{repo}\" at {at}, as well as at /site/{repo}/. A domain reaches \
                      it only once its DNS names this canister and the Internet Computer's boundary nodes \
-                     have registered it."
+                     have registered it. {FEE}"
                 )
             }
         }),
