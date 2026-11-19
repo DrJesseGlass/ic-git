@@ -81,6 +81,14 @@ fn parse_command(line: &str) -> Result<Command, String> {
             store::parse_oid(hex).map(Some)
         }
     };
+    // The store keeps refs under refs/ only (`store::set_ref`). Said here,
+    // where the request is read and nothing has been charged: `handle`
+    // took a command for applicable once `check_command` passed it, which
+    // never looked at the name, so a push naming `HEAD` or `main` trapped
+    // there, after its owner had paid for it.
+    if !refname.starts_with("refs/") {
+        return Err(format!("{refname}: a ref is pushed under refs/ (refs/heads/..., refs/tags/...)"));
+    }
     Ok(Command {
         old: parse(old)?,
         new: parse(new)?,
@@ -214,21 +222,26 @@ pub fn handle(repo: &str, request: Request, prepared: Option<pack::Prepared>) ->
 
     report.extend_from_slice(&pkt_line(b"unpack ok\n"));
     for cmd in &commands {
-        match check_command(repo, cmd) {
-            Ok(()) => {
-                match cmd.new {
-                    Some(new) => {
-                        store::set_ref(repo, &cmd.refname, new).expect("checked command applies");
-                        // If this push moved the deploy branch and a deploy is
-                        // configured, hand the tip back for the caller to build
-                        // and install (first slice of m4).
-                        if deploy_configured
-                            && deploy_branch.as_deref() == Some(cmd.refname.as_str())
-                        {
-                            deploy_commit = Some(new);
-                        }
-                    }
-                    None => store::delete_ref(repo, &cmd.refname),
+        // A ref the store will not take is that command's refusal, not a
+        // trap: by here the push is charged, and a trap would keep the
+        // charge and tell the pusher nothing. (The store refuses a name
+        // outside refs/, which `parse_command` has refused already, and
+        // any write once this side is frozen for its move, which can
+        // begin while the charge is awaited.)
+        let applied = check_command(repo, cmd).and_then(|()| match cmd.new {
+            Some(new) => store::set_ref(repo, &cmd.refname, new).map(|()| Some(new)),
+            None => {
+                store::delete_ref(repo, &cmd.refname);
+                Ok(None)
+            }
+        });
+        match applied {
+            Ok(set) => {
+                // If this push moved the deploy branch and a deploy is
+                // configured, hand the tip back for the caller to build
+                // and install (first slice of m4).
+                if set.is_some() && deploy_configured && deploy_branch.as_deref() == Some(cmd.refname.as_str()) {
+                    deploy_commit = set;
                 }
                 report.extend_from_slice(&pkt_line(format!("ok {}\n", cmd.refname).as_bytes()));
             }
@@ -312,6 +325,45 @@ mod tests {
         assert!(r.cert.is_none());
         assert_eq!(r.commands[0].refname, "refs/heads/main");
         assert_eq!(r.pack_start, body.len());
+    }
+
+    /// A command naming a ref outside refs/ is refused where the request
+    /// is read, before anything is charged, signed or not; and a ref the
+    /// store will not take is that command's `ng`, not a trap.
+    #[test]
+    fn a_ref_outside_refs_is_refused_before_the_charge() {
+        const NEW: &str = "cef80612845a57d04f793619713e8b62234a8381";
+        for name in ["HEAD", "main", "heads/main", "refsx/heads/main", " refs/heads/main"] {
+            let mut body = pkt_line(format!("{ZERO_OID} {NEW} {name}\0 report-status\n").as_bytes());
+            body.extend_from_slice(FLUSH_PKT);
+            let request = parse_request(&body);
+            let e = request.as_ref().err().unwrap_or_else(|| panic!("{name} parsed"));
+            assert!(e.contains("under refs/"), "{e}");
+            let report = String::from_utf8(refuse(&request, e)).unwrap();
+            assert!(report.contains("unpack") && report.contains("under refs/"), "{report}");
+        }
+        // One bad name among good ones refuses the push whole.
+        let mut body = pkt_line(format!("{ZERO_OID} {NEW} refs/heads/main\0 report-status\n").as_bytes());
+        body.extend_from_slice(&pkt_line(format!("{ZERO_OID} {NEW} HEAD\n").as_bytes()));
+        body.extend_from_slice(FLUSH_PKT);
+        assert!(parse_request(&body).is_err());
+
+        // The backstop: a command the store refuses is reported, and the
+        // ones beside it are applied.
+        store::create_repo("ref-outside").unwrap();
+        let tip = store::commit_file_for_tests("ref-outside", "f", b"1", None);
+        let branch = store::head_target("ref-outside").unwrap();
+        let commands = vec![
+            Command { old: None, new: Some(tip), refname: "HEAD".into() },
+            Command { old: None, new: Some(tip), refname: "refs/tags/v1".into() },
+        ];
+        let out = handle("ref-outside", Request { commands, cert: None, pack_start: 0 }, None);
+        let report = String::from_utf8(out.report).unwrap();
+        assert!(report.contains("ng HEAD refname must start with refs/"), "{report}");
+        assert!(report.contains("ok refs/tags/v1"), "{report}");
+        assert_eq!(store::get_ref("ref-outside", "refs/tags/v1"), Some(tip));
+        assert_eq!(store::get_ref("ref-outside", &branch), Some(tip), "the branch is where it was");
+        assert_eq!(store::get_ref("ref-outside", "HEAD"), None);
     }
 
     #[test]
