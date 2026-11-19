@@ -1323,9 +1323,11 @@ fn record(rec: EvmDeployRecord) -> Result<(), String> {
 pub const MAX_DEPLOY_GAS: u64 = 10_000_000;
 
 /// The most init code a CREATE may carry: 49,152 bytes (EIP-3860), twice
-/// the largest contract a chain keeps. A transaction with more is invalid
-/// on every chain since Shanghai, so one is refused here, before anything
-/// is read, signed or sent.
+/// the largest contract Ethereum keeps. A transaction with more is invalid
+/// there since Shanghai, and on the chains that follow its rules, which
+/// are the ones this canister is configured for; so one is refused here,
+/// before anything is read, signed or sent. A chain that takes more would
+/// need this raised with its config.
 ///
 /// Until 2026-11 nothing looked at the size. An artifact is whatever file
 /// the repo's config names, up to the 32 MiB a job may be, and a large
@@ -1345,7 +1347,7 @@ fn check_initcode(bytecode: &[u8]) -> Result<(), String> {
     }
     if bytecode.len() > MAX_INITCODE {
         return Err(format!(
-            "the bytecode is {} bytes, and a contract's init code is at most {MAX_INITCODE} (EIP-3860): no chain would take it; nothing was signed or sent",
+            "the bytecode is {} bytes, and a contract's init code is at most {MAX_INITCODE} (EIP-3860): the chain would refuse it, so nothing was signed or sent",
             bytecode.len()
         ));
     }
