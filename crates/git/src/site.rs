@@ -51,6 +51,7 @@ pub fn set_config(repo: &str, root: String) -> Result<(), String> {
     if !store::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
+    ic_git_types::deploy::check_config_path("a site's root", &root)?;
     let root = root.trim_matches('/').to_string();
     let domains = get_config(repo).map(|c| c.domains).unwrap_or_default();
     crate::kv::set_json(&site_key(repo), &SiteConfig { root, domains });
@@ -1384,6 +1385,12 @@ mod tests {
         assert!(set_domains("dom-nosite", vec!["a.example".into()]).unwrap_err().contains("set_site first"));
 
         set_config("dom-a", String::new()).unwrap();
+        set_config("dom-b", "www".into()).unwrap();
+        // A root is a path in the tree, and no longer than a config's may be.
+        let long = "d/".repeat(ic_git_types::deploy::MAX_CONFIG_PATH);
+        assert!(set_config("dom-b", long).unwrap_err().contains("at most 512 bytes"));
+        assert_eq!(get_config("dom-b").unwrap().root, "www");
+        set_config("dom-b", "w".repeat(ic_git_types::deploy::MAX_CONFIG_PATH)).unwrap();
         set_config("dom-b", "www".into()).unwrap();
         // Named as looked up: case and a trailing dot fall away, a repeat
         // is one domain.

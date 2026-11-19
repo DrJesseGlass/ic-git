@@ -94,6 +94,16 @@ bound to a key. It is off by default.
 | Voter | owner, `add_member(repo, p, "voter")` | cast ballots on commits |
 | Operator | controller or the legacy admin allowlist (never ic-git itself) | act on any repo; charged nothing |
 
+What a repo keeps besides its objects is bounded, since none of it is
+paid for and all of it is read whenever the repo is touched, by the
+hourly rent tick for one: at most 32 members besides the owner (one
+already on the list can always change role); a deploy's `source_path`
+and a site's root of at most 512 bytes, in the configs and in a pending
+policy change that names one; at most 8 pending policy changes for each
+approver, so 264 at the very most; at most eight domains. Until 2026-11
+the members and the paths had no limit, and with them neither had the
+pending changes.
+
 Repos created before tenancy existed have no owner and are treated as
 operator repos: exempt from every charge, writable only by operators.
 
