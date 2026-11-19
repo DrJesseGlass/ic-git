@@ -313,6 +313,14 @@ expect "signed by another key: refused, naming both keys" "$(signed "$URL" "$WOR
 OUT=$(git -C "$W" push "$PURL" main 2>&1 || true)
 expect "unbound token, not required: accepted" "$OUT" 'main -> main'
 refuse "  ...and not rejected" "$OUT" 'rejected'
+# A push naming a ref outside refs/, which no git client sends: the
+# request is refused as it is read, with the reason, and nothing is
+# charged. (It used to be charged, and then trap where the ref was written.)
+ten_balance() { ic "$TEN" get_account "(principal \"$T\")" --query | sed -n 's/.*balance = \([0-9_]*\).*/\1/p' | tr -d _; }
+python3 -c 'import sys; l = b"%s %s HEAD\0 report-status\n" % (b"0" * 40, sys.argv[1].encode()); sys.stdout.buffer.write(b"%04x" % (len(l) + 4) + l + b"0000")' "$(git -C "$W" rev-parse HEAD)" >"$WORK/badref.bin"
+BALR=$(ten_balance)
+expect "a push naming a ref outside refs/ is refused, with the reason" "$(curl -s -u "ic:$PLAIN" -H 'Content-Type: application/x-git-receive-pack-request' --data-binary "@$WORK/badref.bin" "http://$HOST/e2e-app.git/git-receive-pack" | tr -d '\0')" 'unpack HEAD: a ref is pushed under refs/'
+expect "  ...and costs nothing" "$(ten_balance)" "^$BALR\$"
 ic "$TEN" set_require_signed_push '("e2e-app", true)' >/dev/null
 commit site/c.txt c v3
 expect "unbound token, signing required: refused" "$(git -C "$W" push "$PURL" main 2>&1)" 'remote rejected.*requires signed pushes'
@@ -457,7 +465,6 @@ expect "  ...and the list before it stays" "$(curl -s "http://$HOST/.well-known/
 MANY=$(python3 -c 'print("; ".join("\"d%d.example\"" % i for i in range(9)))')
 # The owner pays for a change of domains, and for nothing the canister
 # refuses: a list longer than a site may have is refused for its length.
-ten_balance() { ic "$TEN" get_account "(principal \"$T\")" --query | sed -n 's/.*balance = \([0-9_]*\).*/\1/p' | tr -d _; }
 BAL0=$(ten_balance)
 expect "a list of more than eight is refused" "$(ic "$TEN" set_site_domains "(\"e2e-app\", vec { $MANY })")" 'at most 8 domains'
 expect "  ...and costs nothing" "$(ten_balance)" "^$BAL0\$"

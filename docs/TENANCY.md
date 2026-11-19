@@ -149,6 +149,14 @@ and no pack whose objects, with the bases its deltas are applied to,
 come to more than 256 MiB inflated; nothing is inflated or built past
 the size its entry declares.
 
+A push whose request cannot be read is refused and charged nothing, and
+a command naming a ref outside `refs/` (`HEAD`, a bare `main`) is such a
+request: the whole push is refused with the reason. Until 2026-11 that
+name was found only when the ref was written, after the charge, and the
+canister trapped there: the pusher paid and was told nothing. A ref the
+store refuses at that point is now that ref's refusal (`! [remote
+rejected]`), beside whatever else the push did.
+
 The gas of an EVM transaction is paid on the other chain by the
 canister's EOA, which the operators fund and every tenant's deploys draw
 on. Two things keep one tenant from spending it for the rest. A deploy's
