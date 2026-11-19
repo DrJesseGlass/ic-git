@@ -56,6 +56,9 @@ type RepoInfo = record {
   require_signed_push : bool;
   governed : bool;
   pending_owner : opt principal;
+  // the rent due at the next tick; on a delinquent repo, what a deposit
+  // has to cover to clear it
+  rent_owed : nat64;
 };
 type Vote = variant { Approve; Reject; Object };
 type Ballot = record {

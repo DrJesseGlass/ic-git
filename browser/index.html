@@ -1110,7 +1110,7 @@ const Console = (() => {
     const pricing = get('pricing').catch(e => { console.warn('pricing: ' + e.message); return undefined; });
     let html = '<div class="panel"><h3>ownership</h3>' +
       '<p>owner: ' + (info.owner ? '<span class="oid" title="' + esc(info.owner) + '">' + esc(short(info.owner)) + '</span>' : '<span class="muted">operator (exempt)</span>') +
-      ' &middot; storage ' + info.storage_bytes + ' bytes' + (info.delinquent ? ' &middot; <b class="bad">behind on rent</b>' : '') +
+      ' &middot; storage ' + info.storage_bytes + ' bytes' + (info.delinquent ? ' &middot; <b class="bad">behind on rent' + (info.rent_owed ? ': ' + fmtT(info.rent_owed) + ' owed, and a deposit that covers it clears it at the next tick' : '') + '</b>' : '') +
       ' &middot; deploys need ' + info.required_votes + ' approval' + (info.required_votes === 1 ? '' : 's') +
       (info.app_canister ? ' &middot; app canister <span class="oid">' + esc(info.app_canister) + '</span>' : '') +
       (info.governed ? ' &middot; <b>GOVERNED</b>: ic-git is the app canister\'s only controller' : '') +

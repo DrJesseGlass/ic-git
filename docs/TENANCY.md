@@ -173,8 +173,17 @@ Rent is charged on the bytes a repo's pushes ingested. Objects are
 content-addressed and shared, so two repos pushing the same blob are both
 charged for it: attribution, not a measure of unique storage. An owner who
 cannot cover rent pays what they have and the repo goes **delinquent**:
-pushes and deploys are refused, serving continues, and the next deposit and
-rent tick clear it.
+pushes and deploys are refused, and serving continues. What was not paid
+stays owed: the repo's rent clock moves only as far as the payment
+reached, so the debt grows with the time the bytes are held, and the
+tick after a deposit takes it. The repo is cleared when a tick is paid
+in full, not by any deposit: one short of the debt is taken whole and
+the repo stays delinquent. `get_repo_info` and `/api/<repo>/info` say
+what is owed (`rent_owed`), and the console shows it. The debt is the
+repo's, so whoever accepts a transfer of a delinquent repo takes it
+over. Until 2026-11 the clock moved to now at every tick whatever was
+paid: a delinquent repo was held for nothing, and the smallest deposit
+cleared it.
 
 The push fee and the rent pay for git-side work, which after the canister
 split (docs/CANISTER_SPLIT.md, step 12d) the git canister does. Both go

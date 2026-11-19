@@ -1498,9 +1498,36 @@ fn rent_due(p: &Pricing, bytes: u64, from_ns: u64, to_ns: u64) -> u64 {
     due.min(u64::MAX as u128) as u64
 }
 
+/// How far a payment of `paid` moves a rent clock at `from_ns`, when `due`
+/// is owed for the time from there to `to_ns`: the whole way when it
+/// covers what is due, else the share of the time it pays for, rounded
+/// down, so what is left unpaid stays owed.
+fn rent_paid_to(from_ns: u64, to_ns: u64, due: u64, paid: u64) -> u64 {
+    if paid >= due || to_ns <= from_ns {
+        return to_ns.max(from_ns);
+    }
+    let elapsed = (to_ns - from_ns) as u128;
+    from_ns + (elapsed * paid as u128 / due as u128) as u64
+}
+
+/// The rent a repo owes now: for the time since its rent clock, on the
+/// bytes it holds. Under an hour's worth on a repo that pays its way,
+/// more on one that is behind; nothing on an exempt one.
+pub fn rent_owed(m: &RepoMeta) -> u64 {
+    if exempt(m) {
+        return 0;
+    }
+    rent_due(&pricing(), m.storage_bytes, m.rent_paid_to_ns, now_ns())
+}
+
 /// Settle rent on every tenant repo up to now. An owner who cannot cover it
-/// pays what they have and the repo goes delinquent; a later deposit and the
-/// next tick clear it. Returns (repos charged, cycles collected).
+/// pays what they have and the repo goes delinquent, and its rent clock
+/// moves only as far as that payment reaches: the rest stays owed, grows
+/// with the time the bytes are held, and is taken by the tick after a
+/// deposit, which clears the repo once it is paid in full. Until 2026-11
+/// the clock moved to now whatever was paid, so what a delinquent repo
+/// did not pay was forgiven, and any deposit cleared it. Returns (repos
+/// charged, cycles collected).
 pub fn charge_rent_all() -> (u32, u64) {
     let p = pricing();
     let now = now_ns();
@@ -1531,10 +1558,17 @@ pub fn charge_rent_all() -> (u32, u64) {
                         collected = collected.saturating_add(have);
                     }
                     m.delinquent = true;
+                    // The clock stops where the payment does.
+                    m.rent_paid_to_ns = rent_paid_to(m.rent_paid_to_ns, now, due, have);
+                    charged += 1;
+                    save_meta(&name, &m);
+                    continue;
                 }
             }
             charged += 1;
-        } else if m.delinquent && balance(&owner) > 0 {
+        } else {
+            // Nothing is owed: no bytes, or no time. A repo behind on
+            // rent that owes none is behind no longer.
             m.delinquent = false;
         }
         m.rent_paid_to_ns = now;
@@ -1559,12 +1593,16 @@ pub struct RepoInfo {
     pub require_signed_push: bool,
     pub governed: bool,
     pub pending_owner: Option<Principal>,
+    /// `rent_owed`: what the next rent tick will ask for, and on a
+    /// delinquent repo what a deposit has to cover to clear it.
+    pub rent_owed: u64,
 }
 
 pub fn repo_info(repo: &str) -> Option<RepoInfo> {
     let m = existing(repo).ok()?;
     Some(RepoInfo {
         exempt: exempt(&m),
+        rent_owed: rent_owed(&m),
         owner: m.owner,
         members: m.members,
         storage_bytes: m.storage_bytes,
@@ -1926,13 +1964,40 @@ mod tests {
         assert!(meta("t-rent").unwrap().delinquent);
         assert!(charge_push("t-rent", 1).unwrap_err().contains("rent"));
         assert!(charge_action("t-rent", 5, "evm").unwrap_err().contains("rent"));
-        // A deposit and the next tick clear it, charging the elapsed rent.
-        credit(&alice, 1_000_000_000);
+        // What was not paid is owed: the clock moved only as far as the
+        // one cycle reached, and the repo's info says what is due.
+        let year = 1000 * pr.rent_per_byte_year;
+        assert_eq!(repo_info("t-rent").unwrap().rent_owed, year - 1);
+        // A deposit short of it is taken whole and clears nothing.
+        credit(&alice, year / 2);
+        let (_, part) = charge_rent_all();
+        assert_eq!(part, year / 2);
+        assert_eq!(balance(&alice), 0);
+        assert!(meta("t-rent").unwrap().delinquent, "half the debt is not the debt");
+        assert!(charge_push("t-rent", 1).unwrap_err().contains("rent"));
+        let owed = repo_info("t-rent").unwrap().rent_owed;
+        assert!(owed >= year - 1 - year / 2 && owed <= year - year / 2, "{owed}");
+        // A tick with nothing to take leaves the debt where it is.
+        assert_eq!(charge_rent_all(), (1, 0));
+        assert_eq!(repo_info("t-rent").unwrap().rent_owed, owed);
+        // A deposit that covers it and the next tick clear the repo,
+        // charging the arrears and the year since.
+        credit(&alice, 3 * year + pr.push_base + pr.push_per_byte);
         set_test_now(start + 2 * YEAR_NS as u64);
         let (_, collected2) = charge_rent_all();
-        assert_eq!(collected2, 1000 * pr.rent_per_byte_year);
+        assert_eq!(collected2, owed + year);
         assert!(!meta("t-rent").unwrap().delinquent);
+        assert_eq!(meta("t-rent").unwrap().rent_paid_to_ns, start + 2 * YEAR_NS as u64);
+        assert_eq!(repo_info("t-rent").unwrap().rent_owed, 0);
         assert!(charge_push("t-rent", 1).is_ok());
+        // The clock's arithmetic: a payment moves it by the share of the
+        // time it pays for, rounded down, and never past now.
+        assert_eq!(rent_paid_to(100, 200, 10, 0), 100);
+        assert_eq!(rent_paid_to(100, 200, 10, 5), 150);
+        assert_eq!(rent_paid_to(100, 200, 3, 1), 133);
+        assert_eq!(rent_paid_to(100, 200, 10, 10), 200);
+        assert_eq!(rent_paid_to(100, 200, 10, 11), 200);
+        assert_eq!(rent_paid_to(0, u64::MAX, u64::MAX, u64::MAX - 1), u64::MAX - 1);
         set_test_now(start);
     }
 
