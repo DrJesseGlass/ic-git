@@ -314,17 +314,42 @@ thread_local! {
     static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Pop the front job, run it, and re-arm if more remain. The job is removed
-/// (and the removal persisted) before running, so a job can never loop forever;
-/// `run` records its own outcome and is written never to trap.
+/// The drain chain's hold on `DRAINING`, given up when it is dropped: at the
+/// end of `drain_one`, and when the chain is cancelled because a job
+/// trapped after an await (the executor drops a task whose callback
+/// trapped, from the call's cleanup, where what is written persists). A
+/// flag set and cleared by hand stayed set after such a trap, and no job
+/// ran again until an upgrade. Dropping re-arms for what is still queued.
+struct Draining;
+
+impl Drop for Draining {
+    fn drop(&mut self) {
+        DRAINING.with(|f| f.set(false));
+        // Re-read the queue rather than trusting a snapshot: a push that
+        // arrived during an await armed a timer that bailed on DRAINING,
+        // so its job is this chain's to pick up.
+        if !queue_load().is_empty() {
+            arm_timer();
+        }
+    }
+}
+
+/// Pop the front job, run it, and re-arm if more remain. The removal is
+/// saved before the job runs, and `run` puts a message boundary
+/// (`commit_point`) between that and anything built from what the repo
+/// holds, so a job that traps is not put back at the head of the queue to
+/// trap again: it is consumed, recorded as failed (`Unfinished`), and the
+/// chain goes on (`Draining`). Before the boundary, a source nested deeply
+/// enough to overflow the compiler's stack trapped the timer's whole
+/// message, the removal with it, and every later run met the same job.
 #[cfg_attr(any(test, feature = "testing"), allow(dead_code))]
 async fn drain_one() {
     if DRAINING.with(|f| f.replace(true)) {
         return;
     }
+    let _draining = Draining;
     let mut jobs = queue_load();
     if jobs.is_empty() {
-        DRAINING.with(|f| f.set(false));
         return;
     }
     let job = jobs.remove(0);
@@ -351,12 +376,59 @@ async fn drain_one() {
             ),
         }
     }
-    DRAINING.with(|f| f.set(false));
-    // Re-read the queue rather than trusting the pre-run snapshot: a push
-    // that arrived during the await armed a timer that bailed on DRAINING
-    // above, so its job is ours to pick up.
-    if !queue_load().is_empty() {
-        arm_timer();
+}
+
+/// A message boundary: what was written before it stays written whatever
+/// the code after it does, since a trap undoes only the message it happens
+/// in. The call is the cheapest the management canister answers anyone;
+/// its reply is not used. An error is the call refused, before it went
+/// out or after: the caller gives up either way, and what it then writes
+/// is in a message of its own or in the one it began in.
+#[cfg(not(any(test, feature = "testing")))]
+async fn commit_point() -> Result<(), String> {
+    intercanister::call::<(), Vec<u8>>(Principal::management_canister(), "raw_rand", ())
+        .await
+        .map(|_| ())
+}
+
+/// Tests run in one piece; there is no message to end.
+#[cfg(any(test, feature = "testing"))]
+async fn commit_point() -> Result<(), String> {
+    Ok(())
+}
+
+const TRAPPED: &str = "the deploy trapped and was abandoned; it was charged as a failed deploy. \
+                       Fix what it builds and push again, or deploy_now";
+
+/// A deploy past its commit point. If it is dropped unfinished -- the run
+/// trapped after an await, and the executor cancelled it -- whatever leg
+/// still says "deploying" for this commit is recorded as failed. Left so,
+/// the commit would count as in flight for good and no retry of it would
+/// be taken (`accept`), as after an interrupted upgrade (`resume_pending`).
+struct Unfinished<'a> {
+    repo: &'a str,
+    commit: String,
+    done: bool,
+}
+
+impl Drop for Unfinished<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            fail_deploying(self.repo, &self.commit, TRAPPED);
+        }
+    }
+}
+
+/// Record `why` on each leg of `repo` whose status says it is deploying
+/// `commit`.
+fn fail_deploying(repo: &str, commit: &str, why: &str) {
+    if let Some(mut st) = get_status(repo).filter(|s| s.message == DEPLOYING && s.commit == commit) {
+        st.message = why.into();
+        put_status(repo, &st);
+    }
+    if let Some(mut st) = get_evm_status(repo).filter(|s| s.message == DEPLOYING && s.commit == commit) {
+        st.message = why.into();
+        crate::kv::set_json(&evm_status_key(repo), &st);
     }
 }
 
@@ -690,6 +762,22 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
         },
     );
 
+    // Everything up to here is this side's own bookkeeping. What follows
+    // reads and builds what the repo holds, which is its owner's to shape,
+    // and a build that traps must not take the above back with it: from
+    // the queue that is the job's removal, and the job would run again
+    // and trap again, in front of every other repo's (`drain_one`). So the
+    // message ends here, with the job consumed, the deploy charged and
+    // the status "deploying", and a trap from here on is a failed deploy.
+    let mut unfinished = Unfinished { repo, commit: st.commit.clone(), done: false };
+    if let Err(e) = commit_point().await {
+        crate::tenancy::refund_action(payer, cost);
+        st.message = format!("the deploy could not start ({e}); nothing was charged, deploy_now retries");
+        put_status(repo, &st);
+        unfinished.done = true;
+        return st;
+    }
+
     match (&wasm_cfg, wasm_artifact) {
         (Some(cfg), Some(artifact)) => {
             match attempt(repo, cfg, &commit_oid, artifact, &mut st).await {
@@ -799,6 +887,7 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
     // - after the reply: annotate only while the status is still this one.
     if let (Some(cfg), true, Some(names_cfg)) = (&wasm_cfg, wasm_installed, crate::names::get_config()) {
         if !is_latest_install(repo, &cfg.target, &st) {
+            unfinished.done = true;
             return st;
         }
         let before = st.clone();
@@ -810,6 +899,7 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
             put_status(repo, &st);
         }
     }
+    unfinished.done = true;
     st
 }
 
@@ -1146,6 +1236,53 @@ mod tests {
         assert!(in_flight("still", "c2"));
         assert_eq!(get_status("still").unwrap().message, DEPLOYING);
         queue_save(&[]);
+    }
+
+    /// A deploy dropped unfinished -- its run trapped past the commit
+    /// point -- is recorded as failed on each leg still deploying that
+    /// commit, so the commit is not in flight for good. A leg that already
+    /// has its outcome, another commit's status, and a deploy that
+    /// finished are left as they are.
+    #[test]
+    fn a_deploy_dropped_unfinished_is_recorded_as_failed() {
+        let evm = |commit: &str, message: &str| EvmDeployStatus {
+            commit: commit.into(),
+            ok: false,
+            message: message.into(),
+            contract_address: String::new(),
+            tx_hash: String::new(),
+        };
+        put_status("trap", &status("c1", false, DEPLOYING));
+        crate::kv::set_json(&evm_status_key("trap"), &evm("c1", DEPLOYING));
+        drop(Unfinished { repo: "trap", commit: "c1".into(), done: false });
+        assert!(!in_flight("trap", "c1"));
+        assert_eq!(get_status("trap").unwrap().message, TRAPPED);
+        assert_eq!(get_evm_status("trap").unwrap().message, TRAPPED);
+
+        // The wasm leg installed and the EVM leg trapped: only the EVM
+        // leg's status changes.
+        put_status("trap", &status("c2", true, "installed"));
+        crate::kv::set_json(&evm_status_key("trap"), &evm("c2", DEPLOYING));
+        drop(Unfinished { repo: "trap", commit: "c2".into(), done: false });
+        assert_eq!(get_status("trap").unwrap().message, "installed");
+        assert_eq!(get_evm_status("trap").unwrap().message, TRAPPED);
+
+        // A newer commit's deploy is not this one's to fail.
+        put_status("trap", &status("c3", false, DEPLOYING));
+        drop(Unfinished { repo: "trap", commit: "c2".into(), done: false });
+        assert_eq!(get_status("trap").unwrap().message, DEPLOYING);
+        // Nor is a finished one failed.
+        drop(Unfinished { repo: "trap", commit: "c3".into(), done: true });
+        assert_eq!(get_status("trap").unwrap().message, DEPLOYING);
+    }
+
+    /// The drain chain's hold is given up when it is dropped, however the
+    /// chain ended.
+    #[test]
+    fn dropping_the_drain_chain_frees_the_queue() {
+        assert!(!DRAINING.with(|f| f.replace(true)));
+        drop(Draining);
+        assert!(!DRAINING.with(|f| f.get()));
     }
 
     /// The announce guard: a newer deploy that failed or was refused leaves

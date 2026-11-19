@@ -63,6 +63,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${E2E_PORT:-4950}
 KEEP=${KEEP:-0}
+# What the status of a deploy whose source nests too deeply says.
+DEEP_OUTCOME=${DEEP_OUTCOME:-nested too deeply}
 SPLIT=${E2E_SPLIT:-0}
 # The release a mainnet upgrade starts from: by default the newest tag. Set
 # it to what mainnet actually runs (tools/check-module-hash.sh says whether
@@ -518,6 +520,37 @@ done
 expect "another owner's repo naming the app canister: its install is refused" "$THIEVED" "refused: .* is e2e-app.{1,3}s app canister.*not e2e-thief"
 expect "  ...by deploy_now too" "$(ic "$OP" deploy_now '("e2e-thief")')" "refused: .* is e2e-app.{1,3}s app canister.*not e2e-thief"
 expect "  ...and the app canister keeps its module" "$(cd "$WORK" && dfx canister info "$APP" --identity "$OP" 2>&1)" "Module hash: 0x$WASM_SHA"
+# A build that cannot finish is its own repo's failed deploy, and no other
+# repo's: a source nested far past what the compiler's stack holds is
+# refused as a build error, and the job behind it in the queue still runs.
+# (Before the compiler bounded its nesting the build trapped, the trap
+# put the job back at the head of the queue, and nothing deployed again.)
+ic "$OP" create_repo '("e2e-deep")' >/dev/null
+DEEP=$(ic "$OP" create_push_token '("e2e-deep", null, null)' | ok_text)
+DW=$WORK/deep
+git init -q -b main "$DW"
+python3 -c 'n = 200000; print("fn f() = " + "(" * n + "1" + ")" * n + ";")' >"$DW/deep.lang"
+git -C "$DW" add -A
+git -C "$DW" -c user.name=E2E -c user.email=deep@local commit -qm deep
+ic "$OP" set_wasm_deploy "(\"e2e-deep\", \"$APP\", \"deep.lang\")" >/dev/null
+GIT_TERMINAL_PROMPT=0 git -C "$DW" push "http://ic:$DEEP@$HOST/e2e-deep.git" main >/dev/null 2>&1 || true
+printf '(module (func (export "canister_query again")))\n' >"$TW/evil.wat"
+git -C "$TW" -c user.name=E2E -c user.email=thief@local commit -qam evil-2
+T2=$(git -C "$TW" rev-parse HEAD)
+GIT_TERMINAL_PROMPT=0 git -C "$TW" push "http://ic:$THIEF@$HOST/e2e-thief.git" main >/dev/null 2>&1 || true
+DEEPST=
+for _ in $(seq 1 30); do
+  DEEPST=$(flat "$(ic "$OP" get_deploy_status '("e2e-deep")')")
+  echo "$DEEPST" | grep -q "$DEEP_OUTCOME" && break
+  sleep 1
+done
+expect "a source nested past the compiler's stack: a failed deploy" "$DEEPST" "ok = false.*$DEEP_OUTCOME|$DEEP_OUTCOME.*ok = false"
+for _ in $(seq 1 30); do
+  THIEVED=$(flat "$(ic "$OP" get_deploy_status '("e2e-thief")')")
+  echo "$THIEVED" | grep -qE "$T2.*refused|refused.*$T2" && break
+  sleep 1
+done
+expect "  ...and the job queued behind it still runs" "$THIEVED" "$T2.*refused|refused.*$T2"
 if [ -n "$NAMES_WASM" ]; then
   expect "announced" "$STATUS" 'announced as solo/e2e-app'
   REC=$(call "$OP" names get_record '("solo/e2e-app")' --query)

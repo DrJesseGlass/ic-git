@@ -388,6 +388,20 @@ wallet's message on accepting says so.
 Until 2026-11 nothing asked, and a repo's deploy could install
 into any app canister.
 
+A deploy that cannot finish is its own repo's failed deploy. A queued job
+is taken off the queue, charged and marked "deploying" in one message,
+and what it builds is read and built in the next: a build that traps
+undoes only that, so the job is not put back to trap again in front of
+every other repo's. Its status then says it trapped and was abandoned,
+it stays charged as any failed deploy is, and the queue goes on to the
+next job. `deploy_now` runs the same way. A `.lang` expression may be 64
+levels deep, counting parentheses, call arguments, negations and each
+operator of a chain (`a + b + c` is two), and a deeper one is a build
+error: unbounded, a few hundred kilobytes of `(` overflowed the
+compiler's stack. Until 2026-11 that trap took the job's removal back
+with it, the job stayed at the head of the queue, and no repo's deploy
+ran until an upgrade.
+
 ## Governed app canisters
 
 docs/GOVERNANCE.md, section 2. With the owner a controller, the owner can
