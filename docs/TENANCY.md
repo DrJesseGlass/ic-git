@@ -149,6 +149,17 @@ and no pack whose objects, with the bases its deltas are applied to,
 come to more than 256 MiB inflated; nothing is inflated or built past
 the size its entry declares.
 
+A branch moves forward only: a push that is not a fast-forward of the
+ref it names is refused (`non-fast-forward`; `--force` does not change
+that). The rule holds a ref while it exists, so a branch is rewritten by
+deleting it and pushing it again, and any writer may: except the deploy
+branch (the repo's HEAD, `main`), which a push cannot delete. What the
+site serves and the app runs follow that branch, and with votes required
+the approvals are looked for along it, so its history is the one that
+is kept. Until 2026-11 it could be deleted like any other, and a delete
+and a create in one push replaced its history outright. An operator can
+still move a ref by hand where one has to be.
+
 A push whose request cannot be read is refused and charged nothing, and
 a command naming a ref outside `refs/` (`HEAD`, a bare `main`) is such a
 request: the whole push is refused with the reason. Until 2026-11 that

@@ -123,7 +123,16 @@ fn check_command(repo: &str, cmd: &Command) -> Result<(), String> {
         return Err("ref changed since advertisement".into());
     }
     let Some(new) = cmd.new else {
-        return Ok(()); // delete: old-value match is the whole check
+        // A delete. The deploy branch is not deleted by a push: the
+        // fast-forward rule below holds a ref only while it exists, so a
+        // delete and a create, in one push or two, put any history on
+        // it. On the branch the site and the deploys follow that is the
+        // rule undone; on any other it is how a branch is rewritten
+        // here, and the old-value match is the whole check.
+        if jobs::deploy_branch(repo).as_deref() == Some(cmd.refname.as_str()) {
+            return Err("the deploy branch is not deleted by a push: its history only moves forward".into());
+        }
+        return Ok(());
     };
     // Connectivity: everything reachable from the new tip must exist now;
     // current tips bound the walk to what this push introduced.
@@ -364,6 +373,52 @@ mod tests {
         assert_eq!(store::get_ref("ref-outside", "refs/tags/v1"), Some(tip));
         assert_eq!(store::get_ref("ref-outside", &branch), Some(tip), "the branch is where it was");
         assert_eq!(store::get_ref("ref-outside", "HEAD"), None);
+    }
+
+    /// The deploy branch moves forward only, by any push: a delete of it
+    /// is refused, so a delete and a create, in one push or in two,
+    /// cannot put other history on it. Another branch is deleted and
+    /// made again freely.
+    #[test]
+    fn the_deploy_branch_is_not_rewritten_by_a_delete_and_a_create() {
+        store::create_repo("ff-rule").unwrap();
+        let branch = store::head_target("ff-rule").unwrap();
+        let c1 = store::commit_file_for_tests("ff-rule", "f", b"1", None);
+        let c2 = store::commit_file_for_tests("ff-rule", "f", b"2", Some(c1));
+        // History that does not contain the tip.
+        let other = {
+            let tree = store::put_object(ObjectType::Tree, b"");
+            store::put_object(ObjectType::Commit, format!("tree {}\n\nunrelated\n", store::oid_hex(&tree)).as_bytes())
+        };
+        let cmd = |old: Option<Oid>, new: Option<Oid>, name: &str| Command { old, new, refname: name.into() };
+        let push = |commands: Vec<Command>| {
+            String::from_utf8(handle("ff-rule", Request { commands, cert: None, pack_start: 0 }, None).report).unwrap()
+        };
+        // The rule itself.
+        let report = push(vec![cmd(Some(c2), Some(other), &branch)]);
+        assert!(report.contains(&format!("ng {branch} non-fast-forward")), "{report}");
+        // Around it, in one push: the delete is refused, and so the
+        // create, which finds the ref where it was.
+        let report = push(vec![cmd(Some(c2), None, &branch), cmd(None, Some(other), &branch)]);
+        assert!(report.contains(&format!("ng {branch} the deploy branch is not deleted")), "{report}");
+        assert!(report.contains(&format!("ng {branch} ref changed since advertisement")), "{report}");
+        assert_eq!(store::get_ref("ff-rule", &branch), Some(c2));
+        // And in two.
+        let report = push(vec![cmd(Some(c2), None, &branch)]);
+        assert!(report.contains("the deploy branch is not deleted"), "{report}");
+        assert_eq!(store::get_ref("ff-rule", &branch), Some(c2));
+        // Forward still goes.
+        let c3 = store::put_object(
+            ObjectType::Commit,
+            format!("tree {}\nparent {}\n\n3\n", store::oid_hex(&store::put_object(ObjectType::Tree, b"")), store::oid_hex(&c2)).as_bytes(),
+        );
+        assert!(push(vec![cmd(Some(c2), Some(c3), &branch)]).contains(&format!("ok {branch}")));
+        // Another branch is rewritten that way, as before.
+        let side = "refs/heads/side";
+        assert!(push(vec![cmd(None, Some(c1), side)]).contains("ok refs/heads/side"));
+        let report = push(vec![cmd(Some(c1), None, side), cmd(None, Some(other), side)]);
+        assert_eq!(report.matches("ok refs/heads/side").count(), 2, "{report}");
+        assert_eq!(store::get_ref("ff-rule", side), Some(other));
     }
 
     #[test]
