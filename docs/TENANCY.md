@@ -196,7 +196,8 @@ An EVM action is charged up front, and a failed one gives back what it did
 not use:
 
 - **Failed before any outcall** (no config, no registry, send lock held,
-  artifact would not decode) or a deploy skipped as already deployed: the
+  artifact would not decode, or is more init code than a chain takes:
+  49,152 bytes) or a deploy skipped as already deployed: the
   whole charge comes back, gas and all.
 - **No provider can hold the transaction** (a nonce or fee read failed, the
   signature failed, or a provider refused it: nonce too low or too high,

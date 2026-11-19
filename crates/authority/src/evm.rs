@@ -1322,6 +1322,38 @@ fn record(rec: EvmDeployRecord) -> Result<(), String> {
 /// under the 2^24 a single transaction may use since EIP-7825.
 pub const MAX_DEPLOY_GAS: u64 = 10_000_000;
 
+/// The most init code a CREATE may carry: 49,152 bytes (EIP-3860), twice
+/// the largest contract Ethereum keeps. A transaction with more is invalid
+/// there since Shanghai, and on the chains that follow its rules, which
+/// are the ones this canister is configured for; so one is refused here,
+/// before anything is read, signed or sent. A chain that takes more would
+/// need this raised with its config.
+///
+/// Until 2026-11 nothing looked at the size. An artifact is whatever file
+/// the repo's config names, up to the 32 MiB a job may be, and a large
+/// one was read a nonce, signed, and handed to the RPC canister in a
+/// call too large to be delivered. A call that fails is a broadcast of
+/// unknown outcome, so its nonce was reserved for a transaction no
+/// provider ever saw: every later send from the canister's EOA, any
+/// tenant's, queued behind a gap that only `evm_reset_nonce` clears,
+/// while the owner kept the charge and the commit was logged as one that
+/// may be live.
+pub const MAX_INITCODE: usize = 49_152;
+
+/// Is this init code a CREATE could carry?
+fn check_initcode(bytecode: &[u8]) -> Result<(), String> {
+    if bytecode.is_empty() {
+        return Err("empty bytecode".into());
+    }
+    if bytecode.len() > MAX_INITCODE {
+        return Err(format!(
+            "the bytecode is {} bytes, and a contract's init code is at most {MAX_INITCODE} (EIP-3860): the chain would refuse it, so nothing was signed or sent",
+            bytecode.len()
+        ));
+    }
+    Ok(())
+}
+
 /// The canister-level preconditions for a CREATE deploy: a chain config, and a
 /// gas limit that could pay for one (21k intrinsic + 32k for the CREATE) and
 /// is not above `MAX_DEPLOY_GAS`. Until 2026-11 there was a floor and no
@@ -1363,9 +1395,7 @@ pub async fn deploy_bytecode(
     commit: String,
 ) -> Result<TxOutcome, SendError> {
     let cfg = deploy_target(gas_limit).map_err(SendError::before)?;
-    if bytecode.is_empty() {
-        return Err(SendError::before("empty bytecode".into()));
-    }
+    check_initcode(&bytecode).map_err(SendError::before)?;
     // Hashed here rather than taken from the caller: the log has to record what
     // this canister actually broadcast, a property that must survive the caller
     // becoming a separate canister.
@@ -1711,6 +1741,25 @@ mod tests {
         assert!(http(503).is_transient());
         assert!(!http(400).is_transient());
         assert!(!http(404).is_transient());
+    }
+
+    /// Init code no chain would take is refused before anything is read,
+    /// signed or sent: the whole charge comes back, no nonce is reserved,
+    /// and nothing is logged as possibly live.
+    #[test]
+    fn init_code_past_the_chains_limit_is_refused_before_it_is_signed() {
+        assert!(check_initcode(&[]).is_err());
+        assert!(check_initcode(&vec![0x60; MAX_INITCODE]).is_ok());
+        assert!(check_initcode(&vec![0x60; MAX_INITCODE + 1]).is_err());
+
+        set_config("aaaaa-aa".into(), "k".into(), 11155111, vec![]).unwrap();
+        let logged = get_history().len();
+        let e = futures::executor::block_on(deploy_bytecode("big".into(), vec![0x60; 3 << 20], 1_000_000, "c".into())).unwrap_err();
+        assert!(e.message.contains("EIP-3860") && e.message.contains("3145728 bytes"), "{}", e.message);
+        assert!(!e.maybe_sent && e.tx.is_none());
+        assert_eq!(e.refundable(50), 50, "nothing was spent");
+        assert_eq!(next_nonce(), None, "no nonce is reserved");
+        assert_eq!(get_history().len(), logged, "and nothing is logged as possibly live");
     }
 
     /// Which broadcast failures leave the transaction possibly held by a
