@@ -313,6 +313,9 @@ expect "signed by another key: refused, naming both keys" "$(signed "$URL" "$WOR
 OUT=$(git -C "$W" push "$PURL" main 2>&1 || true)
 expect "unbound token, not required: accepted" "$OUT" 'main -> main'
 refuse "  ...and not rejected" "$OUT" 'rejected'
+# The deploy branch moves forward only: a push that deletes it is refused,
+# or a delete and a create would put any history on it.
+expect "a push deleting the deploy branch is refused" "$(git -C "$W" push "$PURL" :main 2>&1 || true)" 'remote rejected.*deploy branch is not deleted'
 # A push naming a ref outside refs/, which no git client sends: the
 # request is refused as it is read, with the reason, and nothing is
 # charged. (It used to be charged, and then trap where the ref was written.)
