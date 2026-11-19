@@ -788,6 +788,7 @@ pricing() { printf '(record { create_repo = 1000000000 : nat64; push_base = 1000
 expect "a tenant cannot retune it" "$(ic "$TEN" set_pricing "$(pricing 1)")" 'is not an operator'
 # The table as it was before the floor: still taken, the floor the default.
 ic "$OP" set_pricing '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64 })' >/dev/null
+expect "  ...and charges nothing for EVM gas, which it says" "$(ic "$OP" get_pricing --query)" 'evm_gas = opt \(0 : nat64\)'
 expect "a table without the floor keeps the default" "$(ic "$OP" get_pricing --query)" 'git_canister_floor = opt \(1_000_000_000_000 : nat64\)'
 
 if [ "$SPLIT" = 1 ]; then

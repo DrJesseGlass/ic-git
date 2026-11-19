@@ -54,6 +54,26 @@ pub struct Pricing {
     /// in, so the table served always says the floor in force.
     #[serde(default)]
     pub git_canister_floor: Option<u64>,
+    /// Per unit of an EVM transaction's gas limit, on top of `evm_action`
+    /// (`evm_cost`): the gas is paid on the other chain by the canister's
+    /// EOA, which is the operators' to fund, and this is what a tenant
+    /// pays toward it. By the limit and not by what was used: the limit
+    /// is what the EOA must hold at the send, and the tenant's to set.
+    /// The rate is the operators' judgment of what that chain's gas is
+    /// worth in cycles; 0, the default, charges nothing, as is right on a
+    /// testnet. Optional as the floor is: `None` reads as the default,
+    /// and `pricing()` fills it in.
+    #[serde(default)]
+    pub evm_gas: Option<u64>,
+}
+
+impl Pricing {
+    /// What one EVM action costs whose transaction has this gas limit: a
+    /// deploy's is its config's, a registry write's is
+    /// `evm::REGISTRY_SET_GAS`.
+    pub fn evm_cost(&self, gas_limit: u64) -> u64 {
+        self.evm_action.saturating_add(self.evm_gas.unwrap_or(0).saturating_mul(gas_limit))
+    }
 }
 
 pub const DEFAULT_GIT_CANISTER_FLOOR: u64 = 1_000_000_000_000;
@@ -73,6 +93,7 @@ impl Default for Pricing {
             evm_action: 50_000_000_000,
             ic_deploy: 5_000_000_000,
             git_canister_floor: Some(DEFAULT_GIT_CANISTER_FLOOR),
+            evm_gas: Some(0),
         }
     }
 }
@@ -83,6 +104,7 @@ const YEAR_NS: u128 = 365 * 24 * 3600 * 1_000_000_000;
 pub fn pricing() -> Pricing {
     let mut p: Pricing = crate::kv::get_json(PRICING_KEY).unwrap_or_default();
     p.git_canister_floor = Some(p.git_canister_floor.unwrap_or(DEFAULT_GIT_CANISTER_FLOOR));
+    p.evm_gas = Some(p.evm_gas.unwrap_or(0));
     p
 }
 
@@ -2517,6 +2539,30 @@ mod tests {
         create_repo("t-unasked", &alice, false).unwrap();
         assert_eq!(balance(&alice), 7 * fee);
         crate::to_git::set_test_side(None);
+    }
+
+    /// An EVM action is priced with its transaction's gas limit, at a
+    /// rate that is 0 until an operator sets one; a table stored or sent
+    /// before the rate existed reads as 0, and the table served says so.
+    #[test]
+    fn an_evm_action_is_priced_with_its_gas_limit() {
+        let before = pricing();
+        assert_eq!(before.evm_gas, Some(0));
+        assert_eq!(before.evm_cost(10_000_000), before.evm_action, "no rate, no charge for gas");
+        let old: Pricing = serde_json::from_str(
+            r#"{"create_repo":1,"push_base":2,"push_per_byte":3,"rent_per_byte_year":4,"evm_action":5,"ic_deploy":6}"#,
+        )
+        .unwrap();
+        assert_eq!(old.evm_gas, None);
+        assert_eq!(old.evm_cost(1_000_000), 5);
+        set_pricing(old);
+        assert_eq!(pricing().evm_gas, Some(0), "always given on the way out");
+
+        let p = Pricing { evm_gas: Some(2_000_000), ..before.clone() };
+        assert_eq!(p.evm_cost(100_000), p.evm_action + 200_000_000_000);
+        assert_eq!(p.evm_cost(0), p.evm_action);
+        assert_eq!(p.evm_cost(u64::MAX), u64::MAX, "no wrapping to a small price");
+        set_pricing(before);
     }
 
     /// Naming a site's domains is the owner's to pay for, at a push's

@@ -1548,7 +1548,7 @@ async fn publish_charged(
     repo: &str,
     record: &provenance::Record,
 ) -> Result<evm::TxOutcome, String> {
-    let cost = tenancy::pricing().evm_action;
+    let cost = tenancy::pricing().evm_cost(evm::REGISTRY_SET_GAS);
     let payer = tenancy::charge_action(repo, cost, "registry publish")?;
     provenance::publish(record).await.map_err(|e| {
         tenancy::refund_action(payer, e.refundable(cost));

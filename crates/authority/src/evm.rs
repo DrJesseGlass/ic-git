@@ -1312,8 +1312,20 @@ fn record(rec: EvmDeployRecord) -> Result<(), String> {
     Ok(())
 }
 
+/// The most gas a deploy may be given. The EOA that pays it is shared and
+/// the limit is the tenant's to set, so without a ceiling one deploy could
+/// ask the EOA to hold, and a contract written to burn it could spend, a
+/// whole block's worth. A contract of the largest size the chain takes
+/// (24,576 bytes, from 49,152 of init code) costs under 6M to create with
+/// a constructor that does nothing else: 53k, up to 16 per byte of init
+/// code, and 200 per byte kept. The rest is the constructor's. It is also
+/// under the 2^24 a single transaction may use since EIP-7825.
+pub const MAX_DEPLOY_GAS: u64 = 10_000_000;
+
 /// The canister-level preconditions for a CREATE deploy: a chain config, and a
-/// gas limit that could pay for one (21k intrinsic + 32k for the CREATE).
+/// gas limit that could pay for one (21k intrinsic + 32k for the CREATE) and
+/// is not above `MAX_DEPLOY_GAS`. Until 2026-11 there was a floor and no
+/// ceiling.
 ///
 /// One definition, used from three places on purpose -- `deploy_bytecode`
 /// needs the config, while `require_deploy_target` lets `configs::set_evm`
@@ -1324,6 +1336,9 @@ fn deploy_target(gas_limit: u64) -> Result<EvmConfig, String> {
     let cfg = require_config()?;
     if gas_limit < 53_000 {
         return Err("gas_limit below the 53k floor of any CREATE".into());
+    }
+    if gas_limit > MAX_DEPLOY_GAS {
+        return Err(format!("gas_limit above the {MAX_DEPLOY_GAS} a deploy may be given"));
     }
     Ok(cfg)
 }
@@ -1435,7 +1450,7 @@ const REGISTRY_KEY: &str = "evm:registry";
 /// 0.009).
 /// The margin over the measured creation cost is for longer keys and the
 /// next repricing.
-const REGISTRY_SET_GAS: u64 = 1_000_000;
+pub const REGISTRY_SET_GAS: u64 = 1_000_000;
 
 pub fn set_registry(address: String) -> Result<(), String> {
     parse_address(&address)?;
@@ -1584,6 +1599,20 @@ mod tests {
             base_fee_per_gas: vec![],
         };
         assert!(fee_pair(&empty).is_err());
+    }
+
+    /// A deploy's gas limit has a floor and a ceiling: the EOA is shared,
+    /// and the limit is the tenant's to set.
+    #[test]
+    fn a_deploy_gas_limit_is_bounded_both_ways() {
+        set_config("aaaaa-aa".into(), "k".into(), 11155111, vec![]).unwrap();
+        assert!(require_deploy_target(52_999).unwrap_err().contains("53k floor"));
+        assert_eq!(require_deploy_target(53_000), Ok(()));
+        assert_eq!(require_deploy_target(MAX_DEPLOY_GAS), Ok(()));
+        assert!(require_deploy_target(MAX_DEPLOY_GAS + 1).unwrap_err().contains("above the 10000000"));
+        assert!(require_deploy_target(u64::MAX).is_err());
+        // A registry write's own limit is within what a deploy may have.
+        const { assert!(REGISTRY_SET_GAS <= MAX_DEPLOY_GAS) };
     }
 
     /// A config stored before the fallback existed loads with none; the

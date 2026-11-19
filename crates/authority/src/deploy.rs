@@ -619,7 +619,7 @@ async fn attempt_evm(
 /// push-then-impatient-deploy_now duplicates. After a fresh broadcast, the
 /// repo's provenance is auto-published to the registry when one is set.
 ///
-/// Also returns how much of `price` (the evm_action charged for this leg) to
+/// Also returns how much of `price` (what this leg was charged, `evm_cost`) to
 /// give back: all of it for a skipped commit, and for a failed deploy what
 /// `SendError::refundable` says it did not use.
 async fn run_evm(
@@ -742,9 +742,16 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
     // with the deploy and refunded if the publish fails before broadcast.
     let app_record = wasm_cfg.as_ref().is_some_and(|cfg| crate::tenancy::governed_target(repo, &cfg.target))
         && crate::evm::get_registry().is_some();
-    let cost = wasm_cfg.as_ref().map_or(0, |_| pricing.ic_deploy)
-        + evm_cfg.as_ref().map_or(0, |_| pricing.evm_action)
-        + if app_record { pricing.evm_action } else { 0 };
+    // Each EVM action is priced with its transaction's gas limit
+    // (`Pricing::evm_cost`): the deploy's is the repo's config's, the
+    // record's the registry write's.
+    let evm_price = evm_cfg.as_ref().map_or(0, |cfg| pricing.evm_cost(cfg.gas_limit));
+    let record_price = pricing.evm_cost(evm::REGISTRY_SET_GAS);
+    let cost = wasm_cfg
+        .as_ref()
+        .map_or(0, |_| pricing.ic_deploy)
+        .saturating_add(evm_price)
+        .saturating_add(if app_record { record_price } else { 0 });
     let payer = match crate::tenancy::charge_action(repo, cost, "deploy") {
         Ok(payer) => payer,
         Err(e) => {
@@ -817,12 +824,12 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
                     // of the registry see it.
                     Ok(reg) => format!("; app record tx {}", reg.tx_hash),
                     Err(e) => {
-                        crate::tenancy::refund_action(payer, e.refundable(pricing.evm_action));
+                        crate::tenancy::refund_action(payer, e.refundable(record_price));
                         format!("; app record failed: {}", e.message)
                     }
                 },
                 Err(e) => {
-                    crate::tenancy::refund_action(payer, pricing.evm_action);
+                    crate::tenancy::refund_action(payer, record_price);
                     format!("; app record failed: {e}")
                 }
             };
@@ -831,13 +838,13 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
                 put_status(repo, &st);
             }
         } else {
-            crate::tenancy::refund_action(payer, pricing.evm_action);
+            crate::tenancy::refund_action(payer, record_price);
         }
     }
 
     if let (Some(cfg), Some(artifact)) = (evm_cfg, evm_artifact) {
         let (evm_st, unused) =
-            run_evm(repo, &cfg, &commit_oid, artifact, force, pricing.evm_action).await;
+            run_evm(repo, &cfg, &commit_oid, artifact, force, evm_price).await;
         crate::tenancy::refund_action(payer, unused);
         let leg = if evm_st.ok {
             format!("evm: {} ({})", evm_st.contract_address, evm_st.tx_hash)
