@@ -1531,14 +1531,17 @@ async fn evm_receipt(tx_hash: String) -> Result<Option<evm::ReceiptSummary>, Str
     evm::receipt(tx_hash).await
 }
 
-/// Append-only EVM provenance log: (repo, commit, chain, address, tx,
-/// bytecode hash, ok) per deploy attempt. Repo and commit are empty for
-/// direct-hex deploys. An ok record means the broadcast was accepted;
-/// receipt_status carries the mined outcome once the automatic receipt
-/// poll (or an evm_receipt call) has seen it.
+/// The EVM provenance log: (repo, commit, chain, address, tx, bytecode
+/// hash, ok) per deploy attempt. Repo and commit are empty for direct-hex
+/// deploys. An ok record means the broadcast was accepted; receipt_status
+/// carries the mined outcome once the automatic receipt poll (or an
+/// evm_receipt call) has seen it. With a repo named, that repo's records,
+/// its newest 200, oldest first; with none, the newest 200 across every
+/// repo. Until 2026-11 it took no argument and answered with every record
+/// of every repo.
 #[ic_cdk::query]
-fn evm_deploy_history() -> Vec<evm::EvmDeployRecord> {
-    evm::get_history()
+fn evm_deploy_history(repo: Option<String>) -> Vec<evm::EvmDeployRecord> {
+    evm::history(repo.as_deref())
 }
 
 /// The stored next EVM nonce: the nonce after the last broadcast a provider

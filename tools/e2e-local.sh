@@ -1198,6 +1198,11 @@ expect "the successor can upgrade the target again" "$( (cd "$WORK" && dfx canis
 fi
 
 section "console reads"
+expect "the EVM deploy log is read by repo" "$(ic anonymous evm_deploy_history '(opt "e2e-app")' --query)" 'vec \{\}'
+expect "  ...or across every repo" "$(ic anonymous evm_deploy_history '(null)' --query)" 'vec \{\}'
+# A caller from before the argument sends none (the bytes of an empty
+# argument list), and is answered: a Candid reply, not a trap.
+expect "  ...and a caller from before it, who sends no argument" "$(ic anonymous evm_deploy_history --type raw 4449444c0000 --query)" '4449444c'
 for p in pricing e2e-app/info "account/$T" e2e-app/deploys; do
   expect "/api/$p" "$(curl -s "http://$AHOST/api/$p")" '^\{'
 done
