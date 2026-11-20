@@ -426,13 +426,17 @@ expect "a method the canister has not is refused" "$(cd "$WORK" && dfx canister 
 # A push comes through the gateway unsigned, so its token is read here:
 # without one the message is not taken, and with one a body of the
 # largest size is, its pack left unread.
-expect "a push without a token is not taken" "$(curl -s -X POST --data-binary x "http://$HOST/e2e-app.git/git-receive-pack")" 'push token required'
-expect "  ...nor a post to anything else" "$(curl -s -X POST --data-binary x "http://$HOST/e2e-app.git/git-receive-packs")" 'not found'
+# The gateway answers a message the canister did not take with a page of
+# its own and an error status, not the canister's 401: git never gets
+# this far without a token, having been asked for one at info/refs.
+expect "a push without a token is not taken" "$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary x "http://$HOST/e2e-app.git/git-receive-pack")" '^[45][0-9][0-9]$'
+expect "  ...the reason is the caller's to read, sent directly" "$(ic "$TEN" http_request_update '(record { method = "POST"; url = "/e2e-app.git/git-receive-pack"; headers = vec {}; body = blob "x" })')" 'http_request_update: push token required'
+expect "  ...nor anything that is not a push" "$(ic "$TEN" http_request_update '(record { method = "GET"; url = "/api/repos"; headers = vec {}; body = blob "" })')" 'only a push comes here'
 ITOK=$(ic "$TEN" create_push_token '("e2e-app", null, null)' | ok_text)
 head -c 1900000 /dev/urandom >"$WORK/junk.bin"
 expect "a push of 1.9 MB with a token is taken, and read" "$(curl -s -u "ic:$ITOK" --data-binary "@$WORK/junk.bin" "http://$HOST/e2e-app.git/git-receive-pack" | tr -d '\0' | head -c 300)" 'unpack '
 ic "$TEN" revoke_push_token "(\"$ITOK\")" >/dev/null
-expect "  ...and not once the token is revoked" "$(curl -s -u "ic:$ITOK" --data-binary "@$WORK/junk.bin" "http://$HOST/e2e-app.git/git-receive-pack" | tr -d '\0' | head -c 300)" 'push token required'
+expect "  ...and not once the token is revoked" "$(curl -s -o /dev/null -w '%{http_code}' -u "ic:$ITOK" --data-binary "@$WORK/junk.bin" "http://$HOST/e2e-app.git/git-receive-pack")" '^[45][0-9][0-9]$'
 
 section "approval-gated site"
 SITE="http://$HOST/site/e2e-app/"
@@ -921,7 +925,7 @@ ic "$TEN" remove_member "(\"e2e-app\", principal \"$OPP\")" >/dev/null
 (cd "$WORK" && dfx canister create copy --identity "$OP" --no-wallet --with-cycles 50000000000000 >/dev/null 2>&1)
 (cd "$WORK" && dfx canister install copy --identity "$OP" --wasm "$GITC_WASM" --argument "(record { authority = principal \"$G\" })" >/dev/null 2>&1)
 C=$(cd "$WORK" && dfx canister id copy)
-expect "a stranger cannot read the export" "$(ic "$TEN" export_page '(null)')" 'operator or the named importer'
+expect "a stranger cannot read the export" "$(ic "$TEN" export_page '(null)')" 'is not an operator'
 expect "the exporter cannot be its own importer" "$(ic "$OP" set_importer "(principal \"$G\")")" 'own importer'
 expect "the copy must be frozen before it imports" "$(call "$OP" copy import_start "(principal \"$G\")")" 'freeze this canister first'
 call "$OP" copy freeze >/dev/null

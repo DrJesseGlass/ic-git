@@ -736,8 +736,8 @@ fn inspect_message() {
 /// A push as the filter reads it, its pack unread: taken when
 /// `http_request_update` would get as far as the token, since without one
 /// it answers 404 or 401 and changes nothing. A token that stopped
-/// authorizing since the advertisement is refused here, where the gateway
-/// reports the refusal in place of the 401.
+/// authorizing since the advertisement is refused here, and the gateway
+/// answers with an error page of its own in place of the 401.
 fn push_at_ingress(arg: &[u8]) -> Result<(), String> {
     let req = ingress::http_request_less_body(arg)?;
     match route(&req) {

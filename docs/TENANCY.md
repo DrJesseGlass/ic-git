@@ -867,8 +867,9 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   and on the git canister anything sent to `http_request_update` but a
   push with a push token that authorizes it, read without its pack. A
   push whose token stopped authorizing between the advertisement and
-  the pack is therefore refused by the gateway, with the reason, in
-  place of the 401. Each method's rule is one line in its side's
+  the pack therefore gets the gateway's own error page in place of the
+  401; git asks for the token at the advertisement, so a push without
+  one does not get that far. Each method's rule is one line in its side's
   `ingress.rs`, and a canister's tests fail when its `.did` has a
   method with none. The filter saves cycles and decides nothing: a call
   from another canister never passes through it and one replica alone
