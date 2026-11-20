@@ -70,9 +70,13 @@ controllers to notice it running low. From 2026-11 the governor's code
 has an ingress filter (`canister_inspect_message`, `State::takes`): a
 change (`propose`, `stage`, `vote`, `execute`) is taken from an approver
 alone, a `withdraw` also from the proposer of an open proposal, a read
-sent as an update with at most 64 bytes of argument, and nothing else.
-It saves cycles and decides nothing: every method checks its caller as
-before.
+sent as an update from anyone, and nothing else. A `withdraw` and a read
+carry at most 64 bytes of argument, since someone other than an approver
+may send them: a proposer the approvers have voted out keeps the
+withdrawal of their own proposal while it is open, and nothing more. A
+governor that has handed its target over takes no change at all, only
+reads. It saves cycles and decides nothing: every method checks its
+caller as before.
 
 The two governors in place run the module from before it
 (`a71ff65d...641f`) and cannot be upgraded: anyone can still send

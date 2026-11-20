@@ -42,9 +42,10 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-/// The most a read's argument weighs when it is sent as an update: `log`
-/// takes two numbers.
-const MAX_READ_ARG_BYTES: usize = 64;
+/// The most the argument weighs of a call someone other than an approver
+/// may send: a read sent as an update (`log` takes two numbers) and a
+/// `withdraw` (one).
+const MAX_SMALL_ARG_BYTES: usize = 64;
 /// At most this many proposals open at once, so staged modules cannot fill
 /// the heap.
 pub const MAX_OPEN: usize = 4;
@@ -389,17 +390,36 @@ impl State {
     }
 
     /// Is a signed message taken at all (`inspect_message`)? Each answer
-    /// is the method's own first refusal or wider, so what is refused
-    /// here the method would refuse: a change is an approver's, a
-    /// withdrawal also its proposer's, who may no longer be one, and a
-    /// read sent as an update is anyone's with a read's argument.
+    /// is a refusal of the method's own or wider, so what is refused here
+    /// the method would refuse: a change is an approver's while the
+    /// governor is live, a withdrawal also its proposer's, who may no
+    /// longer be one, and a read sent as an update is anyone's. A call
+    /// that someone other than an approver may send carries no more than
+    /// its argument could weigh: the proposer of an open proposal may be
+    /// someone the approvers have since voted out.
     fn takes(&self, method: &str, who: Principal, arg_len: usize) -> Result<(), String> {
+        let small = || {
+            if arg_len <= MAX_SMALL_ARG_BYTES {
+                Ok(())
+            } else {
+                Err(format!("{method}: the argument is {arg_len} bytes, and a call of it carries at most {MAX_SMALL_ARG_BYTES}"))
+            }
+        };
         match method {
-            "propose" | "stage" | "vote" | "execute" => self.require_approver(who),
-            "withdraw" if self.proposals.values().any(|p| p.proposer == who) => Ok(()),
-            "withdraw" => self.require_approver(who),
-            "info" | "proposals" | "log" | "cycle_balance" if arg_len <= MAX_READ_ARG_BYTES => Ok(()),
-            "info" | "proposals" | "log" | "cycle_balance" => Err(format!("{method}: the argument is {arg_len} bytes, and a call of it carries at most {MAX_READ_ARG_BYTES}")),
+            "propose" | "stage" | "vote" | "execute" => {
+                self.require_live()?;
+                self.require_approver(who)
+            }
+            "withdraw" => {
+                self.require_live()?;
+                small()?;
+                if self.proposals.values().any(|p| p.proposer == who) {
+                    Ok(())
+                } else {
+                    self.require_approver(who)
+                }
+            }
+            "info" | "proposals" | "log" | "cycle_balance" => small(),
             _ => Err(format!("{method}: this canister takes no such call")),
         }
     }
@@ -1172,22 +1192,64 @@ mod tests {
         let mut s = state(&[p(1), p(2)], 2);
         let stranger = p(9);
         for m in ["propose", "stage", "vote", "execute", "withdraw"] {
-            assert_eq!(s.takes(m, p(1), 1 << 20), Ok(()), "{m}");
+            assert_eq!(s.takes(m, p(1), 10), Ok(()), "{m}");
             assert!(s.takes(m, stranger, 10).unwrap_err().contains("only an approver"), "{m}");
             assert!(s.takes(m, Principal::anonymous(), 10).is_err(), "{m}");
         }
+        // An approver's change weighs what it weighs: a chunk, an install
+        // argument.
+        for m in ["propose", "stage", "vote", "execute"] {
+            assert_eq!(s.takes(m, p(1), 2 << 20), Ok(()), "{m}");
+        }
         for m in ["info", "proposals", "log", "cycle_balance"] {
-            assert_eq!(s.takes(m, Principal::anonymous(), MAX_READ_ARG_BYTES), Ok(()), "{m}");
-            assert!(s.takes(m, p(1), MAX_READ_ARG_BYTES + 1).is_err(), "{m}");
+            assert_eq!(s.takes(m, Principal::anonymous(), MAX_SMALL_ARG_BYTES), Ok(()), "{m}");
+            assert!(s.takes(m, p(1), MAX_SMALL_ARG_BYTES + 1).unwrap_err().contains("at most 64"), "{m}");
         }
         assert!(s.takes("no_such", p(1), 0).unwrap_err().contains("no such call"));
-        // A proposer the policy has since dropped still withdraws their own.
+        // A proposer the policy has since dropped still withdraws their
+        // own, with a withdrawal's argument and no more.
         let id = s.open(p(2), upgrade(b"m"), 0).unwrap();
         s.policy = policy_of(&[p(1)], 1).unwrap();
-        assert_eq!(s.takes("withdraw", p(2), 10), Ok(()));
+        assert_eq!(s.takes("withdraw", p(2), MAX_SMALL_ARG_BYTES), Ok(()));
+        assert!(s.takes("withdraw", p(2), MAX_SMALL_ARG_BYTES + 1).unwrap_err().contains("at most 64"));
+        assert!(s.takes("withdraw", p(1), MAX_SMALL_ARG_BYTES + 1).is_err());
         assert!(s.takes("vote", p(2), 10).is_err());
         assert_eq!(s.withdraw(p(2), id, 0), Ok(()));
         assert!(s.takes("withdraw", p(2), 10).is_err());
+    }
+
+    /// What the filter refuses, the method refuses: every answer of the
+    /// method's to a caller the filter turned away is a refusal.
+    #[test]
+    fn the_filter_refuses_nothing_a_method_would_take() {
+        let mut s = state(&[p(1), p(2)], 1);
+        let id = s.open(p(2), Change::Handover { successor: p(9) }, 0).unwrap();
+        let open = s.open(p(2), upgrade(b"m"), 0).unwrap();
+        for who in [p(1), p(2), p(9), Principal::anonymous()] {
+            if s.takes("propose", who, 10).is_err() {
+                assert!(s.open(who, upgrade(b"m"), 1).is_err());
+                assert!(s.stage(who, open, 0, b"m", 1).is_err());
+                assert!(s.cast(who, open, Decision::Reject, None, 1).is_err());
+            }
+            if s.takes("withdraw", who, 10).is_err() {
+                assert!(s.withdraw(who, open, 1).is_err());
+            }
+        }
+        // An inert governor takes no change, from an approver either; its
+        // reads stay.
+        s.cast(p(1), id, Decision::Approve, None, 1).unwrap();
+        s.begin(id, 2).unwrap();
+        s.finish(id, 2, done("handed over"), 2);
+        for m in ["propose", "stage", "vote", "execute", "withdraw"] {
+            assert!(s.takes(m, p(1), 10).unwrap_err().contains("inert"), "{m}");
+            assert!(s.takes(m, p(2), 10).unwrap_err().contains("inert"), "{m}");
+        }
+        assert!(s.open(p(1), upgrade(b"m"), 3).unwrap_err().contains("inert"));
+        assert!(s.stage(p(1), open, 0, b"m", 3).unwrap_err().contains("inert"));
+        assert!(s.cast(p(1), open, Decision::Reject, None, 3).unwrap_err().contains("inert"));
+        assert!(s.withdraw(p(2), open, 3).unwrap_err().contains("inert"));
+        assert!(s.begin(open, 3).unwrap_err().contains("inert"));
+        assert_eq!(s.takes("log", Principal::anonymous(), 10), Ok(()));
     }
 
     /// Every method of the service has its answer in `takes`.
