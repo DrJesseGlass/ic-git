@@ -162,6 +162,17 @@ push moves a ref, an operator's hand included, so what is pushed to the
 deploy branch stays in its history: a commit there is undone by a commit
 on top of it.
 
+A push's checks cost what the push brings. Every command is checked for
+objects it reaches that the store does not hold, and an update for being
+a fast-forward; the commands of one push share that work: the history
+the refs reach is read once, and the fast-forward checks may load
+100,000 commits between them, past which a command is refused with that
+as its reason (a fast-forward is found within the commits it adds, so
+one push adding more than that to a ref is pushed in steps). Until
+2026-11 each command walked every object the repo holds, so a push
+naming a thousand refs, charged as the few kilobytes it is, was a
+thousand walks of the repo.
+
 A push whose request cannot be read is refused and charged nothing, and
 a command naming a ref outside `refs/` (`HEAD`, a bare `main`) is such a
 request: the whole push is refused with the reason. Until 2026-11 that
