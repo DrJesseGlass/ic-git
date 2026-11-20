@@ -33,8 +33,16 @@
 //! - `finish_icp_deposit(id)` is for the depositor or an operator, and
 //!   credits the depositor. The CMC answers a repeated notify with the same
 //!   result, and the entry is taken off the list after the reply and before
-//!   the credit, so concurrent finishes credit once; the one that finds it
+//!   the credit, so a deposit is credited once; a finish that finds it
 //!   already credited reports the depositor's balance, not an error.
+//! - One attempt at a time takes a deposit forward (`claim`): a finish
+//!   that comes while another is waiting on the ledger or the CMC is
+//!   refused and told to come again. Until 2026-11 two could run at once,
+//!   and each read its reply as the whole story. A replay the ledger
+//!   refused (`TemporarilyUnavailable`, say) dropped the entry while the
+//!   first transfer was still out; when that one came back with its block
+//!   the ICP was the CMC's, the cycles came, and there was no entry left
+//!   to credit them to.
 //!
 //! The candid below is hand-mirrored from the ICP ledger and the CMC, the
 //! same way ledger.rs mirrors the cycles ledger.
@@ -378,9 +386,40 @@ async fn notify(cmc: Principal, block: u64) -> Notified {
     classify_notify(reply)
 }
 
+thread_local! {
+    /// The deposits an attempt is taking forward now (`claim`). On the
+    /// heap: an attempt does not outlive an upgrade, which waits for its
+    /// calls to return.
+    static ADVANCING: std::cell::RefCell<std::collections::BTreeSet<u64>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+/// The one attempt taking deposit `id` forward. Dropped when the attempt
+/// ends, however it ends: a trap after a reply drops it too, since the
+/// attempt's future is dropped then.
+#[derive(Debug)]
+struct Claim(u64);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        ADVANCING.with(|a| a.borrow_mut().remove(&self.0));
+    }
+}
+
+/// Claim deposit `id` for one attempt, or say that another has it.
+fn claim(id: u64) -> Result<Claim, String> {
+    if ADVANCING.with(|a| a.borrow_mut().insert(id)) {
+        Ok(Claim(id))
+    } else {
+        Err(format!("ICP deposit {id} is being finished by an earlier call; ask again when it has answered (finish_icp_deposit({id}))"))
+    }
+}
+
 /// Take pending deposit `id` as far as it will go: the transfer if its
-/// block is not known yet, then the notify and the credit.
+/// block is not known yet, then the notify and the credit. One attempt at
+/// a time: what a reply means for the entry holds only while no other
+/// attempt is waiting on one.
 async fn advance(id: u64) -> Result<u64, String> {
+    let _claim = claim(id)?;
     let p = get_pending(id).ok_or_else(|| format!("no pending ICP deposit {id}"))?;
     let block = match p.block_index {
         Some(b) => b,
@@ -562,6 +601,26 @@ mod tests {
         assert_eq!(tenancy::get_account(&who).balance, before + 3_000);
         assert!(pending().is_empty());
         assert!(settle(99, Notified::Cycles(1)).is_err());
+    }
+
+    /// A second attempt on a deposit is refused while the first is out,
+    /// and taken again once it has ended.
+    #[test]
+    fn one_attempt_at_a_time_takes_a_deposit_forward() {
+        let first = claim(21).unwrap();
+        let e = claim(21).unwrap_err();
+        assert!(e.contains("is being finished by an earlier call"), "{e}");
+        // Another deposit is not held by it.
+        drop(claim(22).unwrap());
+        drop(first);
+        drop(claim(21).unwrap());
+        // The attempt itself: refused before it reads or changes the entry.
+        pend(23, Some(230), p(64));
+        let held = claim(23).unwrap();
+        let e = futures::executor::block_on(advance(23)).unwrap_err();
+        assert!(e.contains("is being finished by an earlier call"), "{e}");
+        assert_eq!(get_pending(23).unwrap().last_error, None);
+        drop(held);
     }
 
     #[test]
