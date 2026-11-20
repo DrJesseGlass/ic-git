@@ -487,24 +487,31 @@ fn step(limit: u64) -> bool {
 }
 
 thread_local! {
-    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The rebuild whose steps a timer is taking: counted, so that the
+    /// timer of one a later rebuild replaced takes no more.
+    static CHAIN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// The next step, as soon as the canister is idle, and the one after it
-/// from there. One timer at a time. A step that trapped would leave
-/// what waits declared uncertified until the next upgrade starts over
-/// (`sites_to_certify` shows it): nothing runs it again, since a step
-/// that traps once would trap every time, at 40 billion instructions a
-/// try.
-#[cfg(not(any(test, feature = "testing")))]
+/// The steps left of the rebuild just started: the next as soon as the
+/// canister is idle, and each one after it from the one before. A step
+/// that trapped ends its chain, and what waits stays declared
+/// uncertified (`sites_to_certify` shows it) until a site changes, each
+/// for itself, or a rebuild starts over, at the next upgrade: nothing
+/// runs the step again, since one that traps once would trap every
+/// time, at 40 billion instructions a try.
 fn arm() {
-    if ARMED.with(|a| a.replace(true)) {
-        return;
-    }
-    ic_cdk_timers::set_timer(std::time::Duration::ZERO, async {
-        ARMED.with(|a| a.set(false));
-        if step(IN_UPDATE) {
-            arm();
+    let chain = CHAIN.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    next_step(chain);
+}
+
+#[cfg(not(any(test, feature = "testing")))]
+fn next_step(chain: u64) {
+    ic_cdk_timers::set_timer(std::time::Duration::ZERO, async move {
+        if CHAIN.with(|c| c.get()) == chain && step(IN_UPDATE) {
+            next_step(chain);
         }
     });
 }
@@ -512,9 +519,7 @@ fn arm() {
 /// Tests take the steps themselves; a timer cannot fire outside a
 /// canister.
 #[cfg(any(test, feature = "testing"))]
-fn arm() {
-    ARMED.with(|a| a.set(true));
-}
+fn next_step(_chain: u64) {}
 
 /// What a site serves may have changed: its config, its domains, its
 /// served commit, a push, a ref an operator wrote. A site a rebuild has
@@ -753,6 +758,11 @@ fn between(s: &mut State) {
 /// ones that changed are touched in the tree: there is one for every
 /// path of every domain's site, and a change of one site is not a change
 /// of the others'.
+///
+/// A site's own entries are made before this runs (`site_entries`,
+/// `step`), over a shadow of the same path where there was one, and its
+/// entries are taken out (`clear`) before this runs too: so a shadow and
+/// an exact entry of one path meet only here, on the shadow's way out.
 fn shadows(s: &mut State) {
     let mut want = BTreeMap::new();
     for path in domain_paths(s) {
@@ -770,7 +780,12 @@ fn shadows(s: &mut State) {
     }
     let had = std::mem::replace(&mut s.shadow, want);
     for (path, c) in &had {
-        if s.shadow.get(path) != Some(c) {
+        // A site's own entry may have taken the shadow's place since,
+        // and be the very same leaf: under `/site/<repo>/` the shadow
+        // is what the site serves there, which is what the site is
+        // certified with once it has entries (its turn in a rebuild, or
+        // back under the cap). That leaf is the site's now.
+        if s.shadow.get(path) != Some(c) && s.exact.get(path) != Some(c) {
             delete(&exact_path(path), c);
         }
     }
@@ -1309,7 +1324,9 @@ mod tests {
         };
         let Some((end, prefix)) = expr.split_last() else { return false };
         if end == "<$>" {
-            return prefix == req.as_slice();
+            // The entry itself, and not its absence: a witness for a leaf
+            // the tree does not hold has the tree's root too.
+            return prefix == req.as_slice() && !absent(&req, "<$>");
         }
         if end != "<*>" || !req.starts_with(prefix) || !absent(&req, "<$>") {
             return false;
@@ -1530,7 +1547,7 @@ mod tests {
 
         pages_a_step(3);
         super::rebuild(IN_UPDATE);
-        assert!(ARMED.with(|a| a.get()));
+        assert_eq!(CHAIN.with(|c| c.get()), 1);
         // b is in hand, three pages in: the root, app/main.js, docs.
         assert_eq!(sites_to_certify(), 3);
         for (url, done) in [("/site/b", true), ("/site/b/", true), ("/site/b/app/main.js", true), ("/site/b/docs", true), ("/site/b/docs/", false), ("/site/b/index.html", false)] {
@@ -1613,6 +1630,53 @@ mod tests {
             assert!(served_at_domain_as_certified("c", "c.example", "GET", sub), "{sub}");
             assert!(most_specific(&domain_url(sub), c, "GET"), "{sub}");
         }
+        pages_a_step(usize::MAX);
+    }
+
+    /// A domain's site with a page at another site's URL, `/site/b/...`:
+    /// while b waits, the canister host's answer there is b's page, as a
+    /// shadow; at b's turn its own entry is that same leaf, and stays in
+    /// the tree when the shadow goes.
+    #[test]
+    fn a_shadow_at_a_waiting_sites_url_leaves_the_sites_entry_when_its_turn_comes() {
+        for repo in ["a", "b"] {
+            store::create_repo(repo).unwrap();
+            crate::mirror::ungated_for_tests(repo);
+            site::set_config(repo, String::new()).unwrap();
+        }
+        let page = store::put_object(ObjectType::Blob, b"<h1>b</h1>");
+        let other = store::put_object(ObjectType::Blob, b"a's");
+        commit("b", &tree(&[("100644", "index.html", &page)]));
+        let b = tree(&[("100644", "index.html", &other)]);
+        let site_dir = tree(&[("40000", "b", &b)]);
+        commit("a", &tree(&[("100644", "index.html", &other), ("40000", "site", &site_dir)]));
+        site::set_domains("a", vec!["a.example".into()]).unwrap();
+        rebuild();
+        let whole = held();
+        // a is five pages: the root, index.html, site/b, site/b/ and
+        // site/b/index.html.
+        pages_a_step(5);
+        super::rebuild(IN_UPDATE);
+        assert_eq!(sites_to_certify(), 1);
+        assert!(STATE.with(|s| s.borrow().shadow.contains_key("/site/b/index.html")));
+        assert!(most_specific("/site/b/index.html", None, "GET") && served_as_certified("/site/b/index.html"));
+        assert!(!step(IN_UPDATE));
+        assert!(STATE.with(|s| !s.borrow().shadow.contains_key("/site/b/index.html")));
+        for url in ["/site/b", "/site/b/", "/site/b/index.html"] {
+            assert!(most_specific(url, None, "GET") && served_as_certified(url), "{url}");
+        }
+        assert_eq!(held(), whole);
+        // A change of the domain's site after it: the same.
+        site_changed("a");
+        assert_eq!(held(), whole);
+        // And past the cap and back under it, where the shadow is all
+        // the site has at the path for a while.
+        set_cap_for_tests(0);
+        site_changed("b");
+        assert!(STATE.with(|s| s.borrow().shadow.contains_key("/site/b/index.html")));
+        set_cap_for_tests(SITE_FILE_CAP);
+        site_changed("b");
+        assert_eq!(held(), whole);
         pages_a_step(usize::MAX);
     }
 
