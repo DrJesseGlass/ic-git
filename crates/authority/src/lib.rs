@@ -21,6 +21,7 @@ pub mod fleet;
 pub mod for_git;
 pub mod funding;
 pub mod icp;
+pub mod ingress;
 pub mod ledger;
 pub mod mirrors;
 pub mod moved;

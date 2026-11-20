@@ -8,6 +8,7 @@ pub mod call;
 pub mod clock;
 pub mod consent;
 pub mod httpjson;
+pub mod ingress;
 pub mod kv;
 pub mod memory;
 pub mod peer;

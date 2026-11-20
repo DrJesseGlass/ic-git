@@ -414,6 +414,26 @@ expect "  ...and its repo is exempt from charges" "$(ic "$OP" get_repo_info '("e
 expect "  ...and refused again once it is not a controller" "$(ic "$TEN" evm_reset_nonce)" 'is not an operator'
 expect "  ...and its repo pays again" "$(ic "$OP" get_repo_info '("e2e-app")')" 'exempt = false'
 
+section "ingress filter"
+# What the canister refuses before it pays for the message
+# (ic_git_common::ingress): the refusals below are the filter's own.
+expect "the anonymous principal: a tenant's call is refused" "$(ic anonymous create_repo '("e2e-anon")')" 'sign in first: the anonymous principal cannot call create_repo'
+expect "a tenant: an argument larger than any real one is refused" "$(ic "$TEN" create_repo "(\"$(head -c 20000 /dev/zero | tr '\0' a)\")")" 'create_repo: the argument is [0-9]+ bytes, and a call of it carries at most 16384'
+refuse "  ...an operator's is not" "$(ic "$OP" compile_wat "(\"(module) ;; $(head -c 20000 /dev/zero | tr '\0' a)\")")" 'carries at most'
+expect "attached cycles are no signed message's to deposit" "$(ic "$TEN" deposit)" 'deposit: a signed message carries no cycles'
+expect "a query sent as an update is taken" "$(ic anonymous get_pricing --update)" 'push_base'
+expect "a method the canister has not is refused" "$(cd "$WORK" && dfx canister call git no_such_call --identity "$TEN" 2>&1)" 'no such call|has no .*method'
+# A push comes through the gateway unsigned, so its token is read here:
+# without one the message is not taken, and with one a body of the
+# largest size is, its pack left unread.
+expect "a push without a token is not taken" "$(curl -s -X POST --data-binary x "http://$HOST/e2e-app.git/git-receive-pack")" 'push token required'
+expect "  ...nor a post to anything else" "$(curl -s -X POST --data-binary x "http://$HOST/e2e-app.git/git-receive-packs")" 'not found'
+ITOK=$(ic "$TEN" create_push_token '("e2e-app", null, null)' | ok_text)
+head -c 1900000 /dev/urandom >"$WORK/junk.bin"
+expect "a push of 1.9 MB with a token is taken, and read" "$(curl -s -u "ic:$ITOK" --data-binary "@$WORK/junk.bin" "http://$HOST/e2e-app.git/git-receive-pack" | tr -d '\0' | head -c 300)" 'unpack '
+ic "$TEN" revoke_push_token "(\"$ITOK\")" >/dev/null
+expect "  ...and not once the token is revoked" "$(curl -s -u "ic:$ITOK" --data-binary "@$WORK/junk.bin" "http://$HOST/e2e-app.git/git-receive-pack" | tr -d '\0' | head -c 300)" 'push token required'
+
 section "approval-gated site"
 SITE="http://$HOST/site/e2e-app/"
 # "<status> <commit>" of a site's root: the X-Ic-Git-Commit header names it.
@@ -613,7 +633,7 @@ INFO=$(ic "$OP" get_repo_info '("e2e-offer")')
 expect "  ...the owner is who it was" "$INFO" "owner = opt principal \"$T\""
 expect "  ...and the offer shows" "$INFO" "pending_owner = opt principal \"$P1\""
 expect "  ...in /api too" "$(curl -s "http://$AHOST/api/e2e-offer/info")" "\"pending_owner\":\"$P1\""
-expect "another principal cannot take it" "$(ic anonymous accept_transfer '("e2e-offer")')" 'is not offered to'
+expect "another principal cannot take it" "$(ic "$OP" accept_transfer '("e2e-offer")')" 'is not offered to'
 expect "the one it was offered to declines" "$(ic "$V1" cancel_transfer '("e2e-offer")')" 'Ok'
 expect "  ...and can no longer take it" "$(ic "$V1" accept_transfer '("e2e-offer")')" 'is not offered to'
 ic "$TEN" transfer_repo "(\"e2e-offer\", principal \"$P1\")" >/dev/null

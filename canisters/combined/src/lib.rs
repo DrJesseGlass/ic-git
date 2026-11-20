@@ -8,7 +8,7 @@
 use ic_git_compiler::{compile, interp, lang};
 // The shared crate, at the paths every module already names (crate::kv, ...).
 use ic_git_common::httpjson::git_response;
-use ic_git_common::{clock, httpjson, kv};
+use ic_git_common::{clock, httpjson, ingress, kv};
 // The git side (crates/git), likewise.
 use ic_git_git::{api, certify, jobs, mirror, outbox, pack, receive, signed_push, site, smart_http, store, to_authority, tokens, transfer};
 // The authority (crates/authority), likewise.
@@ -565,6 +565,57 @@ fn caller() -> candid::Principal {
 /// else is a tenant.
 fn operator() -> bool {
     is_operator(&caller())
+}
+
+// --- the ingress filter (ic_git_common::ingress) ------------------------------
+
+/// Which signed messages this canister takes in, before it pays for them:
+/// each method by its rule, and a push only with a push token. It guards
+/// cycles, not access: every method checks its caller as before, and a
+/// canister's call never comes through here. A refusal traps, so the
+/// caller reads why.
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::msg_method_name();
+    let who = caller();
+    let arg = ic_cdk::api::msg_arg_data();
+    let rule = ingress_rule(&method);
+    let mut taken = ingress::decide(&method, rule, &who, is_operator(&who), arg.len());
+    if taken.is_ok() && rule == Some(ingress::Rule::Push) {
+        taken = push_at_ingress(&arg);
+    }
+    match taken {
+        Ok(()) => ic_cdk::api::accept_message(),
+        Err(e) => ic_cdk::trap(e),
+    }
+}
+
+/// Both sides' methods are this canister's: the authority's rule where
+/// both name one (`create_repo`, `set_site`: here they are the tenant's
+/// calls, and nothing is another canister's message), the git side's for
+/// the rest.
+fn ingress_rule(method: &str) -> Option<ingress::Rule> {
+    ic_git_authority::ingress::rule(method).or_else(|| ic_git_git::ingress::rule(method))
+}
+
+/// A push as the filter reads it, its pack unread: taken when
+/// `http_request_update` would get as far as the token, since without one
+/// it answers 404 or 401 and changes nothing. A token that stopped
+/// authorizing since the advertisement is refused here, where the gateway
+/// reports the refusal in place of the 401.
+fn push_at_ingress(arg: &[u8]) -> Result<(), String> {
+    let req = ingress::http_request_less_body(arg)?;
+    match route(&req) {
+        Route::Rpc {
+            service: Service::ReceivePack,
+            repo,
+        } if push_authorized(&repo, &req.headers).is_some() => Ok(()),
+        Route::Rpc {
+            service: Service::ReceivePack,
+            ..
+        } => Err("http_request_update: push token required".to_string()),
+        _ => Err("http_request_update: only a push comes here".to_string()),
+    }
 }
 
 #[ic_cdk::update(guard = "is_admin")]

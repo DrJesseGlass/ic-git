@@ -14,7 +14,7 @@
 use ic_git_compiler::{compile, interp, lang};
 // The shared crate.
 use ic_git_common::httpjson::git_response;
-use ic_git_common::{httpjson, kv};
+use ic_git_common::{httpjson, ingress, kv};
 // The authority (crates/authority).
 use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, funding, icp, ledger, mirrors, moved, names, peer, provenance, sol, tenancy, to_git};
 use ic_git_types::authority_side::{AuthoritySide, Published};
@@ -326,6 +326,24 @@ fn caller() -> candid::Principal {
 /// else is a tenant.
 fn operator() -> bool {
     is_operator(&caller())
+}
+
+// --- the ingress filter (ic_git_common::ingress) ------------------------------
+
+/// Which signed messages this canister takes in, before it pays for them:
+/// each method by its rule. It guards cycles, not access: every method
+/// checks its caller as before, and a canister's call never comes through
+/// here. A refusal traps, so the caller reads why.
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::msg_method_name();
+    let who = caller();
+    let arg_len = ic_cdk::api::msg_arg_data().len();
+    let rule = ic_git_authority::ingress::rule(&method);
+    match ingress::decide(&method, rule, &who, is_operator(&who), arg_len) {
+        Ok(()) => ic_cdk::api::accept_message(),
+        Err(e) => ic_cdk::trap(e),
+    }
 }
 
 #[ic_cdk::update(guard = "is_admin")]
@@ -1314,3 +1332,18 @@ fn icrc21_canister_call_consent_message(req: ic_git_common::consent::ConsentMess
 }
 
 ic_cdk::export_candid!();
+
+#[cfg(test)]
+mod tests {
+    use ic_git_authority::ingress::{rule, RULES};
+    use ic_git_common::ingress;
+
+    /// A method without a rule is refused at ingress: the list is held to
+    /// the service, and the service to the list.
+    #[test]
+    fn every_method_has_its_ingress_rule() {
+        let did = include_str!("../authority.did");
+        assert_eq!(ingress::against_did(did, rule), Vec::<String>::new());
+        assert_eq!(ingress::stale(did, RULES), Vec::<String>::new());
+    }
+}

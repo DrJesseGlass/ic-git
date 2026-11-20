@@ -260,7 +260,9 @@ it.
 ### Funding
 
 - `deposit()`: credit the cycles attached to the call. Works from a cycles
-  wallet canister and from other canisters.
+  wallet canister and from other canisters, and from nothing else: a
+  signed message carries no cycles, and one sent to `deposit` or
+  `deposit_for` is refused before the canister pays for it.
 - `deposit_from_cycles_ledger(amount)`: the tenant first approves this
   canister on the cycles ledger (`icrc2_approve`), then calls this; ic-git
   pulls the cycles with `icrc2_transfer_from` and `withdraw`s them into
@@ -851,6 +853,28 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   exemption had the same gap: a controller off the allowlist created repos
   free but was then billed for them (rent, pushes, deploy actions). It now
   uses the same rule, `tenancy::is_operator`.
+- The ingress filter (`canister_inspect_message`, `ic_git_common::ingress`):
+  a canister pays for each signed message it takes in, by its bytes,
+  whether or not the call then does anything, so until 2026-11 anyone
+  could send any method an argument of 2 MiB and have the canister pay
+  for it, as often as the subnet allowed. Each canister now refuses,
+  before that charge: a method only the other canister calls, from
+  everyone; an operator's method from anyone else; a tenant's call from
+  the anonymous principal, or with an argument over 16 KiB (32 KiB for
+  the consent message) unless an operator sends it; a query sent as an
+  update with more than that; `deposit` and `deposit_for`, since a
+  signed message carries no cycles to deposit; a method with no rule;
+  and on the git canister anything sent to `http_request_update` but a
+  push with a push token that authorizes it, read without its pack. A
+  push whose token stopped authorizing between the advertisement and
+  the pack is therefore refused by the gateway, with the reason, in
+  place of the 401. Each method's rule is one line in its side's
+  `ingress.rs`, and a canister's tests fail when its `.did` has a
+  method with none. The filter saves cycles and decides nothing: a call
+  from another canister never passes through it and one replica alone
+  runs it, so every guard stays as it was. What is left: a signed-in
+  stranger can still have the canister pay for messages of up to
+  16 KiB to the methods tenants call.
 - `charge_rent_now` runs a rent tick on demand; the timer runs hourly and is
   re-armed on every upgrade.
 - Existing repos (`evm-demo`, `registry`, `ic-git`) are ownerless and exempt.
