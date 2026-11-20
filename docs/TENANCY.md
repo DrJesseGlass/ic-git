@@ -173,6 +173,13 @@ one push adding more than that to a ref is pushed in steps). Until
 naming a thousand refs, charged as the few kilobytes it is, was a
 thousand walks of the repo.
 
+A submodule is pushed as git pushes it: its entry in a tree names a
+commit of another repo, which is not asked for in the push and not sent
+in a fetch (`git clone --recurse-submodules` fetches it from the URL in
+`.gitmodules`, wherever that is). A site does not serve what is under
+one. Until 2026-11 the entry's commit was asked for with the tree's
+files, so a repo with a submodule could not be pushed.
+
 A push whose request cannot be read is refused and charged nothing, and
 a command naming a ref outside `refs/` (`HEAD`, a bare `main`) is such a
 request: the whole push is refused with the reason. Until 2026-11 that

@@ -21,6 +21,13 @@ pub fn is_tree_mode(mode: &str) -> bool {
     mode == "40000" || mode == "040000"
 }
 
+/// Whether a tree entry's mode is a submodule's (a gitlink): the entry
+/// names a commit of another repo, which this one does not hold. The one
+/// spelling git writes, as the site walk and the API read it.
+pub fn is_gitlink_mode(mode: &str) -> bool {
+    mode == "160000"
+}
+
 pub fn tree_entries(content: &[u8]) -> Result<Vec<TreeEntry>, String> {
     let mut out = Vec::new();
     let mut i = 0;
