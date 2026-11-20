@@ -263,6 +263,10 @@ it.
   wallet canister and from other canisters, and from nothing else: a
   signed message carries no cycles, and one sent to `deposit` or
   `deposit_for` is refused before the canister pays for it.
+  Either takes at least 100,000,000 cycles (`tenancy::MIN_DEPOSIT`) and
+  accepts none of a smaller amount: a deposit makes the account's row,
+  which is kept for good, and `deposit_for` names any principal, so with
+  no minimum a canister made rows without end for the price of a call.
 - `deposit_from_cycles_ledger(amount)`: the tenant first approves this
   canister on the cycles ledger (`icrc2_approve`), then calls this; ic-git
   pulls the cycles with `icrc2_transfer_from` and `withdraw`s them into

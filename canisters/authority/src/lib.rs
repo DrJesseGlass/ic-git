@@ -399,6 +399,7 @@ fn deposit() -> Result<tenancy::Account, String> {
         return Err("sign in first: the anonymous principal cannot hold a balance".into());
     }
     let available = ic_cdk::api::msg_cycles_available();
+    tenancy::check_deposit(available)?;
     let accepted = ic_cdk::api::msg_cycles_accept(available);
     Ok(tenancy::credit(&who, accepted.min(u64::MAX as u128) as u64))
 }
@@ -412,6 +413,7 @@ fn deposit_for(beneficiary: candid::Principal) -> Result<tenancy::Account, Strin
         return Err("the anonymous principal cannot hold a balance".into());
     }
     let available = ic_cdk::api::msg_cycles_available();
+    tenancy::check_deposit(available)?;
     let accepted = ic_cdk::api::msg_cycles_accept(available);
     Ok(tenancy::credit(&beneficiary, accepted.min(u64::MAX as u128) as u64))
 }

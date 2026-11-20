@@ -156,6 +156,23 @@ pub fn balance(p: &Principal) -> u64 {
     account(p).balance
 }
 
+/// The least a call may attach to fund an account (`deposit`,
+/// `deposit_for`). A deposit makes the account's row if there is none, and
+/// the row is kept for good; `deposit_for` names any principal and costs
+/// its caller, a canister, nothing but the call. With no minimum, a
+/// canister made rows without end for nothing. This is a push's base
+/// price, many times what a row costs to keep.
+pub const MIN_DEPOSIT: u64 = 100_000_000;
+
+/// Refuse attached cycles under the minimum, before any are accepted:
+/// what is not accepted goes back to the caller.
+pub fn check_deposit(attached: u128) -> Result<(), String> {
+    if attached < u128::from(MIN_DEPOSIT) {
+        return Err(format!("attach at least {MIN_DEPOSIT} cycles: this call carries {attached}"));
+    }
+    Ok(())
+}
+
 /// Add cycles to a principal's balance.
 pub fn credit(p: &Principal, amount: u64) -> Account {
     let mut a = account(p);
@@ -2776,6 +2793,15 @@ mod tests {
         create_repo("t-unasked", &alice, false).unwrap();
         assert_eq!(balance(&alice), 7 * fee);
         crate::to_git::set_test_side(None);
+    }
+
+    /// A deposit under the minimum is refused, one at it is not.
+    #[test]
+    fn a_deposit_has_a_minimum() {
+        assert!(check_deposit(0).unwrap_err().contains("attach at least 100000000 cycles"));
+        assert!(check_deposit(u128::from(MIN_DEPOSIT) - 1).is_err());
+        assert_eq!(check_deposit(u128::from(MIN_DEPOSIT)), Ok(()));
+        assert_eq!(check_deposit(u128::MAX), Ok(()));
     }
 
     /// An EVM action is priced with its transaction's gas limit, at a
