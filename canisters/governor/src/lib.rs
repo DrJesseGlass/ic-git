@@ -42,6 +42,10 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+/// The most the argument weighs of a call someone other than an approver
+/// may send: a read sent as an update (`log` takes two numbers) and a
+/// `withdraw` (one).
+const MAX_SMALL_ARG_BYTES: usize = 64;
 /// At most this many proposals open at once, so staged modules cannot fill
 /// the heap.
 pub const MAX_OPEN: usize = 4;
@@ -382,6 +386,41 @@ impl State {
             Ok(())
         } else {
             Err("only an approver of this governor can do that".into())
+        }
+    }
+
+    /// Is a signed message taken at all (`inspect_message`)? Each answer
+    /// is a refusal of the method's own or wider, so what is refused here
+    /// the method would refuse: a change is an approver's while the
+    /// governor is live, a withdrawal also its proposer's, who may no
+    /// longer be one, and a read sent as an update is anyone's. A call
+    /// that someone other than an approver may send carries no more than
+    /// its argument could weigh: the proposer of an open proposal may be
+    /// someone the approvers have since voted out.
+    fn takes(&self, method: &str, who: Principal, arg_len: usize) -> Result<(), String> {
+        let small = || {
+            if arg_len <= MAX_SMALL_ARG_BYTES {
+                Ok(())
+            } else {
+                Err(format!("{method}: the argument is {arg_len} bytes, and a call of it carries at most {MAX_SMALL_ARG_BYTES}"))
+            }
+        };
+        match method {
+            "propose" | "stage" | "vote" | "execute" => {
+                self.require_live()?;
+                self.require_approver(who)
+            }
+            "withdraw" => {
+                self.require_live()?;
+                small()?;
+                if self.proposals.values().any(|p| p.proposer == who) {
+                    Ok(())
+                } else {
+                    self.require_approver(who)
+                }
+            }
+            "info" | "proposals" | "log" | "cycle_balance" => small(),
+            _ => Err(format!("{method}: this canister takes no such call")),
         }
     }
 
@@ -797,6 +836,22 @@ fn init(args: InitArgs) {
     });
 }
 
+/// Which signed messages the governor takes in, before it pays for them
+/// (`State::takes`). A canister pays for every message it accepts, by its
+/// bytes, whether or not the call then does anything, and nobody can add
+/// cycles' worth of care to a governor later: it has no controllers. This
+/// saves cycles and decides nothing; every method checks its caller as
+/// before. A refusal traps, so the caller reads why.
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::msg_method_name();
+    let arg_len = ic_cdk::api::msg_arg_data().len();
+    match with(|s| s.takes(&method, caller(), arg_len)) {
+        Ok(()) => ic_cdk::api::accept_message(),
+        Err(e) => ic_cdk::trap(e),
+    }
+}
+
 /// Open a proposal. Approvers only. Ballots are separate (`vote`); an
 /// upgrade's module must be staged (`stage`) before it can be approved.
 #[ic_cdk::update]
@@ -847,6 +902,15 @@ fn info() -> Info {
         handed_over_to: s.handed_over_to,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// What this canister holds in cycles. Public, as nothing else can say:
+/// `canister_status` answers controllers alone, and the governor has
+/// none. Anyone may add to it (the management canister's
+/// `deposit_cycles`).
+#[ic_cdk::query]
+fn cycle_balance() -> u64 {
+    u64::try_from(ic_cdk::api::canister_cycle_balance()).unwrap_or(u64::MAX)
 }
 
 #[ic_cdk::query]
@@ -1121,6 +1185,89 @@ mod tests {
             s.open(p(1), upgrade(b"m"), 0).unwrap();
         }
         assert!(s.open(p(1), upgrade(b"m"), 0).unwrap_err().contains("open"));
+    }
+
+    #[test]
+    fn a_signed_message_is_taken_from_those_it_could_be_for() {
+        let mut s = state(&[p(1), p(2)], 2);
+        let stranger = p(9);
+        for m in ["propose", "stage", "vote", "execute", "withdraw"] {
+            assert_eq!(s.takes(m, p(1), 10), Ok(()), "{m}");
+            assert!(s.takes(m, stranger, 10).unwrap_err().contains("only an approver"), "{m}");
+            assert!(s.takes(m, Principal::anonymous(), 10).is_err(), "{m}");
+        }
+        // An approver's change weighs what it weighs: a chunk, an install
+        // argument.
+        for m in ["propose", "stage", "vote", "execute"] {
+            assert_eq!(s.takes(m, p(1), 2 << 20), Ok(()), "{m}");
+        }
+        for m in ["info", "proposals", "log", "cycle_balance"] {
+            assert_eq!(s.takes(m, Principal::anonymous(), MAX_SMALL_ARG_BYTES), Ok(()), "{m}");
+            assert!(s.takes(m, p(1), MAX_SMALL_ARG_BYTES + 1).unwrap_err().contains("at most 64"), "{m}");
+        }
+        assert!(s.takes("no_such", p(1), 0).unwrap_err().contains("no such call"));
+        // A proposer the policy has since dropped still withdraws their
+        // own, with a withdrawal's argument and no more.
+        let id = s.open(p(2), upgrade(b"m"), 0).unwrap();
+        s.policy = policy_of(&[p(1)], 1).unwrap();
+        assert_eq!(s.takes("withdraw", p(2), MAX_SMALL_ARG_BYTES), Ok(()));
+        assert!(s.takes("withdraw", p(2), MAX_SMALL_ARG_BYTES + 1).unwrap_err().contains("at most 64"));
+        assert!(s.takes("withdraw", p(1), MAX_SMALL_ARG_BYTES + 1).is_err());
+        assert!(s.takes("vote", p(2), 10).is_err());
+        assert_eq!(s.withdraw(p(2), id, 0), Ok(()));
+        assert!(s.takes("withdraw", p(2), 10).is_err());
+    }
+
+    /// What the filter refuses, the method refuses: every answer of the
+    /// method's to a caller the filter turned away is a refusal.
+    #[test]
+    fn the_filter_refuses_nothing_a_method_would_take() {
+        let mut s = state(&[p(1), p(2)], 1);
+        let id = s.open(p(2), Change::Handover { successor: p(9) }, 0).unwrap();
+        let open = s.open(p(2), upgrade(b"m"), 0).unwrap();
+        for who in [p(1), p(2), p(9), Principal::anonymous()] {
+            if s.takes("propose", who, 10).is_err() {
+                assert!(s.open(who, upgrade(b"m"), 1).is_err());
+                assert!(s.stage(who, open, 0, b"m", 1).is_err());
+                assert!(s.cast(who, open, Decision::Reject, None, 1).is_err());
+            }
+            if s.takes("withdraw", who, 10).is_err() {
+                assert!(s.withdraw(who, open, 1).is_err());
+            }
+        }
+        // An inert governor takes no change, from an approver either; its
+        // reads stay.
+        s.cast(p(1), id, Decision::Approve, None, 1).unwrap();
+        s.begin(id, 2).unwrap();
+        s.finish(id, 2, done("handed over"), 2);
+        for m in ["propose", "stage", "vote", "execute", "withdraw"] {
+            assert!(s.takes(m, p(1), 10).unwrap_err().contains("inert"), "{m}");
+            assert!(s.takes(m, p(2), 10).unwrap_err().contains("inert"), "{m}");
+        }
+        assert!(s.open(p(1), upgrade(b"m"), 3).unwrap_err().contains("inert"));
+        assert!(s.stage(p(1), open, 0, b"m", 3).unwrap_err().contains("inert"));
+        assert!(s.cast(p(1), open, Decision::Reject, None, 3).unwrap_err().contains("inert"));
+        assert!(s.withdraw(p(2), open, 3).unwrap_err().contains("inert"));
+        assert!(s.begin(open, 3).unwrap_err().contains("inert"));
+        assert_eq!(s.takes("log", Principal::anonymous(), 10), Ok(()));
+    }
+
+    /// Every method of the service has its answer in `takes`.
+    #[test]
+    fn every_method_is_one_the_filter_knows() {
+        let s = state(&[p(1)], 1);
+        let did = include_str!("../governor.did");
+        let service = &did[did.find("\nservice").unwrap()..];
+        let mut seen = 0;
+        for line in service.lines() {
+            let Some((name, _)) = line.trim_start().split_once(" : ") else { continue };
+            if name.contains(' ') || name.starts_with('/') || name == "service" {
+                continue;
+            }
+            seen += 1;
+            assert_eq!(s.takes(name, p(1), 0), Ok(()), "{name}");
+        }
+        assert_eq!(seen, 9);
     }
 
     #[test]

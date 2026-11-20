@@ -100,6 +100,11 @@ type VoteOutcome = record {
   executed : opt Result;
 };
 service : (InitArgs) -> {
+  // What this canister holds in cycles. Public, as nothing else can say:
+  // `canister_status` answers controllers alone, and the governor has
+  // none. Anyone may add to it (the management canister's
+  // `deposit_cycles`).
+  cycle_balance : () -> (nat64) query;
   // Retry a proposal that reached K but failed to execute (or reached it by
   // a policy change). Approvers only.
   execute : (nat64) -> (Result);

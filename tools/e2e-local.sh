@@ -1109,6 +1109,13 @@ expect "  ...so its old controller cannot upgrade it" "$(cd "$WORK" && dfx canis
 expect "only a controller may publish the target's record" "$(call "$OP" ruled registry_publish_canister "(\"$(printf 'a%.0s' $(seq 40))\", \"$(printf 'b%.0s' $(seq 64))\")")" 'only a controller'
 
 expect "a non-approver cannot propose" "$(gov "$TEN" propose "$(upgrade_to "$GZ_SHA")")" 'only an approver'
+# What the governor refuses before it pays for the message (its ingress
+# filter, State::takes): nobody tends its cycles.
+expect "a read sent as an update is taken from anyone" "$(flat "$(gov anonymous info --update)")" 'threshold = 1 : nat32'
+expect "  ...with a read's argument and no more" "$(gov anonymous info --type raw "$(printf '00%.0s' $(seq 100))" --update)" 'info: the argument is 100 bytes, and a call of it carries at most 64'
+expect "a withdrawal weighs a withdrawal's argument" "$(gov "$OP" withdraw --type raw "$(printf '00%.0s' $(seq 100))")" 'withdraw: the argument is 100 bytes, and a call of it carries at most 64'
+expect "a method the governor has not is refused" "$(cd "$WORK" && dfx canister call governor no_such_call --identity "$OP" 2>&1)" 'no such call|has no .*method'
+expect "it says what it holds, to anyone" "$(gov anonymous cycle_balance --query)" '^\([0-9_]+ : nat64\)'
 U1=$(gov "$OP" propose "$(upgrade_to "$GZ_SHA")" | id_of)
 expect "an upgrade is proposed" "$U1" '^[0-9]+$'
 expect "no approval before the module is staged" "$(gov "$OP" vote "($U1 : nat64, variant { Approve }, null)")" 'stage the whole module'
