@@ -77,6 +77,17 @@ pub async fn set_mode(repo: &str, mode: DeployMode) -> Result<(), String> {
     Ok(())
 }
 
+/// What an EVM deploy config must be, whoever sets it: the owner
+/// (`set_evm`) or a vote (`PolicyChange::EvmDeploy`, checked before any
+/// ballot is taken on it).
+pub fn check_evm(source_path: &str, gas_limit: u64) -> Result<(), String> {
+    ic_git_types::deploy::check_config_path("source_path", source_path)?;
+    if !source_path.ends_with(".hex") {
+        return Err("source_path must end in .hex (creation bytecode as hex text)".into());
+    }
+    crate::evm::require_deploy_target(gas_limit)
+}
+
 /// Set (or replace) a repo's EVM deploy config. Refused when this canister
 /// could not deploy with `gas_limit` at all (`evm::require_deploy_target`):
 /// a misconfiguration better rejected now than found at push time.
@@ -84,11 +95,7 @@ pub async fn set_evm(repo: &str, source_path: String, gas_limit: u64) -> Result<
     if !crate::tenancy::repo_exists(repo) {
         return Err(format!("no such repo: {repo}"));
     }
-    ic_git_types::deploy::check_config_path("source_path", &source_path)?;
-    if !source_path.ends_with(".hex") {
-        return Err("source_path must end in .hex (creation bytecode as hex text)".into());
-    }
-    crate::evm::require_deploy_target(gas_limit)?;
+    check_evm(&source_path, gas_limit)?;
     crate::kv::set_json(
         &evm_key(repo),
         &EvmDeployConfig {

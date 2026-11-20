@@ -83,6 +83,7 @@ type PolicyChange = variant {
   Transfer : record { new_owner : principal };
   WasmDeploy : record { target : text; source_path : text };
   DeployMode : record { mode : text };
+  EvmDeploy : record { source_path : text; gas_limit : nat64 };
 };
 type Proposal = record {
   change : PolicyChange;

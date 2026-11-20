@@ -1059,6 +1059,7 @@ async fn propose_policy_change(
     match apply {
         Some(tenancy::PolicyChange::WasmDeploy { target, source_path }) => configs::set_wasm(&repo, target, source_path).await?,
         Some(tenancy::PolicyChange::DeployMode { mode }) => configs::set_mode(&repo, deploy::DeployMode::parse(&mode)?).await?,
+        Some(tenancy::PolicyChange::EvmDeploy { source_path, gas_limit }) => configs::set_evm(&repo, source_path, gas_limit).await?,
         _ => {}
     }
     Ok(BallotTally {
@@ -1369,7 +1370,10 @@ fn deploy_queue_len() -> u64 {
 /// same push.
 #[ic_cdk::update]
 async fn set_evm_deploy(repo: String, source_path: String, gas_limit: u64) -> Result<(), String> {
-    tenancy::can_admin(&repo, &caller(), operator())?;
+    let m = tenancy::can_admin(&repo, &caller(), operator())?;
+    // Governed: what a push deploys is the voters' decision, on this
+    // chain as in the app canister.
+    tenancy::locked(&m, "the EVM deploy config", Some("EvmDeploy"))?;
     // One definition of "could this canister deploy at all", shared with the
     // deploy leg and with the evm_deploy endpoint, so a config accepted here
     // cannot be rejected at drain time for a reason this check missed.

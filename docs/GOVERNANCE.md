@@ -57,7 +57,9 @@ ballot on "require K", "add or remove this voter", "offer the repo to"
 accept it, `accept_transfer`), or "what
 the deploy installs" (the deploy config is part of it, since a source path
 or an install mode changed by the owner alone would put unapproved code,
-or a wipe, into the governed canister), counted over the current approvers
+or a wipe, into the governed canister; the EVM deploy's path and gas
+limit too, from 2026-11, where until then the owner set them alone),
+counted over the current approvers
 with the same objection rule as a commit, and applied the moment it is
 reached. Writers stay the owner's: a writer only pushes, and a push
 deploys only once approved. docs/TENANCY.md, "Governed app canisters".

@@ -84,6 +84,9 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
                     "reinstall" => "set the install mode to REINSTALL, which WIPES ALL STATE of the target on every deploy".to_string(),
                     other => format!("set the install mode to \"{other}\""),
                 },
+                PolicyChange::EvmDeploy { source_path, gas_limit } => {
+                    format!("deploy \"{source_path}\" as a contract on the EVM chain, with a gas limit of {gas_limit}")
+                }
             };
             let because = match reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
                 Some(r) => format!(" Reason: {r}"),
@@ -343,6 +346,7 @@ mod tests {
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::RequiredVotes { k: 2 }, Vote::Approve, None::<String>)).unwrap(), &["Approve a policy change", "require 2 approvals", "applies once"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::AddVoter { principal: p }, Vote::Object, Some("not reviewed yet"))).unwrap(), &["Object to the policy change", "add 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe as a voter", "Reason: not reviewed yet"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None::<String>)).unwrap(), &["REINSTALL", "WIPES ALL STATE"]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::EvmDeploy { source_path: "token.hex".into(), gas_limit: 3_000_000 }, Vote::Approve, None::<String>)).unwrap(), &["deploy \"token.hex\" as a contract on the EVM chain", "gas limit of 3000000"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::Transfer { new_owner: p }, Vote::Reject, None::<String>)).unwrap(), &["Reject the policy change", "offer the repository to 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe as its new owner"]),
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
