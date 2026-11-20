@@ -792,11 +792,20 @@ fn add_member_in(m: &mut RepoMeta, target: Principal, role: Role) -> Result<(), 
     if m.members.len() >= MAX_MEMBERS && !m.members.iter().any(|x| x.principal == target) {
         return Err(format!("a repo has at most {MAX_MEMBERS} members; remove one first"));
     }
+    let was_voter = has_role(m, &target, Role::Voter);
     m.members.retain(|x| x.principal != target);
     m.members.push(Member {
         principal: target,
         role,
     });
+    // A voter made a writer is one approver fewer, as a voter removed is
+    // (`remove_member_in`): the threshold must still be within reach.
+    // Until 2026-11 this path did not look, and a repo could be left
+    // requiring more votes than it had approvers, where `record` refuses
+    // every ballot and nothing deploys again.
+    if was_voter && role != Role::Voter {
+        check_policy(m)?;
+    }
     Ok(())
 }
 
@@ -2311,6 +2320,10 @@ mod tests {
         // Shrinking the approvers below the threshold is refused too, by
         // removal or by a transfer that drops the new owner's voter row.
         assert!(remove_member("t-vote", &alice, false, v1).is_err());
+        // ...or by making the voter a writer, which saves nothing.
+        let e = add_member("t-vote", &alice, false, v1, Role::Writer).unwrap_err();
+        assert!(e.contains("lower required_votes or add voters first"), "{e}");
+        assert!(has_role(&meta("t-vote").unwrap(), &v1, Role::Voter));
         assert!(transfer_repo("t-vote", &alice, false, v1).is_err());
         assert_eq!(meta("t-vote").unwrap().owner, Some(alice));
         assert_eq!(repos_of(&v1), vec!["t-vote".to_string()]);
