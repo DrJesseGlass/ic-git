@@ -1075,46 +1075,103 @@ fn resolve_blob(commit: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<Res
     }
 }
 
-/// The sub-paths a site answers at, as `serve` takes them: "" for the
-/// root, each blob of the bundle, and each directory holding an
-/// index.html with and without its trailing slash; in tree order, so
-/// the count is the same every time. An empty list when the site serves
-/// nothing (no config, no commit: every path is the one miss). `Err`
-/// past `cap` of them.
-pub(crate) fn bundle_paths(repo: &str, cap: usize) -> Result<Vec<String>, ()> {
-    let Ok((cfg, commit)) = site_state(repo) else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    match object::node_at_path_oid(&commit, &cfg.root) {
-        Ok((_, ObjectType::Blob, _)) => out.push(String::new()),
-        Ok((oid, ObjectType::Tree, _)) => walk_bundle(&oid, "", &mut out, cap)?,
-        _ => {}
-    }
-    Ok(out)
+/// One URL of a site's bundle: the sub-path `serve` takes for it, and
+/// the blob that answers there.
+pub(crate) struct Page {
+    pub sub: String,
+    /// The blob's location in the commit's tree, as the walk of the
+    /// bundle met it.
+    path: String,
+    oid: store::Oid,
 }
 
-fn walk_bundle(tree: &store::Oid, prefix: &str, out: &mut Vec<String>, cap: usize) -> Result<(), ()> {
+/// What a site answers at: the commit it serves and every URL of the
+/// bundle, from one walk of its trees.
+pub(crate) struct Bundle {
+    /// `None` when the site serves nothing.
+    commit: Option<store::Oid>,
+    pub pages: Vec<Page>,
+}
+
+impl Bundle {
+    /// What `serve` answers at a page, and the blob it answers with:
+    /// `served`, without its walk from the commit down to the file, which
+    /// the walk of the bundle has made already for every page at once.
+    /// One blob read where `served` reads the commit and each tree on the
+    /// way again; a directory of 2,000 files was read 2,000 times. Where
+    /// the entry is no blob (a tree no git writes), `served` is asked, as
+    /// it was for every page.
+    pub fn answer(&self, repo: &str, page: &Page) -> (HttpResponse, Option<store::Oid>) {
+        if let Some(commit) = &self.commit {
+            if let Some((ObjectType::Blob, body)) = store::get_object_parsed(&page.oid) {
+                return answer(repo, commit, page.path.clone(), body, page.oid);
+            }
+        }
+        served(repo, &page.sub)
+    }
+}
+
+/// The URLs a site answers at, as `serve` takes them: "" for the root,
+/// each blob of the bundle, and each directory holding an index.html
+/// with and without its trailing slash; in tree order, so the count is
+/// the same every time. None when the site serves nothing (no config, no
+/// commit: every path is the one miss). `Err` past `cap` of them.
+pub(crate) fn bundle(repo: &str, cap: usize) -> Result<Bundle, ()> {
+    let Ok((cfg, commit)) = site_state(repo) else {
+        return Ok(Bundle { commit: None, pages: Vec::new() });
+    };
+    let mut pages = Vec::new();
+    match object::node_at_path_oid(&commit, &cfg.root) {
+        Ok((oid, ObjectType::Blob, _)) => pages.push(Page { sub: String::new(), path: cfg.root.clone(), oid }),
+        Ok((oid, ObjectType::Tree, _)) => walk_bundle(&oid, &cfg.root, "", &mut pages, cap)?,
+        _ => {}
+    }
+    Ok(Bundle { commit: Some(commit), pages })
+}
+
+/// `root` is the site's root in the commit's tree, `prefix` the
+/// directory under it: a page's sub-path is from the one, its tree
+/// location from both.
+fn walk_bundle(tree: &store::Oid, root: &str, prefix: &str, out: &mut Vec<Page>, cap: usize) -> Result<(), ()> {
     let Some((ObjectType::Tree, content)) = store::get_object_parsed(tree) else {
         return Ok(());
     };
     let Ok(entries) = object::tree_entries(&content) else {
         return Ok(());
     };
+    let located = |rel: &str| match (root.is_empty(), rel.is_empty()) {
+        (true, _) => rel.to_string(),
+        (false, true) => root.to_string(),
+        (false, false) => format!("{root}/{rel}"),
+    };
     let index = entries.iter().any(|e| e.name == b"index.html" && e.mode != "40000");
-    if index {
-        out.push(prefix.to_string());
+    // The entry `serve` takes for the directory: the first of the name,
+    // whatever it is.
+    if let Some(e) = entries.iter().find(|e| e.name == b"index.html").filter(|_| index) {
+        let dir = located(prefix);
+        let path = if dir.is_empty() { "index.html".to_string() } else { format!("{dir}/index.html") };
         if !prefix.is_empty() {
-            out.push(format!("{prefix}/"));
+            out.push(Page { sub: prefix.to_string(), path: path.clone(), oid: e.oid });
+            out.push(Page { sub: format!("{prefix}/"), path, oid: e.oid });
+        } else {
+            out.push(Page { sub: String::new(), path, oid: e.oid });
         }
     }
+    // A path finds an entry by its name, and the first of the name: an
+    // entry a path cannot spell (an empty name, a slash in it) or cannot
+    // reach (a name a second time) is in no tree git writes, and is not
+    // what `serve` answers with at its URL. It is no page, and such a
+    // directory is not walked.
+    let mut seen = std::collections::BTreeSet::new();
     for e in &entries {
         let Ok(name) = std::str::from_utf8(&e.name) else { continue };
+        let found = seen.insert(name) && !name.is_empty() && !name.contains('/');
         let rel = if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
         match e.mode.as_str() {
-            "40000" => walk_bundle(&e.oid, &rel, out, cap)?,
+            _ if !found => {}
+            "40000" => walk_bundle(&e.oid, root, &rel, out, cap)?,
             "160000" => {}
-            _ => out.push(rel),
+            _ => out.push(Page { path: located(&rel), oid: e.oid, sub: rel }),
         }
         if out.len() > cap {
             return Err(());
@@ -1292,19 +1349,26 @@ pub(crate) fn served(repo: &str, path: &str) -> (HttpResponse, Option<store::Oid
     let Some(r) = resolve_blob(&commit, &cfg, path).filter(|r| r.index || !dir) else {
         return (expressed(not_in_bundle()), None);
     };
-    if r.body.len() > MAX_BODY {
+    answer(repo, &commit, r.path, r.body, r.oid)
+}
+
+/// The answer with a blob of the bundle: `served`'s, and the certifier's
+/// for a page of the bundle it walked (`Bundle::answer`), so that what is
+/// certified at a URL is what is served there.
+fn answer(repo: &str, commit: &store::Oid, path: String, body: Vec<u8>, oid: store::Oid) -> (HttpResponse, Option<store::Oid>) {
+    if body.len() > MAX_BODY {
         return (expressed(plain(413, "file exceeds the single-response limit\n")), None);
     }
-    let mut res = crate::git_response(200, content_type(&r.path), r.body);
+    let mut res = crate::git_response(200, content_type(&path), body);
     // The provenance binding a verifier checks against the registry. Path is
     // the actual location in the commit tree (site root and index.html
     // fallback applied), so `git show <commit>:<path>` reproduces the body.
     res.headers
         .push(("X-Ic-Git-Repo".to_string(), repo.to_string()));
     res.headers
-        .push(("X-Ic-Git-Commit".to_string(), store::oid_hex(&commit)));
-    res.headers.push(("X-Ic-Git-Path".to_string(), r.path));
-    (expressed(res), Some(r.oid))
+        .push(("X-Ic-Git-Commit".to_string(), store::oid_hex(commit)));
+    res.headers.push(("X-Ic-Git-Path".to_string(), path));
+    (expressed(res), Some(oid))
 }
 
 #[cfg(test)]
@@ -1366,6 +1430,82 @@ mod tests {
         set_config("web", "app".into()).unwrap();
         assert_eq!(serve("web", "main.js").status_code, 200);
         assert_eq!(serve("web", "").status_code, 404);
+    }
+
+    /// The certifier's walk of a bundle answers at every page as `serve`
+    /// does there (`Bundle::answer`), with the site at the root and under
+    /// a directory, and in trees git does not write: an empty name, a
+    /// slash in one, a name twice (a file over a directory and the other
+    /// way), an index.html that is a directory, a file's mode on a tree.
+    #[test]
+    fn the_walk_of_a_bundle_answers_as_serve_does() {
+        fn tree(entries: &[(&str, &str, store::Oid)]) -> store::Oid {
+            let mut t = Vec::new();
+            for (mode, name, oid) in entries {
+                t.extend_from_slice(format!("{mode} {name}\0").as_bytes());
+                t.extend_from_slice(oid.as_slice());
+            }
+            store::put_object(ObjectType::Tree, &t)
+        }
+        let blob = |b: &[u8]| store::put_object(ObjectType::Blob, b);
+        store::create_repo("walked").unwrap();
+        crate::mirror::ungated_for_tests("walked");
+        let docs = tree(&[("100644", "a.txt", blob(b"a")), ("100644", "index.html", blob(b"docs"))]);
+        let deep = tree(&[("40000", "docs", docs), ("100644", "x.js", blob(b"x"))]);
+        let hidden = tree(&[("100644", "x.js", blob(b"hidden")), ("100644", "only.txt", blob(b"only"))]);
+        let no_index = tree(&[("40000", "index.html", docs), ("100644", "index.html", blob(b"late"))]);
+        let root = tree(&[
+            ("100644", "", blob(b"nameless")),
+            ("40000", "", hidden),
+            ("100644", "app/x.js", blob(b"slashed")),
+            ("40000", "app", deep),
+            ("100644", "app", blob(b"a file after its directory")),
+            ("100644", "twice", blob(b"first")),
+            ("40000", "twice", hidden),
+            ("100644", "twice", blob(b"second")),
+            ("100644", "tree.txt", docs),
+            ("40000", "odd", no_index),
+            ("100644", "index.html", blob(b"<h1>root</h1>")),
+            ("100644", "big.bin", blob(&vec![0u8; MAX_BODY + 1])),
+            ("160000", "sub", store::parse_oid(&"07".repeat(20)).unwrap()),
+        ]);
+        let commit = format!("tree {}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n", store::oid_hex(&root));
+        let commit = store::put_object(ObjectType::Commit, commit.as_bytes());
+        store::set_ref("walked", &store::head_target("walked").unwrap(), commit).unwrap();
+        for (site_root, pages, a_page) in [("", 16, "app/docs/a.txt"), ("app", 5, "docs/"), ("app/docs/a.txt", 1, ""), ("nowhere", 0, "")] {
+            set_config("walked", site_root.to_string()).unwrap();
+            let bundle = bundle("walked", 100).unwrap();
+            let subs: Vec<&str> = bundle.pages.iter().map(|p| p.sub.as_str()).collect();
+            assert_eq!(subs.len(), pages, "{site_root:?}: {subs:?}");
+            assert!(pages == 0 || subs.contains(&a_page), "{site_root:?}: {subs:?}");
+            // Each URL once.
+            assert_eq!(subs.iter().collect::<std::collections::BTreeSet<_>>().len(), pages, "{site_root:?}: {subs:?}");
+            for page in &bundle.pages {
+                let (walked, blob) = bundle.answer("walked", page);
+                let (asked, asked_blob) = served("walked", &page.sub);
+                let at = (site_root, &page.sub);
+                assert_eq!((walked.status_code, &walked.headers, &walked.body), (asked.status_code, &asked.headers, &asked.body), "{at:?}");
+                assert_eq!(blob, asked_blob, "{at:?}");
+            }
+        }
+        // And what it answers with is the bundle's own: a page, the 413,
+        // the miss where no path leads.
+        set_config("walked", String::new()).unwrap();
+        let bundle = bundle("walked", 100).unwrap();
+        let status = |sub: &str| {
+            let page = bundle.pages.iter().find(|p| p.sub == sub).unwrap_or_else(|| panic!("no page {sub:?}"));
+            let (res, _) = bundle.answer("walked", page);
+            (res.status_code, res.body)
+        };
+        assert_eq!(status("app/docs"), (200, b"docs".to_vec()));
+        assert_eq!(status("app/x.js"), (200, b"x".to_vec()));
+        assert_eq!(status("twice"), (200, b"first".to_vec()));
+        assert_eq!(status("big.bin").0, 413);
+        assert_eq!(status("tree.txt"), (200, b"docs".to_vec()));
+        assert!(!bundle.pages.iter().any(|p| p.sub.contains("only.txt")));
+        // Past the cap: no bundle.
+        assert!(super::bundle("walked", 15).is_err());
+        assert!(super::bundle("walked", 16).is_ok());
     }
 
     /// A site's own domains: named as looked up, held by one repo at a

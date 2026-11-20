@@ -65,7 +65,7 @@ fn init(arg: InitArg) {
     auth::init_with_caller();
     store::init_schema_version();
     arm_push_cert_seed();
-    certify::rebuild();
+    certify::rebuild(certify::IN_UPGRADE);
 }
 
 #[ic_cdk::pre_upgrade]
@@ -82,8 +82,9 @@ fn post_upgrade() {
     // What this side has not yet told the authority: the outbox. It
     // survives in stable memory; its timer does not.
     outbox::resume();
-    // The certification tree is heap state: from stable memory again.
-    certify::rebuild();
+    // The certification tree is heap state: from stable memory again,
+    // as far as this message's budget goes, and the rest in their own.
+    certify::rebuild(certify::IN_UPGRADE);
 }
 
 #[ic_cdk::query]
@@ -121,6 +122,16 @@ async fn registry_publish_canister(commit: String, module_sha256: String) -> Res
 #[ic_cdk::query]
 fn cycle_balance() -> u64 {
     u64::try_from(ic_cdk::api::canister_cycle_balance()).unwrap_or(u64::MAX)
+}
+
+/// How many sites the rebuild of the certification tree has yet to reach
+/// (certify.rs): after an upgrade it goes on in messages of its own when
+/// the sites are more than the upgrade's message holds, and a site it
+/// has not reached is served declared uncertified. 0 when every site is
+/// certified.
+#[ic_cdk::query]
+fn sites_to_certify() -> u64 {
+    certify::sites_to_certify()
 }
 
 // --- the authority's messages -----------------------------------------------

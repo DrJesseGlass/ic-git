@@ -157,6 +157,9 @@ service : (InitArg) -> {
   // what this canister holds in cycles (public: its controller is a
   // governor, and the authority asks before a top-up)
   cycle_balance : () -> (nat64) query;
+  // how many sites the rebuild after an upgrade has yet to certify
+  // (declared uncertified until it has); 0 when every site is certified
+  sites_to_certify : () -> (nat64) query;
   // its messages, from its principal alone
   set_deploy_configs : (SetDeployConfigs) -> ();
   set_push_policy : (SetPushPolicy) -> ();

@@ -713,6 +713,25 @@ answered without one, and fails the gateway's check at a page. A site past
 certify.rs's caps is served at its domains declared uncertified, as
 every domain was before this.
 
+The tree is heap state, so an upgrade of the git canister builds it
+again from stable memory: every file of every site, read and hashed.
+No one message holds that for any number of sites (measured, a site of
+2,000 small files is about 4 billion instructions, and 20 MB of bodies
+about 3.5 billion more), so the rebuild has a budget: 100 billion
+instructions of the upgrade's own message, and after that 20 billion a
+message, one after another on a timer, until every site is in. A
+canister whose sites fit the first is whole when the upgrade ends. A
+site the rebuild has not reached is declared uncertified at the
+canister host, `/site/<repo>/...`: the gateway passes its pages
+unverified until its turn, as the raw host always does. At its own
+domain such a site has no entry, and its page is refused by the gateway
+wherever a site already certified has a page at the same path (`/`, for
+one), since a declaration there would be one for every host; so the
+sites with domains are first. A site that is pushed to, or whose
+config changes, while it waits is certified in that message. The git
+canister's public query `sites_to_certify` says how many wait: 0 once
+the tree is whole, and it is worth reading after an upgrade.
+
 The domain form was first served by the real gateways on 2026-11-18, at
 `evm-test.jesse.glass` for the `evm-demo` repo (v0.3.15): registered 45
 seconds after the request, and reachable a few minutes later. Each of
