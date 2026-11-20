@@ -62,6 +62,29 @@ the registry address, seeding, pricing. Those are calls the code allows,
 not changes to it, and every one is visible in the code the governor
 installed; putting them under a vote is later work.
 
+### Its cycles
+
+A canister pays for every signed message it takes in, by its bytes,
+whether or not the call then does anything, and a governor has no
+controllers to notice it running low. From 2026-11 the governor's code
+has an ingress filter (`canister_inspect_message`, `State::takes`): a
+change (`propose`, `stage`, `vote`, `execute`) is taken from an approver
+alone, a `withdraw` also from the proposer of an open proposal, a read
+sent as an update with at most 64 bytes of argument, and nothing else.
+It saves cycles and decides nothing: every method checks its caller as
+before.
+
+The two governors in place run the module from before it
+(`a71ff65d...641f`) and cannot be upgraded: anyone can still send
+either a message of 2 MiB and have it pay. The filter reaches a
+governed canister only by a handover to a governor newly installed
+from this code, which the clients would then have to pin in place of
+the old one. Nor can anyone read what the two hold: `canister_status`
+answers controllers alone and they have none. The code from 2026-11 has
+a public `cycle_balance` for that, which reaches them the same way.
+Anyone can add cycles to either (`dfx canister deposit-cycles`), seen
+or not.
+
 ## Following it
 
 The governor has no controllers, so it can never learn to serve a feed.
