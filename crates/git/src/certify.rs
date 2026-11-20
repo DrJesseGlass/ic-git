@@ -58,10 +58,11 @@
 //! upgrade (`rebuild`) and recomputed for a site whenever what it serves
 //! can change (`site_changed`: the config, the domains, the served
 //! commit, a push, a ref written by an operator; `repos_changed` for the
-//! index). Each URL is certified by asking `serve` for it, so the
-//! certified bytes and the served bytes are one function's answer. Body
-//! hashes are kept by blob, so a push that changes one file hashes one
-//! file.
+//! index). Each URL is certified with the answer `serve` builds for it,
+//! from the blob one walk of the bundle found there (site.rs
+//! `Bundle::answer`), so the certified bytes and the served bytes are
+//! one function's answer. Body hashes are kept by blob, so a push that
+//! changes one file hashes one file.
 
 use crate::site;
 use crate::store::Oid;
@@ -422,8 +423,8 @@ fn site_entries(repo: &str) -> bool {
             return had;
         };
         let cap = s.cap;
-        let subs = match site::bundle_paths(repo, cap) {
-            Ok(subs) => subs,
+        let bundle = match site::bundle(repo, cap) {
+            Ok(bundle) => bundle,
             Err(()) => {
                 let c = HttpCertification::skip();
                 insert(&wild, &c);
@@ -432,19 +433,20 @@ fn site_entries(repo: &str) -> bool {
             }
         };
         let hosts = cfg.domains;
-        let with_domains = !hosts.is_empty() && subs.len() * hosts.len() * METHODS.len() <= DOMAIN_ENTRY_CAP;
+        let with_domains = !hosts.is_empty() && bundle.pages.len() * hosts.len() * METHODS.len() <= DOMAIN_ENTRY_CAP;
         let mut domain = Domain::default();
-        for sub in subs {
-            let (mut res, blob) = site::served(repo, &sub);
+        for page in &bundle.pages {
+            let sub = &page.sub;
+            let (mut res, blob) = bundle.answer(repo, page);
             let hash = blob.map(|oid| body_hash(&mut s, &oid, &res.body));
             let Some(c) = certify(&res, hash) else { continue };
-            for url in urls(repo, &sub) {
+            for url in urls(repo, sub) {
                 insert(&HttpCertificationPath::exact(url.clone()), &c);
                 s.exact.insert(url, c);
             }
             if with_domains {
                 set_expression(&mut res, full_text());
-                let path = domain_url(&sub);
+                let path = domain_url(sub);
                 for host in &hosts {
                     for method in METHODS {
                         let Some(c) = certify_full(method, &path, host, &res, hash) else { continue };
