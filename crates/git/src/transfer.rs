@@ -613,8 +613,9 @@ async fn import_step(fetch: impl AsyncFn(Principal, Option<Cursor>) -> Result<Pa
         // The copy's digest starts now: one an operator stepped while the
         // pages were still coming was of less than the copy.
         kv::remove(DIGEST_KEY);
-        // The sites copied are served from here: certified from here.
-        crate::certify::rebuild();
+        // The sites copied are served from here: certified from here, as
+        // far as this message's budget goes, and the rest in their own.
+        crate::certify::rebuild(crate::certify::IN_UPDATE);
     }
     save_import(&st);
     Ok(true)

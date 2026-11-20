@@ -954,6 +954,7 @@ else
 fi
 expect "site unchanged" "$(served)" "^${BEFORE%% *} ${BEFORE#* }"
 expect "  ...certified again, from stable memory" "$(nserved)" "^${BEFORE%% *} ${BEFORE#* }"
+expect "  ...every site, in the upgrade's own message (none waits for the rebuild's timer)" "$(call "$OP" git sites_to_certify --query)" '^\(0 : nat64\)$'
 expect "tokens kept" "$(ic "$TEN" list_push_tokens '("e2e-app")' | grep -c 'id =')" '^[1-9]'
 expect "balance kept" "$(ic "$TEN" get_account "(principal \"$T\")")" 'deposited = [1-9]'
 expect "push-cert still offered (the seed survived)" "$(curl -s "http://ic:$BOUND@$HOST/e2e-app.git/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert='

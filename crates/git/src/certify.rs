@@ -58,7 +58,22 @@
 //! upgrade (`rebuild`) and recomputed for a site whenever what it serves
 //! can change (`site_changed`: the config, the domains, the served
 //! commit, a push, a ref written by an operator; `repos_changed` for the
-//! index). Each URL is certified with the answer `serve` builds for it,
+//! index). The rebuild is every site's every file, read and hashed
+//! again, and no one message holds that for any number of sites: it
+//! goes site by site and page by page for as long as its message's
+//! budget lasts (`IN_UPGRADE`), and what is left is done in messages of
+//! its own, one after another on a timer (`IN_UPDATE` each). Until a
+//! site's turn it is declared uncertified, as a site past the cap is:
+//! the gateway passes its pages unverified, as the raw host does, and
+//! the verifying clients check them by hash as ever. That is at the
+//! canister host. At its own domains a site that waits has no entry, and
+//! the root wildcard's declaration answers for it only at a path no
+//! site already certified has a page at: at the others (the root, for
+//! one) the gateway refuses its page until its turn, since a declaration
+//! at such a path would be one for every host, the certified ones too.
+//! So the sites with domains are first, within the upgrade's own message
+//! while they fit. A site that changes while it waits is certified then
+//! and there. `sites_to_certify` says how many wait. Each URL is certified with the answer `serve` builds for it,
 //! from the blob one walk of the bundle found there (site.rs
 //! `Bundle::answer`), so the certified bytes and the served bytes are
 //! one function's answer. Body hashes are kept by blob, so a push that
@@ -226,6 +241,12 @@ struct State {
     cross_wild: Cross,
     /// The sha256 of each blob served, by oid.
     bodies: BTreeMap<Vec<u8>, [u8; 32]>,
+    /// The sites a rebuild has not reached, each declared uncertified at
+    /// its wildcard until its turn: (whether it has no domain, the repo),
+    /// so the ones with domains are first.
+    pending: BTreeSet<(bool, String)>,
+    /// The site a rebuild is part-way through.
+    work: Option<Work>,
     /// In tests, a smaller cap.
     cap: usize,
     /// `CROSS_CAP`; in tests, a smaller one.
@@ -233,6 +254,76 @@ struct State {
 }
 
 type Cross = BTreeMap<(String, String, String), HttpCertification>;
+
+/// A site being certified: its bundle, and how far into it the entries
+/// are made. In one message for a change of the site; over as many as it
+/// takes in a rebuild.
+struct Work {
+    repo: String,
+    bundle: site::Bundle,
+    /// The first page with no entries yet.
+    next: usize,
+    /// The site's domains, when its pages are certified at them.
+    hosts: Vec<String>,
+}
+
+/// What a rebuild may spend of the message that starts it, at install
+/// and upgrade, in instructions: a third of the 300 billion such a
+/// message has, so a canister whose sites fit is whole when the upgrade
+/// ends, as it was when the rebuild was one message whatever it took.
+pub const IN_UPGRADE: u64 = 100_000_000_000;
+
+/// What a rebuild may spend of an update's message or a timer's: half of
+/// their 40 billion. The half left is for the page in hand when the
+/// budget ends (at most a body of `site::MAX_BODY`, under half a
+/// billion) and for the shadows and crosses after it (`between`).
+pub const IN_UPDATE: u64 = 20_000_000_000;
+
+/// How far a step of a rebuild may go: to an instruction count of its
+/// message. Off the IC there is no count: tests set a number of pages.
+struct Meter {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    limit: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    pages: std::cell::Cell<usize>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static STEP_PAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+impl Meter {
+    fn new(limit: u64) -> Meter {
+        Meter {
+            limit,
+            #[cfg(not(target_arch = "wasm32"))]
+            pages: std::cell::Cell::new(if limit == u64::MAX { usize::MAX } else { STEP_PAGES.with(|p| p.get()) }),
+        }
+    }
+
+    /// No limit: a change of one site is one message.
+    fn unbounded() -> Meter {
+        Meter::new(u64::MAX)
+    }
+
+    /// A page was certified.
+    fn page(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pages.set(self.pages.get().saturating_sub(1));
+    }
+
+    fn spent(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            ic_cdk::api::instruction_counter() >= self.limit
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.pages.get() == 0
+        }
+    }
+}
 
 fn exact_path(path: &str) -> HttpCertificationPath<'static> {
     HttpCertificationPath::exact(path.to_string())
@@ -310,8 +401,12 @@ fn publish() {
 }
 
 /// Start over from stable memory: at install, after an upgrade, and when
-/// an import has copied another canister's sites here.
-pub fn rebuild() {
+/// an import has copied another canister's sites here. Every site is
+/// declared uncertified first, at its wildcard, and then they are
+/// certified one by one until `limit` instructions of this message are
+/// spent (`IN_UPGRADE`, `IN_UPDATE`); the rest in messages of their own
+/// (`step`), from a timer.
+pub fn rebuild(limit: u64) {
     TREE.with(|t| *t.borrow_mut() = HttpCertificationTree::default());
     let (cap, cross_cap) = STATE.with(|s| (s.borrow().cap, s.borrow().cross_cap));
     STATE.with(|s| *s.borrow_mut() = State { cap, cross_cap, ..State::default() });
@@ -323,15 +418,107 @@ pub fn rebuild() {
         STATE.with(|s| s.borrow_mut().no_site = Some(c));
     }
     domains_entry();
-    for (repo, _) in site::all_configs() {
-        site_entries(&repo);
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        for (repo, cfg) in site::all_configs() {
+            // Not the `/site` wildcard's 404, which its pages are not.
+            let c = HttpCertification::skip();
+            insert(&wildcard_path(&format!("/site/{repo}")), &c);
+            s.sites.insert(repo.clone(), c);
+            s.pending.insert((cfg.domains.is_empty(), repo));
+        }
+    });
+    if step(limit) {
+        arm();
     }
-    STATE.with(|s| between(&mut s.borrow_mut()));
+}
+
+/// How many sites a rebuild has yet to certify: declared uncertified
+/// until it has.
+pub fn sites_to_certify() -> u64 {
+    STATE.with(|s| {
+        let s = s.borrow();
+        (s.pending.len() + usize::from(s.work.is_some())) as u64
+    })
+}
+
+/// Go on with a rebuild, until `limit` instructions of this message are
+/// spent: the site in hand from the page it stopped at, then the sites
+/// that wait, the ones with domains first (a domain is where waiting
+/// costs most: see the module's note). At least one page a step, so that
+/// every step ends nearer the end. Whether any is left.
+fn step(limit: u64) -> bool {
+    let meter = Meter::new(limit);
+    let more = STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        loop {
+            let mut work = match s.work.take() {
+                Some(work) => work,
+                None => {
+                    let Some((_, repo)) = s.pending.pop_first() else { break };
+                    clear(s, &repo);
+                    match begin(s, &repo).1 {
+                        Some(work) => work,
+                        None => {
+                            if meter.spent() {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                }
+            };
+            if !advance(s, &mut work, &meter) {
+                s.work = Some(work);
+                break;
+            }
+            finish(s, work);
+            if meter.spent() {
+                break;
+            }
+        }
+        // The pages made so far have their shadows and crosses: no host
+        // loses a path between the steps.
+        between(s);
+        s.work.is_some() || !s.pending.is_empty()
+    });
     publish();
+    more
+}
+
+thread_local! {
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The next step, as soon as the canister is idle, and the one after it
+/// from there. One timer at a time. A step that trapped would leave
+/// what waits declared uncertified until the next upgrade starts over
+/// (`sites_to_certify` shows it): nothing runs it again, since a step
+/// that traps once would trap every time, at 40 billion instructions a
+/// try.
+#[cfg(not(any(test, feature = "testing")))]
+fn arm() {
+    if ARMED.with(|a| a.replace(true)) {
+        return;
+    }
+    ic_cdk_timers::set_timer(std::time::Duration::ZERO, async {
+        ARMED.with(|a| a.set(false));
+        if step(IN_UPDATE) {
+            arm();
+        }
+    });
+}
+
+/// Tests take the steps themselves; a timer cannot fire outside a
+/// canister.
+#[cfg(any(test, feature = "testing"))]
+fn arm() {
+    ARMED.with(|a| a.set(true));
 }
 
 /// What a site serves may have changed: its config, its domains, its
-/// served commit, a push, a ref an operator wrote.
+/// served commit, a push, a ref an operator wrote. A site a rebuild has
+/// not reached is certified here, whole, and waits no longer.
 pub fn site_changed(repo: &str) {
     // A repo with no site, before and after, has nothing here: a push to
     // it recomputes nothing.
@@ -387,93 +574,143 @@ fn domain_url(sub: &str) -> String {
 
 /// Whether the site had entries or has them now.
 fn site_entries(repo: &str) -> bool {
-    let wild = HttpCertificationPath::wildcard(format!("/site/{repo}"));
     STATE.with(|s| {
-        let mut s = s.borrow_mut();
-        // Out with the old: every exact URL of the site, its wildcard, and
-        // its domains' entries. The root and the rest are two walks: in
-        // key order another repo's root can sit between them
-        // (`/site/web-2` before `/site/web/`).
-        let root = format!("/site/{repo}");
-        let under = format!("{root}/");
-        let mut old: Vec<String> = s.exact.range(under.clone()..).map(|(k, _)| k.clone()).take_while(|k| k.starts_with(&under)).collect();
-        old.push(root);
-        let mut had = false;
-        for url in old {
-            if let Some(c) = s.exact.remove(&url) {
-                delete(&HttpCertificationPath::exact(url), &c);
-                had = true;
-            }
+        let s = &mut *s.borrow_mut();
+        let had = clear(s, repo);
+        let (has, work) = begin(s, repo);
+        if let Some(mut work) = work {
+            advance(s, &mut work, &Meter::unbounded());
+            finish(s, work);
         }
-        if let Some(c) = s.sites.remove(repo) {
-            delete(&wild, &c);
+        had || has
+    })
+}
+
+/// Out with the old: every exact URL of the site, its wildcard, and its
+/// domains' entries, and its place in a rebuild. Whether it had any.
+fn clear(s: &mut State, repo: &str) -> bool {
+    let wild = HttpCertificationPath::wildcard(format!("/site/{repo}"));
+    s.pending.remove(&(false, repo.to_string()));
+    s.pending.remove(&(true, repo.to_string()));
+    if s.work.as_ref().is_some_and(|w| w.repo == repo) {
+        s.work = None;
+    }
+    // The root and the rest are two walks: in key order another repo's
+    // root can sit between them (`/site/web-2` before `/site/web/`).
+    let root = format!("/site/{repo}");
+    let under = format!("{root}/");
+    let mut old: Vec<String> = s.exact.range(under.clone()..).map(|(k, _)| k.clone()).take_while(|k| k.starts_with(&under)).collect();
+    old.push(root);
+    let mut had = false;
+    for url in old {
+        if let Some(c) = s.exact.remove(&url) {
+            delete(&HttpCertificationPath::exact(url), &c);
             had = true;
         }
-        if let Some(d) = s.domains.remove(repo) {
-            had = true;
-            for ((_, _, path), c) in &d.exact {
-                delete(&HttpCertificationPath::exact(path.clone()), c);
-            }
-            for c in d.miss.values() {
-                delete(&HttpCertificationPath::wildcard(""), c);
-            }
+    }
+    if let Some(c) = s.sites.remove(repo) {
+        delete(&wild, &c);
+        had = true;
+    }
+    if let Some(d) = s.domains.remove(repo) {
+        had = true;
+        for ((_, _, path), c) in &d.exact {
+            delete(&HttpCertificationPath::exact(path.clone()), c);
         }
-        // A repo with no site: the `/site` wildcard answers for it.
-        let Some(cfg) = site::get_config(repo) else {
-            return had;
-        };
-        let cap = s.cap;
-        let bundle = match site::bundle(repo, cap) {
-            Ok(bundle) => bundle,
-            Err(()) => {
-                let c = HttpCertification::skip();
-                insert(&wild, &c);
-                s.sites.insert(repo.to_string(), c);
-                return true;
-            }
-        };
-        let hosts = cfg.domains;
-        let with_domains = !hosts.is_empty() && bundle.pages.len() * hosts.len() * METHODS.len() <= DOMAIN_ENTRY_CAP;
-        let mut domain = Domain::default();
-        for page in &bundle.pages {
-            let sub = &page.sub;
-            let (mut res, blob) = bundle.answer(repo, page);
-            let hash = blob.map(|oid| body_hash(&mut s, &oid, &res.body));
-            let Some(c) = certify(&res, hash) else { continue };
+        for c in d.miss.values() {
+            delete(&HttpCertificationPath::wildcard(""), c);
+        }
+    }
+    had
+}
+
+/// In with the new, for a site `clear` left with nothing: the walk of
+/// its bundle, whose pages `advance` certifies and `finish` closes.
+/// Until then the site is declared uncertified at its wildcard, where a
+/// page with no entry yet is answered from: its 404 there would be no
+/// answer for such a page. Whether the site has entries now; no work for
+/// a repo with no site (the `/site` wildcard answers for it) and for a
+/// site past the cap (declared uncertified, and left so).
+fn begin(s: &mut State, repo: &str) -> (bool, Option<Work>) {
+    let Some(cfg) = site::get_config(repo) else {
+        return (false, None);
+    };
+    let c = HttpCertification::skip();
+    insert(&wildcard_path(&format!("/site/{repo}")), &c);
+    s.sites.insert(repo.to_string(), c);
+    let Ok(bundle) = site::bundle(repo, s.cap) else {
+        return (true, None);
+    };
+    let mut hosts = cfg.domains;
+    if hosts.is_empty() || bundle.pages.len() * hosts.len() * METHODS.len() > DOMAIN_ENTRY_CAP {
+        hosts.clear();
+    } else {
+        // Its pages are found there as they are made.
+        s.domains.insert(repo.to_string(), Domain::default());
+    }
+    (true, Some(Work { repo: repo.to_string(), bundle, next: 0, hosts }))
+}
+
+/// Certify the pages of a site from where the work stands, until they
+/// are all in or the meter is spent after one. Whether they are all in.
+fn advance(s: &mut State, work: &mut Work, meter: &Meter) -> bool {
+    let repo = &work.repo;
+    while let Some(page) = work.bundle.pages.get(work.next) {
+        work.next += 1;
+        let sub = &page.sub;
+        let (mut res, blob) = work.bundle.answer(repo, page);
+        let hash = blob.map(|oid| body_hash(s, &oid, &res.body));
+        if let Some(c) = certify(&res, hash) {
             for url in urls(repo, sub) {
                 insert(&HttpCertificationPath::exact(url.clone()), &c);
                 s.exact.insert(url, c);
             }
-            if with_domains {
+            if !work.hosts.is_empty() {
                 set_expression(&mut res, full_text());
                 let path = domain_url(sub);
-                for host in &hosts {
+                for host in &work.hosts {
                     for method in METHODS {
                         let Some(c) = certify_full(method, &path, host, &res, hash) else { continue };
                         insert(&HttpCertificationPath::exact(path.clone()), &c);
-                        domain.exact.insert((host.clone(), method.to_string(), path.clone()), c);
+                        if let Some(d) = s.domains.get_mut(repo) {
+                            d.exact.insert((host.clone(), method.to_string(), path.clone()), c);
+                        }
                     }
                 }
             }
         }
-        let mut miss = site::miss(repo);
-        if let Some(c) = certify(&miss, None) {
-            insert(&wild, &c);
-            s.sites.insert(repo.to_string(), c);
+        meter.page();
+        if meter.spent() && work.next < work.bundle.pages.len() {
+            return false;
         }
-        if with_domains {
-            set_expression(&mut miss, full_text());
-            for host in &hosts {
-                for method in METHODS {
-                    let Some(c) = certify_full(method, "/", host, &miss, None) else { continue };
-                    insert(&HttpCertificationPath::wildcard(""), &c);
-                    domain.miss.insert((host.clone(), method.to_string()), c);
+    }
+    true
+}
+
+/// Every page of the site has its entries: the 404 for the rest takes
+/// the wildcard's place, and at its domains the root's.
+fn finish(s: &mut State, work: Work) {
+    let repo = &work.repo;
+    let wild = wildcard_path(&format!("/site/{repo}"));
+    let mut miss = site::miss(repo);
+    if let Some(c) = certify(&miss, None) {
+        if let Some(old) = s.sites.insert(repo.to_string(), c) {
+            delete(&wild, &old);
+        }
+        insert(&wild, &c);
+    }
+    if !work.hosts.is_empty() {
+        set_expression(&mut miss, full_text());
+        for host in &work.hosts {
+            for method in METHODS {
+                let Some(c) = certify_full(method, "/", host, &miss, None) else { continue };
+                insert(&HttpCertificationPath::wildcard(""), &c);
+                if let Some(d) = s.domains.get_mut(repo) {
+                    d.miss.insert((host.clone(), method.to_string()), c);
                 }
             }
-            s.domains.insert(repo.to_string(), domain);
         }
-        true
-    })
+    }
 }
 
 /// What the canister host answers at a path a domain's site has, so
@@ -753,6 +990,7 @@ fn set_cross_cap_for_tests(cap: usize) {
 mod tests {
     use super::*;
     use crate::store::{self, ObjectType};
+    use ic_certification::hash_tree::HashTreeNode;
 
     fn tree(entries: &[(&str, &str, &Oid)]) -> Oid {
         let mut t = Vec::new();
@@ -788,6 +1026,50 @@ mod tests {
     fn root() -> [u8; 32] {
         TREE.with(|t| t.borrow().root_hash())
     }
+
+    /// The rebuild of one message: off the IC a step has no end unless a
+    /// test sets one (`pages_a_step`).
+    fn rebuild() {
+        super::rebuild(IN_UPGRADE);
+        assert_eq!(sites_to_certify(), 0);
+    }
+
+    fn pages_a_step(n: usize) {
+        STEP_PAGES.with(|p| p.set(n));
+    }
+
+    /// Everything the tree holds: its leaves, each by the labels down to
+    /// it, and the entries by what holds them. Not its root: two trees
+    /// of the same leaves, entered in another order, are forked
+    /// otherwise.
+    fn held() -> (BTreeSet<Vec<String>>, Vec<String>) {
+        fn leaves(t: &HashTreeNode<Vec<u8>>, at: &mut Vec<String>, out: &mut BTreeSet<Vec<String>>) {
+            match t {
+                HashTreeNode::Fork(f) => {
+                    leaves(&f.0, at, out);
+                    leaves(&f.1, at, out);
+                }
+                HashTreeNode::Labeled(label, sub) => {
+                    at.push(hex::encode(label.as_bytes()));
+                    leaves(sub, at, out);
+                    at.pop();
+                }
+                HashTreeNode::Leaf(_) => {
+                    out.insert(at.clone());
+                }
+                HashTreeNode::Empty() | HashTreeNode::Pruned(_) => {}
+            }
+        }
+        let mut in_tree = BTreeSet::new();
+        TREE.with(|t| leaves(t.borrow().as_hash_tree().as_ref(), &mut Vec::new(), &mut in_tree));
+        STATE.with(|s| {
+            let s = s.borrow();
+            let domains: Vec<_> = s.domains.iter().map(|(r, d)| (r, &d.exact, &d.miss)).collect();
+            (in_tree, vec![format!("{:?}", s.exact), format!("{:?}", s.sites), format!("{domains:?}"), format!("{:?}", s.shadow), format!("{:?}", s.cross), format!("{:?}", s.cross_wild)])
+        })
+    }
+
+    const SITE_URLS: [&str; 8] = ["", "/", "/index.html", "/app/main.js", "/docs", "/docs/", "/docs/a.txt", "/docs/index.html"];
 
     /// The witness for `path` at the canister host proves the tree's
     /// root, and names `expr`.
@@ -1226,6 +1508,152 @@ mod tests {
         assert!(pages());
         assert_eq!(at(CROSS_CAP), (12, 66));
         assert_eq!(misses(), (true, true, true));
+    }
+
+    /// Three sites of seven pages, one with a domain, rebuilt three pages
+    /// a step: the one with the domain first; what a step has not
+    /// reached is declared uncertified at the site's wildcard and the
+    /// rest is certified as served; every answer of the canister host
+    /// has its witness after every step; and the end is the tree one
+    /// message builds.
+    #[test]
+    fn a_rebuild_in_steps_ends_where_one_message_does() {
+        for repo in ["a", "b", "c"] {
+            store::create_repo(repo).unwrap();
+            crate::mirror::ungated_for_tests(repo);
+            site(repo, format!("<h1>{repo}</h1>").as_bytes());
+            site::set_config(repo, String::new()).unwrap();
+        }
+        site::set_domains("b", vec!["b.example".into()]).unwrap();
+        rebuild();
+        let whole = held();
+
+        pages_a_step(3);
+        super::rebuild(IN_UPDATE);
+        assert!(ARMED.with(|a| a.get()));
+        // b is in hand, three pages in: the root, app/main.js, docs.
+        assert_eq!(sites_to_certify(), 3);
+        for (url, done) in [("/site/b", true), ("/site/b/", true), ("/site/b/app/main.js", true), ("/site/b/docs", true), ("/site/b/docs/", false), ("/site/b/index.html", false)] {
+            assert_eq!(kind_at(url, None, "GET"), if done { Kind::Response } else { Kind::Skip }, "{url}");
+            assert!(most_specific(url, None, "GET"), "{url}");
+            assert!(!done || served_as_certified(url), "{url}");
+        }
+        assert!(proves("/site/b/index.html", &["http_expr", "site", "b", "<*>"]));
+        assert!(served_at_domain_as_certified("b", "b.example", "GET", "app/main.js"));
+        assert_eq!(kind_at("/index.html", Some("b.example"), "GET"), Kind::Skip);
+        // a and c wait: declared, each at its own wildcard, not the 404
+        // of a repo with no site.
+        assert_eq!(kind_at("/site/a/index.html", None, "GET"), Kind::Skip);
+        assert!(proves("/site/c/", &["http_expr", "site", "c", "<*>"]));
+
+        let mut steps = 0;
+        loop {
+            let left = sites_to_certify();
+            let more = step(IN_UPDATE);
+            steps += 1;
+            assert!(sites_to_certify() <= left);
+            assert_eq!(more, sites_to_certify() > 0);
+            // The canister host loses no path on the way: its sites', and
+            // the paths the domain's pages are at.
+            for repo in ["a", "b", "c"] {
+                for sub in SITE_URLS {
+                    let url = format!("/site/{repo}{sub}");
+                    assert!(most_specific(&url, None, "GET"), "{url} after {steps} steps");
+                    assert!(kind_at(&url, None, "GET") == Kind::Skip || served_as_certified(&url), "{url} after {steps} steps");
+                }
+            }
+            for path in ["/", "/index.html", "/docs/a.txt", "/nope"] {
+                assert!(most_specific(path, None, "GET"), "{path} after {steps} steps");
+            }
+            if !more {
+                break;
+            }
+        }
+        // 21 pages, three a step, three of them in the rebuild's message.
+        assert_eq!(steps, 6);
+        assert_eq!(held(), whole);
+        for sub in ["", "index.html", "docs/", "docs/a.txt"] {
+            assert!(served_at_domain_as_certified("b", "b.example", "HEAD", sub), "{sub}");
+            assert!(most_specific(&domain_url(sub), Some("b.example"), "HEAD"), "{sub}");
+        }
+        assert!(most_specific("/nope", Some("b.example"), "GET") && most_specific("/site/a/index.html", Some("b.example"), "GET"));
+        pages_a_step(usize::MAX);
+    }
+
+    /// Two sites with a domain each, and a rebuild that has reached one:
+    /// the other's page is passed declared uncertified where the first
+    /// has no page, and has no witness where it has one, until its turn.
+    #[test]
+    fn a_site_that_waits_is_refused_at_its_domain_where_a_certified_one_has_a_page() {
+        for repo in ["b", "c"] {
+            store::create_repo(repo).unwrap();
+            crate::mirror::ungated_for_tests(repo);
+            site::set_config(repo, String::new()).unwrap();
+        }
+        let page = |b: &[u8]| store::put_object(ObjectType::Blob, b);
+        commit("b", &tree(&[("100644", "index.html", &page(b"b"))]));
+        commit("c", &tree(&[("100644", "index.html", &page(b"c")), ("100644", "own.txt", &page(b"own"))]));
+        site::set_domains("b", vec!["b.example".into()]).unwrap();
+        site::set_domains("c", vec!["c.example".into()]).unwrap();
+        // b is two pages: the root and index.html.
+        pages_a_step(2);
+        super::rebuild(IN_UPDATE);
+        assert_eq!(sites_to_certify(), 1);
+        let c = Some("c.example");
+        assert!(served_at_domain_as_certified("b", "b.example", "GET", "index.html"));
+        assert_eq!(kind_at("/own.txt", c, "GET"), Kind::Skip);
+        assert!(most_specific("/own.txt", c, "GET"));
+        assert_eq!(kind_at("/index.html", c, "GET"), Kind::Skip);
+        assert!(!most_specific("/index.html", c, "GET") && !most_specific("/", c, "GET"));
+        // At the canister host it is declared, and passed.
+        assert!(most_specific("/site/c/index.html", None, "GET"));
+        assert!(step(IN_UPDATE));
+        assert!(!step(IN_UPDATE));
+        for sub in ["", "index.html", "own.txt"] {
+            assert!(served_at_domain_as_certified("c", "c.example", "GET", sub), "{sub}");
+            assert!(most_specific(&domain_url(sub), c, "GET"), "{sub}");
+        }
+        pages_a_step(usize::MAX);
+    }
+
+    /// A site that changes while a rebuild has not reached it, or is
+    /// part-way through it, is certified whole in the message of the
+    /// change, and the rebuild goes on with the others.
+    #[test]
+    fn a_site_that_changes_during_a_rebuild_is_certified_at_once() {
+        for repo in ["a", "b", "c"] {
+            store::create_repo(repo).unwrap();
+            crate::mirror::ungated_for_tests(repo);
+            site(repo, format!("<h1>{repo}</h1>").as_bytes());
+            site::set_config(repo, String::new()).unwrap();
+        }
+        let whole_site = |repo: &str| SITE_URLS.iter().all(|sub| served_as_certified(&format!("/site/{repo}{sub}"))) && served_as_certified(&format!("/site/{repo}/nope"));
+        pages_a_step(3);
+        super::rebuild(IN_UPDATE);
+        // a is in hand, b and c wait.
+        assert_eq!(sites_to_certify(), 3);
+        assert!(!whole_site("a") && !whole_site("b"));
+        // A push to the one in hand, and to one that waits.
+        site("a", b"<h1>a, again</h1>");
+        site::advance("a");
+        assert!(whole_site("a"));
+        assert_eq!(sites_to_certify(), 2);
+        site("c", b"<h1>c, again</h1>");
+        site::advance("c");
+        assert!(whole_site("c"));
+        assert_eq!(sites_to_certify(), 1);
+        // A site gone while it waits is not a site when its turn comes:
+        // the 404 of a repo with no site, under /site.
+        store::create_repo("d").unwrap();
+        STATE.with(|s| s.borrow_mut().pending.insert((true, "d".to_string())));
+        while step(IN_UPDATE) {}
+        assert!(whole_site("a") && whole_site("b") && whole_site("c"));
+        assert!(proves("/site/d/", &["http_expr", "site", "<*>"]));
+        // The same tree as one message's, of the sites as they are now.
+        let stepped = held();
+        pages_a_step(usize::MAX);
+        rebuild();
+        assert_eq!(held(), stepped);
     }
 
     #[test]

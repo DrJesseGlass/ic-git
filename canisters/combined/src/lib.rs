@@ -50,7 +50,7 @@ fn init() {
     tenancy::arm_rent_timer();
     arm_push_cert_seed();
     feed::arm_governor_timer();
-    certify::rebuild();
+    certify::rebuild(certify::IN_UPGRADE);
 }
 
 #[ic_cdk::pre_upgrade]
@@ -74,8 +74,9 @@ fn post_upgrade() {
     // survive in stable memory; their timers do not.
     mirrors::resume();
     outbox::resume();
-    // The certification tree is heap state: from stable memory again.
-    certify::rebuild();
+    // The certification tree is heap state: from stable memory again,
+    // as far as this message's budget goes, and the rest in their own.
+    certify::rebuild(certify::IN_UPGRADE);
 }
 
 // --- HTTP: git smart-HTTP endpoints -----------------------------------------
@@ -479,6 +480,16 @@ fn frozen() -> bool {
 #[ic_cdk::query]
 fn cycle_balance() -> u64 {
     u64::try_from(ic_cdk::api::canister_cycle_balance()).unwrap_or(u64::MAX)
+}
+
+/// How many sites the rebuild of the certification tree has yet to reach
+/// (certify.rs): after an upgrade it goes on in messages of its own when
+/// the sites are more than the upgrade's message holds, and a site it
+/// has not reached is served declared uncertified. 0 when every site is
+/// certified.
+#[ic_cdk::query]
+fn sites_to_certify() -> u64 {
+    certify::sites_to_certify()
 }
 
 /// Name the one canister that may read the export besides operators
