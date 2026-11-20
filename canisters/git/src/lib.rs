@@ -11,7 +11,7 @@
 
 // The shared crate.
 use ic_git_common::httpjson::git_response;
-use ic_git_common::{clock, httpjson, kv};
+use ic_git_common::{clock, httpjson, ingress, kv};
 // The git side (crates/git).
 use ic_git_git::{api, certify, for_authority, jobs, mirror, outbox, pack, peer, receive, signed_push, site, smart_http, store, to_authority, tokens, transfer};
 use ic_git_types::authority_side::{Event, Published};
@@ -710,6 +710,49 @@ fn operator() -> bool {
     is_operator(&caller())
 }
 
+// --- the ingress filter (ic_git_common::ingress) ------------------------------
+
+/// Which signed messages this canister takes in, before it pays for them:
+/// each method by its rule, and a push only with a push token. It guards
+/// cycles, not access: every method checks its caller as before, and a
+/// canister's call never comes through here. A refusal traps, so the
+/// caller reads why.
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::msg_method_name();
+    let who = caller();
+    let arg = ic_cdk::api::msg_arg_data();
+    let rule = ic_git_git::ingress::rule(&method);
+    let mut taken = ingress::decide(&method, rule, &who, is_operator(&who), arg.len());
+    if taken.is_ok() && rule == Some(ingress::Rule::Push) {
+        taken = push_at_ingress(&arg);
+    }
+    match taken {
+        Ok(()) => ic_cdk::api::accept_message(),
+        Err(e) => ic_cdk::trap(e),
+    }
+}
+
+/// A push as the filter reads it, its pack unread: taken when
+/// `http_request_update` would get as far as the token, since without one
+/// it answers 404 or 401 and changes nothing. A token that stopped
+/// authorizing since the advertisement is refused here, and the gateway
+/// answers with an error page of its own in place of the 401.
+fn push_at_ingress(arg: &[u8]) -> Result<(), String> {
+    let req = ingress::http_request_less_body(arg)?;
+    match route(&req) {
+        Route::Rpc {
+            service: Service::ReceivePack,
+            repo,
+        } if push_authorized(&repo, &req.headers).is_some() => Ok(()),
+        Route::Rpc {
+            service: Service::ReceivePack,
+            ..
+        } => Err("http_request_update: push token required".to_string()),
+        _ => Err("http_request_update: only a push comes here".to_string()),
+    }
+}
+
 #[ic_cdk::update(guard = "is_admin")]
 fn authorize(principal: candid::Principal) -> Result<(), String> {
     if principal == candid::Principal::anonymous() {
@@ -871,3 +914,18 @@ fn icrc21_canister_call_consent_message(req: ic_git_common::consent::ConsentMess
 }
 
 ic_cdk::export_candid!();
+
+#[cfg(test)]
+mod tests {
+    use ic_git_common::ingress;
+    use ic_git_git::ingress::{rule, RULES};
+
+    /// A method without a rule is refused at ingress: the list is held to
+    /// the service, and the service to the list.
+    #[test]
+    fn every_method_has_its_ingress_rule() {
+        let did = include_str!("../git.did");
+        assert_eq!(ingress::against_did(did, rule), Vec::<String>::new());
+        assert_eq!(ingress::stale(did, RULES), Vec::<String>::new());
+    }
+}

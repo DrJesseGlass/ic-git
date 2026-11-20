@@ -466,3 +466,54 @@ fn a_ballot_brings_the_app_back_to_the_site_after_a_withdrawn_install() {
     tenancy::cast_ballot("parted", &voter, &h1, tenancy::Vote::Reject, None).unwrap();
     assert!(!deploy::in_flight("parted", &h1));
 }
+
+/// A method without a rule is refused at ingress: both sides' lists,
+/// together, cover this canister's service.
+#[test]
+fn every_method_has_its_ingress_rule() {
+    let did = include_str!("../combined.did");
+    assert_eq!(ic_git_common::ingress::against_did(did, crate::ingress_rule), Vec::<String>::new());
+    // Where both sides name a method, it is the tenant's call here.
+    assert_eq!(crate::ingress_rule("create_repo"), Some(ic_git_common::ingress::Rule::SignedIn));
+    assert_eq!(crate::ingress_rule("set_site"), Some(ic_git_common::ingress::Rule::SignedIn));
+}
+
+/// The filter takes a push with a token that authorizes it and nothing
+/// else sent to `http_request_update`, whatever its size.
+#[test]
+fn a_push_is_taken_at_ingress_with_its_token_only() {
+    use base64::Engine;
+    sides();
+    set_test_now(T0);
+    let owner = Principal::from_slice(&[31; 8]);
+    tenancy::credit(&owner, 10_000_000_000);
+    tenancy::create_repo("ingress-a", &owner, false).unwrap();
+    tenancy::create_repo("ingress-b", &owner, false).unwrap();
+    tokens::mint("ingress-a", "tok-ingress", owner, None, None).unwrap();
+    let basic = |token: &str| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("ic:{token}")));
+    let sent = |method: &str, url: &str, auth: Option<String>| {
+        let req = ic_dev_kit_rs::http::HttpRequest {
+            method: method.into(),
+            url: url.into(),
+            headers: auth.into_iter().map(|a| ("Authorization".to_string(), a)).collect(),
+            body: vec![7; 1_900_000],
+        };
+        crate::push_at_ingress(&candid::encode_one(&req).unwrap())
+    };
+    assert_eq!(sent("POST", "/ingress-a.git/git-receive-pack", Some(basic("tok-ingress"))), Ok(()));
+    // No token, one that is no token, and one for another repo.
+    for auth in [None, Some(basic("tok-none")), Some("Bearer tok-ingress".to_string())] {
+        let e = sent("POST", "/ingress-a.git/git-receive-pack", auth).unwrap_err();
+        assert!(e.contains("push token required"), "{e}");
+    }
+    assert!(sent("POST", "/ingress-b.git/git-receive-pack", Some(basic("tok-ingress"))).is_err());
+    // Anything but a push, token or not.
+    for (method, url) in [("POST", "/ingress-a.git/git-upload-pack"), ("GET", "/ingress-a.git/git-receive-pack"), ("GET", "/api/repos"), ("POST", "/")] {
+        let e = sent(method, url, Some(basic("tok-ingress"))).unwrap_err();
+        assert!(e.contains("only a push comes here"), "{method} {url}: {e}");
+    }
+    // An expired token, and one whose minter no longer writes.
+    set_test_now(T0 + 366 * 86_400 * 1_000_000_000);
+    assert!(sent("POST", "/ingress-a.git/git-receive-pack", Some(basic("tok-ingress"))).is_err());
+    assert!(crate::push_at_ingress(b"not candid").is_err());
+}

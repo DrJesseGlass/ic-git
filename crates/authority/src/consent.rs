@@ -26,7 +26,6 @@ fn whole_commit(method: &str, commit: &str) -> Result<String, Icrc21Error> {
 pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>> {
     let m = method;
     Some(match method {
-        "deposit" => Ok("Deposit the cycles attached to this call into your ic-git balance.".to_string()),
         "deposit_from_cycles_ledger" => args::<(u64,)>(arg, m).map(|(amount,)| {
             format!(
                 "Deposit {} into your ic-git balance, taken from the allowance you approved \
@@ -354,7 +353,6 @@ mod tests {
             ("set_site_domains", encode_args(("ic-vote", vec!["Vote.Example.", "www.vote.example"])).unwrap(), &["https://vote.example/, https://www.vote.example/", "as well as at /site/ic-vote/", "boundary nodes"]),
             ("set_site_domains", encode_args(("ic-vote", Vec::<String>::new())).unwrap(), &["no domain of its own", "only at /site/ic-vote/"]),
             ("evm_registry_publish_site", encode_args(("ic-vote",)).unwrap(), &["provenance record", "EVM action fee"]),
-            ("deposit", encode_args(()).unwrap(), &["attached to this call"]),
         ];
         for (method, arg, expect) in cases {
             let text = text(method, arg).unwrap_or_else(|e| panic!("{method}: {e:?}"));
@@ -363,6 +361,9 @@ mod tests {
             }
         }
         assert!(describe("create_push_token", &encode_args(("r",)).unwrap()).is_none(), "the git side's");
+        // A wallet's call carries no cycles, and the ingress filter refuses it:
+        // not described, so not signed.
+        assert!(describe("deposit", &encode_args(()).unwrap()).is_none());
         assert!(describe("charge_rent_now", &encode_args(()).unwrap()).is_none(), "not for a wallet");
     }
 
