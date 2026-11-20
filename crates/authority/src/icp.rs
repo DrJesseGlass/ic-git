@@ -452,6 +452,12 @@ pub async fn finish_icp_deposit(caller: Principal, operator: bool, id: u64) -> R
     }
 }
 
+/// Is deposit `id` one `who` made, pending or credited? What
+/// `finish_icp_deposit` asks of a caller who is no operator.
+pub fn is_depositor(id: u64, who: &Principal) -> bool {
+    get_pending(id).is_some_and(|p| p.who == *who) || credited_to(id) == Some(*who)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

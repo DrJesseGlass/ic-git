@@ -420,6 +420,12 @@ section "ingress filter"
 expect "the anonymous principal: a tenant's call is refused" "$(ic anonymous create_repo '("e2e-anon")')" 'sign in first: the anonymous principal cannot call create_repo'
 expect "a tenant: an argument larger than any real one is refused" "$(ic "$TEN" create_repo "(\"$(head -c 20000 /dev/zero | tr '\0' a)\")")" 'create_repo: the argument is [0-9]+ bytes, and a call of it carries at most 16384'
 refuse "  ...an operator's is not" "$(ic "$OP" compile_wat "(\"(module) ;; $(head -c 20000 /dev/zero | tr '\0' a)\")")" 'carries at most'
+# A tenant's call is taken from a caller it could be for: a voter of
+# another repo has no part in this one, and no account to create with.
+expect "a stranger to a repo: a call on it is refused" "$(ic "$V2" set_site '("e2e-super", "")')" 'set_site: .* has no part in a repo named e2e-super'
+expect "  ...and a push token for it" "$(ic "$V2" create_push_token '("e2e-super", null, null)')" 'may not write to repo e2e-super'
+expect "an account that does not cover a repo creates none" "$(ic "$V2" create_repo '("e2e-unpaid")')" 'does not cover the creation fee'
+expect "a query sent as an update carries a query's argument" "$(ic anonymous get_repo_info "(\"$(head -c 2000 /dev/zero | tr '\0' a)\")" --update)" 'get_repo_info: the argument is [0-9]+ bytes, and a call of it carries at most 1024'
 expect "attached cycles are no signed message's to deposit" "$(ic "$TEN" deposit)" 'deposit: a signed message carries no cycles'
 expect "a query sent as an update is taken" "$(ic anonymous get_pricing --update)" 'push_base'
 expect "a method the canister has not is refused" "$(cd "$WORK" && dfx canister call git no_such_call --identity "$TEN" 2>&1)" 'no such call|has no .*method'
@@ -481,7 +487,7 @@ section "custom domains"
 # The Host goes through http_request itself: the local gateway routes by
 # canister id and carries no other host to the canister.
 at_host() { flat "$(call "$OP" git http_request "(record { method = \"${3:-GET}\"; url = \"$2\"; headers = vec { record { \"host\"; \"$1\" } }; body = blob \"\" })" --query)"; }
-expect "a voter may not name the domains" "$(ic "$V1" set_site_domains '("e2e-app", vec { "app.example" })')" 'does not own'
+expect "a stranger to the repo may not name the domains" "$(ic "$V1" set_site_domains '("e2e-app", vec { "app.example" })')" 'has no part in a repo named e2e-app'
 expect "the owner names them, as looked up" "$(ic "$TEN" set_site_domains '("e2e-app", vec { "App.Example."; "www.app.example" })')" 'Ok'
 expect "  ...get_site lists them" "$(flat "$(ic "$TEN" get_site '("e2e-app")' --query)")" 'domains = vec \{ "app.example"; "www.app.example" \}'
 expect "  ...and /.well-known/ic-domains does, for the boundary nodes" "$(curl -s "http://$HOST/.well-known/ic-domains")" '^www.app.example$'
@@ -639,14 +645,17 @@ expect "  ...and the offer shows" "$INFO" "pending_owner = opt principal \"$P1\"
 expect "  ...in /api too" "$(curl -s "http://$AHOST/api/e2e-offer/info")" "\"pending_owner\":\"$P1\""
 expect "another principal cannot take it" "$(ic "$OP" accept_transfer '("e2e-offer")')" 'is not offered to'
 expect "the one it was offered to declines" "$(ic "$V1" cancel_transfer '("e2e-offer")')" 'Ok'
-expect "  ...and can no longer take it" "$(ic "$V1" accept_transfer '("e2e-offer")')" 'is not offered to'
+expect "  ...and can no longer take it" "$(ic "$V1" accept_transfer '("e2e-offer")')" 'has no part in a repo named e2e-offer'
 ic "$TEN" transfer_repo "(\"e2e-offer\", principal \"$P1\")" >/dev/null
 expect "offered again and taken" "$(ic "$V1" accept_transfer '("e2e-offer")')" 'Ok'
 expect "  ...the new owner owns it" "$(ic "$OP" get_repo_info '("e2e-offer")')" "owner = opt principal \"$P1\""
-expect "  ...and the old one administers nothing" "$(ic "$TEN" set_required_votes '("e2e-offer", 0 : nat32)')" 'does not own'
+expect "  ...and the old one administers nothing" "$(ic "$TEN" set_required_votes '("e2e-offer", 0 : nat32)')" 'has no part in a repo named e2e-offer'
 P2=$(dfx identity get-principal --identity "$V2")
 ic "$TEN" add_member "(\"e2e-app\", principal \"$P1\", \"voter\")" >/dev/null
 ic "$TEN" add_member "(\"e2e-app\", principal \"$P2\", \"voter\")" >/dev/null
+# A voter has a part in the repo, so the filter takes the call and the
+# method refuses it: the repo is not theirs to administer.
+expect "a voter may not name the domains" "$(ic "$V1" set_site_domains '("e2e-app", vec { "app.example" })')" 'does not own'
 commit app.wat '(module (func (export "canister_query hello")) (func (export "canister_query hi")))' app-v2
 signed "$URL" >/dev/null || true
 A2=$(git -C "$W" rev-parse HEAD)

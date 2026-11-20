@@ -16,11 +16,19 @@
 //! the size of a tenant's argument (`MAX_ARG`), which no call here comes
 //! near.
 //!
+//! A tenant's call is taken only from a caller it could be for: each side
+//! asks its own state (its `standing`) whether the caller has a part in
+//! the repo the call names, an account that covers the repo it would
+//! create, a deposit to finish. A stranger is left the calls that are
+//! anyone's, and those are small: a first deposit (a number), a query
+//! sent as an update (`MAX_READ_ARG`), a consent message
+//! (`MAX_CONSENT_ARG`).
+//!
 //! It is not an access check. A call from another canister never passes
 //! through it, and a replica that skips it is not caught: every guard and
-//! every check a method makes stays where it is. What is left after it: a
-//! signed-in stranger can still have the canister pay for small messages
-//! (`MAX_ARG` at most) to the methods tenants call.
+//! every check a method makes stays where it is. What is left after it is
+//! the price of a message that is taken, which no filter removes: its
+//! fixed part, and its bytes up to those bounds.
 //!
 //! Each side lists its methods' rules (its `ingress.rs`); a method with no
 //! rule is refused, and each canister's tests hold its list to its `.did`.
@@ -33,9 +41,18 @@ use ic_dev_kit_rs::http::HttpRequest;
 /// or an SSH public key, a few kilobytes.
 pub const MAX_ARG: usize = 16 << 10;
 
-/// The same for the consent message, whose argument carries another
-/// call's argument inside it.
-pub const MAX_CONSENT_ARG: usize = 2 * MAX_ARG;
+/// The most a query's argument may weigh when it is sent as an update:
+/// a repo's name, a principal, a commit, a small request.
+pub const MAX_READ_ARG: usize = 1 << 10;
+
+/// The same for the consent message, which anyone may ask for and whose
+/// argument carries another call's inside it: the largest one described
+/// is a list of eight domain names, under three kilobytes.
+pub const MAX_CONSENT_ARG: usize = 8 << 10;
+
+/// The same for a deposit from a ledger, whose argument is one number
+/// and which a caller with no account yet must be able to send.
+pub const MAX_DEPOSIT_ARG: usize = 64;
 
 /// Who may send a method as an ingress message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,10 +61,15 @@ pub enum Rule {
     NotIngress(&'static str),
     /// Operators, with an argument of any size.
     Operator,
-    /// Anyone but the anonymous principal, with at most `MAX_ARG`.
+    /// Anyone but the anonymous principal, with at most `MAX_ARG`, whom
+    /// the side then finds to have standing for this call (its
+    /// `standing`, by the method).
     SignedIn,
-    /// Anyone, with at most `MAX_ARG`: the queries, which may be called
-    /// as updates for a certified answer.
+    /// The same, for a call on the repo its first argument names: the
+    /// side asks whether the caller has a part in that repo.
+    Member,
+    /// Anyone, with at most `MAX_READ_ARG`: the queries, which may be
+    /// called as updates for a certified answer.
     Anyone,
     /// Anyone, with at most `MAX_CONSENT_ARG`: the ICRC-21 consent
     /// message, which a wallet may ask for before its user has signed in.
@@ -74,16 +96,29 @@ pub fn decide(method: &str, rule: Option<Rule>, caller: &Principal, operator: bo
         // a source text), and an operator is refused nothing else here.
         _ if operator => return Ok(()),
         Rule::Operator => return Err(format!("{caller} is not an operator (a controller or on the admin allowlist)")),
-        Rule::SignedIn if *caller == Principal::anonymous() => {
+        Rule::SignedIn | Rule::Member if *caller == Principal::anonymous() => {
             return Err(format!("sign in first: the anonymous principal cannot call {method}"));
         }
-        Rule::SignedIn | Rule::Anyone => MAX_ARG,
+        Rule::SignedIn | Rule::Member => MAX_ARG,
+        Rule::Anyone => MAX_READ_ARG,
         Rule::Consent => MAX_CONSENT_ARG,
     };
     if arg_len > cap {
         return Err(format!("{method}: the argument is {arg_len} bytes, and a call of it carries at most {cap}"));
     }
     Ok(())
+}
+
+/// Does the side ask its own state about the caller, once `decide` has
+/// taken the message? Not of an operator, who is refused nothing.
+pub fn asks_standing(rule: Option<Rule>, operator: bool) -> bool {
+    !operator && matches!(rule, Some(Rule::SignedIn | Rule::Member))
+}
+
+/// The first argument of a call, when it is a text: the repo a tenant's
+/// call names. `None` for an argument the method itself could not read.
+pub fn first_text(arg: &[u8]) -> Option<String> {
+    candid::de::IDLDeserialize::new(arg).ok()?.get_value::<String>().ok()
 }
 
 /// A method's rule in a side's list.
@@ -238,10 +273,34 @@ mod tests {
 
     #[test]
     fn a_read_is_anyones_but_small() {
-        for (rule, cap) in [(Rule::Anyone, MAX_ARG), (Rule::Consent, MAX_CONSENT_ARG)] {
+        for (rule, cap) in [(Rule::Anyone, MAX_READ_ARG), (Rule::Consent, MAX_CONSENT_ARG)] {
             assert_eq!(decide("m", Some(rule), &Principal::anonymous(), false, cap), Ok(()));
             assert!(decide("m", Some(rule), &Principal::anonymous(), false, cap + 1).is_err());
         }
+    }
+
+    #[test]
+    fn a_call_on_a_repo_is_bounded_as_a_tenants_and_then_the_sides_to_ask() {
+        assert_eq!(decide("vote", Some(Rule::Member), &user(), false, MAX_ARG), Ok(()));
+        assert!(decide("vote", Some(Rule::Member), &user(), false, MAX_ARG + 1).is_err());
+        assert!(decide("vote", Some(Rule::Member), &Principal::anonymous(), false, 10).is_err());
+        for rule in [Rule::SignedIn, Rule::Member] {
+            assert!(asks_standing(Some(rule), false));
+            assert!(!asks_standing(Some(rule), true), "an operator is not asked");
+        }
+        for rule in [Rule::Anyone, Rule::Consent, Rule::Operator, Rule::Push] {
+            assert!(!asks_standing(Some(rule), false));
+        }
+        assert!(!asks_standing(None, false));
+    }
+
+    #[test]
+    fn the_repo_a_call_names_is_its_first_argument() {
+        let arg = candid::encode_args(("my-repo", 7u64, Some("why"))).unwrap();
+        assert_eq!(first_text(&arg).as_deref(), Some("my-repo"));
+        assert_eq!(first_text(&candid::encode_args((7u64, "x")).unwrap()), None);
+        assert_eq!(first_text(&candid::encode_args(()).unwrap()), None);
+        assert_eq!(first_text(b"junk"), None);
     }
 
     #[test]

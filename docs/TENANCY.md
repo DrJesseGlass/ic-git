@@ -860,9 +860,10 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   for it, as often as the subnet allowed. Each canister now refuses,
   before that charge: a method only the other canister calls, from
   everyone; an operator's method from anyone else; a tenant's call from
-  the anonymous principal, or with an argument over 16 KiB (32 KiB for
-  the consent message) unless an operator sends it; a query sent as an
-  update with more than that; `deposit` and `deposit_for`, since a
+  the anonymous principal, with an argument over 16 KiB, or from a
+  caller it could not be for (below); a query sent as an update with
+  more than 1 KiB, and a consent message with more than 8 KiB; `deposit`
+  and `deposit_for`, since a
   signed message carries no cycles to deposit; a method with no rule;
   and on the git canister anything sent to `http_request_update` but a
   push with a push token that authorizes it, read without its pack. A
@@ -873,9 +874,20 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   `ingress.rs`, and a canister's tests fail when its `.did` has a
   method with none. The filter saves cycles and decides nothing: a call
   from another canister never passes through it and one replica alone
-  runs it, so every guard stays as it was. What is left: a signed-in
-  stranger can still have the canister pay for messages of up to
-  16 KiB to the methods tenants call.
+  runs it, so every guard stays as it was. An operator is bound by none
+  of the sizes. A tenant's call is taken only from a caller it could be
+  for, asked of the canister's own state: a call on a repo (named by
+  its first argument) from its owner, a member, or the one it is
+  offered to; `create_repo` from an account that covers the fee, or
+  holds the name reserved; `finish_icp_deposit` from the deposit's
+  maker; a push token minted or revoked by a writer of its repo. A
+  stranger is left the calls that are anyone's, each small: a first
+  deposit from a ledger (64 bytes), a query sent as an update, the
+  consent message. What remains is the price of a message that is
+  taken, its fixed part and its bytes up to those bounds, which no
+  filter removes. The filter takes a push by its path and token and
+  does not look at its Host: at a site's own domain it is taken and
+  then refused, as before, by `http_request_update`.
 - `charge_rent_now` runs a rent tick on demand; the timer runs hourly and is
   re-armed on every upgrade.
 - Existing repos (`evm-demo`, `registry`, `ic-git`) are ownerless and exempt.

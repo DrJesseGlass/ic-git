@@ -2,6 +2,7 @@
 //! (ic_git_common::ingress): who may send each. A method without a line
 //! here is refused, and the canister's tests hold the list to its `.did`.
 
+use candid::Principal;
 use ic_git_common::ingress::Rule::{self, *};
 
 /// The authority is a canister: its messages never come signed by a key.
@@ -40,7 +41,7 @@ pub const RULES: &[(&str, Rule)] = &[
     ("deauthorize", Operator),
     ("dead_push_tokens", Operator),
     ("purge_dead_push_token", Operator),
-    // A repo's writers.
+    // A repo's writers, and taken from no one else (`standing`).
     ("create_push_token", SignedIn),
     ("revoke_push_token", SignedIn),
     ("revoke_push_token_id", SignedIn),
@@ -67,4 +68,43 @@ pub const RULES: &[(&str, Rule)] = &[
 
 pub fn rule(method: &str) -> Option<Rule> {
     ic_git_common::ingress::find(RULES, method)
+}
+
+/// Could this call be for `who`, who is signed in and no operator? Asked
+/// of the `SignedIn` methods once the message is otherwise taken
+/// (ic_git_common::ingress::asks_standing). Each is a writer's on one
+/// repo -- the one it names, or the one its token is for -- and the
+/// answer is the method's own (`mirror::may_write`).
+pub fn standing(method: &str, rule: Rule, who: &Principal, arg: &[u8]) -> Result<(), String> {
+    if rule != SignedIn {
+        return Ok(());
+    }
+    let named = ic_git_common::ingress::first_text(arg).ok_or_else(|| format!("{method}: the argument is not this call's"))?;
+    let repo = match method {
+        "create_push_token" => named,
+        "revoke_push_token" => crate::tokens::repo_of(&named).ok_or("revoke_push_token: no such push token")?,
+        "revoke_push_token_id" => crate::tokens::find_id(&named)?.1,
+        // A tenant's method with no answer here is taken from no one: the
+        // tests hold every one to a line above.
+        _ => return Err(format!("{method}: no one has standing for this call")),
+    };
+    crate::mirror::may_write(&repo, who, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candid::encode_args;
+
+    /// Every tenant method has its answer, and it is no to a stranger.
+    #[test]
+    fn a_stranger_has_standing_for_nothing() {
+        let stranger = Principal::from_slice(&[211; 8]);
+        for (method, rule) in RULES.iter().filter(|(_, r)| *r == SignedIn) {
+            let e = standing(method, *rule, &stranger, &encode_args(("no-such",)).unwrap()).unwrap_err();
+            assert!(!e.contains("no one has standing"), "{method} has no answer: {e}");
+            assert!(standing(method, *rule, &stranger, b"junk").is_err(), "{method}");
+        }
+        assert_eq!(standing("list_repos", Anyone, &stranger, b""), Ok(()));
+    }
 }
