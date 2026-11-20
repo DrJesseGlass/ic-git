@@ -158,11 +158,17 @@ pub fn node_at_path_oid(commit_oid: &Oid, path: &str) -> Result<(Oid, store::Obj
         if tty != store::ObjectType::Tree {
             return Err(format!("path component '{comp}' is not a directory"));
         }
-        oid = tree_entries(&tcontent)?
+        let entry = tree_entries(&tcontent)?
             .into_iter()
             .find(|e| e.name == comp.as_bytes())
-            .ok_or_else(|| format!("path not found: {comp}"))?
-            .oid;
+            .ok_or_else(|| format!("path not found: {comp}"))?;
+        // A submodule's entry names a commit of another repo, and no
+        // object of this one: the store is one for every repo, so the id
+        // may be held there for another, and is not read as this path.
+        if is_gitlink_mode(&entry.mode) {
+            return Err(format!("'{comp}' is a submodule: what is under it is in another repo"));
+        }
+        oid = entry.oid;
     }
     let (ty, content) = store::get_object_parsed(&oid).ok_or("object missing")?;
     Ok((oid, ty, content))
@@ -243,6 +249,16 @@ mod tests {
         assert!(blob_at_path(&commit_oid, "nope").is_err());
         // A file where a directory is expected.
         assert!(blob_at_path(&commit_oid, "build/app.wat/x").is_err());
+        // A submodule's entry is no path to an object, though the store
+        // holds one of its id.
+        let mut with_sub = Vec::new();
+        with_sub.extend_from_slice(b"160000 sub\0");
+        with_sub.extend_from_slice(blob.as_slice());
+        let with_sub = store::put_object(ObjectType::Tree, &with_sub);
+        let sub_commit = store::put_object(ObjectType::Commit, format!("tree {}\n\nsub\n", store::oid_hex(&with_sub)).as_bytes());
+        for path in ["sub", "sub/app.wat"] {
+            assert!(node_at_path(&sub_commit, path).unwrap_err().contains("is a submodule"), "{path}");
+        }
         // "" resolves to the root tree; a directory path to its subtree.
         assert!(matches!(
             node_at_path(&commit_oid, "").unwrap(),
