@@ -338,9 +338,15 @@ fn operator() -> bool {
 fn inspect_message() {
     let method = ic_cdk::api::msg_method_name();
     let who = caller();
-    let arg_len = ic_cdk::api::msg_arg_data().len();
+    let arg = ic_cdk::api::msg_arg_data();
     let rule = ic_git_authority::ingress::rule(&method);
-    match ingress::decide(&method, rule, &who, is_operator(&who), arg_len) {
+    let operator = is_operator(&who);
+    let mut taken = ingress::decide(&method, rule, &who, operator, arg.len());
+    // A tenant's call, from a caller it could be for.
+    if let (Ok(()), Some(rule), true) = (&taken, rule, ingress::asks_standing(rule, operator)) {
+        taken = ic_git_authority::ingress::standing(&method, rule, &who, &arg);
+    }
+    match taken {
         Ok(()) => ic_cdk::api::accept_message(),
         Err(e) => ic_cdk::trap(e),
     }

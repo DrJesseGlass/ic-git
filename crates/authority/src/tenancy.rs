@@ -573,6 +573,21 @@ pub fn can_admin(repo: &str, p: &Principal, operator: bool) -> Result<RepoMeta, 
     }
 }
 
+/// Has `who` a part in `repo`: its owner, a member of it, or the one it
+/// is offered to? Every call a tenant makes on a repo asks for one of
+/// them, so the ingress filter (ingress.rs) takes such a call from no one
+/// else.
+pub fn has_part(repo: &str, who: &Principal) -> bool {
+    meta(repo).is_some_and(|m| m.owner == Some(*who) || m.pending_owner == Some(*who) || m.members.iter().any(|x| x.principal == *who))
+}
+
+/// Could `who`, who is no operator, create `name` as far as their account
+/// goes: it covers the fee, or the name is theirs already, reserved by a
+/// creation that is waiting (`create_repo` finishes that one unpaid).
+pub fn could_create(name: &str, who: &Principal) -> bool {
+    balance(who) >= pricing().create_repo || reservation(name).is_some_and(|r| r.owner == *who)
+}
+
 /// Owner or voter: may cast a ballot. Decided by the vote policy itself, so
 /// whoever passes here is exactly an approver `record` accepts.
 pub fn can_vote(repo: &str, p: &Principal) -> Result<RepoMeta, String> {

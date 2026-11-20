@@ -475,7 +475,25 @@ fn every_method_has_its_ingress_rule() {
     assert_eq!(ic_git_common::ingress::against_did(did, crate::ingress_rule), Vec::<String>::new());
     // Where both sides name a method, it is the tenant's call here.
     assert_eq!(crate::ingress_rule("create_repo"), Some(ic_git_common::ingress::Rule::SignedIn));
-    assert_eq!(crate::ingress_rule("set_site"), Some(ic_git_common::ingress::Rule::SignedIn));
+    assert_eq!(crate::ingress_rule("set_site"), Some(ic_git_common::ingress::Rule::Member));
+}
+
+/// Each side answers for its own tenants' calls: a repo's owner has
+/// standing for the authority's and the git side's, a stranger for
+/// neither.
+#[test]
+fn a_tenants_call_is_taken_from_one_it_could_be_for() {
+    use ic_git_common::ingress::Rule::{Member, SignedIn};
+    sides();
+    set_test_now(T0);
+    let (owner, stranger) = (Principal::from_slice(&[41; 8]), Principal::from_slice(&[42; 8]));
+    tenancy::credit(&owner, 10_000_000_000);
+    tenancy::create_repo("ingress-own", &owner, false).unwrap();
+    let arg = candid::encode_args(("ingress-own",)).unwrap();
+    for (method, rule) in [("set_site", Member), ("create_push_token", SignedIn)] {
+        assert_eq!(crate::ingress_standing(method, rule, &owner, &arg), Ok(()), "{method}");
+        assert!(crate::ingress_standing(method, rule, &stranger, &arg).is_err(), "{method}");
+    }
 }
 
 /// The filter takes a push with a token that authorizes it and nothing
@@ -501,6 +519,14 @@ fn a_push_is_taken_at_ingress_with_its_token_only() {
         crate::push_at_ingress(&candid::encode_one(&req).unwrap())
     };
     assert_eq!(sent("POST", "/ingress-a.git/git-receive-pack", Some(basic("tok-ingress"))), Ok(()));
+    // Whatever its Host: the filter does not walk the sites for it.
+    let at_a_domain = ic_dev_kit_rs::http::HttpRequest {
+        method: "POST".into(),
+        url: "/ingress-a.git/git-receive-pack".into(),
+        headers: vec![("Host".into(), "www.example.com".into()), ("Authorization".into(), basic("tok-ingress"))],
+        body: Vec::new(),
+    };
+    assert_eq!(crate::push_at_ingress(&candid::encode_one(&at_a_domain).unwrap()), Ok(()));
     // No token, one that is no token, and one for another repo.
     for auth in [None, Some(basic("tok-none")), Some("Bearer tok-ingress".to_string())] {
         let e = sent("POST", "/ingress-a.git/git-receive-pack", auth).unwrap_err();

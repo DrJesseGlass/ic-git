@@ -2,6 +2,7 @@
 //! who may send each. A method without a line here is refused, and the
 //! canister's tests hold the list to its `.did`.
 
+use candid::Principal;
 use ic_git_common::ingress::Rule::{self, *};
 
 /// The git canister is a canister: its messages never come signed by a key.
@@ -66,33 +67,36 @@ pub const RULES: &[(&str, Rule)] = &[
     ("sol_signature_status", Operator),
     ("run_wasm", Operator),
     ("run_wat", Operator),
-    // Tenants: each asks for an owner, a member, or an account's holder,
-    // and the anonymous principal is none of them.
+    // Tenants, each taken only from a caller it could be for (`standing`).
+    // On a repo, named first: its owner, a member, or the one it is
+    // offered to. The rest by the method: an account that covers the new
+    // repo, a deposit of the caller's to finish, and a first deposit,
+    // which is anyone's and one number.
     ("create_repo", SignedIn),
-    ("set_require_signed_push", SignedIn),
+    ("set_require_signed_push", Member),
     ("deposit_from_cycles_ledger", SignedIn),
     ("deposit_from_icp", SignedIn),
     ("finish_icp_deposit", SignedIn),
-    ("add_member", SignedIn),
-    ("remove_member", SignedIn),
-    ("transfer_repo", SignedIn),
-    ("accept_transfer", SignedIn),
-    ("cancel_transfer", SignedIn),
-    ("set_required_votes", SignedIn),
-    ("cast_ballot", SignedIn),
-    ("vote", SignedIn),
-    ("propose_policy_change", SignedIn),
-    ("create_app_canister", SignedIn),
-    ("top_up_app_canister", SignedIn),
-    ("govern_app_canister", SignedIn),
-    ("set_wasm_deploy", SignedIn),
-    ("set_deploy_mode", SignedIn),
-    ("deploy_now", SignedIn),
-    ("set_evm_deploy", SignedIn),
-    ("set_site", SignedIn),
-    ("set_site_domains", SignedIn),
-    ("evm_registry_publish", SignedIn),
-    ("evm_registry_publish_site", SignedIn),
+    ("add_member", Member),
+    ("remove_member", Member),
+    ("transfer_repo", Member),
+    ("accept_transfer", Member),
+    ("cancel_transfer", Member),
+    ("set_required_votes", Member),
+    ("cast_ballot", Member),
+    ("vote", Member),
+    ("propose_policy_change", Member),
+    ("create_app_canister", Member),
+    ("top_up_app_canister", Member),
+    ("govern_app_canister", Member),
+    ("set_wasm_deploy", Member),
+    ("set_deploy_mode", Member),
+    ("deploy_now", Member),
+    ("set_evm_deploy", Member),
+    ("set_site", Member),
+    ("set_site_domains", Member),
+    ("evm_registry_publish", Member),
+    ("evm_registry_publish_site", Member),
     // What a wallet asks before it signs.
     ("icrc21_canister_call_consent_message", Consent),
     // The queries.
@@ -130,4 +134,113 @@ pub const RULES: &[(&str, Rule)] = &[
 
 pub fn rule(method: &str) -> Option<Rule> {
     ic_git_common::ingress::find(RULES, method)
+}
+
+/// Could this call be for `who`, who is signed in and no operator? Asked
+/// of the `SignedIn` and `Member` methods once the message is otherwise
+/// taken (ic_git_common::ingress::asks_standing). Each answer is the
+/// method's own first refusal, or wider: what is refused here the method
+/// would refuse.
+pub fn standing(method: &str, rule: Rule, who: &Principal, arg: &[u8]) -> Result<(), String> {
+    use ic_git_common::ingress::{first_text, MAX_DEPOSIT_ARG};
+    let unread = || format!("{method}: the argument is not this call's");
+    match (rule, method) {
+        (Member, _) => {
+            let repo = first_text(arg).ok_or_else(unread)?;
+            if crate::tenancy::has_part(&repo, who) {
+                Ok(())
+            } else {
+                Err(format!("{method}: {who} has no part in a repo named {repo}"))
+            }
+        }
+        (SignedIn, "create_repo") => {
+            let name = first_text(arg).ok_or_else(unread)?;
+            if crate::tenancy::could_create(&name, who) {
+                Ok(())
+            } else {
+                Err(format!("create_repo: the balance of {who} does not cover the creation fee; deposit first"))
+            }
+        }
+        (SignedIn, "deposit_from_cycles_ledger" | "deposit_from_icp") => {
+            if arg.len() <= MAX_DEPOSIT_ARG {
+                Ok(())
+            } else {
+                Err(format!("{method}: the argument is {} bytes, and a call of it carries at most {MAX_DEPOSIT_ARG}", arg.len()))
+            }
+        }
+        (SignedIn, "finish_icp_deposit") => {
+            let (id,) = candid::decode_args::<(u64,)>(arg).map_err(|_| unread())?;
+            if crate::icp::is_depositor(id, who) {
+                Ok(())
+            } else {
+                Err(format!("finish_icp_deposit: {who} made no ICP deposit {id}"))
+            }
+        }
+        // A tenant's method with no answer here is taken from no one: the
+        // tests hold every one to a line above.
+        (SignedIn, _) => Err(format!("{method}: no one has standing for this call")),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tenancy;
+    use candid::encode_args;
+
+    fn p(n: u8) -> Principal {
+        Principal::from_slice(&[n; 8])
+    }
+
+    /// Every tenant method has its answer, and it is no to a stranger:
+    /// one who owns nothing, belongs to nothing and holds nothing.
+    #[test]
+    fn a_stranger_has_standing_for_a_first_deposit_alone() {
+        let stranger = p(201);
+        let mut pricing = tenancy::pricing();
+        pricing.create_repo = 1;
+        tenancy::set_pricing(pricing);
+        for (method, rule) in RULES.iter().filter(|(_, r)| matches!(r, SignedIn | Member)) {
+            let deposit = matches!(*method, "deposit_from_cycles_ledger" | "deposit_from_icp");
+            let arg = if deposit || *method == "finish_icp_deposit" { encode_args((1u64,)).unwrap() } else { encode_args(("no-such-repo",)).unwrap() };
+            assert_eq!(standing(method, *rule, &stranger, &arg).is_ok(), deposit, "{method}");
+            // An argument that is not the call's is nobody's.
+            assert!(deposit || standing(method, *rule, &stranger, b"junk").is_err(), "{method}");
+        }
+        let long = encode_args((1u64, vec![0u8; 100])).unwrap();
+        assert!(standing("deposit_from_icp", SignedIn, &stranger, &long).is_err());
+        // The others are not asked.
+        assert_eq!(standing("get_pricing", Anyone, &stranger, b""), Ok(()));
+    }
+
+    #[test]
+    fn a_repos_own_people_have_standing_on_it() {
+        let (owner, voter, next, other) = (p(202), p(203), p(204), p(205));
+        use futures::executor::block_on;
+        tenancy::credit(&owner, 10_000_000_000);
+        block_on(tenancy::create_repo("ingress-part", &owner, false)).unwrap();
+        block_on(tenancy::add_member("ingress-part", &owner, false, voter, tenancy::Role::Voter)).unwrap();
+        block_on(tenancy::transfer_repo("ingress-part", &owner, false, next)).unwrap();
+        let arg = encode_args(("ingress-part", "x")).unwrap();
+        for who in [owner, voter, next] {
+            assert_eq!(standing("cast_ballot", Member, &who, &arg), Ok(()), "{who}");
+        }
+        let e = standing("cast_ballot", Member, &other, &arg).unwrap_err();
+        assert!(e.contains("has no part in a repo named ingress-part"), "{e}");
+    }
+
+    #[test]
+    fn a_repo_is_created_by_an_account_that_covers_it() {
+        let (rich, poor) = (p(206), p(207));
+        let mut pricing = tenancy::pricing();
+        pricing.create_repo = 1_000;
+        tenancy::set_pricing(pricing);
+        tenancy::credit(&rich, 1_000);
+        tenancy::credit(&poor, 999);
+        let arg = encode_args(("ingress-new",)).unwrap();
+        assert_eq!(standing("create_repo", SignedIn, &rich, &arg), Ok(()));
+        let e = standing("create_repo", SignedIn, &poor, &arg).unwrap_err();
+        assert!(e.contains("does not cover the creation fee"), "{e}");
+    }
 }

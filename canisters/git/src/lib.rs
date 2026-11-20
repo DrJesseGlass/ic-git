@@ -723,9 +723,14 @@ fn inspect_message() {
     let who = caller();
     let arg = ic_cdk::api::msg_arg_data();
     let rule = ic_git_git::ingress::rule(&method);
-    let mut taken = ingress::decide(&method, rule, &who, is_operator(&who), arg.len());
+    let operator = is_operator(&who);
+    let mut taken = ingress::decide(&method, rule, &who, operator, arg.len());
     if taken.is_ok() && rule == Some(ingress::Rule::Push) {
         taken = push_at_ingress(&arg);
+    }
+    // A tenant's call, from a caller it could be for.
+    if let (Ok(()), Some(rule), true) = (&taken, rule, ingress::asks_standing(rule, operator)) {
+        taken = ic_git_git::ingress::standing(&method, rule, &who, &arg);
     }
     match taken {
         Ok(()) => ic_cdk::api::accept_message(),
@@ -739,12 +744,18 @@ fn inspect_message() {
 /// authorizing since the advertisement is refused here, and the gateway
 /// answers with an error page of its own in place of the 401.
 fn push_at_ingress(arg: &[u8]) -> Result<(), String> {
-    let req = ingress::http_request_less_body(arg)?;
+    let mut req = ingress::http_request_less_body(arg)?;
+    // By the path alone. `route` asks first whether the Host is a site's
+    // domain, a walk of every site config for a host that looks like one,
+    // and the filter's budget is a small part of an update's: a push at a
+    // site's domain is taken here and refused there, by its token's
+    // holder alone.
+    let headers = std::mem::take(&mut req.headers);
     match route(&req) {
         Route::Rpc {
             service: Service::ReceivePack,
             repo,
-        } if push_authorized(&repo, &req.headers).is_some() => Ok(()),
+        } if push_authorized(&repo, &headers).is_some() => Ok(()),
         Route::Rpc {
             service: Service::ReceivePack,
             ..
