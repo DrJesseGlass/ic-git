@@ -532,6 +532,53 @@ mod tests {
         assert_eq!(walk.is_ancestor(&line[11], &line[11]), Some(true), "the tip itself costs nothing");
     }
 
+    /// A repo with a submodule is pushed and fetched as git does it: the
+    /// submodule's entry names a commit of another repo, which is not
+    /// asked for in the push and not sent in a fetch, whether or not the
+    /// store holds it for some other repo. Everything else the tree
+    /// names is still asked for.
+    #[test]
+    fn a_repo_with_a_submodule_is_pushed_without_the_submodules_commit() {
+        store::create_repo("super").unwrap();
+        let tree_of = |entries: &[(&str, &str, &Oid)]| {
+            let mut t = Vec::new();
+            for (mode, name, oid) in entries {
+                t.extend_from_slice(format!("{mode} {name}\0").as_bytes());
+                t.extend_from_slice(oid.as_slice());
+            }
+            store::put_object(ObjectType::Tree, &t)
+        };
+        let commit_of = |tree: &Oid| store::put_object(ObjectType::Commit, format!("tree {}\n\nsuper\n", store::oid_hex(tree)).as_bytes());
+        let cmd = |new: Oid, name: &str| Command { old: None, new: Some(new), refname: name.into() };
+        let modules = store::put_object(ObjectType::Blob, b"[submodule \"lib\"]\n\tpath = vendor/lib\n\turl = https://example.org/lib.git\n");
+        // A commit the store has never seen, in a directory and at the root.
+        let elsewhere = Oid::try_from([0x5b; 20].as_slice()).unwrap();
+        let vendor = tree_of(&[("160000", "lib", &elsewhere)]);
+        let root = tree_of(&[("100644", ".gitmodules", &modules), ("160000", "top", &elsewhere), ("40000", "vendor", &vendor)]);
+        let tip = commit_of(&root);
+        check_command(&mut Walk::new("super"), &cmd(tip, "refs/heads/main")).unwrap();
+        let packed: Vec<Oid> = pack::closure(&[tip], &[]).unwrap().into_iter().map(|(oid, _)| oid).collect();
+        assert_eq!(BTreeSet::from_iter(packed), BTreeSet::from([tip, root, vendor, modules]));
+
+        // The submodule's repo on the same canister: its commit is in the
+        // store, and is still no part of this repo's pack.
+        store::create_repo("lib").unwrap();
+        let theirs = store::commit_file_for_tests("lib", "lib.rs", b"pub fn f() {}", None);
+        let root = tree_of(&[("160000", "lib", &theirs)]);
+        let tip = commit_of(&root);
+        check_command(&mut Walk::new("super"), &cmd(tip, "refs/heads/pinned")).unwrap();
+        let packed: Vec<Oid> = pack::closure(&[tip], &[]).unwrap().into_iter().map(|(oid, _)| oid).collect();
+        assert_eq!(BTreeSet::from_iter(packed), BTreeSet::from([tip, root]));
+
+        // What is no submodule is asked for as before: a file, a
+        // directory, and an entry whose mode only looks like one.
+        for mode in ["100644", "40000", "0160000", "16000"] {
+            let root = tree_of(&[(mode, "x", &elsewhere), ("160000", "lib", &elsewhere)]);
+            let e = check_command(&mut Walk::new("super"), &cmd(commit_of(&root), "refs/heads/broken")).unwrap_err();
+            assert!(e.contains("missing objects"), "{mode}: {e}");
+        }
+    }
+
     #[test]
     fn branch_tip_must_be_commit() {
         store::create_repo("tip-check").unwrap();

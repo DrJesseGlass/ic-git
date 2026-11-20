@@ -77,7 +77,17 @@ pub fn parse_request(body: &[u8]) -> Result<UploadPackRequest, String> {
 
 // --- closure walk -----------------------------------------------------------
 
-/// Child object ids referenced by a non-blob object.
+/// Child object ids referenced by a non-blob object: the objects that
+/// must be in the store for it to be whole there, and that go with it in
+/// a pack.
+///
+/// A submodule's entry is none. It names a commit of another repo, and
+/// git neither sends that commit in a push nor expects it in a fetch.
+/// Until 2026-11 it was taken for a child, so a push of a repo with a
+/// submodule was refused for missing objects -- unless the store, which
+/// is one for every repo, held that commit for another repo: then the
+/// push went through and every clone carried the submodule's whole
+/// history with it.
 fn children(object_type: ObjectType, content: &[u8]) -> Result<Vec<Oid>, String> {
     Ok(match object_type {
         ObjectType::Blob => Vec::new(),
@@ -90,6 +100,7 @@ fn children(object_type: ObjectType, content: &[u8]) -> Result<Vec<Oid>, String>
         ObjectType::Tag => vec![object::tag_target(content)?],
         ObjectType::Tree => object::tree_entries(content)?
             .into_iter()
+            .filter(|e| !object::is_gitlink_mode(&e.mode))
             .map(|e| e.oid)
             .collect(),
     })

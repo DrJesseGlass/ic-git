@@ -1062,6 +1062,7 @@ fn resolve_blob(commit: &store::Oid, cfg: &SiteConfig, path: &str) -> Option<Res
         Ok((_, ObjectType::Tree, tree)) => object::tree_entries(&tree)
             .ok()
             .and_then(|es| es.into_iter().find(|e| e.name == b"index.html"))
+            .filter(|e| !object::is_gitlink_mode(&e.mode))
             .and_then(|e| store::get_object_parsed(&e.oid).map(|(ty, body)| (e.oid, ty, body)))
             .and_then(|(oid, ty, body)| {
                 let path = if full.is_empty() {
@@ -1146,8 +1147,8 @@ fn walk_bundle(tree: &store::Oid, root: &str, prefix: &str, out: &mut Vec<Page>,
     };
     let index = entries.iter().any(|e| e.name == b"index.html" && e.mode != "40000");
     // The entry `serve` takes for the directory: the first of the name,
-    // whatever it is.
-    if let Some(e) = entries.iter().find(|e| e.name == b"index.html").filter(|_| index) {
+    // whatever it is, but a submodule's, which is no object of this repo.
+    if let Some(e) = entries.iter().find(|e| e.name == b"index.html").filter(|e| index && !object::is_gitlink_mode(&e.mode)) {
         let dir = located(prefix);
         let path = if dir.is_empty() { "index.html".to_string() } else { format!("{dir}/index.html") };
         if !prefix.is_empty() {
@@ -1170,7 +1171,7 @@ fn walk_bundle(tree: &store::Oid, root: &str, prefix: &str, out: &mut Vec<Page>,
         match e.mode.as_str() {
             _ if !found => {}
             "40000" => walk_bundle(&e.oid, root, &rel, out, cap)?,
-            "160000" => {}
+            m if object::is_gitlink_mode(m) => {}
             _ => out.push(Page { path: located(&rel), oid: e.oid, sub: rel }),
         }
         if out.len() > cap {
@@ -1468,6 +1469,10 @@ mod tests {
             ("100644", "index.html", blob(b"<h1>root</h1>")),
             ("100644", "big.bin", blob(&vec![0u8; MAX_BODY + 1])),
             ("160000", "sub", store::parse_oid(&"07".repeat(20)).unwrap()),
+            // Submodule entries forged to name blobs the store holds:
+            // no pages, at their own path or as a directory's index.
+            ("160000", "linked", blob(b"linked")),
+            ("40000", "gl", tree(&[("160000", "index.html", blob(b"gl")), ("100644", "index.html", blob(b"second"))])),
         ]);
         let commit = format!("tree {}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n", store::oid_hex(&root));
         let commit = store::put_object(ObjectType::Commit, commit.as_bytes());
@@ -1487,6 +1492,10 @@ mod tests {
                 assert_eq!((walked.status_code, &walked.headers, &walked.body), (asked.status_code, &asked.headers, &asked.body), "{at:?}");
                 assert_eq!(blob, asked_blob, "{at:?}");
             }
+        }
+        for sub in ["linked", "gl", "gl/", "gl/index.html", "sub"] {
+            assert_eq!(served("walked", sub).0.status_code, 404, "{sub}");
+            assert!(!bundle("walked", 100).unwrap().pages.iter().any(|p| p.sub == sub), "{sub}");
         }
         // And what it answers with is the bundle's own: a page, the 413,
         // the miss where no path leads.

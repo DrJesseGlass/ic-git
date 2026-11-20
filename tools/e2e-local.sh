@@ -364,6 +364,29 @@ if command -v gpg >/dev/null; then
   unset GNUPGHOME
 fi
 
+section "a repo with a submodule"
+# A submodule's entry names a commit of another repo: no part of the
+# push, and no part of a clone. (The push was refused for missing
+# objects.)
+ic "$TEN" create_repo '("e2e-super")' >/dev/null
+ST=$(ic "$TEN" create_push_token '("e2e-super", null, null)' | ok_text)
+SW=$WORK/super
+git init -q -b main "$SW"
+git -C "$SW" config user.name E2E
+git -C "$SW" config user.email e2e@local
+SUB=$(printf '5b%.0s' $(seq 20))
+printf '[submodule "lib"]\n\tpath = vendor/lib\n\turl = https://example.invalid/lib.git\n' >"$SW/.gitmodules"
+echo x >"$SW/a"
+git -C "$SW" add .gitmodules a
+git -C "$SW" update-index --add --cacheinfo "160000,$SUB,vendor/lib"
+git -C "$SW" commit -qm 'with a submodule'
+OUT=$(GIT_TERMINAL_PROMPT=0 git -C "$SW" push "http://ic:$ST@$HOST/e2e-super.git" main 2>&1 || true)
+expect "pushed" "$OUT" 'new branch'
+refuse "  ...and not rejected" "$OUT" 'rejected|missing'
+git clone -q "http://$HOST/e2e-super.git" "$WORK/super-clone" 2>/dev/null || true
+expect "  ...and cloned, the submodule's entry with it" "$(git -C "$WORK/super-clone" ls-tree HEAD vendor/lib 2>&1)" "^160000 commit $SUB"
+expect "  ...a clone git finds whole" "$(git -C "$WORK/super-clone" fsck 2>&1; echo "fsck $?")" '^fsck 0$'
+
 section "operator guard"
 expect "tenant: evm_set_config refused" "$(ic "$TEN" evm_set_config '("x", "dfx_test_key", 11155111 : nat64, vec {})')" 'is not an operator'
 expect "tenant: evm_set_fee_fallback refused" "$(ic "$TEN" evm_set_fee_fallback '(opt record { max_fee_gwei = 50 : nat64; tip_gwei = 2 : nat64 })')" 'is not an operator'
