@@ -556,8 +556,12 @@ themselves sole approver, and push anything:
   `RemoveVoter`, `Transfer { new_owner }`, `WasmDeploy { target,
   source_path }` or `DeployMode { mode }` -- under the same rule as a
   commit: approve, reject or object with a reason, counted over the
-  current approvers, applied the moment approvals minus objections reach
-  `k`. Any approver may propose, and proposing is approving: the first
+  current approvers, applied by the approval that finds approvals minus
+  objections at `k`. Only an approval applies a change: one that came to
+  have its votes without a ballot (the threshold was lowered under it, or
+  an objector removed) stays pending until an approver says yes again,
+  and a rejection or an objection cast on it meanwhile is recorded and
+  applies nothing. Any approver may propose, and proposing is approving: the first
   ballot on a change must be an approval (a rejection of nothing is
   refused), and a pending change whose approvals fall to none -- its
   approvers having replaced theirs with rejections -- is withdrawn,

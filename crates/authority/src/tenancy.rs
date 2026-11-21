@@ -1154,8 +1154,8 @@ pub fn unmark_governed(repo: &str) {
 /// Cast a ballot on a policy change. Any approver may; the change is
 /// validated against the current policy before the ballot is taken, and
 /// applied -- to the metadata here, to the deploy config by the caller when
-/// `apply_deploy` is returned -- the moment approvals minus objections reach
-/// the threshold. Its ballots are then cleared, so proposing the same change
+/// `apply_deploy` is returned -- by the approval that finds approvals minus
+/// objections at the threshold. Its ballots are then cleared, so proposing the same change
 /// again later starts from nothing. A Transfer to a new owner is the one
 /// change the count does not decide alone: it waits, pending and reported
 /// as not reached, until the owner's approval is among its ballots
@@ -1215,6 +1215,16 @@ pub async fn propose_policy_change(
         .map_err(|e| e.to_string())?;
     // Read after the ballot is recorded, so the owner's own counts.
     if tally.reached && awaits_owner(&m, repo, &change) {
+        tally.reached = false;
+    }
+    // Only an approval applies a change. A pending change can come to
+    // have its votes with no ballot cast on it: the threshold was lowered,
+    // or an objector was removed. Until 2026-11 the next ballot of any
+    // kind then applied it, a rejection or an objection included, in the
+    // name of the one voter who had just said no. It stays pending, and
+    // reported as not reached, until an approver says yes with the policy
+    // as it now is; an earlier approver may say it again.
+    if tally.reached && decision != Vote::Approve {
         tally.reached = false;
     }
     let mut apply_deploy = None;
@@ -2555,6 +2565,35 @@ mod tests {
         let (t, _) = propose_policy_change("t-seat", &v2, to(v2), Vote::Approve, None).unwrap();
         assert!(!t.reached);
         assert_eq!(seat(), (Some(v1), None));
+    }
+
+    /// A change that came to have its votes without a ballot -- the
+    /// threshold was lowered under it -- is not applied by the next voter
+    /// to say no. It waits for an approval.
+    #[test]
+    fn only_an_approval_applies_a_pending_change() {
+        let (alice, v1, v2, x) = (p(171), p(172), p(173), p(174));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-says-no", &alice, false).unwrap();
+        add_member("t-says-no", &alice, false, v1, Role::Voter).unwrap();
+        add_member("t-says-no", &alice, false, v2, Role::Voter).unwrap();
+        set_required_votes("t-says-no", &alice, false, 2).unwrap();
+        let add = PolicyChange::AddVoter { principal: x };
+        let (t, _) = propose_policy_change("t-says-no", &v1, add.clone(), Vote::Approve, None).unwrap();
+        assert_eq!((t.approvals, t.required, t.reached), (1, 2, false));
+        // The owner lowers the threshold: the change has its one vote now.
+        set_required_votes("t-says-no", &alice, false, 1).unwrap();
+        assert!(proposals("t-says-no")[0].reached);
+        // A rejection and an objection are recorded, and apply nothing.
+        let (t, _) = propose_policy_change("t-says-no", &v2, add.clone(), Vote::Reject, None).unwrap();
+        assert_eq!((t.approvals, t.reached), (1, false));
+        assert!(!has_role(&meta("t-says-no").unwrap(), &x, Role::Voter));
+        assert_eq!(meta("t-says-no").unwrap().proposals, vec![add.clone()]);
+        // An approval does: the first approver's own, said again.
+        let (t, _) = propose_policy_change("t-says-no", &v1, add.clone(), Vote::Approve, None).unwrap();
+        assert!(t.reached);
+        assert!(has_role(&meta("t-says-no").unwrap(), &x, Role::Voter));
+        assert!(meta("t-says-no").unwrap().proposals.is_empty());
     }
 
     /// Governing locks the policy: the owner's mutators refuse what is now
