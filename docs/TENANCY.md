@@ -334,8 +334,9 @@ exempt with its writers still pushing.
 voters (the owner counts as one) have approved it with
 `cast_ballot(repo, commit, Approve, null)`. Ballots can be changed; a
 removed voter's ballot stops counting. A `k` above the owner plus voters is
-refused, and so is removing a voter or transferring the repo when that
-would leave `k` out of reach: lower `k` first. `k = 0`, the default,
+refused, and so is removing a voter, making one a writer, or
+transferring the repo when that would leave `k` out of reach: lower `k`
+first. `k = 0`, the default,
 deploys on push as before.
 
 A ballot is on a commit of the repo: a commit object that one of the
