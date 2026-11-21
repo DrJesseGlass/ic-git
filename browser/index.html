@@ -162,7 +162,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc', 'approvals', 'objections', 'required', 'reached', 'governed', 'counts', 'change', 'ballots', 'RequiredVotes', 'AddVoter', 'RemoveVoter', 'Transfer', 'WasmDeploy', 'DeployMode', 'k', 'new_owner', 'domains']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc', 'approvals', 'objections', 'required', 'reached', 'governed', 'counts', 'change', 'ballots', 'RequiredVotes', 'AddVoter', 'RemoveVoter', 'Transfer', 'WasmDeploy', 'DeployMode', 'EvmDeploy', 'k', 'new_owner', 'domains']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -1328,7 +1328,7 @@ const Console = (() => {
   // --- governance (docs/GOVERNANCE.md) ---
   // The candid shape of a policy change, for the encoder and for reading
   // the JSON the API returns ({"RequiredVotes":{"k":2}}, ...).
-  const CHANGE = { variant: { RequiredVotes: { record: { k: 'nat32' } }, AddVoter: { record: { principal: 'principal' } }, RemoveVoter: { record: { principal: 'principal' } }, Transfer: { record: { new_owner: 'principal' } }, WasmDeploy: { record: { target: 'text', source_path: 'text' } }, DeployMode: { record: { mode: 'text' } } } };
+  const CHANGE = { variant: { RequiredVotes: { record: { k: 'nat32' } }, AddVoter: { record: { principal: 'principal' } }, RemoveVoter: { record: { principal: 'principal' } }, Transfer: { record: { new_owner: 'principal' } }, WasmDeploy: { record: { target: 'text', source_path: 'text' } }, DeployMode: { record: { mode: 'text' } }, EvmDeploy: { record: { source_path: 'text', gas_limit: 'nat64' } } } };
   const VOTE = { variant: { Approve: 'null', Reject: 'null', Object: 'null' } };
   const describe = c => {
     const [kind, v] = Object.entries(c)[0];
@@ -1338,6 +1338,7 @@ const Console = (() => {
       : kind === 'Transfer' ? 'offer the repository to ' + short(v.new_owner) + ', theirs once they accept (takes the owner\'s approval as well as the votes)'
       : kind === 'WasmDeploy' ? 'deploy ' + v.source_path + ' into ' + short(v.target)
       : kind === 'DeployMode' ? 'install mode ' + v.mode + (v.mode === 'reinstall' ? ' (WIPES the target\'s state on every deploy)' : '')
+      : kind === 'EvmDeploy' ? 'deploy ' + v.source_path + ' to the EVM chain, gas limit ' + v.gas_limit
       : JSON.stringify(c);
   };
   const count = p => p.approvals + ' approve' + (p.objections ? ', ' + p.objections + ' object: net ' + (p.approvals - p.objections) : '') + ' of ' + p.required + ' required';
@@ -1367,7 +1368,7 @@ const Console = (() => {
       '<tr><td>' + esc(describe(p.change)) + '</td><td>' + esc(count(p)) + '</td><td>' + p.ballots.map(b => '<span class="oid" title="' + esc(b.principal) + '">' + esc(short(b.principal)) + '</span> ' + (b.decision === 'object' ? '<span class="objection">objects' + (b.reason ? ': ' + esc(b.reason) : '') + '</span>' : esc(b.decision + (b.reason ? ' (' + b.reason + ')' : '')))).join('<br>') + '</td>' +
       (canVote ? '<td><form class="f-prop" data-change="' + esc(JSON.stringify(p.change)) + '"><button data-v="Approve">approve</button><button data-v="Reject">reject</button><textarea name="reason" maxlength="1024" placeholder="reason, required to object"></textarea><button data-v="Object">object</button></form></td>' : '') + '</tr>').join('') + '</table><p id="prop-st" class="status"></p>'
       : '<p class="muted">no pending policy changes.</p>';
-    if (canVote) html += '<form id="f-propose"><select name="kind"><option value="RequiredVotes">required votes</option><option value="AddVoter">add voter</option><option value="RemoveVoter">remove voter</option><option value="Transfer">transfer to</option><option value="WasmDeploy">deploy path (into the app canister)</option><option value="DeployMode">install mode</option></select><input name="value" placeholder="value"><textarea name="reason" maxlength="1024" placeholder="reason (optional)"></textarea><button>propose and approve</button></form><p id="f-propose-st" class="status"></p>';
+    if (canVote) html += '<form id="f-propose"><select name="kind"><option value="RequiredVotes">required votes</option><option value="AddVoter">add voter</option><option value="RemoveVoter">remove voter</option><option value="Transfer">transfer to</option><option value="WasmDeploy">deploy path (into the app canister)</option><option value="DeployMode">install mode</option><option value="EvmDeploy">EVM deploy (path, then gas limit)</option></select><input name="value" placeholder="value"><textarea name="reason" maxlength="1024" placeholder="reason (optional)"></textarea><button>propose and approve</button></form><p id="f-propose-st" class="status"></p>';
     return html + '</div>';
   }
   function governanceWire(repo, info) {
@@ -1389,6 +1390,7 @@ const Console = (() => {
       if (kind === 'Transfer') { if (!value) throw new Error('enter the new owner\'s principal'); return { Transfer: { new_owner: value } }; }
       if (kind === 'WasmDeploy') { if (!value) throw new Error('enter the path in the commit, e.g. app.wasm'); return { WasmDeploy: { target: info.app_canister, source_path: value } }; }
       if (kind === 'DeployMode') { if (value !== 'upgrade' && value !== 'reinstall') throw new Error('the install mode is upgrade or reinstall'); return { DeployMode: { mode: value } }; }
+      if (kind === 'EvmDeploy') { const [path, gas] = value.split(/\s+/); if (!path || !/^[0-9]+$/.test(gas || '')) throw new Error('enter the path in the commit and the gas limit, e.g. token.hex 3000000'); return { EvmDeploy: { source_path: path, gas_limit: BigInt(gas) } }; }
       throw new Error('unknown change');
     };
     const cast = async (st, c, decision, reason) => {

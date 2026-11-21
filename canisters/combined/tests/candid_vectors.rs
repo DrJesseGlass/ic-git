@@ -30,6 +30,7 @@ enum PolicyChange {
     RequiredVotes { k: u32 },
     AddVoter { principal: Principal },
     WasmDeploy { target: String, source_path: String },
+    EvmDeploy { source_path: String, gas_limit: u64 },
 }
 
 #[derive(CandidType, Deserialize)]
@@ -138,6 +139,7 @@ fn print_vectors() {
         ("args:cast_ballot_object", encode_args(("r", "0123456789abcdef0123456789abcdef01234567", Vote::Object, Some("skips the migration"))).unwrap()),
         ("args:propose_add_voter", encode_args(("r", PolicyChange::AddVoter { principal: q }, Vote::Approve, None::<String>)).unwrap()),
         ("args:propose_required_votes", encode_args(("r", PolicyChange::RequiredVotes { k: 2 }, Vote::Object, Some("too few"))).unwrap()),
+        ("args:propose_evm_deploy", encode_args(("r", PolicyChange::EvmDeploy { source_path: "token.hex".into(), gas_limit: 3_000_000 }, Vote::Approve, None::<String>)).unwrap()),
         ("args:propose_wasm_deploy", encode_args(("r", PolicyChange::WasmDeploy { target: p.to_text(), source_path: "app.wasm".into() }, Vote::Approve, None::<String>)).unwrap()),
         ("args:cast_ballot_approve", encode_args(("r", "0123456789abcdef0123456789abcdef01234567", Vote::Approve, None::<String>)).unwrap()),
         ("args:text,nat32", encode_args(("r", 2u32)).unwrap()),

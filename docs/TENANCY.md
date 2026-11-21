@@ -191,7 +191,8 @@ rejected]`), beside whatever else the push did.
 The gas of an EVM transaction is paid on the other chain by the
 canister's EOA, which the operators fund and every tenant's deploys draw
 on. Two things keep one tenant from spending it for the rest. A deploy's
-gas limit, which is its owner's to set (`set_evm_deploy`), is at least
+gas limit, which is its owner's to set (`set_evm_deploy`; on a governed
+repo the voters', `EvmDeploy`), is at least
 53,000 and at most 10,000,000: enough for a contract of the largest size
 the chain takes, with room for its constructor. And an EVM action costs
 `evm_action` plus `evm_gas` for each unit of its transaction's gas limit:
@@ -554,7 +555,8 @@ themselves sole approver, and push anything:
 - `propose_policy_change(repo, change, decision, reason)` is that path: a
   ballot on the change itself -- `RequiredVotes { k }`, `AddVoter`,
   `RemoveVoter`, `Transfer { new_owner }`, `WasmDeploy { target,
-  source_path }` or `DeployMode { mode }` -- under the same rule as a
+  source_path }`, `DeployMode { mode }` or `EvmDeploy { source_path,
+  gas_limit }` -- under the same rule as a
   commit: approve, reject or object with a reason, counted over the
   current approvers, applied by the approval that finds approvals minus
   objections at `k`. Only an approval applies a change: one that came to

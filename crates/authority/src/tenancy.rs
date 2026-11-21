@@ -992,6 +992,11 @@ pub enum PolicyChange {
     WasmDeploy { target: String, source_path: String },
     /// The install mode, "upgrade" or "reinstall" (set_deploy_mode).
     DeployMode { mode: String },
+    /// The EVM deploy's source path and gas limit (set_evm_deploy). Last,
+    /// as the arm added last (2026-11): until then a governed repo's owner
+    /// set this alone, the one part of what its pushes deploy that was
+    /// not a vote.
+    EvmDeploy { source_path: String, gas_limit: u64 },
 }
 
 impl PolicyChange {
@@ -1005,6 +1010,7 @@ impl PolicyChange {
             PolicyChange::Transfer { new_owner } => format!("offer the repo to {new_owner}"),
             PolicyChange::WasmDeploy { target, source_path } => format!("deploy {source_path} to canister {target}"),
             PolicyChange::DeployMode { mode } => format!("set the install mode to {mode}"),
+            PolicyChange::EvmDeploy { source_path, gas_limit } => format!("deploy {source_path} to the EVM chain with a gas limit of {gas_limit}"),
         }
     }
 
@@ -1050,6 +1056,7 @@ impl PolicyChange {
                 }
                 Ok(())
             }
+            PolicyChange::EvmDeploy { source_path, gas_limit } => crate::configs::check_evm(source_path, *gas_limit),
         }
     }
 }
@@ -1231,7 +1238,7 @@ pub async fn propose_policy_change(
     if tally.reached {
         // `check` just passed on this same `m`, so this applies.
         change.apply_to(&mut m, repo)?;
-        if matches!(change, PolicyChange::WasmDeploy { .. } | PolicyChange::DeployMode { .. }) {
+        if matches!(change, PolicyChange::WasmDeploy { .. } | PolicyChange::DeployMode { .. } | PolicyChange::EvmDeploy { .. }) {
             apply_deploy = Some(change.clone());
         }
         VoteStore { repo }.save(&subj, Vec::new());
@@ -1880,6 +1887,29 @@ mod tests {
 
     fn p(n: u8) -> Principal {
         Principal::from_slice(&[n; 8])
+    }
+
+    /// What a repo deploys to the EVM chain is a change the voters can
+    /// make: checked as the owner's own setting is, before any ballot, and
+    /// handed to the caller to apply once it has its votes.
+    #[test]
+    fn the_evm_deploy_config_is_a_policy_change() {
+        let alice = p(181);
+        credit(&alice, 10_000_000_000);
+        create_repo("t-evm-vote", &alice, false).unwrap();
+        set_required_votes("t-evm-vote", &alice, false, 1).unwrap();
+        let change = |path: &str, gas: u64| PolicyChange::EvmDeploy { source_path: path.into(), gas_limit: gas };
+        crate::evm::set_config("aaaaa-aa".into(), "key".into(), 11155111, Vec::new()).unwrap();
+        for (bad, why) in [(change("token.sol", 3_000_000), ".hex"), (change("token.hex", 1), "53k floor"), (change("token.hex", u64::MAX), "above the")] {
+            let e = propose_policy_change("t-evm-vote", &alice, bad, Vote::Approve, None).unwrap_err();
+            assert!(e.contains(why), "{e}");
+        }
+        assert!(meta("t-evm-vote").unwrap().proposals.is_empty());
+        let good = change("token.hex", 3_000_000);
+        assert_eq!(good.describe(), "deploy token.hex to the EVM chain with a gas limit of 3000000");
+        let (t, apply) = propose_policy_change("t-evm-vote", &alice, good.clone(), Vote::Approve, None).unwrap();
+        assert!(t.reached);
+        assert_eq!(apply, Some(good));
     }
 
     /// This canister controls every app canister, so the management

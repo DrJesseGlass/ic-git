@@ -740,6 +740,7 @@ expect "owner: voters locked" "$(ic "$TEN" add_member "(\"e2e-app\", principal \
 expect "owner: removing a voter locked" "$(ic "$TEN" remove_member "(\"e2e-app\", principal \"$P1\")")" 'propose_policy_change'
 expect "owner: transfer locked" "$(ic "$TEN" transfer_repo "(\"e2e-app\", principal \"$P1\")")" 'propose_policy_change'
 expect "owner: deploy config locked" "$(ic "$TEN" set_wasm_deploy '("e2e-app", "app", "other.wat")')" 'propose_policy_change'
+expect "owner: EVM deploy config locked" "$(ic "$TEN" set_evm_deploy '("e2e-app", "token.hex", 3000000 : nat64)')" 'propose_policy_change \(EvmDeploy\)'
 expect "owner: install mode locked" "$(ic "$TEN" set_deploy_mode '("e2e-app", "reinstall")')" 'propose_policy_change'
 OPP=$(dfx identity get-principal --identity "$OP")
 expect "writers are still the owner's to manage" "$(ic "$TEN" add_member "(\"e2e-app\", principal \"$OPP\", \"writer\")")" 'Ok'
