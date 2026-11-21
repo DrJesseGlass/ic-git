@@ -1328,10 +1328,16 @@ fn read_log(repo: &str) -> Result<Vec<EvmDeployRecord>, String> {
 }
 
 /// Save a repo's log under its own key. Its first save takes the repo's
-/// records out of the old log, which `read_log` has just read them from.
+/// records out of the old log, which `read_log` has just read them from,
+/// and files each of their transactions under the repo, so a receipt that
+/// comes later still finds the record (`mark_receipt` looks in the old log
+/// only for a hash filed nowhere).
 fn write_log(repo: &str, log: &[EvmDeployRecord]) {
     let key = log_key(repo);
     if kv::get_bytes(&key).is_none() {
+        for r in log.iter().filter(|r| !r.tx_hash.is_empty()) {
+            kv::set_json(&tx_key(&r.tx_hash), &repo.to_string());
+        }
         if let Ok(mut legacy) = read_legacy() {
             let before = legacy.len();
             legacy.retain(|r| r.repo != repo);
@@ -2099,6 +2105,13 @@ mod tests {
         // And a receipt for a new record goes by what its hash is filed under.
         mark_receipt("0xB2", RECEIPT_SUCCESS);
         assert_eq!(history_of("old-b")[1].receipt_status, RECEIPT_SUCCESS);
+        // A record moved out of the old log is filed too: its receipt, come
+        // after the move, still reaches it, a revert included.
+        assert_eq!(kv::get_json::<String>(&tx_key("0xa1")).as_deref(), Some("old-a"));
+        mark_receipt("0xA1", RECEIPT_REVERTED);
+        assert!(latest_deploy("old-a", "c1").is_none(), "moved by a receipt, then reverted");
+        mark_receipt("0xB1", RECEIPT_REVERTED);
+        assert!(latest_deploy("old-b", "c1").is_none(), "moved by a deploy, then reverted");
     }
 
     /// With no repo named the history is the newest across all of them and

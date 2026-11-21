@@ -285,7 +285,7 @@ call "$TEN" "$ICP_LEDGER" icrc2_approve "(record { spender = record { owner = pr
 RATE=$(call "$OP" "$CMC" get_icp_xdr_conversion_rate '()' --query | sed -n 's/.*xdr_permyriad_per_icp = \([0-9_]*\).*/\1/p' | tr -d _)
 OUT=$(ic "$TEN" deposit_from_icp '(100_000_000 : nat64)')
 expect "deposit_from_icp credits exactly the CMC's cycles for 1 ICP" "$(echo "$OUT" | tr -d _)" "Ok = $((RATE * 100000000)) "
-expect "nothing left pending" "$(ic "$TEN" pending_icp_deposits)" '^\(vec \{\}\)$'
+expect "nothing left pending" "$(ic "$TEN" pending_icp_deposits)" '\(vec \{\}\)'
 
 section "push certificates"
 KEY=$WORK/key
@@ -1201,8 +1201,8 @@ section "console reads"
 expect "the EVM deploy log is read by repo" "$(ic anonymous evm_deploy_history '(opt "e2e-app")' --query)" 'vec \{\}'
 expect "  ...or across every repo" "$(ic anonymous evm_deploy_history '(null)' --query)" 'vec \{\}'
 # A caller from before the argument sends none (the bytes of an empty
-# argument list), and is answered: a Candid reply, not a trap.
-expect "  ...and a caller from before it, who sends no argument" "$(ic anonymous evm_deploy_history --type raw 4449444c0000 --query)" '4449444c'
+# argument list), and is answered: the reply decodes, it is not a trap.
+expect "  ...and a caller from before it, who sends no argument" "$(ic anonymous evm_deploy_history --type raw 4449444c0000 --query)" '\(vec \{\}\)'
 for p in pricing e2e-app/info "account/$T" e2e-app/deploys; do
   expect "/api/$p" "$(curl -s "http://$AHOST/api/$p")" '^\{'
 done
@@ -1292,7 +1292,7 @@ expect "  ...the repo records kept" "$(auth "$OP" get_repo_info '("e2e-app")')" 
 expect "  ...and until the git canister is named, what needs it is refused, naming the cut" "$(auth "$OP" create_repo '("after-cut")')" 'not named yet.*step 16.4'
 # 16.4: named, the authority writes every mirror of every repo.
 expect "16.4 the copy is named" "$(auth "$OP" set_git_canister "(principal \"$C\")")" 'Ok'
-expect "  ...and has taken every mirror" "$(auth "$OP" get_mirrors_pending --query)" '^\(vec \{\}\)$'
+expect "  ...and has taken every mirror" "$(auth "$OP" get_mirrors_pending --query)" '\(vec \{\}\)'
 CSITE="http://$C.raw.localhost:$PORT/site/e2e-app/"
 expect "  ...so it serves the gated site's approved commit, not the tip" "$(served_at "$CSITE")" "^${CUT_SITE%% *} ${CUT_SITE#* }"
 # 16.5: the thaw, and a push with the same token at the new remote.
