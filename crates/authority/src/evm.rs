@@ -1188,11 +1188,58 @@ fn default_record_ok() -> bool {
     true
 }
 
-/// Per-repo cap, so one chatty repo cannot evict another's history.
+/// The most records a repo's log keeps: its newest.
 const MAX_LOG: usize = 200;
+/// The most records `history(None)` answers with, across every repo.
+const MAX_HISTORY: usize = 200;
 
-pub fn get_history() -> Vec<EvmDeployRecord> {
-    kv::get_json(LOG_KEY).unwrap_or_default()
+// The log is one value for each repo, under `evm:deploy_log:<repo>` (the
+// repo is empty for a direct-hex deploy). Until 2026-11 it was one value
+// for the whole canister, `evm:deploy_log`: every deploy of any repo read
+// and wrote every repo's records, up to 200 for each; the same-commit
+// check a push makes read them all; the public query answered with them
+// all, past what a reply carries at some hundreds of repos; and one
+// undecodable value stopped every repo's deploys.
+//
+// The old value is not rewritten in an upgrade. A repo with no value of
+// its own is read from it, and its first write moves its records out to a
+// value of its own, so the old one empties as repos deploy.
+
+/// The key of a repo's log.
+fn log_key(repo: &str) -> String {
+    format!("{LOG_KEY}:{repo}")
+}
+
+/// The key that says which repo's log holds the record of a transaction,
+/// for a receipt, which names only the hash.
+fn tx_key(tx_hash: &str) -> String {
+    format!("evm:deploy_tx:{}", tx_hash.to_ascii_lowercase())
+}
+
+fn read_legacy() -> Result<Vec<EvmDeployRecord>, String> {
+    kv::try_get_json::<Vec<EvmDeployRecord>>(LOG_KEY).map(Option::unwrap_or_default)
+}
+
+/// A repo's deploy records, oldest first.
+pub fn history_of(repo: &str) -> Vec<EvmDeployRecord> {
+    read_log(repo).unwrap_or_default()
+}
+
+/// What `evm_deploy_history` answers: a repo's records, or with no repo
+/// named the newest `MAX_HISTORY` across all of them, oldest first.
+pub fn history(repo: Option<&str>) -> Vec<EvmDeployRecord> {
+    if let Some(repo) = repo {
+        return history_of(repo);
+    }
+    let prefix = format!("{LOG_KEY}:");
+    let mut all = read_legacy().unwrap_or_default();
+    for key in kv::keys_with_prefix(&prefix) {
+        all.extend(kv::get_json::<Vec<EvmDeployRecord>>(&key).unwrap_or_default());
+    }
+    all.sort_by_key(|r| r.at_ns);
+    let drop = all.len().saturating_sub(MAX_HISTORY);
+    all.drain(..drop);
+    all
 }
 
 /// ReceiptSummary.status / EvmDeployRecord.receipt_status values. Defined
@@ -1209,29 +1256,34 @@ pub const RECEIPT_UNKNOWN: &str = "unknown";
 /// unknown, so the contract may be live (the receipt poll settles it, and a
 /// found receipt shows as receipt_status). Definite failures log no hash.
 pub fn latest_deploy(repo: &str, commit: &str) -> Option<EvmDeployRecord> {
-    get_history().into_iter().rev().find(|r| {
-        r.repo == repo
-            && r.commit == commit
+    history_of(repo).into_iter().rev().find(|r| {
+        r.commit == commit
             && (r.ok || !r.tx_hash.is_empty())
             && r.receipt_status != RECEIPT_REVERTED
     })
 }
 
-/// Fold a mined receipt's outcome into every deploy record with this tx hash.
+/// Fold a mined receipt's outcome into every deploy record with this tx
+/// hash: in the repo the hash is filed under, or for a record from before
+/// the logs were split, in whichever repos of the old log carry it.
 fn mark_receipt(tx_hash: &str, status: &str) {
-    let mut log = get_history();
-    let mut changed = false;
-    for r in log
-        .iter_mut()
-        .filter(|r| r.tx_hash.eq_ignore_ascii_case(tx_hash))
-    {
-        if r.receipt_status != status {
-            r.receipt_status = status.to_string();
-            changed = true;
-        }
+    let mut repos: Vec<String> = kv::get_json::<String>(&tx_key(tx_hash)).into_iter().collect();
+    if repos.is_empty() {
+        repos = read_legacy().unwrap_or_default().into_iter().filter(|r| r.tx_hash.eq_ignore_ascii_case(tx_hash)).map(|r| r.repo).collect();
+        repos.dedup();
     }
-    if changed {
-        kv::set_json(LOG_KEY, &log);
+    for repo in repos {
+        let Ok(mut log) = read_log(&repo) else { continue };
+        let mut changed = false;
+        for r in log.iter_mut().filter(|r| r.tx_hash.eq_ignore_ascii_case(tx_hash)) {
+            if r.receipt_status != status {
+                r.receipt_status = status.to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            write_log(&repo, &log);
+        }
     }
 }
 
@@ -1265,10 +1317,38 @@ async fn poll_receipt(tx_hash: String, attempt: u32) {
     }
 }
 
-/// Read the deploy log, refusing to substitute a default for an undecodable
-/// one. Callers must treat `Err` as "this log cannot be safely written".
-fn read_log() -> Result<Vec<EvmDeployRecord>, String> {
-    kv::try_get_json::<Vec<EvmDeployRecord>>(LOG_KEY).map(Option::unwrap_or_default)
+/// Read a repo's deploy log, refusing to substitute a default for an
+/// undecodable one. Callers must treat `Err` as "this log cannot be safely
+/// written". A repo with no value of its own is read from the old log.
+fn read_log(repo: &str) -> Result<Vec<EvmDeployRecord>, String> {
+    match kv::try_get_json::<Vec<EvmDeployRecord>>(&log_key(repo))? {
+        Some(log) => Ok(log),
+        None => Ok(read_legacy()?.into_iter().filter(|r| r.repo == repo).collect()),
+    }
+}
+
+/// Save a repo's log under its own key. Its first save takes the repo's
+/// records out of the old log, which `read_log` has just read them from,
+/// and files each of their transactions under the repo, so a receipt that
+/// comes later still finds the record (`mark_receipt` looks in the old log
+/// only for a hash filed nowhere).
+fn write_log(repo: &str, log: &[EvmDeployRecord]) {
+    let key = log_key(repo);
+    if kv::get_bytes(&key).is_none() {
+        for r in log.iter().filter(|r| !r.tx_hash.is_empty()) {
+            kv::set_json(&tx_key(&r.tx_hash), &repo.to_string());
+        }
+        if let Ok(mut legacy) = read_legacy() {
+            let before = legacy.len();
+            legacy.retain(|r| r.repo != repo);
+            if legacy.is_empty() {
+                kv::remove(LOG_KEY);
+            } else if legacy.len() != before {
+                kv::set_json(LOG_KEY, &legacy);
+            }
+        }
+    }
+    kv::set_json(&key, &log);
 }
 
 /// Refuse to start a deploy whose result could not be recorded.
@@ -1279,36 +1359,35 @@ fn read_log() -> Result<Vec<EvmDeployRecord>, String> {
 /// `run_evm` would not see it either, so every retry or re-push would broadcast
 /// another paid deployment of a contract that is already on chain. Failing
 /// closed here costs nothing; failing open costs gas on every attempt.
-fn preflight_log() -> Result<(), String> {
-    read_log().map(|_| ()).map_err(|e| {
-        format!("{e}; refusing to deploy because the outcome could not be recorded (inspect or clear the {LOG_KEY} entry first)")
+fn preflight_log(repo: &str) -> Result<(), String> {
+    read_log(repo).map(|_| ()).map_err(|e| {
+        format!("{e}; refusing to deploy because the outcome could not be recorded (inspect or clear the {} entry first)", log_key(repo))
     })
 }
 
 fn record(rec: EvmDeployRecord) -> Result<(), String> {
     let repo = rec.repo.clone();
-    // Read-modify-write on the append-only provenance log, so a decode failure
-    // must NOT fall back to an empty Vec: that would replace every prior
-    // deploy's tx hash and bytecode hash with this single entry, and take the
+    // Read-modify-write on the provenance log, so a decode failure must NOT
+    // fall back to an empty Vec: that would replace every prior deploy's tx
+    // hash and bytecode hash with this single entry, and take the
     // same-commit dedupe in run_evm down with it. Refuse to write instead --
     // the stored bytes stay intact and recoverable. `preflight_log` should have
     // caught this before any gas was spent; reaching here means the log became
     // unreadable mid-flight, so the failure is propagated rather than logged.
-    let mut log = read_log()?;
-    log.push(rec);
-    let count = log.iter().filter(|r| r.repo == repo).count();
-    if count > MAX_LOG {
-        let mut to_drop = count - MAX_LOG;
-        log.retain(|r| {
-            if to_drop > 0 && r.repo == repo {
-                to_drop -= 1;
-                false
-            } else {
-                true
-            }
-        });
+    let mut log = read_log(&repo)?;
+    if !rec.tx_hash.is_empty() {
+        kv::set_json(&tx_key(&rec.tx_hash), &repo);
     }
-    kv::set_json(LOG_KEY, &log);
+    log.push(rec);
+    // The oldest go, and what filed their transactions under this repo.
+    let drop = log.len().saturating_sub(MAX_LOG);
+    let dropped: Vec<EvmDeployRecord> = log.drain(..drop).collect();
+    for old in dropped {
+        if !old.tx_hash.is_empty() && !log.iter().any(|r| r.tx_hash.eq_ignore_ascii_case(&old.tx_hash)) {
+            kv::remove(&tx_key(&old.tx_hash));
+        }
+    }
+    write_log(&repo, &log);
     Ok(())
 }
 
@@ -1402,7 +1481,7 @@ pub async fn deploy_bytecode(
     let sha256 = hex::encode(sha2::Sha256::digest(&bytecode));
     let len = bytecode.len() as u64;
     // Before spending gas: if the outcome cannot be recorded, do not broadcast.
-    preflight_log().map_err(SendError::before)?;
+    preflight_log(&repo).map_err(SendError::before)?;
     let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
     // The transaction that is, or may be, live: an accepted one, or one whose
     // broadcast outcome is unknown. Either is logged with its hash and polled
@@ -1753,13 +1832,13 @@ mod tests {
         assert!(check_initcode(&vec![0x60; MAX_INITCODE + 1]).is_err());
 
         set_config("aaaaa-aa".into(), "k".into(), 11155111, vec![]).unwrap();
-        let logged = get_history().len();
+        let logged = history_of("big").len();
         let e = futures::executor::block_on(deploy_bytecode("big".into(), vec![0x60; 3 << 20], 1_000_000, "c".into())).unwrap_err();
         assert!(e.message.contains("EIP-3860") && e.message.contains("3145728 bytes"), "{}", e.message);
         assert!(!e.maybe_sent && e.tx.is_none());
         assert_eq!(e.refundable(50), 50, "nothing was spent");
         assert_eq!(next_nonce(), None, "no nonce is reserved");
-        assert_eq!(get_history().len(), logged, "and nothing is logged as possibly live");
+        assert_eq!(history_of("big").len(), logged, "and nothing is logged as possibly live");
     }
 
     /// Which broadcast failures leave the transaction possibly held by a
@@ -1979,11 +2058,76 @@ mod tests {
         for n in 0..(MAX_LOG as u64 + 5) {
             record(rec("chatty", n)).unwrap();
         }
-        let log = get_history();
-        let chatty: Vec<_> = log.iter().filter(|r| r.repo == "chatty").collect();
+        let chatty = history_of("chatty");
         assert_eq!(chatty.len(), MAX_LOG);
         assert_eq!(chatty[0].nonce, 5); // oldest five dropped
-        assert_eq!(log.iter().filter(|r| r.repo == "quiet").count(), 1);
+        assert_eq!(history_of("quiet").len(), 1);
+    }
+
+    fn logged(repo: &str, commit: &str, tx_hash: &str, at_ns: u64) -> EvmDeployRecord {
+        EvmDeployRecord {
+            repo: repo.into(),
+            commit: commit.into(),
+            chain_id: 1,
+            contract_address: String::new(),
+            tx_hash: tx_hash.into(),
+            nonce: 0,
+            bytecode_sha256: String::new(),
+            bytecode_len: 0,
+            ok: true,
+            message: String::new(),
+            receipt_status: String::new(),
+            at_ns,
+        }
+    }
+
+    /// The log from before it was split is read where a repo has no value
+    /// of its own, and a repo's first write moves its records out of it:
+    /// nothing is lost, nothing is counted twice, and the old value goes
+    /// when its last repo has left it.
+    #[test]
+    fn the_old_log_is_read_until_each_repo_has_its_own() {
+        kv::set_json(LOG_KEY, &vec![logged("old-a", "c1", "0xa1", 1), logged("old-b", "c1", "0xb1", 2), logged("old-a", "c2", "0xa2", 3)]);
+        assert_eq!(history_of("old-a").len(), 2);
+        assert!(latest_deploy("old-b", "c1").is_some());
+        assert!(latest_deploy("old-b", "c2").is_none(), "another repo's commit is not this one's");
+        assert_eq!(history(None).iter().filter(|r| r.repo.starts_with("old-")).count(), 3);
+        // A receipt for a record still in the old log finds it by its hash.
+        mark_receipt("0xA2", RECEIPT_REVERTED);
+        assert!(latest_deploy("old-a", "c2").is_none());
+        assert_eq!(history_of("old-a").len(), 2, "moved whole, not copied");
+        assert_eq!(read_legacy().unwrap().iter().map(|r| r.repo.as_str()).collect::<Vec<_>>(), vec!["old-b"]);
+        // A deploy moves the other, and the old value is gone.
+        record(logged("old-b", "c2", "0xb2", 4)).unwrap();
+        assert_eq!(history_of("old-b").iter().map(|r| r.commit.as_str()).collect::<Vec<_>>(), vec!["c1", "c2"]);
+        assert!(kv::get_bytes(LOG_KEY).is_none());
+        assert_eq!(history(None).iter().filter(|r| r.repo.starts_with("old-")).count(), 4);
+        // And a receipt for a new record goes by what its hash is filed under.
+        mark_receipt("0xB2", RECEIPT_SUCCESS);
+        assert_eq!(history_of("old-b")[1].receipt_status, RECEIPT_SUCCESS);
+        // A record moved out of the old log is filed too: its receipt, come
+        // after the move, still reaches it, a revert included.
+        assert_eq!(kv::get_json::<String>(&tx_key("0xa1")).as_deref(), Some("old-a"));
+        mark_receipt("0xA1", RECEIPT_REVERTED);
+        assert!(latest_deploy("old-a", "c1").is_none(), "moved by a receipt, then reverted");
+        mark_receipt("0xB1", RECEIPT_REVERTED);
+        assert!(latest_deploy("old-b", "c1").is_none(), "moved by a deploy, then reverted");
+    }
+
+    /// With no repo named the history is the newest across all of them and
+    /// has an end; what a repo's log drops, it stops filing.
+    #[test]
+    fn the_history_across_repos_is_bounded() {
+        for n in 0..(MAX_LOG as u64 + 3) {
+            record(logged("many-a", "c", &format!("0xaa{n:04x}"), 1_000 + n)).unwrap();
+        }
+        record(logged("many-b", "c", "0xbb", 5_000)).unwrap();
+        let all = history(None);
+        assert_eq!(all.len(), MAX_HISTORY);
+        assert_eq!(all.last().unwrap().repo, "many-b", "oldest first, so the newest is last");
+        assert_eq!(history(Some("many-a")).len(), MAX_LOG);
+        assert!(kv::get_json::<String>(&tx_key("0xaa0000")).is_none(), "a dropped record's hash is filed no longer");
+        assert_eq!(kv::get_json::<String>(&tx_key("0xAA0003")).as_deref(), Some("many-a"));
     }
 
     /// An undecodable deploy log must stop a deploy BEFORE it broadcasts, and
@@ -1997,12 +2141,13 @@ mod tests {
     /// gas is still unspent.
     #[test]
     fn corrupt_deploy_log_blocks_deploy_and_survives_intact() {
-        kv::set_json(LOG_KEY, &"not a deploy log at all".to_string());
+        kv::set_json(&log_key("r"), &"not a deploy log at all".to_string());
 
         assert!(
-            preflight_log().is_err(),
+            preflight_log("r").is_err(),
             "preflight must refuse before any broadcast"
         );
+        assert!(preflight_log("another").is_ok(), "and it is this repo's log alone that stops");
         let err = record(EvmDeployRecord {
             repo: "r".into(),
             commit: "c".into(),
@@ -2020,9 +2165,9 @@ mod tests {
         assert!(err.is_err(), "record must propagate, not swallow");
 
         // The original bytes are still there: nothing was clobbered.
-        let raw: String = kv::get_json(LOG_KEY).expect("original value intact");
+        let raw: String = kv::get_json(&log_key("r")).expect("original value intact");
         assert_eq!(raw, "not a deploy log at all");
-        kv::set_json(LOG_KEY, &Vec::<EvmDeployRecord>::new());
+        kv::remove(&log_key("r"));
     }
 
     /// A reverted receipt (folded case-insensitively by tx hash) must

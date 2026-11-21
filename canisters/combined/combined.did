@@ -447,7 +447,7 @@ service : {
   evm_send : (text, text) -> (ResultTxOutcome);
   evm_deploy : (text, nat64) -> (ResultTxOutcome);
   evm_receipt : (text) -> (ResultReceipt);
-  evm_deploy_history : () -> (vec EvmDeployRecord) query;
+  evm_deploy_history : (opt text) -> (vec EvmDeployRecord) query;
   evm_next_nonce : () -> (opt nat64) query;
   evm_reset_nonce : () -> ();
 
