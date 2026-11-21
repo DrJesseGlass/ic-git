@@ -295,7 +295,10 @@ it.
   `finish_icp_deposit(id)` (the depositor or an operator) takes a pending
   deposit the rest of the way: it replays a transfer whose outcome was
   unknown, and retries a notify that failed, crediting the depositor once;
-  a finish that arrives after the credit reports the balance. A definite
+  a finish that arrives after the credit reports the balance, and one
+  that arrives while an earlier call is still waiting on the ledger or
+  the CMC is refused and asked to come again: two at once could drop a
+  deposit whose ICP had moved. A definite
   transfer refusal drops the deposit (nothing moved), and a CMC refund
   returns the ICP to the tenant less a fee, uncredited. Errors no retry
   can fix (the CMC's TransactionTooOld or InvalidTransaction, or a replay
