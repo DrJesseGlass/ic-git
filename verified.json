@@ -116,6 +116,10 @@
         {
           "date": "2026-11-18",
           "what": "proposal 6 installed v0.3.15 (2f0e0f0, 60cef0fb...8c93; the API's /compare) and published ic-git#git (tx 0x0ecc5954...d1d0, block 12160419)"
+        },
+        {
+          "date": "2026-11-22",
+          "what": "proposal 7 installed v0.3.16 (cd03f5c, e78d7736...b211; the fixes of the 2026-11-18 tenant review, #161 to #190) and published ic-git#git (tx 0x4a9ead21...a908, block 12191894)"
         }
       ],
       "policy": {
@@ -354,6 +358,44 @@
           "note": "governor proposal 6, one approval executed it; the new code had the authority publish ic-git#git (commit 2f0e0f0, this module hash) in Sepolia tx 0x0ecc595492b042090ab97ea89b5310a7486f99a258db1571c2be7caf44bbd1d0, block 12160419. GET /api/<repo>/compare/<rev> answers on the live canister: the merge base of two revs, how far each is ahead of the other, and the head's own commits. The repo browser's compare view that reads it (#154) is in this commit's source and came to the page the canister serves with a push the same day: main at c9b2009 into the ic-git repo held there (a fast-forward from b158e2c) and ic-git#site republished in Sepolia tx 0x674bb7293e8b1fff39cfe15a4d03719fb23168bf5e547e962195e3ade6de6901, block 12162179; tools/verify.mjs verifies the page at c9b2009. The authority stays at v0.3.11: its build is unchanged (56aa3419...196b)"
         },
         "wasm_sha256": "04df6c95d1dc0151eda3d56e523a87443a0215866198c2939285e996198d8e14"
+      },
+      {
+        "commit": "cd03f5c97ee1e846aa8f766d89d6ecf2574759a1",
+        "tag": "v0.3.16",
+        "module_hash": "e78d773634fec54c727690611ede2c4a3b263dfdd908b284858dcafa3634b211",
+        "recipe": {
+          "dockerfile": "Dockerfile.build",
+          "platform": "linux/amd64",
+          "rustc": "1.94.1",
+          "dfx": "0.31.0",
+          "base_image": "rust:1.94.1-slim-bookworm",
+          "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+          "artifact": "git_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+        },
+        "builders": [
+          {
+            "who": "deployer (DrJesseGlass)",
+            "lineage": "pinned-container",
+            "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+            "date": "2026-11-22",
+            "check": "built at cd03f5c, the merge of #190: authority f41c5716...19b7 (raw 9cfafce1...d9ea), git canister e78d7736...b211 (raw cb1bc118...826e), combined f3b240bc...b95c (raw e7c3a7f3...c26e, the rollback artifact, not installed)"
+          },
+          {
+            "who": "GitHub Actions (independent runner)",
+            "lineage": "pinned-container",
+            "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+            "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/45063265055",
+            "date": "2026-11-22",
+            "check": "identical hashes for every module"
+          }
+        ],
+        "deployed": {
+          "date": "2026-11-22",
+          "on_chain_match": "match",
+          "checked_by": "dfx canister info after the install: Module hash 0xe78d7736...b211, Controllers 3hps4-taaaa-aaaab-ahela-cai",
+          "note": "git governor proposal 7 (1,004.8 G cycles read first), staged in one chunk, one approval executed it; the new code had the authority publish ic-git#git (commit cd03f5c, this module hash) in Sepolia tx 0x4a9ead212bb27bf186e6eda9a435cded7ed34e18bc39a534e0790688caeda908, block 12191894. Installed before the authority, whose new code calls the git canister's standings (#171, #174). cycle_balance read 997.6 G after both installs. The console change of #189 and the extensions' host check of #160 are in this commit's source and not in the page the canister serves, which comes from the ic-git repo held there. The e2e passed on cd03f5c with no failure, combined 371/0 and split 265/0, on a second run: the first lost calls without an error and then met a clock jump from the host sleeping mid-run (ingress_expiry refused), and the split pass stopped while starting the network"
+        },
+        "wasm_sha256": "cb1bc118932a3d65ca791184cc2e95b96b66024534b87968d54a8f157f15818a"
       }
     ]
   },
@@ -970,6 +1012,44 @@
         "note": "installed by governor proposal 9 (two chunks, 1 of 2, executed in the same call); the new code published ic-git#canister (commit ef7722f, this module hash) in Sepolia tx 0x480e6b157a52bb68d6897413d4e6c00a70f8b79bcb709f1038b8c29bd9b64580, block 12149606, which the registry reads back. The two lessons of the cut (#140, #141): the authority reports its cycles (cycle_balance read 1.31T right after the install, the first reading ever; the watch holds both canisters to a 500G floor and governor.sh refuses a target under 200G), and the fee-history read is at the finalized head with a fallback the operator set after the install (evm_set_fee_fallback: 50 gwei cap, 2 gwei tip). The git canister stays on d5b5bba7...49a7 (its module did not change). No e2e was run for this release: the authority crate changed in evm.rs (fees) and lib.rs (two queries, one update), covered by unit tests, and the publish path ran live at the install"
       },
       "wasm_sha256": "9ac02dbee7f5c8c3bc73f9d1cb615d7ce39ccf988dbbd1768ec9864604a78bb1"
+    },
+    {
+      "commit": "cd03f5c97ee1e846aa8f766d89d6ecf2574759a1",
+      "tag": "v0.3.16",
+      "module_hash": "f41c5716eb2d9a7547deb4c31b81e21b72cb6e319313e5bbd302ba097ed119b7",
+      "recipe": {
+        "dockerfile": "Dockerfile.build",
+        "platform": "linux/amd64",
+        "rustc": "1.94.1",
+        "dfx": "0.31.0",
+        "base_image": "rust:1.94.1-slim-bookworm",
+        "base_image_digest": "sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2",
+        "artifact": "authority_canister.wasm.gz (gzip -9 -n of the raw module; the on-chain hash is of the compressed bytes)"
+      },
+      "builders": [
+        {
+          "who": "deployer (DrJesseGlass)",
+          "lineage": "pinned-container",
+          "host": "macOS arm64 (colima), linux/amd64 image under emulation",
+          "date": "2026-11-22",
+          "check": "built at cd03f5c, the merge of #190: authority f41c5716...19b7 (raw 9cfafce1...d9ea), git canister e78d7736...b211 (raw cb1bc118...826e), combined f3b240bc...b95c (raw e7c3a7f3...c26e, the rollback artifact, not installed)"
+        },
+        {
+          "who": "GitHub Actions (independent runner)",
+          "lineage": "pinned-container",
+          "host": "ubuntu-24.04 x86_64 native, workflow reproducible-build.yml (tag push trigger)",
+          "run": "https://github.com/DrJesseGlass/ic-git/actions/runs/45063265055",
+          "date": "2026-11-22",
+          "check": "identical hashes for every module"
+        }
+      ],
+      "deployed": {
+        "date": "2026-11-22",
+        "on_chain_match": "match",
+        "checked_by": "dfx canister info after the install: Module hash 0xf41c5716...19b7, Controllers 7kkwl-baaaa-aaaab-ag6rq-cai",
+        "note": "governor proposal 10 (1,148.5 G cycles read first), staged in two chunks, one approval executed it; the new code published ic-git#canister (commit cd03f5c, this module hash) in Sepolia tx 0xcd52f74d6f8e6cc9885496aaeefc9ddbb6ba2afeef592299930c164a74dfd6e6, block 12191908. It went in after the git canister's proposal 7, since it calls the git canister's standings (#171, #174). cycle_balance read 1,119.0 G after both installs. The first release of the authority since v0.3.11: it carries the fixes of the 2026-11-18 tenant review, #161 to #190. The e2e passed on cd03f5c with no failure, combined 371/0 and split 265/0, on a second run: the first lost calls without an error and then met a clock jump from the host sleeping mid-run (ingress_expiry refused), and the split pass stopped while starting the network"
+      },
+      "wasm_sha256": "9cfafce132aacdb9eb66de759a50b123e04963d15afa4b8c21f48fa03261d9ea"
     }
   ]
 }

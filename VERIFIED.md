@@ -34,6 +34,45 @@ canister"), and `verified.json` records it under `git_canister`.
 | 2026-11-12 | `2469a17` | `v0.3.8` | `375c7ed6b342ce30ca8e559bed8c111764b1f853edb688b5f08f42d9759fc8f9` (gz) | MATCH, 2026-11-12 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43281752572](https://github.com/DrJesseGlass/ic-git/actions/runs/43281752572), identical hash; installed by governor proposal 5, record published by proposal 6 |
 | 2026-11-16 | `5c5c88e` | `v0.3.10` | `1e9ce2a185f3fa8366bfec8cd5146aa2daf5e9657ce7874c4492bfa4a02d8e57` (gz, the authority build) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43906147760](https://github.com/DrJesseGlass/ic-git/actions/runs/43906147760), identical hash; installed by governor proposal 8 at the cut, after proposal 7's combined build `b6868caa...d45b` (unrecorded on chain, an hour) |
 | 2026-11-16 | `ef7722f` | `v0.3.11` | `f90c5c03faf3877b7bf73329a0ab3f207bfbf9aecbef6bed94c103c5e2127225` (gz) | MATCH, 2026-11-16 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 43924565432](https://github.com/DrJesseGlass/ic-git/actions/runs/43924565432), identical hash; installed by governor proposal 9 |
+| 2026-11-22 | `cd03f5c` | `v0.3.16` | `f41c5716eb2d9a7547deb4c31b81e21b72cb6e319313e5bbd302ba097ed119b7` (gz) | MATCH, 2026-11-22 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 45063265055](https://github.com/DrJesseGlass/ic-git/actions/runs/45063265055), identical hash; installed by governor proposal 10 |
+
+## v0.3.16, both canisters -- 2026-11-22
+
+The fixes of the 2026-11-18 review of the tenant-facing calls, #161 to
+#190, one PR each: among them, a deploy installs only into its own
+repo's canister (#161), a transfer is an offer the new owner takes
+(#163), a push is charged for what it stores (#164), a trapping build
+is its own failed deploy (#166), a deploy's gas has a ceiling and is
+priced (#168), signed messages are refused before either canister pays
+for them (#182, #183), and each repo has its own EVM deploy log (#190).
+Also in this source: the reserved canister hosts (#158), the
+certifier's caps (#159) and the extensions' host check (#160). The
+first release of the authority since v0.3.11.
+
+The pinned container built `cd03f5c`, the merge of #190, to
+`f41c5716...19b7` (gz; raw `9cfafce1...d9ea`) for the authority and
+`e78d7736...b211` (gz; raw `cb1bc118...826e`) for the git canister,
+with the combined build, the rollback artifact, at `f3b240bc...b95c`;
+CI built the tag on a GitHub Actions x86_64 runner
+([run 45063265055](https://github.com/DrJesseGlass/ic-git/actions/runs/45063265055))
+and agreed byte for byte on every module. The git canister went first,
+since the new authority calls its `standings` (#171, #174): git
+governor proposal 7, one chunk, one approval, and the authority
+published `ic-git#git` (commit `cd03f5c`, this module hash) in Sepolia
+tx `0x4a9ead21...a908`, block 12191894. Then governor proposal 10, two
+chunks, one approval, and the new authority published `ic-git#canister`
+in Sepolia tx `0xcd52f74d...d6e6`, block 12191908. The e2e passed on
+`cd03f5c`, combined 371/0 and split 265/0, on a second run: the first
+lost calls without an error, then met a clock jump from the host
+sleeping mid-run, and its split pass stopped while starting the
+network.
+
+Right after, `tools/check-module-hash.sh` found both module hashes
+above on chain, each canister's governor as its only controller, and
+cycles at 1,119.0 G (umobs) and 997.6 G (git canister). The console
+change of #189 is not live by this: the page the canister serves is
+the one in the ic-git repo it holds, so it arrives with a push of this
+repository there and a new site record.
 
 ## v0.3.15, the git canister -- 2026-11-18
 
@@ -283,6 +322,7 @@ sites are read from and keeps v0.3.8.
 | 2026-11-17 | `be2fd6f` | `v0.3.13` | `ea7dc44fcc6b120f5e790ee2152e7028786706cf75aebde4643278aa98f81311` (gz) | MATCH, 2026-11-17 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 44162124208](https://github.com/DrJesseGlass/ic-git/actions/runs/44162124208), identical hash; installed by git governor proposal 4 |
 | 2026-11-18 | `34f7fd9` | `v0.3.14` | `c110f3c0d0a188cde060856dc91680e1c40c8f6b34160458de7d41f27e87a775` (gz) | MATCH, 2026-11-18 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 44207996732](https://github.com/DrJesseGlass/ic-git/actions/runs/44207996732), identical hash; installed by git governor proposal 5 |
 | 2026-11-18 | `2f0e0f0` | `v0.3.15` | `60cef0fb28beff3b69ca838529e1a8e604c80016ebe07eb2324856e53bbf8c93` (gz) | MATCH, 2026-11-18 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 44225760148](https://github.com/DrJesseGlass/ic-git/actions/runs/44225760148), identical hash; installed by git governor proposal 6 |
+| 2026-11-22 | `cd03f5c` | `v0.3.16` | `e78d773634fec54c727690611ede2c4a3b263dfdd908b284858dcafa3634b211` (gz) | MATCH, 2026-11-22 | deployer (pinned container, macOS arm64 host under emulation); GitHub Actions amd64 runner, [run 45063265055](https://github.com/DrJesseGlass/ic-git/actions/runs/45063265055), identical hash; installed by git governor proposal 7 |
 
 The pinned container built `28288c9`, the merge of #135, to
 `d5b5bba7...49a7` (gz; raw `f25d202c...98fd`) for the git canister;
