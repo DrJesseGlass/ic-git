@@ -896,6 +896,14 @@ ic "$OP" set_pricing '(record { create_repo = 1000000000 : nat64; push_base = 10
 expect "  ...and marks EVM gas up by the default, which it says" "$(ic "$OP" get_pricing --query)" 'gas_markup_bps = opt \(100 : nat32\)'
 expect "a gas markup over 100% is refused" "$(ic "$OP" set_pricing '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64; gas_markup_bps = opt (10001 : nat32) })')" 'in basis points'
 expect "  ...and the markup in force is kept" "$(ic "$OP" get_pricing --query)" 'gas_markup_bps = opt \(100 : nat32\)'
+expect "a float whose floor is over its target is refused" "$(ic "$OP" set_pricing '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64; float_target_txs = opt (10 : nat32); float_floor_txs = opt (11 : nat32) })')" 'at most its target'
+PRICES=$(ic "$OP" get_pricing --query | tr -d ' \n')
+expect "  ...and the float is sized in transactions, by default" "$PRICES" 'float_target_txs=opt\(1_000:nat32\)'
+expect "  ...with its floor" "$PRICES" 'float_floor_txs=opt\(500:nat32\)'
+expect "  ...and its margin over open holds" "$PRICES" 'float_margin_txs=opt\(10:nat32\)'
+# No chain is configured here, so the float has nothing to be read from.
+expect "the float is read by anyone, and says there is no chain" "$(ic anonymous get_gas_float --query)" 'no EVM config'
+expect "a tenant may not pay for a fresh read of it" "$(ic "$TEN" gas_float_refresh)" 'is not an operator'
 expect "a table without the floor keeps the default" "$(ic "$OP" get_pricing --query)" 'git_canister_floor = opt \(1_000_000_000_000 : nat64\)'
 
 if [ "$SPLIT" = 1 ]; then

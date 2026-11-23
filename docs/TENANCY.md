@@ -195,7 +195,10 @@ ckSepoliaETH for Sepolia, deposited with `deposit_gas`. Before a
 transaction is signed, the most it may cost, its gas limit at the fee
 cap with the markup (`gas_markup_bps`, 1% by default and at most 100%)
 on it, is reserved from the balance of the principal who pays the
-repo's cycles, and the send is refused if the balance is short. The receipt then charges the gas
+repo's cycles, and the send is refused if the balance is short. It is
+refused too when ic-git's own EOA could not cover it with every other
+open hold and a margin of ten transactions (`get_gas_float`); the
+operators refill the EOA, and the send can be retried then. The receipt then charges the gas
 it used at the price it paid, with the markup, and gives back the rest. A
 deploy's gas limit, which is its owner's to set (`set_evm_deploy`; on a
 governed repo the voters', `EvmDeploy`), is at least 53,000 and at most
