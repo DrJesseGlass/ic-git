@@ -16,7 +16,7 @@ use ic_git_compiler::{compile, interp, lang};
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{httpjson, ingress, kv};
 // The authority (crates/authority).
-use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, funding, gas, icp, ledger, mirrors, moved, names, peer, provenance, sol, tenancy, to_git};
+use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, funding, gas, icp, ledger, mirrors, moved, names, peer, provenance, refill, sol, tenancy, to_git};
 use ic_git_types::authority_side::{AuthoritySide, Published};
 use ic_git_types::side::Reply;
 use ic_git_types::wire;
@@ -38,6 +38,7 @@ fn init() {
     install_sides();
     auth::init_with_caller();
     tenancy::arm_rent_timer();
+    refill::arm_timer();
     feed::arm_governor_timer();
 }
 
@@ -57,6 +58,7 @@ fn post_upgrade() {
     // again, or given back if cut off before they were signed.
     evm::resume_gas_holds();
     tenancy::arm_rent_timer();
+    refill::arm_timer();
     feed::arm_governor_timer();
     // What this side has not yet told the git canister: the mirrors marked
     // before the upgrade. They survive in stable memory; their timer does
@@ -524,6 +526,28 @@ fn get_gas_float() -> Result<gas::GasFloat, String> {
 #[ic_cdk::update(guard = "is_admin")]
 async fn gas_float_refresh() -> Result<gas::GasFloat, String> {
     evm::gas_float_refresh().await
+}
+
+/// The refill of ic-git's EOA through the ckETH minter: the last tick's
+/// report and the refills the minter has made (docs/EVM_GAS.md, section 5).
+#[ic_cdk::query]
+fn get_gas_refills() -> Result<refill::RefillStatus, String> {
+    refill::status()
+}
+
+/// Run the refill tick now rather than at the hour. Operators only: it
+/// pays for outcalls and moves ckETH.
+#[ic_cdk::update(guard = "is_admin")]
+async fn gas_refill_now() -> Result<refill::RefillReport, String> {
+    refill::tick().await
+}
+
+/// Credit the markup's surplus back to the balances it came from, in
+/// proportion to the markup each paid. Operators only. Returns what was
+/// credited, in the ledger's smallest unit.
+#[ic_cdk::update(guard = "is_admin")]
+fn gas_credit_surplus() -> Result<candid::Nat, String> {
+    gas::credit_surplus().map(candid::Nat::from)
 }
 
 /// Gas transfers not yet settled.

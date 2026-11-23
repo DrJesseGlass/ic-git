@@ -1847,18 +1847,24 @@ pub fn gas_float() -> Result<crate::gas::GasFloat, String> {
 
 /// Read the EOA's balance and the fee cap now, for `gas_float`.
 pub async fn gas_float_refresh() -> Result<crate::gas::GasFloat, String> {
-    let cfg = require_config()?;
+    read_float(&require_config()?).await?;
+    gas_float()
+}
+
+/// The EOA's balance and the fee cap, read now and noted for `gas_float`.
+pub async fn read_float(cfg: &EvmConfig) -> Result<crate::gas::BalanceRead, String> {
     let meter = Meter::default();
-    let from = eoa_of_pubkey(&public_key(&cfg).await?)?;
-    let (balance, fee_pair) = futures::future::join(eoa_balance(&cfg, &from, &meter), fees(&cfg, &meter)).await;
-    crate::gas::note_balance(&crate::gas::BalanceRead {
+    let from = eoa_of_pubkey(&public_key(cfg).await?)?;
+    let (balance, fee_pair) = futures::future::join(eoa_balance(cfg, &from, &meter), fees(cfg, &meter)).await;
+    let read = crate::gas::BalanceRead {
         chain_id: cfg.chain_id,
         address: checksum_address(&from),
         wei: balance?,
         max_fee: fee_pair?.0,
         at_ns: crate::clock::now_ns(),
-    });
-    gas_float()
+    };
+    crate::gas::note_balance(&read);
+    Ok(read)
 }
 
 // --- tests -------------------------------------------------------------------

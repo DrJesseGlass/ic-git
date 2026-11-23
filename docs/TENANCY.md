@@ -198,9 +198,11 @@ on it, is reserved from the balance of the principal who pays the
 repo's cycles, and the send is refused if the balance is short. It is
 refused too when ic-git's own EOA could not cover it with every other
 open hold and a margin of ten transactions (`get_gas_float`); the
-operators refill the EOA, and the send can be retried then. The receipt then charges the gas
-it used at the price it paid, with the markup, and gives back the rest. A
-deploy's gas limit, which is its owner's to set (`set_evm_deploy`; on a
+operators refill the EOA, and the send can be retried then. The receipt
+then charges the gas it used at the price it paid, with the markup, and
+gives back the rest. What the markup collects beyond what refilling the
+EOA costs is credited back to the balances it came from
+(`gas_credit_surplus`). A deploy's gas limit, which is its owner's to set (`set_evm_deploy`; on a
 governed repo the voters', `EvmDeploy`), is at least 53,000 and at most
 10,000,000: enough for a contract of the largest size the chain takes,
 with room for its constructor. A tighter limit holds less of the balance

@@ -30,6 +30,7 @@ pub mod names;
 pub mod peer;
 pub mod provenance;
 pub mod records;
+pub mod refill;
 pub mod rpc_common;
 pub mod sol;
 pub mod tenancy;

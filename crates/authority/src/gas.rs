@@ -157,11 +157,14 @@ pub struct GasAccount {
     pub spent: u128,
     #[serde(default)]
     pub markup: u128,
+    /// What has come back to it out of the markup's surplus.
+    #[serde(default)]
+    pub credited: u128,
 }
 
 impl Default for GasAccount {
     fn default() -> Self {
-        GasAccount { ledger: anonymous(), available: 0, deposited: 0, withdrawn: 0, created_ns: 0, reserved: 0, spent: 0, markup: 0 }
+        GasAccount { ledger: anonymous(), available: 0, deposited: 0, withdrawn: 0, created_ns: 0, reserved: 0, spent: 0, markup: 0, credited: 0 }
     }
 }
 
@@ -273,6 +276,25 @@ pub struct GasCharge {
 pub struct GasTotals {
     pub spent: u128,
     pub markup: u128,
+    /// What refilling the EOA has cost: ledger fees, the minter's gas, and
+    /// any part of a failed refill not given back (refill.rs). The markup
+    /// is there to pay for it.
+    #[serde(default)]
+    pub refill_costs: u128,
+    /// What has been credited back to balances out of the markup's surplus.
+    #[serde(default)]
+    pub credited: u128,
+}
+
+impl GasTotals {
+    /// What the markup collected and neither refills cost nor was credited.
+    pub fn surplus(&self) -> u128 {
+        self.markup.saturating_sub(self.refill_costs).saturating_sub(self.credited)
+    }
+}
+
+pub(crate) fn save_totals(ledger: &Principal, t: &GasTotals) {
+    crate::kv::set_json(&format!("{TOTALS_PREFIX}{}", ledger.to_text()), t);
 }
 
 /// The markup on `cost` at `bps` basis points, rounded up: it errs high,
@@ -394,7 +416,7 @@ pub fn settle_tx(tx_hash: &str, gas_used: u128, effective_gas_price: u128) -> Op
     let mut t = totals(&h.ledger);
     t.spent = t.spent.saturating_add(cost);
     t.markup = t.markup.saturating_add(markup);
-    crate::kv::set_json(&format!("{TOTALS_PREFIX}{}", h.ledger.to_text()), &t);
+    save_totals(&h.ledger, &t);
     let charge = GasCharge { tx_hash: tx, gas_used, effective_gas_price, cost, markup, at_ns: crate::clock::now_ns() };
     let key = charges_key(&h.ledger, &h.who);
     let mut list: Vec<GasCharge> = crate::kv::get_json(&key).unwrap_or_default();
@@ -405,6 +427,79 @@ pub fn settle_tx(tx_hash: &str, gas_used: u128, effective_gas_price: u128) -> Op
     }
     crate::kv::set_json(&key, &list);
     Some(charge)
+}
+
+// --- what ic-git owes, and the surplus ---------------------------------------------------
+
+/// Every balance held on `ledger`, by principal.
+pub fn accounts_on(ledger: &Principal) -> Vec<(Principal, GasAccount)> {
+    let prefix = format!("gas:account:{}:", ledger.to_text());
+    crate::kv::keys_with_prefix(&prefix)
+        .into_iter()
+        .filter_map(|k| Principal::from_text(&k[prefix.len()..]).ok())
+        .map(|who| (who, account_on(ledger, &who)))
+        .collect()
+}
+
+/// What of ic-git's balance on `ledger` is the tenants': every balance,
+/// available or held; every withdrawal debited and not yet known to be
+/// sent; and every deposit that may have been pulled and is not yet
+/// credited. It errs high, so that a refill never spends a tenant's.
+pub fn owed_on(ledger: &Principal) -> u128 {
+    let held = accounts_on(ledger)
+        .iter()
+        .fold(0u128, |s, (_, a)| s.saturating_add(a.available).saturating_add(a.reserved));
+    let pending = pending()
+        .iter()
+        .filter(|p| p.ledger == *ledger && (p.direction == GasDirection::Withdrawal || p.uncertain || p.in_flight))
+        .fold(0u128, |s, p| s.saturating_add(p.amount));
+    let failed = failed().iter().filter(|f| f.ledger == *ledger).fold(0u128, |s, f| s.saturating_add(f.amount));
+    held.saturating_add(pending).saturating_add(failed)
+}
+
+/// `a * b / c`, exactly, rounded down; `c` is not 0.
+fn mul_div(a: u128, b: u128, c: u128) -> u128 {
+    let n = Nat::from(a) * Nat::from(b) / Nat::from(c);
+    u128::try_from(n.0).unwrap_or(u128::MAX)
+}
+
+/// Shares of `amount` in proportion to `weights`, rounded down, so they
+/// never sum to more than `amount`.
+fn pro_rata(amount: u128, weights: &[u128]) -> Vec<u128> {
+    let total = weights.iter().fold(0u128, |s, w| s.saturating_add(*w));
+    if total == 0 {
+        return vec![0; weights.len()];
+    }
+    weights.iter().map(|w| mul_div(amount, *w, total)).collect()
+}
+
+/// Credit the markup's surplus on the ledger in force back to the balances
+/// it came from, in proportion to the markup each has paid (section 4).
+/// An entry in this canister's books: no ledger transfer, no fee. Returns
+/// what was credited.
+pub fn credit_surplus() -> Result<u128, String> {
+    let ledger = ledger()?;
+    let mut t = totals(&ledger);
+    let surplus = t.surplus();
+    let accounts = accounts_on(&ledger);
+    let shares = pro_rata(surplus, &accounts.iter().map(|(_, a)| a.markup).collect::<Vec<_>>());
+    let mut given = 0u128;
+    for ((who, _), share) in accounts.iter().zip(shares) {
+        if share > 0 {
+            credit_markup_back(&ledger, who, share);
+            given = given.saturating_add(share);
+        }
+    }
+    t.credited = t.credited.saturating_add(given);
+    save_totals(&ledger, &t);
+    Ok(given)
+}
+
+fn credit_markup_back(ledger: &Principal, who: &Principal, amount: u128) {
+    let mut a = account_on(ledger, who);
+    a.available = a.available.saturating_add(amount);
+    a.credited = a.credited.saturating_add(amount);
+    save(ledger, who, &a);
 }
 
 // --- the float ---------------------------------------------------------------------
@@ -807,7 +902,7 @@ fn settle(id: u64, moved: Moved) -> Result<u128, String> {
 
 // --- the calls -------------------------------------------------------------------------
 
-async fn fee_of(ledger: Principal) -> Result<u128, String> {
+pub(crate) async fn fee_of(ledger: Principal) -> Result<u128, String> {
     let fee: Nat = intercanister::call(ledger, "icrc1_fee", ()).await?;
     u128::try_from(fee.0).map_err(|_| "the gas ledger's fee is out of range".to_string())
 }
@@ -1157,6 +1252,39 @@ mod tests {
     }
 
     #[test]
+    fn a_surplus_is_shared_by_the_markup_paid_and_never_over() {
+        assert_eq!(pro_rata(100, &[1, 1, 2]), vec![25, 25, 50]);
+        assert_eq!(pro_rata(10, &[1, 1, 1]), vec![3, 3, 3], "rounded down, the rest kept");
+        assert_eq!(pro_rata(10, &[0, 0]), vec![0, 0]);
+        let big = u128::MAX / 2;
+        let s = pro_rata(big, &[big, big]);
+        assert_eq!(s, vec![big / 2, big / 2], "no overflow in the product");
+        let t = GasTotals { spent: 0, markup: 100, refill_costs: 30, credited: 20 };
+        assert_eq!(t.surplus(), 50);
+        assert_eq!(GasTotals { markup: 10, refill_costs: 30, ..t }.surplus(), 0, "a loss is no surplus");
+    }
+
+    /// The tenants' share of ic-git's ledger balance: every balance, held
+    /// or not, and every transfer that may yet be theirs.
+    #[test]
+    fn what_is_owed_counts_every_balance_and_every_doubtful_transfer() {
+        let l = p(140);
+        credit(&l, &p(41), 1_000);
+        credit(&l, &p(42), 500);
+        let h = reserve(&p(42), l, 100, 1).unwrap();
+        assert_eq!(owed_on(&l), 1_500, "a hold is still owed");
+        let mk = |id, direction, uncertain| PendingGasTransfer { id, direction, who: p(43), amount: 70, fee: 1, ledger: l, at_ns: 0, last_error: None, uncertain, in_flight: false };
+        add_pending(mk(9_140_001, GasDirection::Withdrawal, false));
+        add_pending(mk(9_140_002, GasDirection::Deposit, false));
+        add_pending(mk(9_140_003, GasDirection::Deposit, true));
+        assert_eq!(owed_on(&l), 1_500 + 70 + 70, "a deposit not yet pulled is not");
+        for id in [9_140_001, 9_140_002, 9_140_003] {
+            take_pending(id);
+        }
+        release(h.id);
+    }
+
+    #[test]
     fn the_markup_rounds_up() {
         assert_eq!(markup_of(10_000, 100), 100);
         assert_eq!(markup_of(10_001, 100), 101, "a part of a unit is a unit");
@@ -1255,7 +1383,7 @@ mod tests {
 
     #[test]
     fn a_balance_round_trips_through_storage() {
-        let a = GasAccount { ledger: ck(), available: u128::MAX, deposited: 1, withdrawn: 2, created_ns: 3, reserved: 4, spent: 5, markup: 6 };
+        let a = GasAccount { ledger: ck(), available: u128::MAX, deposited: 1, withdrawn: 2, created_ns: 3, reserved: 4, spent: 5, markup: 6, credited: 7 };
         save(&ck(), &p(16), &a);
         assert_eq!(account_on(&ck(), &p(16)), a);
         let bytes = candid::encode_one(&a).unwrap();

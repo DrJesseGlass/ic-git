@@ -2,8 +2,8 @@
 
 Status: **design, 2026-11-22. Built: leg 1, the balance (#197); leg 2,
 the reservation and settlement of each transaction (#198); and leg 3a,
-the float's measure and invariant. Not yet: leg 3b (the refill through
-the minter and its accounting) and leg 4 (the console).** It replaces a first draft the same
+the float's measure and invariant; and leg 3b, the refill through the
+minter and its accounting. Not yet: leg 4 (the console).** It replaces a first draft the same
 day that gave each repo an EVM address of its own. That draft was
 dropped because it spread ic-git's ETH over one address per
 repo and ruled out putting many records in one transaction. Companion
@@ -123,13 +123,27 @@ later satoshis); there is no floating point anywhere in it.
   transactions (10). A send that would break it is refused, as for a
   short balance, and the watch reports it. ic-git's own records are
   never refused by it.
-- **Refill:** when the EOA falls under its floor, the authority withdraws
-  settled ckETH (what tenants have paid, never what they still hold) to
-  the EOA through the minter's `withdraw_eth`, enough to bring it back to
-  the target, and never under the minter's minimum (0.01 ETH on Sepolia).
-  The minter takes the gas of its own transaction out of the amount, and
-  `withdrawal_status` reports it; that and the ledger fees are recorded
-  against the markup (section 4).
+- **Refill:** an hourly tick (and `gas_refill_now`, for the operators)
+  withdraws ckETH to the EOA through the minter's `withdraw_eth` when the
+  EOA is under its floor, enough to bring it back to the target and never
+  under the minter's minimum (0.01 ETH on Sepolia). What it may withdraw
+  is read from the ledger, not counted: ic-git's ckETH balance, less all
+  it owes tenants (balances, held or not, and every transfer that may
+  yet be theirs) and less the markup's surplus not yet credited back.
+  That leaves the gas tenants have paid for and the EOA has not been
+  given back. The ledger and the minter are asked first, so a tick with
+  nothing to refill from pays for no outcall.
+- **The minter is the record of each refill.** A tick first reads ic-git's
+  withdrawals from the minter (`withdrawal_status`), which also finds a
+  refill whose reply an upgrade dropped. One not finished blocks the
+  next. The minter takes the gas of its own transaction out of the
+  amount and reports it; that, the ledger fees (the approval's, and the
+  burn's in case it has one), and any part of a failed refill not given
+  back are booked against the markup (section 4, `refill_costs`).
+- **The surplus** (markup, less refill costs, less what was credited) is
+  credited back by the operators (`gas_credit_surplus`), to each balance
+  in proportion to the markup it paid: an entry in ic-git's own books,
+  with no transfer and no fee.
 - **The operators seed the first float**, and they fund the EOA for
   ic-git's own records.
 - **The watch** reads the EOA's balance, the target and floor, and the
