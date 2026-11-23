@@ -74,6 +74,14 @@ change of #189 is not live by this: the page the canister serves is
 the one in the ic-git repo it holds, so it arrives with a push of this
 repository there and a new site record.
 
+That push followed the same day: `main` at `99ed643` (the merge of
+this release's record, #191) into the canister's `ic-git` repo, a
+fast-forward of 36 commits from `c9b2009`, and `ic-git#site`
+republished (Sepolia nonce 46, tx `0x2172842e...ce33`, block 12192042).
+`tools/verify.mjs ic-git index.html` verifies at `99ed643`, and the
+page the canister serves is byte for byte `browser/index.html` at that
+commit, the console of #189 with it.
+
 ## v0.3.15, the git canister -- 2026-11-18
 
 The API says where two histories part (#153;
