@@ -41,8 +41,6 @@ const LAST_KEY: &str = "gas:refill:last";
 /// How long a mark left by a lost reply blocks the next refill: past it,
 /// a withdrawal that was made shows on the minter.
 const LOST_REPLY_NS: u64 = 3_600 * 1_000_000_000;
-/// How many refills are kept, for the console.
-const KEEP: usize = 50;
 
 /// The ckETH minter of a chain, if it has one.
 pub fn default_minter(chain_id: u64) -> Option<Principal> {
@@ -106,11 +104,12 @@ pub fn refills(ledger: &Principal) -> Vec<Refill> {
     crate::kv::get_json(&refills_key(ledger)).unwrap_or_default()
 }
 
+/// Every refill is kept. The minter lists every withdrawal ever made from
+/// ic-git's account, so one dropped here would be adopted again on the
+/// next tick and its cost booked twice. A refill is at most hourly and in
+/// practice a few a month, so the list stays small.
 fn save_refills(ledger: &Principal, all: &[Refill]) {
-    let start = all.len().saturating_sub(KEEP);
-    // Never drop one not yet finished and booked.
-    let keep: Vec<&Refill> = all.iter().enumerate().filter(|(i, r)| *i >= start || !r.booked).map(|(_, r)| r).collect();
-    crate::kv::set_json(&refills_key(ledger), &keep);
+    crate::kv::set_json(&refills_key(ledger), &all);
 }
 
 /// Fold what the minter says of a withdrawal into the record, and book
@@ -158,6 +157,12 @@ fn book_fee(ledger: &Principal, fee: u128) {
     let mut t = crate::gas::totals(ledger);
     t.refill_costs = t.refill_costs.saturating_add(fee);
     crate::gas::save_totals(ledger, &t);
+}
+
+/// Whether a refill on `ledger` is not finished: its cost is not booked
+/// yet, so the markup's surplus is not known.
+pub fn unfinished(ledger: &Principal) -> Option<u64> {
+    refills(ledger).iter().find(|r| !r.state.is_final()).map(|r| r.withdrawal_id)
 }
 
 /// What may be refilled from: the ledger balance, less what is owed and
@@ -241,6 +246,13 @@ pub async fn tick() -> Result<RefillReport, String> {
     let cfg = crate::evm::get_config().ok_or("no EVM config, so no chain to refill on")?;
     let minter = default_minter(cfg.chain_id).ok_or_else(|| format!("chain {} has no ckETH minter to refill through", cfg.chain_id))?;
     let ledger = crate::gas::ledger_for_chain(cfg.chain_id)?;
+    // The minter burns its own ledger's asset: with another gas ledger set
+    // by the operators, an approval there would only pay a fee each hour.
+    if Some(ledger) != crate::gas::default_ledger(cfg.chain_id) {
+        return Err(format!(
+            "the gas ledger {ledger} is not the one the chain's minter burns; refilling is the operators' while it is set"
+        ));
+    }
     let mut report = RefillReport { at_ns: crate::clock::now_ns(), updated: 0, started: None, note: String::new() };
     let out = run(&cfg, minter, ledger, &mut report).await;
     report.note = match out {
@@ -263,8 +275,8 @@ async fn run(cfg: &crate::evm::EvmConfig, minter: Principal, ledger: Principal, 
         }
         crate::kv::remove(IN_FLIGHT_KEY);
     }
-    if let Some(r) = refills(&ledger).iter().find(|r| !r.state.is_final()) {
-        return Ok(format!("refill {} is not finished; the next waits for it", r.withdrawal_id));
+    if let Some(id) = unfinished(&ledger) {
+        return Ok(format!("refill {id} is not finished; the next waits for it"));
     }
     // The ledger and the minter first: calls between canisters, no
     // outcalls. Only a pool that could make a refill pays for the chain read.
@@ -558,6 +570,18 @@ mod tests {
         absorb(&ledger, failed(RefillState::Reimbursed { tx_hash: "0x2".into(), reimbursed: 990 }));
         assert_eq!(crate::gas::totals(&ledger).refill_costs, 40, "what did not come back");
         assert!(refills(&ledger).iter().all(|r| r.booked));
+        assert_eq!(unfinished(&ledger), None);
+        absorb(&ledger, Seen { withdrawal_id: 9, amount: 1, recipient: "0xE".into(), state: RefillState::Pending });
+        assert_eq!(unfinished(&ledger), Some(9));
+
+        // The minter lists every withdrawal on every tick: reading the
+        // finished ones again books nothing more.
+        let before = crate::gas::totals(&ledger).refill_costs;
+        for _ in 0..3 {
+            absorb(&ledger, seen(RefillState::Done { tx_hash: "0x1".into(), fee: 30 }));
+            absorb(&ledger, failed(RefillState::Reimbursed { tx_hash: "0x2".into(), reimbursed: 990 }));
+        }
+        assert_eq!(crate::gas::totals(&ledger).refill_costs, before);
     }
 
     #[test]

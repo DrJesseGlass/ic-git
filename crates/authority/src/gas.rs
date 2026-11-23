@@ -479,6 +479,11 @@ fn pro_rata(amount: u128, weights: &[u128]) -> Vec<u128> {
 /// what was credited.
 pub fn credit_surplus() -> Result<u128, String> {
     let ledger = ledger()?;
+    // An unfinished refill's cost is not booked yet: the surplus would be
+    // counted high, and credited from what that cost will take.
+    if let Some(id) = crate::refill::unfinished(&ledger) {
+        return Err(format!("refill {id} is not finished, so its cost is not known; credit the surplus once it is"));
+    }
     let mut t = totals(&ledger);
     let surplus = t.surplus();
     let accounts = accounts_on(&ledger);
