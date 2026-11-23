@@ -951,7 +951,9 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
 - The gas float (docs/EVM_GAS.md, section 5): `get_gas_float` gives
   the EOA's balance as last read against its target, floor and margin,
   and the sum of open holds, with no outcall; `gas_float_refresh`
-  (operators) reads it now. The refill runs hourly; `gas_refill_now`
+  (operators) reads it now. The six-hourly watch
+  (`tools/check-module-hash.sh`) reads the balance live from the chain
+  and fails under the floor, or under the open holds and the margin. The refill runs hourly; `gas_refill_now`
   runs one on demand and `get_gas_refills` lists every refill as the
   minter reports it. `gas_credit_surplus` credits the markup's surplus
   back to the balances it came from, and is refused while a refill is

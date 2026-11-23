@@ -8,7 +8,10 @@
 # its governor. A fourth, of each canister: does it hold cycles above a
 # floor (CYCLES_FLOOR, 500 G by default)? Its controller is a governor, so
 # only its own public `cycle_balance` can say, and an install fails for
-# want of cycles nobody saw otherwise, as one did at the cut.
+# want of cycles nobody saw otherwise, as one did at the cut. A fifth, of
+# the authority: does ic-git's EOA hold its float, the ETH it pays EVM
+# transactions with (docs/EVM_GAS.md, section 5)? Its balance is read
+# from the chain, the sizes from the canister.
 #
 #   tools/check-module-hash.sh            compare live hash vs the latest record
 #
@@ -156,8 +159,106 @@ cycles() {
   fi
 }
 
+# Exact arithmetic on non-negative integers of any size, as decimal
+# strings: a balance in wei passes what the shell's 64 bits hold, and the
+# watch takes no floating point.
+dec_norm() { local a=${1#"${1%%[!0]*}"}; echo "${a:-0}"; }
+dec_lt() { local a b LC_ALL=C; a=$(dec_norm "$1"); b=$(dec_norm "$2"); [ ${#a} -ne ${#b} ] && { [ ${#a} -lt ${#b} ]; return; }; [[ "$a" < "$b" ]]; }
+dec_add() {
+  local a=$1 b=$2 r= c=0 i s
+  while [ ${#a} -lt ${#b} ]; do a=0$a; done
+  while [ ${#b} -lt ${#a} ]; do b=0$b; done
+  for ((i = ${#a} - 1; i >= 0; i--)); do s=$((${a:i:1} + ${b:i:1} + c)); r=$((s % 10))$r; c=$((s / 10)); done
+  dec_norm "$c$r"
+}
+dec_mul16() {
+  local a=$1 r= c=0 i s
+  for ((i = ${#a} - 1; i >= 0; i--)); do s=$((${a:i:1} * 16 + c)); r=$((s % 10))$r; c=$((s / 10)); done
+  dec_norm "$c$r"
+}
+hex_dec() { local h=${1#0x} r=0 i; for ((i = 0; i < ${#h}; i++)); do r=$(dec_add "$(dec_mul16 "$r")" $((16#${h:i:1}))); done; echo "$r"; }
+# wei as ETH: the point put in 18 digits from the right, trailing zeros trimmed.
+eth() { local w f; w=$(dec_norm "$1"); while [ ${#w} -lt 19 ]; do w=0$w; done; f=$(printf '%s' "${w: -18}" | sed 's/0*$//'); echo "$(dec_norm "${w:0:${#w}-18}")${f:+.$f} ETH"; }
+# nat_field <candid text> <name>: the value of a record field `name = 1_000 : nat`.
+nat_field() { printf '%s\n' "$1" | sed -n "s/.*[^a-z_]$2 = \([0-9_]*\) : nat.*/\1/p" | tr -d _; }
+
+# gas_float <canister> <did>: ic-git's float (docs/EVM_GAS.md, section 5),
+# the ETH its EOA holds to pay for EVM transactions before tenants pay it
+# back. The canister's get_gas_float names the floor, the target, the
+# margin and what open transactions hold; its own balance read is as old
+# as the last send or refresh, and a refill does not renew it, so the
+# balance is read here, live, from the chain's RPC URL the canister is
+# configured with (evm_get_config; GAS_RPC_URL overrides it), at the
+# address of the canister's last read. Under the floor is status 1: the
+# hourly refill should have brought it back from what tenants paid
+# (get_gas_refills says why not), or the operators fund it. Under the
+# open holds and the margin, tenants' sends are refused, also status 1. A
+# module without the query, or a canister with no chain, is noted, not
+# failed; a read that fails otherwise is status 3, not a low balance.
+gas_float() {
+  local canister=$1 did=$2 out cfg addr url body hex wei floor target margin held need
+  out=$(dfx canister --network ic --identity "${DFX_IDENTITY:-anonymous}" call "$canister" get_gas_float '()' --candid "$did" --query 2>"$info_err") || out=""
+  if [ -z "$out" ]; then
+    if grep -q "no query method" "$info_err"; then
+      echo "gas float           : not reported by the module it runs (no get_gas_float query)"
+    else
+      echo "gas float           : <unreadable> -- this is NOT a low balance." >&2
+      sed 's/^/  dfx: /' "$info_err" >&2 || true
+      [ "$status" = 1 ] || status=3
+    fi
+    return 0
+  fi
+  case "$out" in *'Err = '*)
+    echo "gas float           : none ($(printf '%s\n' "$out" | sed -n 's/.*Err = "\(.*\)".*/\1/p'))"
+    return 0 ;;
+  esac
+  addr=$(printf '%s\n' "$out" | sed -n 's/.*address = "\(0x[0-9a-fA-F]\{40\}\)".*/\1/p')
+  floor=$(nat_field "$out" floor) target=$(nat_field "$out" target) margin=$(nat_field "$out" margin) held=$(nat_field "$out" held)
+  if [ -z "$addr" ] || [ -z "$floor" ] || [ -z "$target" ] || [ -z "$margin" ] || [ -z "$held" ]; then
+    echo "gas float           : <unread> -- the EOA's address is known once its balance has been read;" >&2
+    echo "  an operator's gas_float_refresh reads it. This is NOT a low balance." >&2
+    [ "$status" = 1 ] || status=3
+    return 0
+  fi
+  url=${GAS_RPC_URL:-}
+  if [ -z "$url" ]; then
+    cfg=$(dfx canister --network ic --identity "${DFX_IDENTITY:-anonymous}" call "$canister" evm_get_config '()' --candid "$did" --query 2>"$info_err") || cfg=""
+    url=$(printf '%s\n' "$cfg" | tr -d '\n' | sed -n 's/.*rpc_urls = vec { *"\([^"]*\)".*/\1/p')
+  fi
+  if [ -z "$url" ]; then
+    echo "gas float           : <unread> -- the canister names no RPC URL to read the EOA's balance from;" >&2
+    echo "  set GAS_RPC_URL. This is NOT a low balance." >&2
+    [ "$status" = 1 ] || status=3
+    return 0
+  fi
+  body='{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["'"$addr"'","latest"]}'
+  hex=$(curl -fsS --max-time 20 -H 'content-type: application/json' --data "$body" "$url" 2>"$info_err" | sed -n 's/.*"result" *: *"\(0x[0-9a-fA-F]*\)".*/\1/p') || hex=""
+  if [ -z "$hex" ]; then
+    echo "gas float           : <unreadable> -- eth_getBalance at $url did not answer. This is NOT a low balance." >&2
+    sed 's/^/  curl: /' "$info_err" >&2 || true
+    [ "$status" = 1 ] || status=3
+    return 0
+  fi
+  wei=$(hex_dec "$hex")
+  need=$(dec_add "$held" "$margin")
+  echo "gas float           : EOA $addr holds $(eth "$wei") ($wei wei, from $url)"
+  echo "                      floor $(eth "$floor"), target $(eth "$target"); open holds $(eth "$held") + margin $(eth "$margin")"
+  if dec_lt "$wei" "$floor"; then
+    echo "LOW -- the EOA is under its floor; the hourly refill should bring it back to the"
+    echo "  target from what tenants paid (get_gas_refills says why it has not), or fund it."
+    status=1
+  elif dec_lt "$wei" "$need"; then
+    echo "LOW -- the EOA cannot cover its open holds and the margin; tenants' EVM sends are"
+    echo "  refused until it is refilled or funded."
+    status=1
+  else
+    echo "OK -- the EOA holds its floor and covers every open hold and the margin."
+  fi
+}
+
 check "$canister" "$expected" "$commit" "$gov_id" "$gov_hash"
 cycles "$canister" canisters/authority/authority.did
+gas_float "$canister" canisters/authority/authority.did
 if [ -n "$git_id" ]; then
   echo
   check "$git_id" "$git_expected" "$git_commit" "$git_gov_id" "$git_gov_hash"

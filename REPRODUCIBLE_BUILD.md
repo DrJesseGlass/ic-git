@@ -190,7 +190,11 @@ Two independent observers, standing:
   `cycle_balance` against a floor (`CYCLES_FLOOR`, 500 G by default) and
   fails under it: a canister whose only controller is a governor reports
   its cycles to nobody else, and an install it cannot pay for fails at
-  the vote, as one did at the cut. This is the cheapest rung of the
+  the vote, as one did at the cut. And it checks ic-git's float, the ETH
+  its EOA pays EVM transactions with (docs/EVM_GAS.md, section 5): the
+  balance read live from the chain against the floor, the open holds and
+  the margin the authority's `get_gas_float` names, failing under any of
+  them. This is the cheapest rung of the
   upgrade-trust spectrum in "Residual assumptions" below: monitor first,
   governance later.
 
