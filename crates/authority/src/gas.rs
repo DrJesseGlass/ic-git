@@ -419,16 +419,30 @@ fn costs_key(chain_id: u64) -> String {
     format!("gas:costs:{chain_id}")
 }
 
-/// Note what a transaction on `chain_id` cost, from its receipt: every
-/// receipt read, ic-git's own and tenants' alike, once per transaction.
-pub fn observe_cost(chain_id: u64, tx_hash: &str, cost: u128) {
+/// One receipt the cost per transaction is the mean of.
+#[derive(Serialize, Deserialize)]
+struct CostSample {
+    tx: String,
+    /// Where it was mined: the block number, then the index in the block.
+    mined_at: (u128, u128),
+    cost: u128,
+}
+
+/// Note what one of the EOA's transactions on `chain_id` cost, from its
+/// receipt, ic-git's own sends and tenants' alike, once per transaction.
+/// The EOA's transactions are mined in nonce order, so a receipt counts
+/// only if it was mined after the newest one counted: one read again after
+/// it has left the window cannot come back into it, and one read out of
+/// order is passed over, which only loses a sample. The hash is checked as
+/// well, for a reorg that mines a counted transaction again later.
+pub fn observe_cost(chain_id: u64, tx_hash: &str, mined_at: (u128, u128), cost: u128) {
     let tx = tx_hash.to_ascii_lowercase();
     let key = costs_key(chain_id);
-    let mut list: Vec<(String, u128)> = crate::kv::get_json(&key).unwrap_or_default();
-    if list.iter().any(|(h, _)| *h == tx) {
+    let mut list: Vec<CostSample> = crate::kv::get_json(&key).unwrap_or_default();
+    if list.last().is_some_and(|s| s.mined_at >= mined_at) || list.iter().any(|s| s.tx == tx) {
         return;
     }
-    list.push((tx, cost));
+    list.push(CostSample { tx, mined_at, cost });
     if list.len() > COSTS_KEEP {
         let drop = list.len() - COSTS_KEEP;
         list.drain(0..drop);
@@ -438,8 +452,8 @@ pub fn observe_cost(chain_id: u64, tx_hash: &str, cost: u128) {
 
 /// The mean cost of the chain's recent transactions, if it has any.
 pub fn measured_cost(chain_id: u64) -> Option<u128> {
-    let list: Vec<(String, u128)> = crate::kv::get_json(&costs_key(chain_id)).unwrap_or_default();
-    mean(list.iter().map(|(_, c)| *c))
+    let list: Vec<CostSample> = crate::kv::get_json(&costs_key(chain_id)).unwrap_or_default();
+    mean(list.iter().map(|s| s.cost))
 }
 
 fn mean(costs: impl Iterator<Item = u128>) -> Option<u128> {
@@ -1115,15 +1129,21 @@ mod tests {
         let chain = 990_001;
         assert_eq!(measured_cost(chain), None);
         assert_eq!(unit_cost(chain, 7), FALLBACK_TX_GAS * 7, "before any receipt");
-        observe_cost(chain, "0xA", 100);
-        observe_cost(chain, "0xa", 999_999);
+        observe_cost(chain, "0xA", (10, 0), 100);
+        observe_cost(chain, "0xa", (10, 0), 999_999);
         assert_eq!(measured_cost(chain), Some(100), "a receipt read twice counts once");
-        observe_cost(chain, "0xb", 300);
+        observe_cost(chain, "0xb", (10, 3), 300);
         assert_eq!(unit_cost(chain, 7), 200);
+        observe_cost(chain, "0xc", (10, 1), 5_000);
+        assert_eq!(measured_cost(chain), Some(200), "one read out of order is passed over");
+        observe_cost(chain, "0xb", (12, 0), 300);
+        assert_eq!(measured_cost(chain), Some(200), "nor does a reorg count one twice");
         for i in 0..COSTS_KEEP {
-            observe_cost(chain, &format!("0x{i:x}f"), 1_000);
+            observe_cost(chain, &format!("0x{i:x}f"), (20 + i as u128, 0), 1_000);
         }
         assert_eq!(measured_cost(chain), Some(1_000), "only the last {COSTS_KEEP}");
+        observe_cost(chain, "0xA", (10, 0), 100);
+        assert_eq!(measured_cost(chain), Some(1_000), "nor one read again after it left the window");
         assert_eq!(mean(std::iter::empty()), None);
         assert_eq!(mean([u128::MAX, u128::MAX].into_iter()), Some(u128::MAX / 2), "saturates, never wraps");
     }

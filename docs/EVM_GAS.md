@@ -114,8 +114,10 @@ later satoshis); there is no floating point anywhere in it.
   ckBTC in satoshis later, with only the refill call differing.
 - **The cost per transaction** is the mean of what the chain's recent
   transactions cost (`gas_used * effective_gas_price`, the last 50
-  receipts read, ic-git's own and tenants' alike). Until there are any,
-  it is 100k gas at the current fee cap.
+  receipts of the EOA's own transactions, ic-git's records and tenants'
+  sends alike). Each counts once: a receipt counts only if it was mined
+  after the newest one counted, so reading an old one again changes
+  nothing. Until there are any, it is 100k gas at the current fee cap.
 - **The invariant:** after a tenant's send is reserved, the EOA still
   holds at least the sum of all open holds plus `float_margin_txs`
   transactions (10). A send that would break it is refused, as for a

@@ -1816,7 +1816,8 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
         // evm_receipt takes any hash, and one foreign transaction's cost
         // would move the float's sizes.
         if cached_eoa(&cfg).is_some_and(|eoa| r.from.eq_ignore_ascii_case(&eoa)) {
-            crate::gas::observe_cost(cfg.chain_id, &tx_hash, r.gas_used.saturating_mul(r.effective_gas_price));
+            let mined_at = (r.block_number, r.transaction_index);
+            crate::gas::observe_cost(cfg.chain_id, &tx_hash, mined_at, r.gas_used.saturating_mul(r.effective_gas_price));
         }
     }
     let summary = receipt.map(|r| ReceiptSummary {
