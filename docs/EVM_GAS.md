@@ -44,8 +44,10 @@ signature and the outcalls. `evm_gas` is retired.
 
 ## 3. The tenant's balance
 
-- **Kept per principal**, beside the cycles balance, in wei, by the same
-  rule as cycles: the principal who pays a repo's cycles pays its gas.
+- **Kept per principal and per ledger**, beside the cycles balance, in
+  wei, by the same rule as cycles: the principal who pays a repo's cycles
+  pays its gas. A balance on one ledger is never read as one on another,
+  so a change of chain leaves what was held where it was.
 - **Deposit** by `icrc2_approve` on the asset's ledger, then a call to the
   authority, which pulls the amount with `icrc2_transfer_from` and
   credits it. It has the shape the ICP deposit has: one attempt at a
@@ -60,9 +62,11 @@ signature and the outcalls. `evm_gas` is retired.
 ## 4. Charging a transaction
 
 1. **Reserve before signing.** After the fee read, the send reserves
-   `gas_limit * max_fee_per_gas` from the payer's available balance, and
-   is refused before signing if that is more than they have. The refusal
-   names the shortfall.
+   `gas_limit * max_fee_per_gas`, with the markup (point 4) on it, from
+   the payer's available balance, and is refused before signing if that
+   is more than they have. The refusal names the shortfall. The markup
+   is reserved too, so that no settlement can come to more than was
+   reserved.
 2. **Settle on the receipt.** The receipt poll that already runs
    (`schedule_receipt_poll`) debits `gas_used * effective_gas_price` and
    releases the rest of the reservation. A reverted transaction still
