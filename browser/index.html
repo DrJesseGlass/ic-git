@@ -1241,9 +1241,9 @@ const Console = (() => {
       // What one EVM action costs: the fee, and the table's rate for each
       // unit of its transaction's gas limit (0 until an operator sets one).
       // A registry write carries a limit of 1M.
-      const evmCost = (pr, gas) => BigInt(pr.evm_action) + BigInt(pr.evm_gas || 0) * BigInt(gas);
+      const evmCost = (pr, gas) => BigInt(pr.evm_action);
       const REGISTRY_GAS = 1000000;
-      const gasNote = pr => pr.evm_gas ? 'the gas is paid on that chain by the signer; the charge includes ' + pr.evm_gas + ' cycles per unit of the gas limit toward it.' : 'gas is paid on that chain by the signer, not in cycles.';
+      const gasNote = pr => 'the gas is paid from the gas balance of whoever pays this repo, in the chain\'s asset: the most it may cost is held when it is sent, and the receipt charges what it used, with a ' + (pr.gas_markup_bps ?? 100) / 100 + '% markup.';
       Promise.all([siteCfg, pricing]).then(([c, pr]) => {
         const box = document.getElementById('box-pubsite');
         if (!box || c === null) return;

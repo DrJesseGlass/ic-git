@@ -1,8 +1,10 @@
 # EVM gas -- tenants pay in the chain's asset, held on the IC
 
-Status: **design, 2026-11-22; nothing is built.** It replaces a first
-draft the same day that gave each repo an EVM address of its own. That
-draft was dropped because it spread ic-git's ETH over one address per
+Status: **design, 2026-11-22. Built: leg 1, the balance (#197), and leg
+2, the reservation and settlement of each transaction. Not yet: legs 3
+(the float) and 4 (the console).** It replaces a first draft the same
+day that gave each repo an EVM address of its own. That draft was
+dropped because it spread ic-git's ETH over one address per
 repo and ruled out putting many records in one transaction. Companion
 to docs/TENANCY.md (who pays, in cycles) and `crates/authority/src/evm.rs`
 (the signer).

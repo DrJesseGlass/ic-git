@@ -53,6 +53,9 @@ fn post_upgrade() {
     // Timers do not survive upgrades; re-arm the drain timer if the queue
     // (which does survive, in stable memory) still holds pending deploys.
     deploy::resume_pending();
+    // What EVM transactions hold of tenants' gas balances: polled for
+    // again, or given back if cut off before they were signed.
+    evm::resume_gas_holds();
     tenancy::arm_rent_timer();
     feed::arm_governor_timer();
     // What this side has not yet told the git canister: the mirrors marked
@@ -481,6 +484,35 @@ fn get_gas_account(principal: candid::Principal) -> Result<gas::GasAccount, Stri
     gas::account(&principal)
 }
 
+/// `principal`'s most recent settled gas charges on the ledger in force,
+/// newest last: what each transaction cost on the chain, and the markup.
+#[ic_cdk::query]
+fn get_gas_charges(principal: candid::Principal) -> Result<Vec<gas::GasCharge>, String> {
+    gas::charges(&principal)
+}
+
+/// What EVM transactions hold of their payers' gas balances until their
+/// receipts settle them.
+#[ic_cdk::query]
+fn gas_holds() -> Vec<gas::GasHold> {
+    gas::holds()
+}
+
+/// What every payer's settled transactions on the ledger in force came
+/// to: what the EOA spent for them, and what the markup collected.
+#[ic_cdk::query]
+fn get_gas_totals() -> Result<gas::GasTotals, String> {
+    gas::ledger().map(|l| gas::totals(&l))
+}
+
+/// Give back hold `id` whole, for a transaction that never landed (dropped
+/// from every mempool). Operators only: a transaction that is merely slow
+/// would then be paid for by the EOA's float alone.
+#[ic_cdk::update(guard = "is_admin")]
+fn gas_release_hold(id: u64) -> Result<gas::GasHold, String> {
+    gas::release_hold(id)
+}
+
 /// Gas transfers not yet settled.
 #[ic_cdk::query]
 fn pending_gas_transfers() -> Vec<gas::PendingGasTransfer> {
@@ -632,6 +664,7 @@ fn get_pricing() -> tenancy::Pricing {
 
 #[ic_cdk::update(guard = "is_admin")]
 fn set_pricing(p: tenancy::Pricing) -> Result<(), String> {
+    tenancy::check_pricing(&p)?;
     tenancy::set_pricing(p);
     Ok(())
 }
@@ -1179,7 +1212,7 @@ async fn evm_deploy(bytecode_hex: String, gas_limit: u64) -> Result<evm::TxOutco
     // Hex in, bytes out: the signing side takes decoded bytecode, so this
     // endpoint decodes on the way in. The candid signature is unchanged.
     let bytecode = ic_git_types::deploy::decode_bytecode_hex(&bytecode_hex)?;
-    Ok(evm::deploy_bytecode(String::new(), bytecode, gas_limit, String::new()).await?)
+    Ok(evm::deploy_bytecode(String::new(), bytecode, gas_limit, String::new(), None).await?)
 }
 
 /// Poll a transaction receipt. None while still pending. A found receipt is
@@ -1271,7 +1304,7 @@ async fn registry_publish_canister(
         return Err("only a controller of this canister can publish its record".to_string());
     }
     let record = provenance::canister_record(&commit, &module_sha256)?;
-    provenance::publish(&record).await.map_err(|e| e.message)
+    provenance::publish(&record, None).await.map_err(|e| e.message)
 }
 
 /// Publish a record asked of the git side, once the checks made before the
@@ -1292,9 +1325,9 @@ async fn publish_charged(
     repo: &str,
     record: &provenance::Record,
 ) -> Result<evm::TxOutcome, String> {
-    let cost = tenancy::pricing().evm_cost(evm::REGISTRY_SET_GAS);
+    let cost = tenancy::pricing().evm_action;
     let payer = tenancy::charge_action(repo, cost, "registry publish")?;
-    provenance::publish(record).await.map_err(|e| {
+    provenance::publish(record, payer).await.map_err(|e| {
         tenancy::refund_action(payer, e.refundable(cost));
         e.message
     })

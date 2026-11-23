@@ -310,6 +310,16 @@ expect "  ...and the tenant has it, less one ledger fee" "$(bal_of "$T")" "^\($(
 expect "  ...and the balance counts it withdrawn" "$(ic "$TEN" get_gas_account "(principal \"$T\")" --query | tr -d _)" 'withdrawn = 20000000 '
 expect "nobody else may finish a tenant's gas transfer" "$(ic "$V1" finish_gas_transfer '(1 : nat64)')" 'has no gas transfer 1'
 expect "no gas transfer left pending" "$(ic "$TEN" pending_gas_transfers --query)" '\(vec \{\}\)'
+# Section 4: nothing is held or charged here, since there is no chain to
+# send to; the reservation and the settlement are unit-tested in gas.rs.
+expect "nothing is reserved of the balance" "$(ic "$TEN" get_gas_account "(principal \"$T\")" --query | tr -d _)" '"?reserved"? = 0 '
+expect "  ...no transaction holds any" "$(ic "$TEN" gas_holds --query)" '\(vec \{\}\)'
+expect "  ...and none has been charged" "$(ic "$TEN" get_gas_charges "(principal \"$T\")" --query)" 'Ok = vec \{\}'
+TOTALS=$(ic "$TEN" get_gas_totals --query | tr -d ' \n')
+expect "the EOA has spent nothing for anyone" "$TOTALS" 'spent=0:nat'
+expect "  ...and the markup has collected nothing" "$TOTALS" 'markup=0:nat'
+expect "a tenant may not release a hold" "$(ic "$TEN" gas_release_hold '(1 : nat64)')" 'is not an operator'
+expect "  ...and the operators find none to release" "$(ic "$OP" gas_release_hold '(1 : nat64)')" 'no gas hold 1'
 ic "$OP" set_gas_ledger '(null)' >/dev/null
 
 section "push certificates"
@@ -883,7 +893,9 @@ pricing() { printf '(record { create_repo = 1000000000 : nat64; push_base = 1000
 expect "a tenant cannot retune it" "$(ic "$TEN" set_pricing "$(pricing 1)")" 'is not an operator'
 # The table as it was before the floor: still taken, the floor the default.
 ic "$OP" set_pricing '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64 })' >/dev/null
-expect "  ...and charges nothing for EVM gas, which it says" "$(ic "$OP" get_pricing --query)" 'evm_gas = opt \(0 : nat64\)'
+expect "  ...and marks EVM gas up by the default, which it says" "$(ic "$OP" get_pricing --query)" 'gas_markup_bps = opt \(100 : nat32\)'
+expect "a gas markup over 100% is refused" "$(ic "$OP" set_pricing '(record { create_repo = 1000000000 : nat64; push_base = 100000000 : nat64; push_per_byte = 5000 : nat64; rent_per_byte_year = 5000 : nat64; evm_action = 50000000000 : nat64; ic_deploy = 5000000000 : nat64; gas_markup_bps = opt (10001 : nat32) })')" 'in basis points'
+expect "  ...and the markup in force is kept" "$(ic "$OP" get_pricing --query)" 'gas_markup_bps = opt \(100 : nat32\)'
 expect "a table without the floor keeps the default" "$(ic "$OP" get_pricing --query)" 'git_canister_floor = opt \(1_000_000_000_000 : nat64\)'
 
 if [ "$SPLIT" = 1 ]; then

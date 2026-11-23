@@ -10,6 +10,7 @@
 //! approved commit holds.
 
 use crate::evm::{self, TxOutcome};
+use candid::Principal;
 use ic_git_types::deploy::bytecode_of;
 use ic_git_types::git_side::{Attested, RecordKind};
 pub use ic_git_types::keys::{Record, CANISTER_KEY, GIT_CANISTER_KEY};
@@ -18,9 +19,11 @@ use ic_git_types::oid::{commit20, parse_oid, Oid};
 use sha2::Digest as _;
 
 /// The single exit point to the signing side. The error says whether the
-/// broadcast was attempted, which decides a refund.
-pub async fn publish(rec: &Record) -> Result<TxOutcome, evm::SendError> {
-    let out = evm::registry_publish_record(&rec.key, &rec.commit, &rec.bundle).await?;
+/// broadcast was attempted, which decides a refund. `payer` is whose gas
+/// balance pays the write's gas: the tenant whose repo it is, or `None`
+/// for ic-git's own records (docs/EVM_GAS.md, section 4).
+pub async fn publish(rec: &Record, payer: Option<Principal>) -> Result<TxOutcome, evm::SendError> {
+    let out = evm::registry_publish_record(&rec.key, &rec.commit, &rec.bundle, payer).await?;
     crate::feed::published(&rec.key, &hex::encode(rec.commit), &out.tx_hash);
     Ok(out)
 }
@@ -159,10 +162,11 @@ pub async fn publish_commit(
     repo: &str,
     commit_oid: &Oid,
     bundle: [u8; 32],
+    payer: Option<Principal>,
 ) -> Result<TxOutcome, evm::SendError> {
     evm::require_publish_target().map_err(evm::SendError::before)?;
     let record = Record::artifact(repo, commit_oid, bundle).map_err(evm::SendError::before)?;
-    publish(&record).await
+    publish(&record, payer).await
 }
 
 #[cfg(test)]

@@ -55,7 +55,7 @@ pub async fn publish_git_record(
     let info = canister_info(git).await?;
     crate::provenance::running(&record, info.module_hash.as_deref())?;
     crate::evm::require_publish_target()?;
-    let out = crate::provenance::publish(&record).await.map_err(|e| e.message)?;
+    let out = crate::provenance::publish(&record, None).await.map_err(|e| e.message)?;
     Ok(Published { tx_hash: out.tx_hash })
 }
 
