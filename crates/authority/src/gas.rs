@@ -32,8 +32,8 @@
 //! Where icp.rs drops a deposit on any refusal, this does not, because a
 //! withdrawal given back after it was paid would pay a tenant twice. A
 //! replay past the window moves it to `failed_gas_transfers` for the
-//! operators. One attempt at a
-//! time takes a transfer forward, for the reason icp.rs gives (#186).
+//! operators. One attempt at a time takes a transfer forward, for the
+//! reason icp.rs gives (#186).
 
 use crate::ledger::{Account, TransferFromArgs, TransferFromError};
 use candid::{CandidType, Nat, Principal};

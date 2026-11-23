@@ -186,7 +186,7 @@ pub fn standing(method: &str, rule: Rule, who: &Principal, arg: &[u8]) -> Result
         }
         (SignedIn, "withdraw_gas") => {
             let (amount,) = candid::decode_args::<(candid::Nat,)>(arg).map_err(|_| unread())?;
-            let amount = u128::try_from(amount.0).map_err(|_| format!("withdraw_gas: the amount is more than any balance holds"))?;
+            let amount = u128::try_from(amount.0).map_err(|_| "withdraw_gas: the amount is more than any balance holds".to_string())?;
             crate::gas::ledger().and_then(|ledger| crate::gas::covers(&ledger, who, amount)).map_err(|e| format!("withdraw_gas: {e}"))
         }
         (SignedIn, "finish_gas_transfer") => {

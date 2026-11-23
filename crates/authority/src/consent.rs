@@ -275,7 +275,6 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
     })
 }
 
-/// e8s as ICP, to 8 places with trailing zeros dropped: "1.5 ICP".
 /// The gas ledger in force and an amount on it, or why a gas call would
 /// be refused, so it is not described.
 fn gas_amount(method: &str, amount: candid::Nat) -> Result<(Principal, u128), Icrc21Error> {
@@ -284,6 +283,7 @@ fn gas_amount(method: &str, amount: candid::Nat) -> Result<(Principal, u128), Ic
     Ok((ledger, amount))
 }
 
+/// e8s as ICP, to 8 places with trailing zeros dropped: "1.5 ICP".
 fn icp(e8s: u64) -> String {
     let frac = format!("{:08}", e8s % 100_000_000);
     let frac = frac.trim_end_matches('0');
