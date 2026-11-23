@@ -1001,6 +1001,14 @@ async fn send_tx(
     payer: Option<Principal>,
 ) -> Result<TxOutcome, SendError> {
     let _lock = SendLock::acquire().map_err(SendError::before)?;
+    // The asset the payer's gas is held in, read with `cfg` and before any
+    // await: an operator changing the chain while this send waits must not
+    // move its charge to another chain's asset. No such asset is a refusal
+    // before any outcall.
+    let payer = match payer {
+        Some(who) => Some((who, crate::gas::ledger_for_chain(cfg.chain_id).map_err(SendError::before)?)),
+        None => None,
+    };
     let meter = Meter::default();
     // The hold sign_tx takes, once it has: a definite failure gives it back.
     let hold: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
@@ -1125,7 +1133,7 @@ async fn sign_tx(
     value: u128,
     data: Vec<u8>,
     gas_limit: u64,
-    payer: Option<Principal>,
+    payer: Option<(Principal, Principal)>,
     hold: &std::cell::Cell<Option<u64>>,
     meter: &Meter,
 ) -> Result<(String, Vec<u8>, u64, [u8; 20]), String> {
@@ -1140,8 +1148,8 @@ async fn sign_tx(
     let (max_fee, tip) = fee_pair?;
     // Before the signature: a payer who cannot cover the most this may
     // cost is refused for the price of the reads alone.
-    if let Some(who) = payer {
-        hold.set(Some(crate::gas::reserve(&who, gas_limit, max_fee)?.id));
+    if let Some((who, ledger)) = payer {
+        hold.set(Some(crate::gas::reserve(&who, ledger, gas_limit, max_fee)?.id));
     }
     let tx = Tx {
         chain_id: cfg.chain_id,
@@ -1746,17 +1754,15 @@ mod tests {
     /// never went out, and the upgrade gives it back whole.
     #[test]
     fn an_upgrade_gives_back_a_hold_that_was_never_signed() {
-        let ck = Principal::from_text(crate::gas::CKSEPOLIAETH_LEDGER).unwrap();
-        crate::gas::set_ledger(Some(ck));
+        let ck = Principal::from_slice(&[8; 29]);
         let who = Principal::from_slice(&[7; 29]);
         crate::gas::credit(&ck, &who, 1_000_000);
-        let h = crate::gas::reserve(&who, 21_000, 10).unwrap();
-        assert_eq!(crate::gas::account(&who).unwrap().reserved, h.amount);
+        let h = crate::gas::reserve(&who, ck, 21_000, 10).unwrap();
+        assert_eq!(crate::gas::account_on(&ck, &who).reserved, h.amount);
         resume_gas_holds();
-        let a = crate::gas::account(&who).unwrap();
+        let a = crate::gas::account_on(&ck, &who);
         assert_eq!((a.available, a.reserved), (1_000_000, 0));
         assert!(crate::gas::holds().iter().all(|x| x.id != h.id));
-        crate::gas::set_ledger(None);
     }
 
     /// The cap is three base fees above the window plus the median tip, the
