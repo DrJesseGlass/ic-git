@@ -109,6 +109,36 @@ type Pricing = record {
   evm_gas : opt nat64;
 };
 type Stranded = record { who : principal; amount : nat64; error : text; at_ns : nat64 };
+type GasAccount = record {
+  ledger : principal;
+  available : nat;
+  deposited : nat;
+  withdrawn : nat;
+  created_ns : nat64;
+};
+type GasDirection = variant { Deposit; Withdrawal };
+type PendingGasTransfer = record {
+  id : nat64;
+  direction : GasDirection;
+  who : principal;
+  amount : nat;
+  fee : nat;
+  ledger : principal;
+  at_ns : nat64;
+  last_error : opt text;
+  uncertain : bool;
+};
+type FailedGasTransfer = record {
+  id : nat64;
+  direction : GasDirection;
+  who : principal;
+  amount : nat;
+  ledger : principal;
+  error : text;
+  at_ns : nat64;
+};
+type ResultNat = variant { Ok : nat; Err : text };
+type ResultGasAccount = variant { Ok : GasAccount; Err : text };
 type PendingIcpDeposit = record {
   id : nat64;
   block_index : opt nat64;
@@ -355,6 +385,13 @@ service : {
   deposit_from_cycles_ledger : (nat64) -> (ResultNat64);
   deposit_from_icp : (nat64) -> (ResultNat64);
   finish_icp_deposit : (nat64) -> (ResultNat64);
+  deposit_gas : (nat) -> (ResultNat);
+  withdraw_gas : (nat) -> (ResultNat);
+  finish_gas_transfer : (nat64) -> (ResultNat);
+  get_gas_ledger : () -> (ResultPrincipal) query;
+  get_gas_account : (principal) -> (ResultGasAccount) query;
+  pending_gas_transfers : () -> (vec PendingGasTransfer) query;
+  failed_gas_transfers : () -> (vec FailedGasTransfer) query;
   pending_icp_deposits : () -> (vec PendingIcpDeposit) query;
   failed_icp_deposits : () -> (vec FailedIcpDeposit) query;
   get_account : (principal) -> (Account) query;
@@ -373,6 +410,7 @@ service : {
   set_pricing : (Pricing) -> (Result);
   charge_rent_now : () -> (nat32, nat64);
   set_cycles_ledger : (principal) -> (Result);
+  set_gas_ledger : (opt principal) -> (Result);
   set_icp_ledgers : (principal, principal) -> (Result);
   stranded_deposits : () -> (vec Stranded) query;
   create_app_canister : (text, nat64) -> (ResultPrincipal);

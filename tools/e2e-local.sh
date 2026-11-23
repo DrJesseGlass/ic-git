@@ -287,6 +287,31 @@ OUT=$(ic "$TEN" deposit_from_icp '(100_000_000 : nat64)')
 expect "deposit_from_icp credits exactly the CMC's cycles for 1 ICP" "$(echo "$OUT" | tr -d _)" "Ok = $((RATE * 100000000)) "
 expect "nothing left pending" "$(ic "$TEN" pending_icp_deposits)" '\(vec \{\}\)'
 
+# docs/EVM_GAS.md, section 3. There is no ckETH here: the local ICP
+# ledger stands in for it, being ICRC-2 like any ck ledger, and amounts
+# are its base units either way. Its fee is 10_000.
+section "gas balance"
+bal_of() { call anonymous "$ICP_LEDGER" icrc1_balance_of "(record { owner = principal \"$1\"; subaccount = null })" --query | tr -d '_ \n'; }
+expect "a tenant may not set the gas ledger" "$(ic "$TEN" set_gas_ledger "(opt principal \"$ICP_LEDGER\")")" 'is not an operator'
+ic "$OP" set_gas_ledger "(opt principal \"$ICP_LEDGER\")" >/dev/null
+expect "the gas ledger is the one the operator set" "$(ic "$TEN" get_gas_ledger --query)" "Ok = principal \"$ICP_LEDGER\""
+expect "a deposit under ten ledger fees is refused" "$(ic "$TEN" deposit_gas '(99_999 : nat)')" 'deposit at least 100000 units'
+call "$TEN" "$ICP_LEDGER" icrc2_approve "(record { spender = record { owner = principal \"$A\"; subaccount = null }; amount = 50_010_000 : nat; expected_allowance = null; expires_at = null; fee = null; memo = null; from_subaccount = null; created_at_time = null })" >/dev/null
+HELD=$(bal_of "$A")
+expect "deposit_gas credits the amount whole" "$(ic "$TEN" deposit_gas '(50_000_000 : nat)' | tr -d _)" 'Ok = 50000000 '
+expect "  ...which the ledger moved into ic-git's account" "$(bal_of "$A")" "^\($(( ${HELD//[!0-9]/} + 50000000 )):nat\)$"
+expect "  ...and the gas balance says so" "$(ic "$TEN" get_gas_account "(principal \"$T\")" --query | tr -d _)" 'available = 50000000 '
+expect "a deposit past the allowance is refused, and credits nothing" "$(ic "$TEN" deposit_gas '(1_000_000 : nat)')" 'InsufficientAllowance'
+expect "  ...the balance is as it was" "$(ic "$TEN" get_gas_account "(principal \"$T\")" --query | tr -d _)" 'available = 50000000 '
+expect "a withdrawal past the balance is refused before it is taken" "$(ic "$TEN" withdraw_gas '(50_000_001 : nat)')" 'less than the 50000001 units'
+MINE=$(bal_of "$T")
+expect "withdraw_gas leaves the rest available" "$(ic "$TEN" withdraw_gas '(20_000_000 : nat)' | tr -d _)" 'Ok = 30000000 '
+expect "  ...and the tenant has it, less one ledger fee" "$(bal_of "$T")" "^\($(( ${MINE//[!0-9]/} + 19990000 )):nat\)$"
+expect "  ...and the balance counts it withdrawn" "$(ic "$TEN" get_gas_account "(principal \"$T\")" --query | tr -d _)" 'withdrawn = 20000000 '
+expect "nobody else may finish a tenant's gas transfer" "$(ic "$V1" finish_gas_transfer '(1 : nat64)')" 'has no gas transfer 1'
+expect "no gas transfer left pending" "$(ic "$TEN" pending_gas_transfers --query)" '\(vec \{\}\)'
+ic "$OP" set_gas_ledger '(null)' >/dev/null
+
 section "push certificates"
 KEY=$WORK/key
 ssh-keygen -q -t ed25519 -N "" -C e2e@local -f "$KEY"

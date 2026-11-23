@@ -49,6 +49,29 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
                  them to the depositor."
             )
         }),
+        "deposit_gas" => args::<(candid::Nat,)>(arg, m).and_then(|(amount,)| {
+            let (ledger, amount) = gas_amount(m, amount)?;
+            Ok(format!(
+                "Deposit {} into your ic-git gas balance, taken from the allowance you approved \
+                 on its ledger {ledger} (plus that ledger's fee). ic-git spends it on the gas of \
+                 the EVM transactions it sends for you, and you can withdraw what is left.",
+                crate::gas::amount_text(&ledger, amount)
+            ))
+        }),
+        "withdraw_gas" => args::<(candid::Nat,)>(arg, m).and_then(|(amount,)| {
+            let (ledger, amount) = gas_amount(m, amount)?;
+            Ok(format!(
+                "Withdraw {} from your ic-git gas balance to your own account on its ledger \
+                 {ledger}. The ledger's fee comes out of this amount.",
+                crate::gas::amount_text(&ledger, amount)
+            ))
+        }),
+        "finish_gas_transfer" => args::<(u64,)>(arg, m).map(|(id,)| {
+            format!(
+                "Finish pending gas transfer {id}: repeat its transfer on the gas ledger, which \
+                 the ledger takes only once, and settle the gas balance it is for."
+            )
+        }),
         "create_repo" => args::<(String,)>(arg, m).map(|(repo,)| {
             format!(
                 "Create the repository \"{repo}\" on ic-git. You become its owner, and the \
@@ -253,6 +276,14 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
 }
 
 /// e8s as ICP, to 8 places with trailing zeros dropped: "1.5 ICP".
+/// The gas ledger in force and an amount on it, or why a gas call would
+/// be refused, so it is not described.
+fn gas_amount(method: &str, amount: candid::Nat) -> Result<(Principal, u128), Icrc21Error> {
+    let amount = u128::try_from(amount.0).map_err(|_| unavailable(method, "the amount is more than any balance holds".into()))?;
+    let ledger = crate::gas::ledger().map_err(|e| unavailable(method, e))?;
+    Ok((ledger, amount))
+}
+
 fn icp(e8s: u64) -> String {
     let frac = format!("{:08}", e8s % 100_000_000);
     let frac = frac.trim_end_matches('0');
@@ -325,6 +356,7 @@ mod tests {
             ("deposit_from_icp", encode_args((150_000_000u64,)).unwrap(), &["Deposit 1.5 ICP", "0.0001 ICP fee", "cycles minting canister"]),
             ("deposit_from_icp", encode_args((2_000_000u64,)).unwrap(), &["Deposit 0.02 ICP"]),
             ("finish_icp_deposit", encode_args((42u64,)).unwrap(), &["pending ICP deposit 42", "credit them to the depositor"]),
+            ("finish_gas_transfer", encode_args((43u64,)).unwrap(), &["pending gas transfer 43", "only once"]),
             ("create_repo", encode_args(("ic-vote",)).unwrap(), &["\"ic-vote\"", "owner"]),
             ("create_app_canister", encode_args(("ic-vote", 1_000_000_000_000u64)).unwrap(), &["1.000 T cycles", "both control"]),
             ("top_up_app_canister", encode_args(("ic-vote", 500_000_000_000u64)).unwrap(), &["0.500 T cycles", "app canister"]),
@@ -369,6 +401,19 @@ mod tests {
         // not described, so not signed.
         assert!(describe("deposit", &encode_args(()).unwrap()).is_none());
         assert!(describe("charge_rent_now", &encode_args(()).unwrap()).is_none(), "not for a wallet");
+    }
+
+    /// A gas amount is named in the ledger's asset, with the ledger's id.
+    #[test]
+    fn a_gas_call_names_its_amount_in_the_ledgers_asset() {
+        crate::gas::set_ledger(Some(Principal::from_text(crate::gas::CKSEPOLIAETH_LEDGER).unwrap()));
+        let dep = text("deposit_gas", encode_args((candid::Nat::from(25_000_000_000_000_000u64),)).unwrap()).unwrap();
+        for needle in ["Deposit 0.025 ckSepoliaETH", "apia6-jaaaa-aaaar-qabma-cai", "withdraw what is left"] {
+            assert!(dep.contains(needle), "{needle:?} in {dep:?}");
+        }
+        let out = text("withdraw_gas", encode_args((candid::Nat::from(1_000_000_000_000_000_000u64),)).unwrap()).unwrap();
+        assert!(out.contains("Withdraw 1 ckSepoliaETH") && out.contains("fee comes out"), "{out:?}");
+        crate::gas::set_ledger(None);
     }
 
     #[test]
