@@ -135,6 +135,7 @@ type GasAccount = record {
   "reserved" : nat;
   spent : nat;
   markup : nat;
+  credited : nat;
 };
 type GasDirection = variant { Deposit; Withdrawal };
 type GasHold = record {
@@ -154,7 +155,43 @@ type GasCharge = record {
   markup : nat;
   at_ns : nat64;
 };
-type GasTotals = record { spent : nat; markup : nat };
+type GasTotals = record {
+  spent : nat;
+  markup : nat;
+  // what refilling the EOA has cost, and what of the markup's surplus has
+  // been credited back
+  refill_costs : nat;
+  credited : nat;
+};
+type RefillState = variant {
+  Pending;
+  Sent : record { tx_hash : text };
+  Done : record { tx_hash : text; fee : nat };
+  PendingReimbursement : record { tx_hash : text };
+  Reimbursed : record { tx_hash : text; reimbursed : nat };
+};
+type Refill = record {
+  withdrawal_id : nat64;
+  ledger : principal;
+  amount : nat;
+  recipient : text;
+  state : RefillState;
+  booked : bool;
+  at_ns : nat64;
+};
+type RefillReport = record {
+  at_ns : nat64;
+  updated : nat32;
+  started : opt Refill;
+  note : text;
+};
+type RefillStatus = record {
+  minter : opt principal;
+  last : opt RefillReport;
+  refills : vec Refill;
+};
+type ResultRefillStatus = variant { Ok : RefillStatus; Err : text };
+type ResultRefillReport = variant { Ok : RefillReport; Err : text };
 type BalanceRead = record {
   chain_id : nat64;
   address : text;
@@ -464,6 +501,9 @@ service : {
   gas_holds : () -> (vec GasHold) query;
   get_gas_totals : () -> (ResultGasTotals) query;
   get_gas_float : () -> (ResultGasFloat) query;
+  get_gas_refills : () -> (ResultRefillStatus) query;
+  gas_refill_now : () -> (ResultRefillReport);
+  gas_credit_surplus : () -> (ResultNat);
   gas_float_refresh : () -> (ResultGasFloat);
   gas_release_hold : (nat64) -> (ResultGasHold);
   pending_gas_transfers : () -> (vec PendingGasTransfer) query;

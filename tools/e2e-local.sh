@@ -320,6 +320,12 @@ expect "the EOA has spent nothing for anyone" "$TOTALS" 'spent=0:nat'
 expect "  ...and the markup has collected nothing" "$TOTALS" 'markup=0:nat'
 expect "a tenant may not release a hold" "$(ic "$TEN" gas_release_hold '(1 : nat64)')" 'is not an operator'
 expect "  ...and the operators find none to release" "$(ic "$OP" gas_release_hold '(1 : nat64)')" 'no gas hold 1'
+# Section 4's surplus: nothing has been marked up here, so nothing to credit.
+expect "a tenant may not credit the surplus" "$(ic "$TEN" gas_credit_surplus)" 'is not an operator'
+expect "  ...and the operators credit none, with none collected" "$(ic "$OP" gas_credit_surplus)" 'Ok = 0 : nat'
+TOTALS=$(ic "$TEN" get_gas_totals --query | tr -d ' \n')
+expect "the books show no refill cost" "$TOTALS" 'refill_costs=0:nat'
+expect "  ...and nothing credited" "$TOTALS" 'credited=0:nat'
 ic "$OP" set_gas_ledger '(null)' >/dev/null
 
 section "push certificates"
@@ -903,6 +909,9 @@ expect "  ...with its floor" "$PRICES" 'float_floor_txs=opt\(500:nat32\)'
 expect "  ...and its margin over open holds" "$PRICES" 'float_margin_txs=opt\(10:nat32\)'
 # No chain is configured here, so the float has nothing to be read from.
 expect "the float is read by anyone, and says there is no chain" "$(ic anonymous get_gas_float --query)" 'no EVM config'
+expect "  ...as do the refills" "$(ic anonymous get_gas_refills --query)" 'no EVM config'
+expect "a tenant may not run a refill" "$(ic "$TEN" gas_refill_now)" 'is not an operator'
+expect "  ...and the operators' run says there is no chain to refill on" "$(ic "$OP" gas_refill_now)" 'no EVM config'
 expect "a tenant may not pay for a fresh read of it" "$(ic "$TEN" gas_float_refresh)" 'is not an operator'
 expect "a table without the floor keeps the default" "$(ic "$OP" get_pricing --query)" 'git_canister_floor = opt \(1_000_000_000_000 : nat64\)'
 
