@@ -162,7 +162,7 @@ const IC = (() => {
   }
 
   // --- decoder ---
-  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc', 'approvals', 'objections', 'required', 'reached', 'governed', 'counts', 'change', 'ballots', 'RequiredVotes', 'AddVoter', 'RemoveVoter', 'Transfer', 'WasmDeploy', 'DeployMode', 'EvmDeploy', 'k', 'new_owner', 'domains']) NAMES[idlHash(n)] = n;
+  const NAMES = {}; for (const n of ['Ok', 'Err', 'Writer', 'Voter', 'principal', 'role', 'balance', 'deposited', 'spent', 'created_ns', 'canister_id', 'owner', 'subaccount', 'message', 'error_code', 'InsufficientFunds', 'InsufficientAllowance', 'GenericError', 'BadFee', 'expected_fee', 'allowance', 'TooOld', 'TemporarilyUnavailable', 'Duplicate', 'duplicate_of', 'CreatedInFuture', 'ledger_time', 'Expired', 'AllowanceChanged', 'current_allowance', 'BadBurn', 'min_burn_amount', 'target', 'source_path', 'mode', 'upgrade', 'reinstall', 'root', 'commit', 'ok', 'wasm_len', 'wasm_sha256', 'gas_limit', 'id', 'repo', 'minted_by', 'expires_ns', 'key', 'require_signed_push', 'tx_hash', 'nonce', 'from', 'contract_address', 'data', 'xdr_permyriad_per_icp', 'timestamp_seconds', 'certificate', 'hash_tree', 'block_index', 'who', 'e8s', 'at_ns', 'last_error', 'ledger', 'cmc', 'approvals', 'objections', 'required', 'reached', 'governed', 'counts', 'change', 'ballots', 'RequiredVotes', 'AddVoter', 'RemoveVoter', 'Transfer', 'WasmDeploy', 'DeployMode', 'EvmDeploy', 'k', 'new_owner', 'domains', 'available', 'withdrawn', 'reserved', 'markup', 'credited', 'gas_used', 'effective_gas_price', 'cost', 'direction', 'Deposit', 'Withdrawal', 'amount', 'fee', 'uncertain', 'in_flight']) NAMES[idlHash(n)] = n;
   function decode(bytes) {
     let pos = 0;
     const u8 = () => bytes[pos++];
@@ -861,6 +861,11 @@ const Console = (() => {
   const fmtCycles = n => { const s = fmtT(n); return s.endsWith(' T') ? s + ' cycles' : s; };
   // ICP for humans: e8s to a decimal with the trailing zeros trimmed (at least two places).
   const fmtIcp = n => { n = BigInt(n); const s = (n % 100_000_000n).toString().padStart(8, '0').replace(/0+$/, '').padEnd(2, '0'); return (n / 100_000_000n) + '.' + s + ' ICP'; };
+  // Any ledger's base units as a decimal of its token, and back: a gas
+  // ledger names its own decimals and symbol. Never through floating point.
+  const fmtUnits = (n, d, sym) => { n = BigInt(n); const one = 10n ** BigInt(d), f = d ? (n % one).toString().padStart(d, '0').replace(/0+$/, '') : ''; return (n / one) + (f ? '.' + f : '') + ' ' + sym; };
+  const parseUnits = (s, d, sym) => { const m = /^\s*(\d*)(?:\.(\d*))?\s*$/.exec(s); if (!m || (!m[1] && !m[2]) || (m[2] || '').length > d) throw new Error('enter an amount in ' + sym + ', at most ' + d + ' decimal places'); return BigInt(m[1] || '0') * 10n ** BigInt(d) + BigInt((m[2] || '').padEnd(d, '0') || '0'); };
+  const nsDate = ns => new Date(Number(BigInt(ns) / 1_000_000n)).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
   const RESULT_TYPES = {}; // method -> nothing needed: replies are self-describing
 
   // --- signer (ICRC-25 over postMessage) ---
@@ -1010,7 +1015,7 @@ const Console = (() => {
 
   async function reposPanel() {
     let html = '<div class="panel"><h3>console</h3>';
-    if (!me) { html += '<p class="muted">Connect a wallet to create repositories, mint push tokens, manage members and votes, and deposit cycles. Reads need no sign-in.</p></div>'; return html; }
+    if (!me) { html += '<p class="muted">Connect a wallet to create repositories, mint push tokens, manage members and votes, deposit cycles, and hold gas for EVM transactions. Reads need no sign-in.</p></div>'; return html; }
     // What the wallet holds on the ledgers, read anonymously; null when a ledger did not answer.
     // They start now and land in the panel when they answer; the controls
     // below wait only for the same-origin reads.
@@ -1025,7 +1030,7 @@ const Console = (() => {
       '<p class="muted">creating a repo costs ' + fmtT(pricing.create_repo) + '; a push costs ' + fmtT(pricing.push_base) + ' + ' + pricing.push_per_byte + ' cycles/byte; storage rent ' + pricing.rent_per_byte_year + ' cycles per byte-year.</p>' +
       form('f-deposit', [{ name: 'amount', placeholder: 'deposit, in T cycles (e.g. 2)' }], 'deposit from cycles ledger') + '<p id="f-deposit-st" class="status"></p>' +
       form('f-icp', [{ name: 'amount', placeholder: 'deposit, in ICP (e.g. 0.5; at least 0.01)' }], 'deposit from ICP') +
-      '<p id="icp-rate" class="muted">...</p><p id="f-icp-st" class="status"></p><div id="icp-pending"></div>' +
+      '<p id="icp-rate" class="muted">...</p><p id="f-icp-st" class="status"></p><div id="icp-pending"></div><div id="gas"></div>' +
       form('f-create', [{ name: 'name', placeholder: 'new repo name' }], 'create repo') + '<p id="f-create-st" class="status"></p></div>';
     setTimeout(() => {
       land('held-icp', icp, fmtIcp); land('held-cyc', cyc, fmtCycles);
@@ -1072,6 +1077,7 @@ const Console = (() => {
         }; });
       }, e => console.warn('pending_icp_deposits: ' + e.message));
       drawPending();
+      drawGas();
       onsubmit('f-deposit', async v => {
         const amount = cycles(v.amount);
         const fee = 100_000_000n;
@@ -1093,6 +1099,81 @@ const Console = (() => {
       });
       onsubmit('f-create', async v => { await write('create_repo', ['text'], [v.name.trim()]); setTimeout(() => { location.hash = '#/' + encodeURIComponent(v.name.trim()); }, 800); return 'created ' + v.name; });
     }, 0);
+    // The gas balance (gas.rs; docs/EVM_GAS.md, section 3): the EVM chain's
+    // own asset, ckETH or ckSepoliaETH, held here to pay the gas of your
+    // repos' EVM transactions. With no chain configured the authority names
+    // no gas ledger, and none of it is drawn.
+    const unwrap = r => { if (r && 'Err' in r) throw new Error(r.Err); return r && 'Ok' in r ? r.Ok : r; };
+    async function drawGas() {
+      const el = document.getElementById('gas'); if (!el) return;
+      let ledger;
+      try { ledger = unwrap((await IC.query(at('get_gas_ledger'), 'get_gas_ledger', [], []))[0]); } catch (e) { console.warn('get_gas_ledger: ' + e.message); return; }
+      let acct, charges, fee, decimals, symbol;
+      try {
+        [acct, charges, fee, decimals, symbol] = await Promise.all([
+          IC.query(at('get_gas_account'), 'get_gas_account', ['principal'], [me]).then(r => unwrap(r[0])),
+          IC.query(at('get_gas_charges'), 'get_gas_charges', ['principal'], [me]).then(r => unwrap(r[0])),
+          IC.query(ledger, 'icrc1_fee', [], []).then(r => r[0]),
+          IC.query(ledger, 'icrc1_decimals', [], []).then(r => r[0]),
+          IC.query(ledger, 'icrc1_symbol', [], []).then(r => r[0])]);
+      } catch (e) { el.innerHTML = '<p class="bad">the gas balance could not be read: ' + esc(e.message) + '</p>'; return; }
+      const amt = n => fmtUnits(n, decimals, symbol);
+      const least = 10n * fee; // gas.rs MIN_DEPOSIT_FEES
+      // Newest first; the canister keeps the last few.
+      const recent = charges.slice(-10).reverse();
+      el.innerHTML = '<p>gas balance <b>' + esc(amt(acct.available)) + '</b>' +
+        (acct.reserved ? ' &middot; ' + esc(amt(acct.reserved)) + ' held for transactions not yet mined' : '') +
+        ' &middot; wallet holds <b id="held-gas">...</b> <span class="muted">(gas ledger <span class="oid">' + esc(ledger) + '</span>)</span></p>' +
+        '<p class="muted">it pays the gas of your repos\' EVM transactions: each holds the most it may cost when it is sent, and its receipt charges what it used, with the markup, and gives back the rest. What is not held can be withdrawn.</p>' +
+        form('f-gas-in', [{ name: 'amount', placeholder: 'deposit, in ' + symbol + ' (at least ' + amt(least) + ')' }], 'deposit gas') +
+        '<p class="muted">the wallet pays the amount plus two ledger fees (' + esc(amt(2n * fee)) + ').</p><p id="f-gas-in-st" class="status"></p>' +
+        form('f-gas-out', [{ name: 'amount', placeholder: 'withdraw, in ' + symbol + ' (the ledger\'s fee of ' + amt(fee) + ' comes out of it)' }], 'withdraw gas') + '<p id="f-gas-out-st" class="status"></p>' +
+        '<div id="gas-pending"></div>' +
+        (recent.length ? '<p class="muted">recent gas charges, newest first:</p><table><tr><th>transaction</th><th>gas used</th><th>cost</th><th>markup</th><th>settled</th></tr>' +
+          recent.map(c => '<tr><td class="oid" title="' + esc(c.tx_hash) + '">' + esc(short(c.tx_hash)) + '</td><td>' + esc(c.gas_used) + '</td><td>' + esc(amt(c.cost)) + '</td><td>' + esc(amt(c.markup)) + '</td><td class="muted">' + esc(nsDate(c.at_ns)) + '</td></tr>').join('') + '</table>' : '');
+      land('held-gas', held(ledger), amt);
+      // Transfers not yet settled (gas.rs): a finish button replays one whose
+      // outcome was unknown, which the ledger takes only once. Drawn at load,
+      // and again after a deposit or a withdrawal fails.
+      const drawGasPending = () => IC.query(at('pending_gas_transfers'), 'pending_gas_transfers', [], []).then(r => {
+        const mine = r[0].filter(p => p.who === me), box = document.getElementById('gas-pending');
+        if (!box) return;
+        box.innerHTML = !mine.length ? '' : '<p class="bad">gas transfers not yet settled:</p><table>' + mine.map(p => '<tr><td>' + ('Deposit' in p.direction ? 'deposit' : 'withdrawal') + ' of ' + esc(amt(p.amount)) + '</td><td class="muted">' +
+          (p.uncertain ? 'outcome unknown' : 'not settled') + (p.last_error ? ': ' + esc(p.last_error) : '') + '</td><td><button class="gas-finish" type="button" data-id="' + esc(p.id) + '">finish</button></td></tr>').join('') + '</table><p id="gas-pending-st" class="status"></p>';
+        box.querySelectorAll('button.gas-finish').forEach(b => { b.onclick = async () => {
+          b.disabled = true;
+          status('gas-pending-st', 'waiting for wallet...', true);
+          try { const bal = await write('finish_gas_transfer', ['nat64'], [BigInt(b.dataset.id)]); status('gas-pending-st', 'settled; gas balance now ' + amt(bal), true); setTimeout(() => location.reload(), 1200); }
+          catch (e) { b.disabled = false; status('gas-pending-st', e.message, false); }
+        }; });
+      }, e => console.warn('pending_gas_transfers: ' + e.message));
+      drawGasPending();
+      onsubmit('f-gas-in', async v => {
+        const amount = parseUnits(v.amount, decimals, symbol);
+        if (amount < least) throw new Error('deposit at least ' + amt(least) + ' (ten ledger fees)');
+        // 1. approve ic-git on the gas ledger for the amount plus the fee its
+        // transfer_from takes out of the allowance; 2. ic-git pulls it and
+        // credits the amount whole. One wallet session.
+        let available;
+        try {
+          available = await session(async s => {
+            await s('icrc2_approve', [APPROVE], [{ from_subaccount: null, spender: { owner: AUTHORITY, subaccount: null }, amount: amount + fee, expected_allowance: null, expires_at: null, fee: null, memo: null, created_at_time: null }], ledger);
+            return s('deposit_gas', ['nat'], [amount]);
+          });
+        } catch (e) { drawGasPending(); throw e; }
+        setTimeout(() => location.reload(), 1200);
+        return 'deposited ' + amt(amount) + '; gas balance now ' + amt(available);
+      });
+      onsubmit('f-gas-out', async v => {
+        const amount = parseUnits(v.amount, decimals, symbol);
+        if (amount <= fee) throw new Error('withdraw more than the ledger\'s fee of ' + amt(fee));
+        if (amount > acct.available) throw new Error('the gas balance has ' + amt(acct.available) + ' to withdraw');
+        let available;
+        try { available = await write('withdraw_gas', ['nat'], [amount]); } catch (e) { drawGasPending(); throw e; }
+        setTimeout(() => location.reload(), 1200);
+        return 'withdrew ' + amt(amount) + ', of which ' + amt(amount - fee) + ' reaches the wallet; gas balance now ' + amt(available);
+      });
+    }
     return html;
   }
 
@@ -1163,7 +1244,6 @@ const Console = (() => {
       // Live tokens by id, with a revoke button each. Redrawn in place after
       // a mint or a revoke: a reload would wipe the minted token, which is
       // shown once.
-      const nsDate = ns => new Date(Number(BigInt(ns) / 1_000_000n)).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
       // Resolves to the list (or undefined if it could not be read), so the
       // mint can find its own token in it.
       // A bound key as ssh-keygen -l prints it, and as git names the pusher.
@@ -1238,11 +1318,9 @@ const Console = (() => {
       const release = info.required_votes ? 'the newest approved commit' : 'the deploy-branch tip';
       // A failed read (undefined) still shows the box, with a warning: the
       // canister refuses an unserved repo before charging anything.
-      // What one EVM action costs: the fee, and the table's rate for each
-      // unit of its transaction's gas limit (0 until an operator sets one).
-      // A registry write carries a limit of 1M.
-      const evmCost = (pr, gas) => BigInt(pr.evm_action);
-      const REGISTRY_GAS = 1000000;
+      // What one EVM action costs in cycles: the fee alone, for the
+      // signature and the outcalls. Its gas is paid from the gas balance.
+      const evmCost = pr => BigInt(pr.evm_action);
       const gasNote = pr => 'the gas is paid from the gas balance of whoever pays this repo, in the chain\'s asset: the most it may cost is held when it is sent, and the receipt charges what it used, with a ' + (pr.gas_markup_bps ?? 100) / 100 + '% markup.';
       Promise.all([siteCfg, pricing]).then(([c, pr]) => {
         const box = document.getElementById('box-pubsite');
@@ -1251,7 +1329,7 @@ const Console = (() => {
         document.getElementById('pubsite-cost').textContent = c === undefined || pr === undefined
           ? 'could not read the site config or the fee table; reload before publishing.'
           : 'writes set("' + repo + '#site", ' + release + ', sha256 of the served entrypoint) from the canister\'s EOA and charges ' +
-            fmtT(evmCost(pr, REGISTRY_GAS)) + ' from the repo balance; ' + gasNote(pr);
+            fmtT(evmCost(pr)) + ' from the repo balance; ' + gasNote(pr);
       });
       // The call returns once the transaction is broadcast, not mined.
       onsubmit('f-pubsite', async () => { const t = await write('evm_registry_publish_site', ['text'], [repo]); return 'broadcast ' + repo + '#site: tx ' + t.tx_hash + ' (nonce ' + t.nonce + '); not yet confirmed on chain'; });
@@ -1269,14 +1347,14 @@ const Console = (() => {
       if (cost) Promise.all([deployCfg, evmCfg, pricing]).then(([w, e, pr]) => {
         const what = document.getElementById('reinstall-what');
         if (w === undefined || e === undefined || pr === undefined) { cost.textContent = 'could not read the deploy config or the fee table; reload before deploying.'; return; }
-        const fee = BigInt(w ? pr.ic_deploy : 0) + (e ? evmCost(pr, e.gas_limit) : 0n);
+        const fee = BigInt(w ? pr.ic_deploy : 0) + (e ? evmCost(pr) : 0n);
         const evmNote = e ? 'a new CREATE transaction for ' + e.source_path + ' on the EVM chain (gas limit ' + e.gas_limit + '): a fresh contract at a new address; ' + gasNote(pr) : '';
         // A governed repo's install into its app canister also publishes the
         // <repo>#app record, one more evm_action, where a registry is set.
         // The EVM deploy's own registry record is a second transaction and
         // a second evm_action, likewise where a registry is set.
-        const evmRecordNote = e ? ' The deploy is then recorded in the registry, ' + fmtT(evmCost(pr, REGISTRY_GAS)) + ' more where one is configured.' : '';
-        const appNote = w && info.governed && w.target === info.app_canister ? ' Governed: the install is recorded on chain as ' + repo + '#app, ' + fmtT(evmCost(pr, REGISTRY_GAS)) + ' more where a registry is configured.' : '';
+        const evmRecordNote = e ? ' The deploy is then recorded in the registry, ' + fmtT(evmCost(pr)) + ' more where one is configured.' : '';
+        const appNote = w && info.governed && w.target === info.app_canister ? ' Governed: the install is recorded on chain as ' + repo + '#app, ' + fmtT(evmCost(pr)) + ' more where a registry is configured.' : '';
         cost.textContent = !w && !e ? 'nothing is configured to deploy.'
           : 'deploy now runs every configured leg against ' + release + ' and charges ' + fmtT(fee) + ' from the repo balance.' + (e ? ' It also broadcasts ' + evmNote + evmRecordNote : '') + appNote;
         if (!btn) return;

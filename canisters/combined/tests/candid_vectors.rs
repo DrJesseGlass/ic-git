@@ -2,6 +2,7 @@
 //! (browser/index.html, "candid" block; runner: tools/console-codec-test.mjs).
 //! Run with `cargo test --test candid_vectors -- --nocapture`.
 use candid::{encode_args, encode_one, CandidType, Nat, Principal};
+use ic_git_authority::gas::{GasAccount, GasCharge, GasDirection, PendingGasTransfer};
 use serde::Deserialize;
 
 #[derive(CandidType, Deserialize)]
@@ -185,6 +186,38 @@ fn print_vectors() {
             PendingIcpDeposit { id: 1_790_000_000_000_000_001, block_index: None, who: q, e8s: 1_000_000, at_ns: 8, last_error: None, ledger: p, cmc: q },
         ]).unwrap()),
         ("reply:opt_site_reinstall_mode", encode_one(Some(DeployConfig { target: p.to_text(), source_path: "x.wat".into(), mode: DeployMode::Reinstall })).unwrap()),
+        // The gas balance's reads, in the canister's own types.
+        ("reply:result_gas_account_ok", encode_one(Ok::<GasAccount, String>(GasAccount {
+            ledger: p,
+            available: 30_000_000_000_000_000,
+            deposited: 50_000_000_000_000_000,
+            withdrawn: 20_000_000_000_000_000,
+            created_ns: 7,
+            reserved: 5,
+            spent: 3,
+            markup: 1,
+            credited: 0,
+        })).unwrap()),
+        ("reply:result_gas_charges_ok", encode_one(Ok::<Vec<GasCharge>, String>(vec![GasCharge {
+            tx_hash: "0xabc".into(),
+            gas_used: 21_000,
+            effective_gas_price: 2_000_000_000,
+            cost: 42_000_000_000_000,
+            markup: 420_000_000_000,
+            at_ns: 9,
+        }])).unwrap()),
+        ("reply:pending_gas", encode_one(vec![PendingGasTransfer {
+            id: 1_790_000_000_000_000_000,
+            direction: GasDirection::Withdrawal,
+            who: q,
+            amount: 20_000_000,
+            fee: 10_000,
+            ledger: p,
+            at_ns: 8,
+            last_error: Some("ledger transfer call: timeout".into()),
+            uncertain: true,
+            in_flight: false,
+        }]).unwrap()),
     ];
     println!("VECTORS_BEGIN");
     for (name, bytes) in v {

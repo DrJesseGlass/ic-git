@@ -1279,6 +1279,7 @@ globalThis.location = { hostname: 'localhost', origin: 'http://localhost:' + por
 const html = readFileSync(page, 'utf8');
 const IC = new Function(html.slice(html.indexOf('// === candid ==='), html.indexOf('// === end candid ===')) + '\nreturn IC;')();
 const ACCOUNT = { record: { owner: 'principal', subaccount: { opt: 'blob' } } };
+const ICP = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
 // The console's routes block: on a replica it learns the authority from
 // the serving canister (get_authority on the git canister; the combined
 // canister has no such method and is the authority itself).
@@ -1292,13 +1293,22 @@ const reads = {
   get_deploy_config: () => IC.query(A, 'get_deploy_config', ['text'], ['e2e-app']),
   list_push_tokens: () => IC.query(G, 'list_push_tokens', ['text'], ['e2e-app']),
   pending_icp_deposits: () => IC.query(A, 'pending_icp_deposits', [], []),
+  // The gas section's reads, with the local ICP ledger as the gas ledger
+  // again, as in section "gas balance", which left the tenant 30000000.
+  get_gas_ledger: async () => { const r = (await IC.query(A, 'get_gas_ledger', [], []))[0]; if (r.Ok !== ICP) throw new Error('names ' + JSON.stringify(r)); },
+  get_gas_account: async () => { const a = (await IC.query(A, 'get_gas_account', ['principal'], [T]))[0].Ok; if (a.available !== 30000000n || a.withdrawn !== 20000000n || a.reserved !== 0n) throw new Error('read ' + a.available + ' available, ' + a.withdrawn + ' withdrawn, ' + a.reserved + ' reserved'); },
+  get_gas_charges: async () => { const c = (await IC.query(A, 'get_gas_charges', ['principal'], [T]))[0].Ok; if (!Array.isArray(c)) throw new Error('no list of charges'); },
+  pending_gas_transfers: () => IC.query(A, 'pending_gas_transfers', [], []),
+  gas_token: async () => { const [[fee], [d], [sym]] = await Promise.all(['icrc1_fee', 'icrc1_decimals', 'icrc1_symbol'].map(m => IC.query(ICP, m, [], []))); if (fee !== 10000n || d !== 8 || typeof sym !== 'string') throw new Error(fee + ' ' + d + ' ' + sym); },
 };
 for (const [name, f] of Object.entries(reads)) {
   try { await f(); console.log('ok ' + name); } catch (e) { console.log('err ' + name + ': ' + e.message); }
 }
 EOF
+  ic "$OP" set_gas_ledger "(opt principal \"$ICP_LEDGER\")" >/dev/null
   OUT=$(node "$WORK/reads.mjs" "$ROOT/browser/index.html" "$PORT" "$G" "$A" "$T" 2>&1 || true)
-  for r in authority ledger cmc_rate get_site get_deploy_config list_push_tokens pending_icp_deposits; do
+  ic "$OP" set_gas_ledger '(null)' >/dev/null
+  for r in authority ledger cmc_rate get_site get_deploy_config list_push_tokens pending_icp_deposits get_gas_ledger get_gas_account get_gas_charges pending_gas_transfers gas_token; do
     expect "console query $r (page code, local origin)" "$OUT" "ok $r"
   done
 fi

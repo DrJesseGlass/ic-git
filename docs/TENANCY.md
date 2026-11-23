@@ -128,9 +128,16 @@ margin:
 | site domains | 100M (the push base) | each `set_site_domains` by the owner that the git side takes; refunded when it refuses |
 | storage rent | 5K per byte-year of what the repo's pushes stored | hourly timer, pro rata |
 | EVM action | 50B | each deploy or registry publish (a t-ECDSA signature plus RPC outcalls) |
-| EVM gas | 0 per unit of gas limit | with each EVM action, for its transaction's limit (below); optional in `set_pricing`, null is 0 |
+| gas markup | 1% (100 bps) | on what each EVM transaction's gas cost, from the gas balance rather than cycles (below); at most 100%; optional in `set_pricing`, null keeps the default |
 | IC deploy | 5B | each install from the deploy queue |
 | git canister floor | 1T | not a charge: under it, the rent timer tops the git canister up (below); optional in `set_pricing`, null keeps the default |
+
+The table also holds the float's sizes, which are not charges either:
+`float_target_txs` (1000), `float_floor_txs` (500) and
+`float_margin_txs` (10), how much ETH ic-git keeps in its EOA, counted
+in transactions at the measured cost of one (docs/EVM_GAS.md, section
+5). Each is optional in `set_pricing`, null keeping the default; a floor
+over the target, or a target of 0, is refused.
 
 A push is charged for the bytes it stores, and never less than the bytes
 of the request. The pack is read first: every object is inflated and
@@ -191,7 +198,8 @@ rejected]`), beside whatever else the push did.
 The gas of an EVM transaction is paid on the other chain by the
 canister's EOA, and each tenant pays it back from a gas balance held in
 that chain's asset on the IC side (docs/EVM_GAS.md): ckETH for Ethereum,
-ckSepoliaETH for Sepolia, deposited with `deposit_gas`. Before a
+ckSepoliaETH for Sepolia, deposited with `deposit_gas` (Funding,
+below). Before a
 transaction is signed, the most it may cost, its gas limit at the fee
 cap with the markup (`gas_markup_bps`, 1% by default and at most 100%)
 on it, is reserved from the balance of the principal who pays the
@@ -325,8 +333,28 @@ it.
   deposit with a finish button. `set_icp_ledgers(ledger, cmc)` (operators)
   repoints both for local testing; a deposit keeps the pair it started
   with, so repointing never redirects one already under way.
+- `deposit_gas(amount)`: the gas balance (docs/EVM_GAS.md, section 3),
+  held in the EVM chain's own asset on the ledger `get_gas_ledger`
+  names: ckETH for Ethereum, ckSepoliaETH for Sepolia. The tenant
+  approves this canister on that ledger for `amount` plus one fee (the
+  approve costs a second, from the wallet), then calls this; ic-git
+  pulls the amount with `icrc2_transfer_from` and credits it whole. At
+  least ten of the ledger's fees. `withdraw_gas(amount)` sends what is
+  not held back to the caller's own account on the ledger, less one
+  fee. Each transfer is recorded in `pending_gas_transfers` before
+  anything moves, under an id that is also its `created_at_time`, and
+  `finish_gas_transfer(id)` (the one it is for, or an operator) replays
+  one whose outcome was unknown, which the ledger takes only once; past
+  its dedup window it goes to `failed_gas_transfers` for the operators.
+  `get_gas_account(p)` gives the balance (`available`, what open
+  transactions hold as `reserved`, and what has gone in and out), and
+  `get_gas_charges(p)` what each recent transaction cost on the chain,
+  with its markup. The console's gas section does the approve and the
+  deposit in one wallet session, the withdrawal, and a finish button for
+  each transfer not yet settled, and lists the recent charges.
 
-Balances are not refundable yet; that needs the reverse of the ledger flow.
+A cycles balance is not refundable yet; that needs the reverse of the
+ledger flow. A gas balance is, being the same asset going back.
 
 A transfer is an offer. `transfer_repo(repo, p)` names who the repo is
 offered to and changes nothing else: the owner still owns, pays and
@@ -794,6 +822,7 @@ in the shared core, the next leg.
 
 The repo browser page gains a signed-in mode: connect a wallet, see balance
 and repos, create repos, mint, list and revoke push tokens, manage members and votes, deposit,
+hold and withdraw gas for EVM transactions,
 and set what a push deploys (`set_wasm_deploy`, into the repo's app
 canister) and what is served as a site (`set_site`), run the configured
 deploy without a push (`deploy_now`), name the site's own domains
@@ -856,8 +885,10 @@ Reads go through the canister's `/api` routes; every write is a canister call
 the wallet signs, so the page never holds a key. It stays one self-contained
 file, so its attestation still covers every byte that runs.
 
-The panel also shows what the wallet holds on the ICP and cycles ledgers, so
-a tenant can see what there is to deposit. Those two reads cannot go through
+The panel also shows what the wallet holds on the ICP and cycles ledgers, and
+on the gas ledger, so a tenant can see what there is to deposit. The gas
+ledger's own `icrc1_decimals` and `icrc1_symbol` name its amounts, so
+the section reads the same for ckETH, ckSepoliaETH, or a local stand-in. Those two reads cannot go through
 `/api` (a query cannot make inter-canister calls), so the page posts anonymous
 `icrc1_balance_of` queries straight to the IC HTTP API at `icp-api.io` and
 takes the boundary node's reply as is. A ledger that does not answer shows as
@@ -917,6 +948,17 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   filter removes. The filter takes a push by its path and token and
   does not look at its Host: at a site's own domain it is taken and
   then refused, as before, by `http_request_update`.
+- The gas float (docs/EVM_GAS.md, section 5): `get_gas_float` gives
+  the EOA's balance as last read against its target, floor and margin,
+  and the sum of open holds, with no outcall; `gas_float_refresh`
+  (operators) reads it now. The refill runs hourly; `gas_refill_now`
+  runs one on demand and `get_gas_refills` lists every refill as the
+  minter reports it. `gas_credit_surplus` credits the markup's surplus
+  back to the balances it came from, and is refused while a refill is
+  under way. `gas_release_hold(id)` gives back the hold of a
+  transaction that never landed. `set_gas_ledger` names a gas ledger
+  other than the chain's ck ledger (the local e2e names a stand-in);
+  a balance stays on the ledger it was deposited on.
 - `charge_rent_now` runs a rent tick on demand; the timer runs hourly and is
   re-armed on every upgrade.
 - Existing repos (`evm-demo`, `registry`, `ic-git`) are ownerless and exempt.

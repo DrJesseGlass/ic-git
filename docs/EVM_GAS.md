@@ -1,12 +1,13 @@
 # EVM gas -- tenants pay in the chain's asset, held on the IC
 
 Status: **design, 2026-11-22. Built: leg 1, the balance (#197); leg 2,
-the reservation and settlement of each transaction (#198); and leg 3a,
-the float's measure and invariant; and leg 3b, the refill through the
-minter and its accounting. Not yet: leg 4 (the console).** It replaces a first draft the same
-day that gave each repo an EVM address of its own. That draft was
-dropped because it spread ic-git's ETH over one address per
-repo and ruled out putting many records in one transaction. Companion
+the reservation and settlement of each transaction (#198); leg 3a, the
+float's measure and invariant (#199); leg 3b, the refill through the
+minter and its accounting (#200); and leg 4, the console and
+docs/TENANCY.md.** It replaces a first draft the same day that gave
+each repo an EVM address of its own. That draft was dropped because it
+spread ic-git's ETH over one address per repo and ruled out putting many
+records in one transaction. Companion
 to docs/TENANCY.md (who pays, in cycles) and `crates/authority/src/evm.rs`
 (the signer).
 

@@ -80,6 +80,11 @@ assert.deepEqual(dec('reply:opt_site_some'), { root: 'browser', domains: ['git.e
 // The EVM leg's config, which the panel names (with its cost) before a deploy.
 assert.deepEqual(dec('reply:opt_evm_deploy_config_some'), { source_path: 'build/Registry.hex', gas_limit: 1_500_000n });
 assert.deepEqual(dec('reply:opt_site_reinstall_mode'), { target: CANISTER, source_path: 'x.wat', mode: { reinstall: null } });
+// The gas balance: the account, its recent charges, and a transfer not
+// yet settled. Every field the panel reads must resolve to its name.
+assert.deepEqual(dec('reply:result_gas_account_ok'), { Ok: { ledger: CANISTER, available: 30_000_000_000_000_000n, deposited: 50_000_000_000_000_000n, withdrawn: 20_000_000_000_000_000n, created_ns: 7n, reserved: 5n, spent: 3n, markup: 1n, credited: 0n } });
+assert.deepEqual(dec('reply:result_gas_charges_ok'), { Ok: [{ tx_hash: '0xabc', gas_used: 21_000n, effective_gas_price: 2_000_000_000n, cost: 42_000_000_000_000n, markup: 420_000_000_000n, at_ns: 9n }] });
+assert.deepEqual(dec('reply:pending_gas'), [{ id: 1_790_000_000_000_000_000n, direction: { Withdrawal: null }, who: USER, amount: 20_000_000n, fee: 10_000n, ledger: CANISTER, at_ns: 8n, last_error: 'ledger transfer call: timeout', uncertain: true, in_flight: false }]);
 // list_push_tokens: legacy tokens have no minter or creation time.
 assert.deepEqual(dec('reply:push_tokens'), [
   { id: '0123456789abcdef', repo: 'r', minted_by: USER, created_ns: 1n, expires_ns: 2n, key: 'ssh-ed25519 AAAA' },
