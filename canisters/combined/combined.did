@@ -127,6 +127,7 @@ type PendingGasTransfer = record {
   at_ns : nat64;
   last_error : opt text;
   uncertain : bool;
+  in_flight : bool;
 };
 type FailedGasTransfer = record {
   id : nat64;

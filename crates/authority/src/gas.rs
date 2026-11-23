@@ -30,7 +30,11 @@
 //! and a refused replay (the ledger unavailable, say) does not show it
 //! did not, so the entry stays pending until a replay finds its block.
 //! Where icp.rs drops a deposit on any refusal, this does not, because a
-//! withdrawal given back after it was paid would pay a tenant twice. A
+//! withdrawal given back after it was paid would pay a tenant twice. An
+//! attempt cut off between its call and its reply (an upgrade drops the
+//! reply, since the governor does not stop the canister to install) leaves
+//! a stable `in_flight` mark, and the next attempt treats that like an
+//! unknown outcome. A
 //! replay past the window moves it to `failed_gas_transfers` for the
 //! operators. One attempt at a time takes a transfer forward, for the
 //! reason icp.rs gives (#186).
@@ -223,6 +227,14 @@ pub struct PendingGasTransfer {
     /// dedup window, the operators.
     #[serde(default)]
     pub uncertain: bool,
+    /// An attempt has sent the ledger call and not yet handled its reply.
+    /// Stable, unlike the claim: an upgrade drops the reply of a call that
+    /// is out (the governor installs without stopping the canister), and a
+    /// trap after the reply rolls back what handling it wrote. The next
+    /// attempt that finds this set knows an earlier one may have moved the
+    /// asset, and marks the transfer `uncertain` before it asks again.
+    #[serde(default)]
+    pub in_flight: bool,
 }
 
 /// A transfer no replay can settle, kept for the operators.
@@ -277,13 +289,32 @@ fn get_pending(id: u64) -> Option<PendingGasTransfer> {
     pending().into_iter().find(|p| p.id == id)
 }
 
+/// Record a reply that leaves transfer `id` pending: its error, whether it
+/// leaves the outcome unknown, and that no attempt is out any more.
 fn note_error(id: u64, e: &str, uncertain: bool) {
     let mut all = pending();
     if let Some(p) = all.iter_mut().find(|p| p.id == id) {
         p.last_error = Some(e.to_string());
         p.uncertain |= uncertain;
+        p.in_flight = false;
         save_pending(&all);
     }
+}
+
+/// Start an attempt on transfer `id`: if an earlier one sent its call and
+/// never handled the reply, the transfer may have happened, so it is
+/// uncertain from here on; then mark this attempt out, before its call.
+fn begin_attempt(id: u64) -> Result<PendingGasTransfer, String> {
+    let mut all = pending();
+    let p = all.iter_mut().find(|p| p.id == id).ok_or_else(|| format!("no pending gas transfer {id}"))?;
+    if p.in_flight {
+        p.uncertain = true;
+        p.last_error = Some("an earlier attempt's reply was never handled (an upgrade or a trap came between)".into());
+    }
+    p.in_flight = true;
+    let out = p.clone();
+    save_pending(&all);
+    Ok(out)
 }
 
 /// Remove and return pending transfer `id`: the one step that hands a
@@ -491,7 +522,7 @@ fn claim(id: u64) -> Result<Claim, String> {
 
 async fn advance(id: u64) -> Result<u128, String> {
     let _claim = claim(id)?;
-    let p = get_pending(id).ok_or_else(|| format!("no pending gas transfer {id}"))?;
+    let p = begin_attempt(id)?;
     let moved = match p.direction {
         GasDirection::Deposit => pull(&p).await,
         GasDirection::Withdrawal => send(&p).await,
@@ -527,6 +558,7 @@ pub async fn deposit(who: Principal, amount: u128) -> Result<u128, String> {
         at_ns: crate::clock::now_ns(),
         last_error: None,
         uncertain: false,
+        in_flight: false,
     });
     advance(id).await
 }
@@ -556,6 +588,7 @@ pub async fn withdraw(who: Principal, amount: u128) -> Result<u128, String> {
         at_ns: crate::clock::now_ns(),
         last_error: None,
         uncertain: false,
+        in_flight: false,
     });
     advance(id).await
 }
@@ -592,7 +625,7 @@ mod tests {
     }
 
     fn pend(id: u64, direction: GasDirection, who: Principal, amount: u128) {
-        add_pending(PendingGasTransfer { id, direction, who, amount, fee: 7, ledger: ck(), at_ns: 0, last_error: None, uncertain: false });
+        add_pending(PendingGasTransfer { id, direction, who, amount, fee: 7, ledger: ck(), at_ns: 0, last_error: None, uncertain: false, in_flight: false });
     }
 
     /// Pinned by what the ledgers answer on mainnet (icrc1_symbol).
@@ -701,6 +734,33 @@ mod tests {
         settle(501, Moved::Refused("TemporarilyUnavailable".into())).unwrap_err();
         assert!(get_pending(501).is_some());
         assert_eq!(settle(501, Moved::Block), Ok(450));
+    }
+
+    /// An attempt whose reply was never handled (an upgrade dropped it)
+    /// leaves the transfer uncertain for the next one, so the next one's
+    /// refusal gives nothing back; a first attempt's own refusal still does.
+    #[test]
+    fn an_attempt_cut_off_before_its_reply_leaves_the_transfer_uncertain() {
+        let who = p(18);
+        credit(&ck(), &who, 1_000);
+        debit_for_withdrawal(&ck(), &who, 600).unwrap();
+        pend(600, GasDirection::Withdrawal, who, 600);
+        let first = begin_attempt(600).unwrap();
+        assert!(first.in_flight && !first.uncertain);
+        // The upgrade: the reply is never handled. The next attempt sees it.
+        let next = begin_attempt(600).unwrap();
+        assert!(next.uncertain, "{next:?}");
+        let e = settle(600, Moved::Refused("BadFee".into())).unwrap_err();
+        assert!(e.contains("does not show that nothing moved"), "{e}");
+        assert_eq!(account_on(&ck(), &who).available, 400, "the withdrawal is not given back");
+        assert!(!get_pending(600).unwrap().in_flight, "its reply was handled");
+        // A first attempt refused outright is given back, as before.
+        debit_for_withdrawal(&ck(), &who, 100).unwrap();
+        pend(601, GasDirection::Withdrawal, who, 100);
+        begin_attempt(601).unwrap();
+        settle(601, Moved::Refused("BadFee".into())).unwrap_err();
+        assert!(get_pending(601).is_none());
+        assert_eq!(account_on(&ck(), &who).available, 400);
     }
 
     #[test]

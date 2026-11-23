@@ -61,7 +61,8 @@ signature and the outcalls. `evm_gas` is retired.
   goes out, and the ledger's fee comes out of it.
 - **A transfer whose outcome is unknown stays pending**, and a replay
   under the same `created_at_time` settles it, as for ICP. Once an
-  outcome has been unknown, a refused replay settles nothing: the first
+  outcome has been unknown, or an attempt was cut off before its reply
+  was handled (an upgrade drops it), a refused replay settles nothing: the first
   transfer may have landed, and a withdrawal given back after it was paid
   would pay twice. Only the first transfer's block settles it, or, past
   the ledger's dedup window, the operators. Unlike cycles, this balance can be taken out
