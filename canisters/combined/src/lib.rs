@@ -908,6 +908,19 @@ fn gas_release_hold(id: u64) -> Result<gas::GasHold, String> {
     gas::release_hold(id)
 }
 
+/// ic-git's float on the chain (docs/EVM_GAS.md, section 5): the EOA's
+/// balance as last read, against the target, floor and margin in wei.
+#[ic_cdk::query]
+fn get_gas_float() -> Result<gas::GasFloat, String> {
+    evm::gas_float()
+}
+
+/// Read the EOA's balance now. Operators only: it pays for outcalls.
+#[ic_cdk::update(guard = "is_admin")]
+async fn gas_float_refresh() -> Result<gas::GasFloat, String> {
+    evm::gas_float_refresh().await
+}
+
 /// Gas transfers not yet settled.
 #[ic_cdk::query]
 fn pending_gas_transfers() -> Vec<gas::PendingGasTransfer> {

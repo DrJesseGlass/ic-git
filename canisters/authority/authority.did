@@ -104,6 +104,13 @@ type Pricing = record {
   // transaction cost (docs/EVM_GAS.md); it replaces evm_gas. Optional on
   // the way in (null keeps the default), always given on the way out
   gas_markup_bps : opt nat32;
+  // ic-git's float, each in transactions at the measured cost per
+  // transaction (docs/EVM_GAS.md, section 5): refilled to the target,
+  // under the floor, and the margin kept over open gas holds. Optional on
+  // the way in (null keeps the default), always given on the way out
+  float_target_txs : opt nat32;
+  float_floor_txs : opt nat32;
+  float_margin_txs : opt nat32;
 };
 // The git canister's funding (docs/CANISTER_SPLIT.md, phase 3 step 12d).
 type TopUp = record { at_ns : nat64; cycles : nat64; balance_before : opt nat64 };
@@ -148,6 +155,23 @@ type GasCharge = record {
   at_ns : nat64;
 };
 type GasTotals = record { spent : nat; markup : nat };
+type BalanceRead = record {
+  chain_id : nat64;
+  address : text;
+  wei : nat;
+  max_fee : nat;
+  at_ns : nat64;
+};
+type GasFloat = record {
+  balance : opt BalanceRead;
+  measured_cost : opt nat;
+  unit_cost : nat;
+  target : nat;
+  floor : nat;
+  margin : nat;
+  held : nat;
+};
+type ResultGasFloat = variant { Ok : GasFloat; Err : text };
 type ResultGasCharges = variant { Ok : vec GasCharge; Err : text };
 type ResultGasTotals = variant { Ok : GasTotals; Err : text };
 type ResultGasHold = variant { Ok : GasHold; Err : text };
@@ -439,6 +463,8 @@ service : {
   get_gas_charges : (principal) -> (ResultGasCharges) query;
   gas_holds : () -> (vec GasHold) query;
   get_gas_totals : () -> (ResultGasTotals) query;
+  get_gas_float : () -> (ResultGasFloat) query;
+  gas_float_refresh : () -> (ResultGasFloat);
   gas_release_hold : (nat64) -> (ResultGasHold);
   pending_gas_transfers : () -> (vec PendingGasTransfer) query;
   failed_gas_transfers : () -> (vec FailedGasTransfer) query;

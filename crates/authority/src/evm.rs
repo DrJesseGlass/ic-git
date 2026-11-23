@@ -221,8 +221,20 @@ fn key_id(cfg: &EvmConfig) -> EcdsaKeyId {
 /// The canister's secp256k1 public key (SEC1 compressed, 33 bytes), cached in
 /// META after the first management-canister round trip: the key is stable for
 /// the canister's lifetime, and deriving the EOA must not cost a call each time.
+const PUBKEY_CACHE_KEY: &str = "evm:pubkey";
+
+/// The EOA's address, if its key is cached for `cfg`'s key name: no call.
+/// Every send has asked for the key, so a receipt of ic-git's finds it.
+fn cached_eoa(cfg: &EvmConfig) -> Option<String> {
+    let (name, pk) = kv::get_json::<(String, Vec<u8>)>(PUBKEY_CACHE_KEY)?;
+    if name != cfg.key_name {
+        return None;
+    }
+    eoa_of_pubkey(&pk).ok().map(|a| checksum_address(&a))
+}
+
 async fn public_key(cfg: &EvmConfig) -> Result<Vec<u8>, String> {
-    const CACHE_KEY: &str = "evm:pubkey";
+    const CACHE_KEY: &str = PUBKEY_CACHE_KEY;
     // The cache is per key name: switching key_name (test key -> production
     // key) must not serve the stale key.
     if let Some((name, pk)) = kv::get_json::<(String, Vec<u8>)>(CACHE_KEY) {
@@ -425,6 +437,20 @@ enum BlockTag {
     Latest,
     Number(u128),
     Pending,
+}
+
+/// `eth_call`'s argument: the RPC canister's `CallArgs`, with only the
+/// fields a read needs (the rest are optional and go as null).
+#[derive(CandidType, Deserialize, Debug, Clone)]
+struct CallArgs {
+    transaction: CallRequest,
+    block: Option<BlockTag>,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+struct CallRequest {
+    to: Option<String>,
+    input: Option<String>,
 }
 
 #[derive(CandidType, Deserialize, Debug, Clone)]
@@ -764,6 +790,47 @@ where
 }
 
 // --- chain reads -------------------------------------------------------------
+
+/// Multicall3, at this address on Ethereum, Sepolia and most EVM chains.
+/// The RPC canister has no typed eth_getBalance, and its raw requests
+/// compare providers' JSON text, which they format differently; its typed
+/// eth_call compares the returned hex alone, so the balance is read
+/// through Multicall3's `getEthBalance(address)`.
+const MULTICALL3: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
+/// keccak256("getEthBalance(address)")[..4].
+const GET_ETH_BALANCE: [u8; 4] = [0x4d, 0x23, 0x01, 0xcc];
+
+fn get_eth_balance_call(address: &[u8; 20]) -> String {
+    let mut data = GET_ETH_BALANCE.to_vec();
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(address);
+    format!("0x{}", hex::encode(data))
+}
+
+/// A uint256 return as u128, refusing one that does not fit.
+fn uint_return(hex_text: &str) -> Result<u128, String> {
+    let b = hex::decode(hex_text.trim_start_matches("0x")).map_err(|e| format!("eth_call returned bad hex: {e}"))?;
+    if b.len() != 32 {
+        return Err(format!("eth_call returned {} bytes, not a uint256", b.len()));
+    }
+    if b[..16].iter().any(|&x| x != 0) {
+        return Err("a balance past u128".into());
+    }
+    Ok(u128::from_be_bytes(b[16..].try_into().expect("16 bytes")))
+}
+
+/// The EOA's balance in wei at the finalized block, which every replica's
+/// outcall agrees on (the reason `fees` reads there too). It lags the
+/// head by some minutes, so the float's margin (section 5) is what covers
+/// transactions sent since.
+async fn eoa_balance(cfg: &EvmConfig, address: &[u8; 20], meter: &Meter) -> Result<u128, String> {
+    let arg = CallArgs {
+        transaction: CallRequest { to: Some(MULTICALL3.into()), input: Some(get_eth_balance_call(address)) },
+        block: Some(BlockTag::Finalized),
+    };
+    let out: String = rpc_read(cfg, "eth_call", arg, "eth_call getEthBalance", meter).await?;
+    uint_return(&out)
+}
 
 /// Latest, not Pending: the pending count depends on which node a replica's
 /// outcall reaches and what sits in that node's mempool, so replicas disagree
@@ -1140,16 +1207,35 @@ async fn sign_tx(
     let pk = public_key(cfg).await?;
     let from = eoa_of_pubkey(&pk)?;
     let from_hex = checksum_address(&from);
-    // Independent chain reads; joined to pay one outcall round trip, not two.
-    let (confirmed, fee_pair) =
-        futures::future::join(nonce_of(cfg, &from_hex, meter), fees(cfg, meter)).await;
+    // Independent chain reads, joined to pay one outcall round trip: the
+    // EOA's balance only for a tenant's send, which the float must cover.
+    let balance_read = async {
+        match payer {
+            Some(_) => eoa_balance(cfg, &from, meter).await.map(Some),
+            None => Ok(None),
+        }
+    };
+    let (confirmed, fee_pair, balance) =
+        futures::future::join3(nonce_of(cfg, &from_hex, meter), fees(cfg, meter), balance_read).await;
     let stored = stored_next_nonce()?;
     let nonce = choose_nonce(stored.as_ref(), cfg.chain_id, &from_hex, confirmed?);
     let (max_fee, tip) = fee_pair?;
     // Before the signature: a payer who cannot cover the most this may
-    // cost is refused for the price of the reads alone.
+    // cost, or a float that cannot cover it with every other hold, is
+    // refused for the price of the reads alone.
     if let Some((who, ledger)) = payer {
+        let balance = balance?.unwrap_or_default();
+        crate::gas::note_balance(&crate::gas::BalanceRead {
+            chain_id: cfg.chain_id,
+            address: from_hex.clone(),
+            wei: balance,
+            max_fee,
+            at_ns: crate::clock::now_ns(),
+        });
         hold.set(Some(crate::gas::reserve(&who, ledger, gas_limit, max_fee)?.id));
+        let margin = crate::gas::unit_cost(cfg.chain_id, max_fee)
+            .saturating_mul(crate::tenancy::pricing().float_margin_txs.unwrap_or(0) as u128);
+        crate::gas::float_covers(balance, crate::gas::held_on(&ledger), margin)?;
     }
     let tx = Tx {
         chain_id: cfg.chain_id,
@@ -1726,6 +1812,13 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
     // gas balance, if it held any; once, as the hold is taken.
     if let Some(r) = &receipt {
         crate::gas::settle_tx(&tx_hash, r.gas_used, r.effective_gas_price);
+        // Only ic-git's own transactions measure the cost per transaction:
+        // evm_receipt takes any hash, and one foreign transaction's cost
+        // would move the float's sizes.
+        if cached_eoa(&cfg).is_some_and(|eoa| r.from.eq_ignore_ascii_case(&eoa)) {
+            let mined_at = (r.block_number, r.transaction_index);
+            crate::gas::observe_cost(cfg.chain_id, &tx_hash, mined_at, r.gas_used.saturating_mul(r.effective_gas_price));
+        }
     }
     let summary = receipt.map(|r| ReceiptSummary {
         status: match r.status {
@@ -1744,6 +1837,30 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
     Ok(summary)
 }
 
+/// ic-git's float as last read (docs/EVM_GAS.md, section 5), without an
+/// outcall: the balance and fee cap the last tenant send or refresh read.
+pub fn gas_float() -> Result<crate::gas::GasFloat, String> {
+    let cfg = require_config()?;
+    let max_fee = crate::gas::last_balance().filter(|b| b.chain_id == cfg.chain_id).map_or(0, |b| b.max_fee);
+    crate::gas::float_view(cfg.chain_id, max_fee)
+}
+
+/// Read the EOA's balance and the fee cap now, for `gas_float`.
+pub async fn gas_float_refresh() -> Result<crate::gas::GasFloat, String> {
+    let cfg = require_config()?;
+    let meter = Meter::default();
+    let from = eoa_of_pubkey(&public_key(&cfg).await?)?;
+    let (balance, fee_pair) = futures::future::join(eoa_balance(&cfg, &from, &meter), fees(&cfg, &meter)).await;
+    crate::gas::note_balance(&crate::gas::BalanceRead {
+        chain_id: cfg.chain_id,
+        address: checksum_address(&from),
+        wei: balance?,
+        max_fee: fee_pair?.0,
+        at_ns: crate::clock::now_ns(),
+    });
+    gas_float()
+}
+
 // --- tests -------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1752,6 +1869,40 @@ mod tests {
 
     /// A hold cut off by an upgrade before its transaction was signed
     /// never went out, and the upgrade gives it back whole.
+    /// The balance read is Multicall3's getEthBalance, as Sepolia answers
+    /// it (2026-11-23, the ckSepoliaETH minter's address).
+    #[test]
+    fn the_balance_is_read_through_multicall3() {
+        let a: [u8; 20] = hex::decode("1789F79e95324A47c5Fd6693071188e82E9a3558").unwrap().try_into().unwrap();
+        assert_eq!(get_eth_balance_call(&a), "0x4d2301cc0000000000000000000000001789f79e95324a47c5fd6693071188e82e9a3558");
+        assert_eq!(&keccak256(b"getEthBalance(address)")[..4], &GET_ETH_BALANCE);
+        assert_eq!(
+            uint_return("0x00000000000000000000000000000000000000000000051191c8f3369ccd2501").unwrap(),
+            0x051191c8f3369ccd2501
+        );
+        assert!(uint_return("0x01").is_err());
+        assert!(uint_return(&format!("0x01{}", "00".repeat(31))).unwrap_err().contains("past u128"));
+    }
+
+    /// A receipt's sender is checked against the EOA of the cached key,
+    /// and only for the key name the config signs with.
+    #[test]
+    fn the_eoa_is_known_from_the_cached_key_alone() {
+        let sk = k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let pk = sk.verifying_key().to_encoded_point(true).as_bytes().to_vec();
+        let cfg = |key: &str| EvmConfig {
+            evm_rpc: "aaaaa-aa".into(),
+            key_name: key.into(),
+            chain_id: 11155111,
+            rpc_urls: vec![],
+            fee_fallback: None,
+        };
+        kv::set_json(PUBKEY_CACHE_KEY, &("cached-eoa-test".to_string(), pk.clone()));
+        let eoa = checksum_address(&eoa_of_pubkey(&pk).unwrap());
+        assert_eq!(cached_eoa(&cfg("cached-eoa-test")), Some(eoa));
+        assert_eq!(cached_eoa(&cfg("another-key")), None, "a key cached for another name is not this one's");
+    }
+
     #[test]
     fn an_upgrade_gives_back_a_hold_that_was_never_signed() {
         let ck = Principal::from_slice(&[8; 29]);

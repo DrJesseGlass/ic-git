@@ -1,8 +1,9 @@
 # EVM gas -- tenants pay in the chain's asset, held on the IC
 
-Status: **design, 2026-11-22. Built: leg 1, the balance (#197), and leg
-2, the reservation and settlement of each transaction. Not yet: legs 3
-(the float) and 4 (the console).** It replaces a first draft the same
+Status: **design, 2026-11-22. Built: leg 1, the balance (#197); leg 2,
+the reservation and settlement of each transaction (#198); and leg 3a,
+the float's measure and invariant. Not yet: leg 3b (the refill through
+the minter and its accounting) and leg 4 (the console).** It replaces a first draft the same
 day that gave each repo an EVM address of its own. That draft was
 dropped because it spread ic-git's ETH over one address per
 repo and ruled out putting many records in one transaction. Companion
@@ -101,23 +102,38 @@ signature and the outcalls. `evm_gas` is retired.
 
 ## 5. The float
 
-The EOA's ETH is ic-git's float: it is spent first and then paid back
-from tenant balances.
+The EOA's ETH is ic-git's float: ic-git's own money, never a tenant's,
+spent first on every transaction and then paid back from tenant
+balances. Every amount is an integer in the asset's smallest unit (wei,
+later satoshis); there is no floating point anywhere in it.
 
-- **The invariant:** the EOA holds at least the sum of all open
-  reservations, plus a margin the operators set. A send whose
-  reservation would break it is refused, as for a short balance, and
-  the watch reports it.
+- **Sized in transactions, not in ETH.** The float's target is
+  `float_target_txs` transactions (1000 by default) at the chain's
+  measured cost per transaction; its floor is `float_floor_txs` (500).
+  The same rule then holds for any chain and asset: ckETH in wei now,
+  ckBTC in satoshis later, with only the refill call differing.
+- **The cost per transaction** is the mean of what the chain's recent
+  transactions cost (`gas_used * effective_gas_price`, the last 50
+  receipts of the EOA's own transactions, ic-git's records and tenants'
+  sends alike). Each counts once: a receipt counts only if it was mined
+  after the newest one counted, so reading an old one again changes
+  nothing. Until there are any, it is 100k gas at the current fee cap.
+- **The invariant:** after a tenant's send is reserved, the EOA still
+  holds at least the sum of all open holds plus `float_margin_txs`
+  transactions (10). A send that would break it is refused, as for a
+  short balance, and the watch reports it. ic-git's own records are
+  never refused by it.
 - **Refill:** when the EOA falls under its floor, the authority withdraws
   settled ckETH (what tenants have paid, never what they still hold) to
-  the EOA through the minter's `withdraw_eth`. The minter has a minimum
-  withdrawal and charges the gas of its own transaction, so refills are
-  made in large amounts, and what each one cost is recorded against the
-  markup (section 4).
+  the EOA through the minter's `withdraw_eth`, enough to bring it back to
+  the target, and never under the minter's minimum (0.01 ETH on Sepolia).
+  The minter takes the gas of its own transaction out of the amount, and
+  `withdrawal_status` reports it; that and the ledger fees are recorded
+  against the markup (section 4).
 - **The operators seed the first float**, and they fund the EOA for
   ic-git's own records.
-- **The watch** reads the EOA's balance and the sum of the reservations,
-  as it reads the canisters' cycles.
+- **The watch** reads the EOA's balance, the target and floor, and the
+  sum of the holds, as it reads the canisters' cycles.
 
 ## 6. Many records in one transaction (later)
 
@@ -166,9 +182,10 @@ One PR each, in this order, then one release of the authority:
    query.
 2. Reserve and settle on tenant deploys and the records they cause;
    `evm_gas` retired.
-3. The float: the reservation invariant, the refill through the minter,
-   the markup's account of what refills cost and its credit back of a
-   surplus, and the watch.
+3. The float, in two: (a) the cost per transaction, the float's sizes
+   and the reservation invariant, with `get_gas_float` for the watch;
+   (b) the refill through the minter, the markup's account of what
+   refills cost, and its credit back of a surplus.
 4. The console and docs/TENANCY.md.
 
 Later, each its own design pass: batched records (section 6), and
@@ -179,6 +196,9 @@ Bitcoin (section 7).
 - **Decided 2026-11-22: the minter's withdrawal gas is paid by a small
   markup on each charge** (section 4), just enough that ic-git is not
   paying for it, with any surplus credited back on the IC side.
-- **Open: the float's size and floor**, and the margin over open reservations.
+- **Decided 2026-11-23: the float is sized in transactions**: a target
+  of 1000 at the measured cost per transaction, a floor of 500 and a
+  margin of 10 over open holds, all operator-set integers (section 5).
+  Counting transactions rather than ETH carries over to Bitcoin.
 - **Decided in leg 1: a deposit is at least ten ledger fees** (section
   3).

@@ -65,6 +65,17 @@ pub struct Pricing {
     /// floor is: `None` reads as the default, and `pricing()` fills it in.
     #[serde(default)]
     pub gas_markup_bps: Option<u32>,
+    /// ic-git's float on the chain (docs/EVM_GAS.md, section 5), each a
+    /// count of transactions at the measured cost per transaction: the
+    /// level a refill brings the EOA back to, the level under which it
+    /// refills, and what the EOA must hold over all open gas holds for a
+    /// tenant's send to go. Optional as the floor is.
+    #[serde(default)]
+    pub float_target_txs: Option<u32>,
+    #[serde(default)]
+    pub float_floor_txs: Option<u32>,
+    #[serde(default)]
+    pub float_margin_txs: Option<u32>,
 }
 
 pub const DEFAULT_GIT_CANISTER_FLOOR: u64 = 1_000_000_000_000;
@@ -73,6 +84,12 @@ pub const DEFAULT_GIT_CANISTER_FLOOR: u64 = 1_000_000_000_000;
 /// minter's own transaction, which on a refill of a tenth of an ETH at
 /// 20 gwei is under half a percent. The surplus is credited back.
 pub const DEFAULT_GAS_MARKUP_BPS: u32 = 100;
+
+/// The float, in transactions: refilled to 1000, under 500, and 10 kept
+/// over open holds (docs/EVM_GAS.md, section 5).
+pub const DEFAULT_FLOAT_TARGET_TXS: u32 = 1_000;
+pub const DEFAULT_FLOAT_FLOOR_TXS: u32 = 500;
+pub const DEFAULT_FLOAT_MARGIN_TXS: u32 = 10;
 
 /// The most the markup may be: 100%. Past it a mistyped rate would hold
 /// and charge a tenant many times what their gas cost.
@@ -85,7 +102,15 @@ pub fn check_pricing(p: &Pricing) -> Result<(), String> {
             "gas_markup_bps {bps} is over {MAX_GAS_MARKUP_BPS} (100%); it is in basis points, 100 is 1%"
         )),
         _ => Ok(()),
+    }?;
+    let target = p.float_target_txs.unwrap_or(DEFAULT_FLOAT_TARGET_TXS);
+    let floor = p.float_floor_txs.unwrap_or(DEFAULT_FLOAT_FLOOR_TXS);
+    if target == 0 || floor > target {
+        return Err(format!(
+            "the float's floor ({floor} transactions) must be at most its target ({target}), and the target over 0"
+        ));
     }
+    Ok(())
 }
 
 /// The gas markup in force, in basis points.
@@ -109,6 +134,9 @@ impl Default for Pricing {
             ic_deploy: 5_000_000_000,
             git_canister_floor: Some(DEFAULT_GIT_CANISTER_FLOOR),
             gas_markup_bps: Some(DEFAULT_GAS_MARKUP_BPS),
+            float_target_txs: Some(DEFAULT_FLOAT_TARGET_TXS),
+            float_floor_txs: Some(DEFAULT_FLOAT_FLOOR_TXS),
+            float_margin_txs: Some(DEFAULT_FLOAT_MARGIN_TXS),
         }
     }
 }
@@ -120,6 +148,9 @@ pub fn pricing() -> Pricing {
     let mut p: Pricing = crate::kv::get_json(PRICING_KEY).unwrap_or_default();
     p.git_canister_floor = Some(p.git_canister_floor.unwrap_or(DEFAULT_GIT_CANISTER_FLOOR));
     p.gas_markup_bps = Some(p.gas_markup_bps.unwrap_or(DEFAULT_GAS_MARKUP_BPS));
+    p.float_target_txs = Some(p.float_target_txs.unwrap_or(DEFAULT_FLOAT_TARGET_TXS));
+    p.float_floor_txs = Some(p.float_floor_txs.unwrap_or(DEFAULT_FLOAT_FLOOR_TXS));
+    p.float_margin_txs = Some(p.float_margin_txs.unwrap_or(DEFAULT_FLOAT_MARGIN_TXS));
     p
 }
 
@@ -2919,6 +2950,11 @@ mod tests {
         assert!(check_pricing(&Pricing { gas_markup_bps: Some(MAX_GAS_MARKUP_BPS), ..before.clone() }).is_ok());
         let e = check_pricing(&Pricing { gas_markup_bps: Some(MAX_GAS_MARKUP_BPS + 1), ..before.clone() }).unwrap_err();
         assert!(e.contains("basis points"), "{e}");
+        assert_eq!(pricing().float_target_txs, Some(DEFAULT_FLOAT_TARGET_TXS));
+        let bad = Pricing { float_target_txs: Some(10), float_floor_txs: Some(11), ..before.clone() };
+        assert!(check_pricing(&bad).unwrap_err().contains("at most its target"));
+        assert!(check_pricing(&Pricing { float_target_txs: Some(0), float_floor_txs: Some(0), ..before.clone() }).is_err());
+        assert!(check_pricing(&Pricing { float_target_txs: Some(10), float_floor_txs: Some(10), ..before.clone() }).is_ok());
         set_pricing(before);
     }
 

@@ -195,7 +195,10 @@ ckSepoliaETH for Sepolia, deposited with `deposit_gas`. Before a
 transaction is signed, the most it may cost, its gas limit at the fee
 cap with the markup (`gas_markup_bps`, 1% by default and at most 100%)
 on it, is reserved from the balance of the principal who pays the
-repo's cycles, and the send is refused if the balance is short. The receipt then charges the gas
+repo's cycles, and the send is refused if the balance is short. It is
+refused too when ic-git's own EOA could not cover it with every other
+open hold and a margin of ten transactions (`get_gas_float`); the
+operators refill the EOA, and the send can be retried then. The receipt then charges the gas
 it used at the price it paid, with the markup, and gives back the rest. A
 deploy's gas limit, which is its owner's to set (`set_evm_deploy`; on a
 governed repo the voters', `EvmDeploy`), is at least 53,000 and at most
@@ -222,12 +225,15 @@ not use:
   artifact would not decode, or is more init code than a chain takes:
   49,152 bytes) or a deploy skipped as already deployed: the
   whole charge comes back, and nothing is held of the gas balance.
-- **No provider can hold the transaction** (a nonce or fee read failed, the
-  signature failed, or a provider refused it: nonce too low or too high,
+- **No provider can hold the transaction** (a nonce, fee or balance read
+  failed, the gas balance or the float could not cover it, the signature
+  failed, or a provider refused it: nonce too low or too high,
   insufficient funds, a JSON-RPC error, a 429): the owner pays the cycles
   attached to the outcalls made (3B per RPC call, 30B for the signature),
-  and gets the rest back. The worst case is 45B, under the price. The
-  hold on the gas balance comes back whole.
+  and gets the rest back. The worst case is 45B, under the price; a
+  tenant's send also reads the EOA's balance for the float, which can
+  bring it to 51B, and the owner pays at most the price, ic-git the rest.
+  The hold on the gas balance comes back whole.
 - **A provider may hold it** (lost consensus on the broadcast reply, a 5xx,
   providers disagreeing, the call to the RPC canister failing): the full
   charge stays, and so does the hold on the gas balance, until a receipt

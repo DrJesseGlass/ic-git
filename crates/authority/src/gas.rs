@@ -407,6 +407,142 @@ pub fn settle_tx(tx_hash: &str, gas_used: u128, effective_gas_price: u128) -> Op
     Some(charge)
 }
 
+// --- the float ---------------------------------------------------------------------
+
+/// How many receipts the cost per transaction is the mean of.
+const COSTS_KEEP: usize = 50;
+/// The gas of a transaction for the cost per transaction, until a chain
+/// has receipts to measure it by: about what a registry write uses.
+pub const FALLBACK_TX_GAS: u128 = 100_000;
+
+fn costs_key(chain_id: u64) -> String {
+    format!("gas:costs:{chain_id}")
+}
+
+/// One receipt the cost per transaction is the mean of.
+#[derive(Serialize, Deserialize)]
+struct CostSample {
+    tx: String,
+    /// Where it was mined: the block number, then the index in the block.
+    mined_at: (u128, u128),
+    cost: u128,
+}
+
+/// Note what one of the EOA's transactions on `chain_id` cost, from its
+/// receipt, ic-git's own sends and tenants' alike, once per transaction.
+/// The EOA's transactions are mined in nonce order, so a receipt counts
+/// only if it was mined after the newest one counted: one read again after
+/// it has left the window cannot come back into it, and one read out of
+/// order is passed over, which only loses a sample. The hash is checked as
+/// well, for a reorg that mines a counted transaction again later.
+pub fn observe_cost(chain_id: u64, tx_hash: &str, mined_at: (u128, u128), cost: u128) {
+    let tx = tx_hash.to_ascii_lowercase();
+    let key = costs_key(chain_id);
+    let mut list: Vec<CostSample> = crate::kv::get_json(&key).unwrap_or_default();
+    if list.last().is_some_and(|s| s.mined_at >= mined_at) || list.iter().any(|s| s.tx == tx) {
+        return;
+    }
+    list.push(CostSample { tx, mined_at, cost });
+    if list.len() > COSTS_KEEP {
+        let drop = list.len() - COSTS_KEEP;
+        list.drain(0..drop);
+    }
+    crate::kv::set_json(&key, &list);
+}
+
+/// The mean cost of the chain's recent transactions, if it has any.
+pub fn measured_cost(chain_id: u64) -> Option<u128> {
+    let list: Vec<CostSample> = crate::kv::get_json(&costs_key(chain_id)).unwrap_or_default();
+    mean(list.iter().map(|s| s.cost))
+}
+
+fn mean(costs: impl Iterator<Item = u128>) -> Option<u128> {
+    let (sum, n) = costs.fold((0u128, 0u128), |(s, n), c| (s.saturating_add(c), n + 1));
+    (n > 0).then(|| sum / n)
+}
+
+/// The cost per transaction the float is sized by: the measured mean, or
+/// `FALLBACK_TX_GAS` at `max_fee` before there is one.
+pub fn unit_cost(chain_id: u64, max_fee: u128) -> u128 {
+    measured_cost(chain_id).unwrap_or_else(|| FALLBACK_TX_GAS.saturating_mul(max_fee))
+}
+
+/// What all open holds on `ledger` come to.
+pub fn held_on(ledger: &Principal) -> u128 {
+    holds().iter().filter(|h| h.ledger == *ledger).fold(0u128, |s, h| s.saturating_add(h.amount))
+}
+
+/// Section 5's invariant: after a tenant's send is reserved, the EOA still
+/// holds every open hold and the margin. `held` includes the new hold.
+pub fn float_covers(balance: u128, held: u128, margin: u128) -> Result<(), String> {
+    let need = held.saturating_add(margin);
+    if balance >= need {
+        return Ok(());
+    }
+    Err(format!(
+        "ic-git's EOA holds {balance} wei, under the {need} wei its open gas holds and margin need; \
+         the operators refill it, and the send can be retried then"
+    ))
+}
+
+const FLOAT_KEY: &str = "gas:float";
+
+/// The EOA's balance as last read, for `get_gas_float` to answer without an
+/// outcall of its own.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BalanceRead {
+    pub chain_id: u64,
+    pub address: String,
+    pub wei: u128,
+    /// The fee cap read with it, for the cost per transaction before any
+    /// receipt has measured it.
+    pub max_fee: u128,
+    pub at_ns: u64,
+}
+
+pub fn note_balance(read: &BalanceRead) {
+    crate::kv::set_json(FLOAT_KEY, read);
+}
+
+pub fn last_balance() -> Option<BalanceRead> {
+    crate::kv::get_json(FLOAT_KEY)
+}
+
+/// ic-git's float, in wei: what the EOA held when last read, against the
+/// target, the floor and the margin, each a count of transactions at the
+/// cost per transaction (docs/EVM_GAS.md, section 5).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GasFloat {
+    pub balance: Option<BalanceRead>,
+    /// The mean of the chain's recent receipts; `None` before it has any,
+    /// when the sizes below use `FALLBACK_TX_GAS` at the fee cap.
+    pub measured_cost: Option<u128>,
+    /// 0, and every size below with it, until a receipt has measured the
+    /// cost or a balance read has given a fee cap: `balance` is `None`
+    /// then, and `gas_float_refresh` reads both.
+    pub unit_cost: u128,
+    pub target: u128,
+    pub floor: u128,
+    pub margin: u128,
+    /// The sum of open holds on the gas ledger.
+    pub held: u128,
+}
+
+pub fn float_view(chain_id: u64, max_fee: u128) -> Result<GasFloat, String> {
+    let unit = unit_cost(chain_id, max_fee);
+    let p = crate::tenancy::pricing();
+    let times = |n: Option<u32>| unit.saturating_mul(n.unwrap_or(0) as u128);
+    Ok(GasFloat {
+        balance: last_balance().filter(|b| b.chain_id == chain_id),
+        measured_cost: measured_cost(chain_id),
+        unit_cost: unit,
+        target: times(p.float_target_txs),
+        floor: times(p.float_floor_txs),
+        margin: times(p.float_margin_txs),
+        held: held_on(&ledger_for_chain(chain_id)?),
+    })
+}
+
 // --- transfers in flight -------------------------------------------------------------
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -986,6 +1122,38 @@ mod tests {
         assert_eq!(ledger_of(None, 11155111).unwrap().to_text(), CKSEPOLIAETH_LEDGER);
         assert!(ledger_of(None, 31337).unwrap_err().contains("no ck asset"));
         assert_eq!(ledger_of(Some(p(40)), 11155111).unwrap(), p(40));
+    }
+
+    #[test]
+    fn the_cost_per_transaction_is_the_mean_of_recent_receipts() {
+        let chain = 990_001;
+        assert_eq!(measured_cost(chain), None);
+        assert_eq!(unit_cost(chain, 7), FALLBACK_TX_GAS * 7, "before any receipt");
+        observe_cost(chain, "0xA", (10, 0), 100);
+        observe_cost(chain, "0xa", (10, 0), 999_999);
+        assert_eq!(measured_cost(chain), Some(100), "a receipt read twice counts once");
+        observe_cost(chain, "0xb", (10, 3), 300);
+        assert_eq!(unit_cost(chain, 7), 200);
+        observe_cost(chain, "0xc", (10, 1), 5_000);
+        assert_eq!(measured_cost(chain), Some(200), "one read out of order is passed over");
+        observe_cost(chain, "0xb", (12, 0), 300);
+        assert_eq!(measured_cost(chain), Some(200), "nor does a reorg count one twice");
+        for i in 0..COSTS_KEEP {
+            observe_cost(chain, &format!("0x{i:x}f"), (20 + i as u128, 0), 1_000);
+        }
+        assert_eq!(measured_cost(chain), Some(1_000), "only the last {COSTS_KEEP}");
+        observe_cost(chain, "0xA", (10, 0), 100);
+        assert_eq!(measured_cost(chain), Some(1_000), "nor one read again after it left the window");
+        assert_eq!(mean(std::iter::empty()), None);
+        assert_eq!(mean([u128::MAX, u128::MAX].into_iter()), Some(u128::MAX / 2), "saturates, never wraps");
+    }
+
+    #[test]
+    fn the_float_must_cover_every_hold_and_the_margin() {
+        assert!(float_covers(1_000, 900, 100).is_ok());
+        let e = float_covers(999, 900, 100).unwrap_err();
+        assert!(e.contains("999 wei") && e.contains("1000 wei"), "{e}");
+        assert!(float_covers(u128::MAX, u128::MAX, 1).is_ok(), "saturates, never wraps");
     }
 
     #[test]
