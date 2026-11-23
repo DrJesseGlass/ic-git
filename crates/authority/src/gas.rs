@@ -57,6 +57,7 @@ use crate::ledger::{Account, TransferFromArgs, TransferFromError};
 use candid::{CandidType, Nat, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 
 /// The ckETH ledger on mainnet (fee 2,000,000,000,000 wei).
 pub const CKETH_LEDGER: &str = "ss2fx-dyaaa-aaaar-qacoq-cai";
@@ -479,10 +480,10 @@ fn pro_rata(amount: u128, weights: &[u128]) -> Vec<u128> {
 /// what was credited.
 pub fn credit_surplus() -> Result<u128, String> {
     let ledger = ledger()?;
-    // An unfinished refill's cost is not booked yet: the surplus would be
-    // counted high, and credited from what that cost will take.
-    if let Some(id) = crate::refill::unfinished(&ledger) {
-        return Err(format!("refill {id} is not finished, so its cost is not known; credit the surplus once it is"));
+    // A refill under way has costs not booked yet: the surplus would be
+    // counted high, and credited from what those costs will take.
+    if let Some(why) = crate::refill::busy(&ledger) {
+        return Err(format!("{why}, so what refilling costs is not known yet; credit the surplus once it is"));
     }
     let mut t = totals(&ledger);
     let surplus = t.surplus();
@@ -714,8 +715,22 @@ pub fn failed() -> Vec<FailedGasTransfer> {
     crate::kv::get_json(FAILED_KEY).unwrap_or_default()
 }
 
+thread_local! {
+    /// Counts the changes to the transfers in progress, so a reader of
+    /// ic-git's ledger balance can tell whether one moved while it waited
+    /// (refill.rs). On the heap: an upgrade drops the reply such a reader
+    /// waits on, so no read spans one.
+    static MOVES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many times the transfers in progress have changed (`MOVES`).
+pub fn transfer_moves() -> u64 {
+    MOVES.with(|m| m.get())
+}
+
 fn save_pending(all: &[PendingGasTransfer]) {
     crate::kv::set_json(PENDING_KEY, &all);
+    MOVES.with(|m| m.set(m.get().wrapping_add(1)));
 }
 
 /// A fresh id: now in ns, bumped past the last one, so two transfers never
@@ -1184,6 +1199,19 @@ mod tests {
         settle(501, Moved::Refused("TemporarilyUnavailable".into())).unwrap_err();
         assert!(get_pending(501).is_some());
         assert_eq!(settle(501, Moved::Block), Ok(450));
+    }
+
+    /// Every change to the transfers in progress is counted: how the
+    /// refill tells that one moved while it read the ledger balance.
+    #[test]
+    fn every_change_to_the_transfers_in_progress_is_counted() {
+        let m = transfer_moves();
+        pend(610, GasDirection::Withdrawal, p(44), 100);
+        assert_eq!(transfer_moves(), m + 1);
+        begin_attempt(610).unwrap();
+        settle(610, Moved::Block).unwrap();
+        assert_eq!(transfer_moves(), m + 3, "the attempt's mark, then the settlement");
+        assert!(get_pending(610).is_none());
     }
 
     /// An attempt whose reply was never handled (an upgrade dropped it)

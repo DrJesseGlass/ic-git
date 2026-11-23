@@ -11,7 +11,8 @@
 //!   (`gas::owed_on`, erring high) and the markup's surplus not yet
 //!   credited back. What is left is gas tenants have paid for and the EOA
 //!   has not yet been given back. A refill never spends a tenant's
-//!   balance, held or not.
+//!   balance, held or not. The balance and what is owed are taken as of
+//!   one moment: a read during which a gas transfer moved is made again.
 //! - **The minter is the record of every refill.** Each tick first reads
 //!   the withdrawals of ic-git's account from the minter
 //!   (`withdrawal_status`), which finds a refill whose reply was lost to
@@ -165,6 +166,40 @@ pub fn unfinished(ledger: &Principal) -> Option<u64> {
     refills(ledger).iter().find(|r| !r.state.is_final()).map(|r| r.withdrawal_id)
 }
 
+/// Why a refill may have costs on `ledger` not booked yet, if one may:
+/// from a tick's first read until the minter has finished what it asked
+/// for, a lost reply included. The surplus is not credited meanwhile.
+pub fn busy(ledger: &Principal) -> Option<String> {
+    if RUNNING.with(|r| r.get()) {
+        return Some("a refill tick is running".into());
+    }
+    if crate::kv::get_json::<u64>(IN_FLIGHT_KEY).is_some() {
+        return Some("a refill's reply was lost, and a tick has not read it from the minter yet".into());
+    }
+    unfinished(ledger).map(|id| format!("refill {id} is not finished"))
+}
+
+/// How many times a tick reads the balance before it leaves the refill to
+/// the next tick.
+const POOL_READS: u32 = 3;
+
+/// What may be refilled from, with the balance and what is owed of it as
+/// of one moment. What is owed is read when the balance comes back, so a
+/// tenant's withdrawal the ledger made after the balance was read, and
+/// that settled before the reply, would be in the one and gone from the
+/// other: a tenant's ckETH counted as paid for gas. A read during which
+/// any gas transfer moved is made again.
+async fn read_pool(ledger: Principal) -> Result<u128, String> {
+    for _ in 0..POOL_READS {
+        let moves = crate::gas::transfer_moves();
+        let balance = balance_of(ledger).await?;
+        if crate::gas::transfer_moves() == moves {
+            return Ok(pool(balance, crate::gas::owed_on(&ledger), crate::gas::totals(&ledger).surplus()));
+        }
+    }
+    Err(format!("gas transfers moved during each of {POOL_READS} reads of the ledger balance; the next tick reads it again"))
+}
+
 /// What may be refilled from: the ledger balance, less what is owed and
 /// the surplus kept to credit back.
 pub fn pool(balance: u128, owed: u128, surplus: u128) -> u128 {
@@ -280,11 +315,8 @@ async fn run(cfg: &crate::evm::EvmConfig, minter: Principal, ledger: Principal, 
     }
     // The ledger and the minter first: calls between canisters, no
     // outcalls. Only a pool that could make a refill pays for the chain read.
-    let (balance, fee, minimum) = futures::future::join3(balance_of(ledger), crate::gas::fee_of(ledger), minimum_of(minter)).await;
-    let (balance, fee, minimum) = (balance?, fee?, minimum?);
-    let owed = crate::gas::owed_on(&ledger);
-    let surplus = crate::gas::totals(&ledger).surplus();
-    let pool = pool(balance, owed, surplus);
+    let (pool, fee, minimum) = futures::future::join3(read_pool(ledger), crate::gas::fee_of(ledger), minimum_of(minter)).await;
+    let (pool, fee, minimum) = (pool?, fee?, minimum?);
     let fees = refill_fees(fee);
     if pool.saturating_sub(fees) < minimum {
         return Ok(format!("what tenants have paid toward refills ({pool} wei) is under the minter's minimum of {minimum}"));
@@ -318,9 +350,12 @@ async fn run(cfg: &crate::evm::EvmConfig, minter: Principal, ledger: Principal, 
     .await;
     match reply {
         Ok(Ok(req)) => {
-            crate::kv::remove(IN_FLIGHT_KEY);
-            let withdrawal_id = u64::try_from(req.block_index.0).map_err(|_| "a withdrawal id past u64".to_string())?;
+            // The mark goes only once the refill is on record, which then
+            // blocks the next refill and the surplus credit in its place.
+            let withdrawal_id = u64::try_from(req.block_index.0)
+                .map_err(|_| "a withdrawal id past u64; the next tick reads the refill from the minter".to_string())?;
             absorb(&ledger, Seen { withdrawal_id, amount, recipient: read.address.clone(), state: RefillState::Pending });
+            crate::kv::remove(IN_FLIGHT_KEY);
             report.started = refills(&ledger).into_iter().find(|r| r.withdrawal_id == withdrawal_id);
             Ok(format!("asked the minter for {amount} wei to {}", read.address))
         }
@@ -582,6 +617,28 @@ mod tests {
             absorb(&ledger, failed(RefillState::Reimbursed { tx_hash: "0x2".into(), reimbursed: 990 }));
         }
         assert_eq!(crate::gas::totals(&ledger).refill_costs, before);
+    }
+
+    /// The surplus waits while a refill may have costs not booked yet:
+    /// during a tick, while a lost reply's mark stands, and until the
+    /// minter has finished the refill.
+    #[test]
+    fn a_refill_under_way_holds_back_the_surplus_credit() {
+        let ledger = l(151);
+        assert_eq!(busy(&ledger), None);
+        {
+            let _running = Running::start().unwrap();
+            assert!(busy(&ledger).unwrap().contains("tick is running"));
+        }
+        assert_eq!(busy(&ledger), None);
+        crate::kv::set_json(IN_FLIGHT_KEY, &1u64);
+        assert!(busy(&ledger).unwrap().contains("reply was lost"));
+        crate::kv::remove(IN_FLIGHT_KEY);
+        let seen = |state| Seen { withdrawal_id: 4, amount: 1_000, recipient: "0xE".into(), state };
+        absorb(&ledger, seen(RefillState::Pending));
+        assert!(busy(&ledger).unwrap().contains("refill 4 is not finished"));
+        absorb(&ledger, seen(RefillState::Done { tx_hash: "0x4".into(), fee: 30 }));
+        assert_eq!(busy(&ledger), None);
     }
 
     #[test]

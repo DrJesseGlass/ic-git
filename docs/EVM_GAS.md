@@ -131,8 +131,11 @@ later satoshis); there is no floating point anywhere in it.
   it owes tenants (balances, held or not, and every transfer that may
   yet be theirs) and less the markup's surplus not yet credited back.
   That leaves the gas tenants have paid for and the EOA has not been
-  given back. The ledger and the minter are asked first, so a tick with
-  nothing to refill from pays for no outcall.
+  given back. The balance and what is owed are taken as of one moment:
+  a withdrawal that settles while the balance is read would be in the
+  one and gone from the other, so a read during which a tenant's
+  transfer moved is made again. The ledger and the minter are asked
+  first, so a tick with nothing to refill from pays for no outcall.
 - **The minter is the record of each refill.** A tick first reads ic-git's
   withdrawals from the minter (`withdrawal_status`), which also finds a
   refill whose reply an upgrade dropped. One not finished blocks the
@@ -143,7 +146,9 @@ later satoshis); there is no floating point anywhere in it.
 - **The surplus** (markup, less refill costs, less what was credited) is
   credited back by the operators (`gas_credit_surplus`), to each balance
   in proportion to the markup it paid: an entry in ic-git's own books,
-  with no transfer and no fee.
+  with no transfer and no fee. It is not credited while a refill is
+  under way, from a tick's first read until the minter has finished it,
+  a lost reply included, since that refill's costs are not booked yet.
 - **The operators seed the first float**, and they fund the EOA for
   ic-git's own records.
 - **The watch** reads the EOA's balance, the target and floor, and the
