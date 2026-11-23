@@ -221,8 +221,20 @@ fn key_id(cfg: &EvmConfig) -> EcdsaKeyId {
 /// The canister's secp256k1 public key (SEC1 compressed, 33 bytes), cached in
 /// META after the first management-canister round trip: the key is stable for
 /// the canister's lifetime, and deriving the EOA must not cost a call each time.
+const PUBKEY_CACHE_KEY: &str = "evm:pubkey";
+
+/// The EOA's address, if its key is cached for `cfg`'s key name: no call.
+/// Every send has asked for the key, so a receipt of ic-git's finds it.
+fn cached_eoa(cfg: &EvmConfig) -> Option<String> {
+    let (name, pk) = kv::get_json::<(String, Vec<u8>)>(PUBKEY_CACHE_KEY)?;
+    if name != cfg.key_name {
+        return None;
+    }
+    eoa_of_pubkey(&pk).ok().map(|a| checksum_address(&a))
+}
+
 async fn public_key(cfg: &EvmConfig) -> Result<Vec<u8>, String> {
-    const CACHE_KEY: &str = "evm:pubkey";
+    const CACHE_KEY: &str = PUBKEY_CACHE_KEY;
     // The cache is per key name: switching key_name (test key -> production
     // key) must not serve the stale key.
     if let Some((name, pk)) = kv::get_json::<(String, Vec<u8>)>(CACHE_KEY) {
@@ -1800,7 +1812,12 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
     // gas balance, if it held any; once, as the hold is taken.
     if let Some(r) = &receipt {
         crate::gas::settle_tx(&tx_hash, r.gas_used, r.effective_gas_price);
-        crate::gas::observe_cost(cfg.chain_id, &tx_hash, r.gas_used.saturating_mul(r.effective_gas_price));
+        // Only ic-git's own transactions measure the cost per transaction:
+        // evm_receipt takes any hash, and one foreign transaction's cost
+        // would move the float's sizes.
+        if cached_eoa(&cfg).is_some_and(|eoa| r.from.eq_ignore_ascii_case(&eoa)) {
+            crate::gas::observe_cost(cfg.chain_id, &tx_hash, r.gas_used.saturating_mul(r.effective_gas_price));
+        }
     }
     let summary = receipt.map(|r| ReceiptSummary {
         status: match r.status {
@@ -1864,6 +1881,25 @@ mod tests {
         );
         assert!(uint_return("0x01").is_err());
         assert!(uint_return(&format!("0x01{}", "00".repeat(31))).unwrap_err().contains("past u128"));
+    }
+
+    /// A receipt's sender is checked against the EOA of the cached key,
+    /// and only for the key name the config signs with.
+    #[test]
+    fn the_eoa_is_known_from_the_cached_key_alone() {
+        let sk = k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let pk = sk.verifying_key().to_encoded_point(true).as_bytes().to_vec();
+        let cfg = |key: &str| EvmConfig {
+            evm_rpc: "aaaaa-aa".into(),
+            key_name: key.into(),
+            chain_id: 11155111,
+            rpc_urls: vec![],
+            fee_fallback: None,
+        };
+        kv::set_json(PUBKEY_CACHE_KEY, &("cached-eoa-test".to_string(), pk.clone()));
+        let eoa = checksum_address(&eoa_of_pubkey(&pk).unwrap());
+        assert_eq!(cached_eoa(&cfg("cached-eoa-test")), Some(eoa));
+        assert_eq!(cached_eoa(&cfg("another-key")), None, "a key cached for another name is not this one's");
     }
 
     #[test]

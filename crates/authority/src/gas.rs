@@ -503,6 +503,9 @@ pub struct GasFloat {
     /// The mean of the chain's recent receipts; `None` before it has any,
     /// when the sizes below use `FALLBACK_TX_GAS` at the fee cap.
     pub measured_cost: Option<u128>,
+    /// 0, and every size below with it, until a receipt has measured the
+    /// cost or a balance read has given a fee cap: `balance` is `None`
+    /// then, and `gas_float_refresh` reads both.
     pub unit_cost: u128,
     pub target: u128,
     pub floor: u128,

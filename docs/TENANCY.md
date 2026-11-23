@@ -225,12 +225,15 @@ not use:
   artifact would not decode, or is more init code than a chain takes:
   49,152 bytes) or a deploy skipped as already deployed: the
   whole charge comes back, and nothing is held of the gas balance.
-- **No provider can hold the transaction** (a nonce or fee read failed, the
-  signature failed, or a provider refused it: nonce too low or too high,
+- **No provider can hold the transaction** (a nonce, fee or balance read
+  failed, the gas balance or the float could not cover it, the signature
+  failed, or a provider refused it: nonce too low or too high,
   insufficient funds, a JSON-RPC error, a 429): the owner pays the cycles
   attached to the outcalls made (3B per RPC call, 30B for the signature),
-  and gets the rest back. The worst case is 45B, under the price. The
-  hold on the gas balance comes back whole.
+  and gets the rest back. The worst case is 45B, under the price; a
+  tenant's send also reads the EOA's balance for the float, which can
+  bring it to 51B, and the owner pays at most the price, ic-git the rest.
+  The hold on the gas balance comes back whole.
 - **A provider may hold it** (lost consensus on the broadcast reply, a 5xx,
   providers disagreeing, the call to the RPC canister failing): the full
   charge stays, and so does the hold on the gas balance, until a receipt
