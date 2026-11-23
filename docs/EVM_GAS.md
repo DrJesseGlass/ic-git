@@ -1,0 +1,167 @@
+# EVM gas -- tenants pay in the chain's asset, held on the IC
+
+Status: **design, 2026-11-22; nothing is built.** It replaces a first
+draft the same day that gave each repo an EVM address of its own. That
+draft was dropped because it spread ic-git's ETH over one address per
+repo and ruled out putting many records in one transaction. Companion
+to docs/TENANCY.md (who pays, in cycles) and `crates/authority/src/evm.rs`
+(the signer).
+
+## 1. What is wrong today
+
+The authority signs every EVM transaction from one address: the EOA of
+its threshold key, on the one chain its `EvmConfig` names (Sepolia).
+That address pays the gas of two kinds of transaction:
+
+- a tenant's deploy, a CREATE whose gas limit the repo's config sets,
+  anywhere from 53k to `MAX_DEPLOY_GAS` (10M);
+- a registry write, `REGISTRY_SET_GAS` (1M), for ic-git's own records
+  and for the record a tenant's deploy publishes (#177).
+
+Tenants pay in cycles: `evm_action` for the signature and the outcalls,
+plus `evm_gas` per unit of gas limit (#168). `evm_gas` defaults to 0, and
+no fixed cycles rate stays right: the gas is paid in the other chain's
+token, at a fee that moves by the block. On a testnet this is harmless.
+On a chain with real money, every tenant deploy is paid for by the
+operators.
+
+## 2. The decision
+
+- **One EOA and one registry contract**, as today. ic-git holds the
+  chain's native token in that one address and spends it on every write.
+- **Each tenant holds a balance of the chain's asset on the IC side**:
+  ckETH for Ethereum, ckSepoliaETH for Sepolia. They deposit it into
+  ic-git's ledger account.
+- **A tenant's transaction is charged to that balance at what it cost
+  on the chain**: the receipt's `gas_used * effective_gas_price`, in
+  wei. ckETH has 18 decimals, so one unit of it is one wei: no exchange
+  rate comes into it at any point.
+- **ic-git turns the ckETH it was paid back into ETH** through the ckETH
+  minter, to keep its EOA funded.
+
+Cycles keep paying for what the IC spends: `evm_action` covers the
+signature and the outcalls. `evm_gas` is retired.
+
+## 3. The tenant's balance
+
+- **Kept per principal**, beside the cycles balance, in wei, by the same
+  rule as cycles: the principal who pays a repo's cycles pays its gas.
+- **Deposit** by `icrc2_approve` on the asset's ledger, then a call to the
+  authority, which pulls the amount with `icrc2_transfer_from` and
+  credits it. It has the shape the ICP deposit has: one attempt at a
+  time (#186), and `created_at_time` set so that a retry cannot credit
+  twice.
+- **Withdraw** by `icrc1_transfer` back to the principal, of what is
+  neither reserved nor owed. Unlike cycles, this balance can be taken out
+  again, because it is the same asset going back.
+- **A query** gives the balance, the amount reserved, and what each
+  recent transaction cost. The console shows them.
+
+## 4. Charging a transaction
+
+1. **Reserve before signing.** After the fee read, the send reserves
+   `gas_limit * max_fee_per_gas` from the payer's available balance, and
+   is refused before signing if that is more than they have. The refusal
+   names the shortfall.
+2. **Settle on the receipt.** The receipt poll that already runs
+   (`schedule_receipt_poll`) debits `gas_used * effective_gas_price` and
+   releases the rest of the reservation. A reverted transaction still
+   used gas and is charged for it.
+3. **A send that may be out stays reserved.** If a broadcast's outcome
+   is unknown (`maybe_sent`), the reservation is held until a receipt
+   settles it, or an operator resolves it as dropped and it is released.
+4. **A small markup** is added to each settled charge, a rate the
+   operators set: just enough to cover what turning ckETH back into ETH
+   costs (section 5), so that ic-git does not pay for it. It is set to
+   err on the high side, because an overcharge is cheap to undo: the
+   authority keeps what the markup has collected against what refills
+   have cost, and any surplus is credited back to the balances it came
+   from. That credit is an entry in ic-git's own ledger, with no ledger
+   transfer and no fee.
+5. **What is charged this way:** a tenant's deploy, and the registry
+   write that the deploy causes. ic-git's own records
+   (`ic-git#canister`, `#git`, `#site`) are the operators' cost, as now.
+
+## 5. The float
+
+The EOA's ETH is ic-git's float: it is spent first and then paid back
+from tenant balances.
+
+- **The invariant:** the EOA holds at least the sum of all open
+  reservations, plus a margin the operators set. A send whose
+  reservation would break it is refused, as for a short balance, and
+  the watch reports it.
+- **Refill:** when the EOA falls under its floor, the authority withdraws
+  settled ckETH (what tenants have paid, never what they still hold) to
+  the EOA through the minter's `withdraw_eth`. The minter has a minimum
+  withdrawal and charges the gas of its own transaction, so refills are
+  made in large amounts, and what each one cost is recorded against the
+  markup (section 4).
+- **The operators seed the first float**, and they fund the EOA for
+  ic-git's own records.
+- **The watch** reads the EOA's balance and the sum of the reservations,
+  as it reads the canisters' cycles.
+
+## 6. Many records in one transaction (later)
+
+With one EOA and one contract, records that are not urgent can share a
+transaction. They wait in a queue, and one write puts a Merkle root over
+all of them on the chain, so each record pays its share of one
+transaction's gas. This is a leg of its own, after the balances, because
+most of its cost is on the reading side:
+
+- a second registry contract, or a version of it, that stores roots;
+- the git canister serves each record's inclusion proof, certified;
+- every verifier learns to check a proof against a root:
+  `tools/verify.mjs`, `loader/index.html`, both extensions, and ic-vote;
+- an urgent write (a release record, a site record a tenant is waiting
+  on) still goes out alone, at its full price.
+
+## 7. Chains and assets
+
+- **Ethereum and Sepolia** have ck assets and the minter, and this design
+  covers both.
+- **A chain without a ck asset** (Gnosis, for instance) has no IC-side
+  asset to deposit, so it is not covered. It would need a different
+  bridge, or cycles at a rate, and stays out until a tenant needs it.
+- **Bitcoin** has the same shape with ckBTC: a tenant's ckBTC balance pays
+  for a hash written to Bitcoin (an `OP_RETURN`, signed through the IC's
+  Bitcoin integration). That is a leg of its own.
+
+## 8. Moving existing repos over
+
+Nothing about the sender changes: deploys still come from the one EOA,
+so contract addresses keep their `CREATE(EOA, nonce)` form and the
+registry repo needs no exception. When this is installed, a repo whose
+payer has no balance has its next deploy refused, with the reason given.
+Before the release: list the live repos that have an EVM config, and
+tell their owners.
+
+The local e2e has no ckETH minter. It uses a local ICRC ledger in place
+of ckETH, for deposits, reservations, settling and withdrawals, and
+leaves the refill to unit tests and an operator run on Sepolia.
+
+## 9. The legs
+
+One PR each, in this order, then one release of the authority:
+
+1. The asset ledger: ledger ids per chain, deposit, withdraw, balance
+   query.
+2. Reserve and settle on tenant deploys and the records they cause;
+   `evm_gas` retired.
+3. The float: the reservation invariant, the refill through the minter,
+   the markup's account of what refills cost and its credit back of a
+   surplus, and the watch.
+4. The console and docs/TENANCY.md.
+
+Later, each its own design pass: batched records (section 6), and
+Bitcoin (section 7).
+
+## 10. Decided, and still open
+
+- **Decided 2026-11-22: the minter's withdrawal gas is paid by a small
+  markup on each charge** (section 4), just enough that ic-git is not
+  paying for it, with any surplus credited back on the IC side.
+- **Open: the float's size and floor**, and the margin over open reservations.
+- **Open: a minimum deposit**, so that a deposit costs more than the ledger
+  fee it comes with.
