@@ -53,8 +53,19 @@ signature and the outcalls. `evm_gas` is retired.
   credits it. It has the shape the ICP deposit has: one attempt at a
   time (#186), and `created_at_time` set so that a retry cannot credit
   twice.
+- **A deposit is at least ten of the ledger's fees**, read from the
+  ledger at the deposit, so that no deposit costs more in fees than it
+  holds.
 - **Withdraw** by `icrc1_transfer` back to the principal, of what is
-  neither reserved nor owed. Unlike cycles, this balance can be taken out
+  neither reserved nor owed. The amount is debited before the transfer
+  goes out, and the ledger's fee comes out of it.
+- **A transfer whose outcome is unknown stays pending**, and a replay
+  under the same `created_at_time` settles it, as for ICP. Once an
+  outcome has been unknown, or an attempt was cut off before its reply
+  was handled (an upgrade drops it), a refused replay settles nothing: the first
+  transfer may have landed, and a withdrawal given back after it was paid
+  would pay twice. Only the first transfer's block settles it, or, past
+  the ledger's dedup window, the operators. Unlike cycles, this balance can be taken out
   again, because it is the same asset going back.
 - **A query** gives the balance, the amount reserved, and what each
   recent transaction cost. The console shows them.
@@ -167,5 +178,5 @@ Bitcoin (section 7).
   markup on each charge** (section 4), just enough that ic-git is not
   paying for it, with any surplus credited back on the IC side.
 - **Open: the float's size and floor**, and the margin over open reservations.
-- **Open: a minimum deposit**, so that a deposit costs more than the ledger
-  fee it comes with.
+- **Decided in leg 1: a deposit is at least ten ledger fees** (section
+  3).

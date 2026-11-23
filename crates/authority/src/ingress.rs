@@ -33,6 +33,7 @@ pub const RULES: &[(&str, Rule)] = &[
     ("charge_rent_now", Operator),
     ("set_cycles_ledger", Operator),
     ("set_icp_ledgers", Operator),
+    ("set_gas_ledger", Operator),
     ("compile_wat", Operator),
     ("compile_wat_info", Operator),
     ("compile_lang", Operator),
@@ -77,6 +78,9 @@ pub const RULES: &[(&str, Rule)] = &[
     ("deposit_from_cycles_ledger", SignedIn),
     ("deposit_from_icp", SignedIn),
     ("finish_icp_deposit", SignedIn),
+    ("deposit_gas", SignedIn),
+    ("withdraw_gas", SignedIn),
+    ("finish_gas_transfer", SignedIn),
     ("add_member", Member),
     ("remove_member", Member),
     ("transfer_repo", Member),
@@ -108,6 +112,10 @@ pub const RULES: &[(&str, Rule)] = &[
     ("list_authorized", Anyone),
     ("pending_icp_deposits", Anyone),
     ("failed_icp_deposits", Anyone),
+    ("get_gas_ledger", Anyone),
+    ("get_gas_account", Anyone),
+    ("pending_gas_transfers", Anyone),
+    ("failed_gas_transfers", Anyone),
     ("stranded_deposits", Anyone),
     ("get_account", Anyone),
     ("my_repos", Anyone),
@@ -161,7 +169,7 @@ pub fn standing(method: &str, rule: Rule, who: &Principal, arg: &[u8]) -> Result
                 Err(format!("create_repo: the balance of {who} does not cover the creation fee; deposit first"))
             }
         }
-        (SignedIn, "deposit_from_cycles_ledger" | "deposit_from_icp") => {
+        (SignedIn, "deposit_from_cycles_ledger" | "deposit_from_icp" | "deposit_gas") => {
             if arg.len() <= MAX_DEPOSIT_ARG {
                 Ok(())
             } else {
@@ -174,6 +182,19 @@ pub fn standing(method: &str, rule: Rule, who: &Principal, arg: &[u8]) -> Result
                 Ok(())
             } else {
                 Err(format!("finish_icp_deposit: {who} made no ICP deposit {id}"))
+            }
+        }
+        (SignedIn, "withdraw_gas") => {
+            let (amount,) = candid::decode_args::<(candid::Nat,)>(arg).map_err(|_| unread())?;
+            let amount = u128::try_from(amount.0).map_err(|_| "withdraw_gas: the amount is more than any balance holds".to_string())?;
+            crate::gas::ledger().and_then(|ledger| crate::gas::covers(&ledger, who, amount)).map_err(|e| format!("withdraw_gas: {e}"))
+        }
+        (SignedIn, "finish_gas_transfer") => {
+            let (id,) = candid::decode_args::<(u64,)>(arg).map_err(|_| unread())?;
+            if crate::gas::is_party(id, who) {
+                Ok(())
+            } else {
+                Err(format!("finish_gas_transfer: {who} has no gas transfer {id}"))
             }
         }
         // A tenant's method with no answer here is taken from no one: the
@@ -202,8 +223,13 @@ mod tests {
         pricing.create_repo = 1;
         tenancy::set_pricing(pricing);
         for (method, rule) in RULES.iter().filter(|(_, r)| matches!(r, SignedIn | Member)) {
-            let deposit = matches!(*method, "deposit_from_cycles_ledger" | "deposit_from_icp");
-            let arg = if deposit || *method == "finish_icp_deposit" { encode_args((1u64,)).unwrap() } else { encode_args(("no-such-repo",)).unwrap() };
+            let deposit = matches!(*method, "deposit_from_cycles_ledger" | "deposit_from_icp" | "deposit_gas");
+            let arg = match *method {
+                _ if deposit => encode_args((1u64,)).unwrap(),
+                "finish_icp_deposit" | "finish_gas_transfer" => encode_args((1u64,)).unwrap(),
+                "withdraw_gas" => encode_args((candid::Nat::from(1u64),)).unwrap(),
+                _ => encode_args(("no-such-repo",)).unwrap(),
+            };
             assert_eq!(standing(method, *rule, &stranger, &arg).is_ok(), deposit, "{method}");
             // An argument that is not the call's is nobody's.
             assert!(deposit || standing(method, *rule, &stranger, b"junk").is_err(), "{method}");

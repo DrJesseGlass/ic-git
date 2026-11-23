@@ -16,7 +16,7 @@ use ic_git_compiler::{compile, interp, lang};
 use ic_git_common::httpjson::git_response;
 use ic_git_common::{httpjson, ingress, kv};
 // The authority (crates/authority).
-use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, funding, icp, ledger, mirrors, moved, names, peer, provenance, sol, tenancy, to_git};
+use ic_git_authority::{api_authority, apps, configs, deploy, evm, feed, fleet, for_git, funding, gas, icp, ledger, mirrors, moved, names, peer, provenance, sol, tenancy, to_git};
 use ic_git_types::authority_side::{AuthoritySide, Published};
 use ic_git_types::side::Reply;
 use ic_git_types::wire;
@@ -443,6 +443,56 @@ async fn finish_icp_deposit(id: u64) -> Result<u64, String> {
     icp::finish_icp_deposit(caller(), operator(), id).await
 }
 
+/// Your gas balance (docs/EVM_GAS.md): approve this canister on the gas
+/// ledger (`get_gas_ledger`) for `amount` plus one fee, then call this.
+/// The amount is pulled into ic-git's account and credited whole, in the
+/// ledger's base units (wei, on the ck ledgers). Returns what is available.
+#[ic_cdk::update]
+async fn deposit_gas(amount: candid::Nat) -> Result<candid::Nat, String> {
+    let amount = u128::try_from(amount.0).map_err(|_| "the amount is more than any balance holds".to_string())?;
+    gas::deposit(caller(), amount).await.map(candid::Nat::from)
+}
+
+/// Send `amount` of your gas balance, less one ledger fee, to your own
+/// account on the gas ledger. Returns what is left available.
+#[ic_cdk::update]
+async fn withdraw_gas(amount: candid::Nat) -> Result<candid::Nat, String> {
+    let amount = u128::try_from(amount.0).map_err(|_| "the amount is more than any balance holds".to_string())?;
+    gas::withdraw(caller(), amount).await.map(candid::Nat::from)
+}
+
+/// Finish pending gas transfer `id` (see pending_gas_transfers) whose
+/// outcome was unknown: its replay is one the ledger takes only once. For
+/// the one it is for, or an operator.
+#[ic_cdk::update]
+async fn finish_gas_transfer(id: u64) -> Result<candid::Nat, String> {
+    gas::finish(caller(), operator(), id).await.map(candid::Nat::from)
+}
+
+/// The ledger gas balances are held on.
+#[ic_cdk::query]
+fn get_gas_ledger() -> Result<candid::Principal, String> {
+    gas::ledger()
+}
+
+/// `principal`'s gas balance on the ledger in force.
+#[ic_cdk::query]
+fn get_gas_account(principal: candid::Principal) -> Result<gas::GasAccount, String> {
+    gas::account(&principal)
+}
+
+/// Gas transfers not yet settled.
+#[ic_cdk::query]
+fn pending_gas_transfers() -> Vec<gas::PendingGasTransfer> {
+    gas::pending()
+}
+
+/// Gas transfers no replay can settle, for the operators to resolve.
+#[ic_cdk::query]
+fn failed_gas_transfers() -> Vec<gas::FailedGasTransfer> {
+    gas::failed()
+}
+
 /// ICP deposits not yet credited or settled.
 #[ic_cdk::query]
 fn pending_icp_deposits() -> Vec<icp::PendingIcpDeposit> {
@@ -599,6 +649,15 @@ async fn charge_rent_now() -> (u32, u64) {
 #[ic_cdk::update(guard = "is_admin")]
 fn set_cycles_ledger(principal: candid::Principal) -> Result<(), String> {
     ledger::set_ledger_id(principal);
+    Ok(())
+}
+
+/// Hold gas balances on `ledger`, or with none on the ck ledger of the
+/// configured EVM chain (ckETH, ckSepoliaETH). Balances are kept per
+/// ledger, so a change leaves what is held on the old one where it is.
+#[ic_cdk::update(guard = "is_admin")]
+fn set_gas_ledger(ledger: Option<candid::Principal>) -> Result<(), String> {
+    gas::set_ledger(ledger);
     Ok(())
 }
 
