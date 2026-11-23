@@ -56,29 +56,42 @@ pub struct Pricing {
     /// in, so the table served always says the floor in force.
     #[serde(default)]
     pub git_canister_floor: Option<u64>,
-    /// Per unit of an EVM transaction's gas limit, on top of `evm_action`
-    /// (`evm_cost`): the gas is paid on the other chain by the canister's
-    /// EOA, which is the operators' to fund, and this is what a tenant
-    /// pays toward it. By the limit and not by what was used: the limit
-    /// is what the EOA must hold at the send, and the tenant's to set.
-    /// The rate is the operators' judgment of what that chain's gas is
-    /// worth in cycles; 0, the default, charges nothing, as is right on a
-    /// testnet. Optional as the floor is: `None` reads as the default,
-    /// and `pricing()` fills it in.
+    /// The markup on a tenant's EVM gas, in basis points of what each
+    /// transaction cost on the chain (docs/EVM_GAS.md, sections 4 and 5):
+    /// the gas itself is paid from the tenant's gas balance, in the chain's
+    /// asset, and this covers what turning that asset back into the EOA's
+    /// ETH costs. It replaces `evm_gas`, a cycles rate per unit of gas
+    /// limit, which defaulted to 0 and charged nothing. Optional as the
+    /// floor is: `None` reads as the default, and `pricing()` fills it in.
     #[serde(default)]
-    pub evm_gas: Option<u64>,
-}
-
-impl Pricing {
-    /// What one EVM action costs whose transaction has this gas limit: a
-    /// deploy's is its config's, a registry write's is
-    /// `evm::REGISTRY_SET_GAS`.
-    pub fn evm_cost(&self, gas_limit: u64) -> u64 {
-        self.evm_action.saturating_add(self.evm_gas.unwrap_or(0).saturating_mul(gas_limit))
-    }
+    pub gas_markup_bps: Option<u32>,
 }
 
 pub const DEFAULT_GIT_CANISTER_FLOOR: u64 = 1_000_000_000_000;
+
+/// 1%: a refill of the EOA through the ckETH minter costs the gas of the
+/// minter's own transaction, which on a refill of a tenth of an ETH at
+/// 20 gwei is under half a percent. The surplus is credited back.
+pub const DEFAULT_GAS_MARKUP_BPS: u32 = 100;
+
+/// The most the markup may be: 100%. Past it a mistyped rate would hold
+/// and charge a tenant many times what their gas cost.
+pub const MAX_GAS_MARKUP_BPS: u32 = 10_000;
+
+/// What an operator's table must hold to be taken.
+pub fn check_pricing(p: &Pricing) -> Result<(), String> {
+    match p.gas_markup_bps {
+        Some(bps) if bps > MAX_GAS_MARKUP_BPS => Err(format!(
+            "gas_markup_bps {bps} is over {MAX_GAS_MARKUP_BPS} (100%); it is in basis points, 100 is 1%"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The gas markup in force, in basis points.
+pub fn gas_markup_bps() -> u32 {
+    pricing().gas_markup_bps.unwrap_or(DEFAULT_GAS_MARKUP_BPS)
+}
 
 /// The git canister's floor in force.
 pub fn git_canister_floor() -> u64 {
@@ -95,7 +108,7 @@ impl Default for Pricing {
             evm_action: 50_000_000_000,
             ic_deploy: 5_000_000_000,
             git_canister_floor: Some(DEFAULT_GIT_CANISTER_FLOOR),
-            evm_gas: Some(0),
+            gas_markup_bps: Some(DEFAULT_GAS_MARKUP_BPS),
         }
     }
 }
@@ -106,7 +119,7 @@ const YEAR_NS: u128 = 365 * 24 * 3600 * 1_000_000_000;
 pub fn pricing() -> Pricing {
     let mut p: Pricing = crate::kv::get_json(PRICING_KEY).unwrap_or_default();
     p.git_canister_floor = Some(p.git_canister_floor.unwrap_or(DEFAULT_GIT_CANISTER_FLOOR));
-    p.evm_gas = Some(p.evm_gas.unwrap_or(0));
+    p.gas_markup_bps = Some(p.gas_markup_bps.unwrap_or(DEFAULT_GAS_MARKUP_BPS));
     p
 }
 
@@ -2886,27 +2899,26 @@ mod tests {
         assert_eq!(check_deposit(u128::MAX), Ok(()));
     }
 
-    /// An EVM action is priced with its transaction's gas limit, at a
-    /// rate that is 0 until an operator sets one; a table stored or sent
-    /// before the rate existed reads as 0, and the table served says so.
+    /// An EVM action costs cycles for its signature and outcalls alone;
+    /// its gas is the gas balance's, with a markup a table stored or sent
+    /// before it existed reads as the default, and the table served says.
     #[test]
-    fn an_evm_action_is_priced_with_its_gas_limit() {
+    fn the_gas_markup_defaults_and_a_table_without_it_reads() {
         let before = pricing();
-        assert_eq!(before.evm_gas, Some(0));
-        assert_eq!(before.evm_cost(10_000_000), before.evm_action, "no rate, no charge for gas");
+        assert_eq!(before.gas_markup_bps, Some(DEFAULT_GAS_MARKUP_BPS));
+        // A table stored with the old evm_gas rate still reads; the rate is gone.
         let old: Pricing = serde_json::from_str(
-            r#"{"create_repo":1,"push_base":2,"push_per_byte":3,"rent_per_byte_year":4,"evm_action":5,"ic_deploy":6}"#,
+            r#"{"create_repo":1,"push_base":2,"push_per_byte":3,"rent_per_byte_year":4,"evm_action":5,"ic_deploy":6,"evm_gas":7}"#,
         )
         .unwrap();
-        assert_eq!(old.evm_gas, None);
-        assert_eq!(old.evm_cost(1_000_000), 5);
+        assert_eq!(old.gas_markup_bps, None);
         set_pricing(old);
-        assert_eq!(pricing().evm_gas, Some(0), "always given on the way out");
-
-        let p = Pricing { evm_gas: Some(2_000_000), ..before.clone() };
-        assert_eq!(p.evm_cost(100_000), p.evm_action + 200_000_000_000);
-        assert_eq!(p.evm_cost(0), p.evm_action);
-        assert_eq!(p.evm_cost(u64::MAX), u64::MAX, "no wrapping to a small price");
+        assert_eq!(pricing().gas_markup_bps, Some(DEFAULT_GAS_MARKUP_BPS), "always given on the way out");
+        set_pricing(Pricing { gas_markup_bps: Some(250), ..before.clone() });
+        assert_eq!(gas_markup_bps(), 250);
+        assert!(check_pricing(&Pricing { gas_markup_bps: Some(MAX_GAS_MARKUP_BPS), ..before.clone() }).is_ok());
+        let e = check_pricing(&Pricing { gas_markup_bps: Some(MAX_GAS_MARKUP_BPS + 1), ..before.clone() }).unwrap_err();
+        assert!(e.contains("basis points"), "{e}");
         set_pricing(before);
     }
 

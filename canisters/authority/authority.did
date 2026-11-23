@@ -100,10 +100,10 @@ type Pricing = record {
   // what tenants paid for git-side work (get_git_funding). Optional on
   // the way in (null keeps the default), always given on the way out
   git_canister_floor : opt nat64;
-  // cycles per unit of an EVM transaction's gas limit, charged with
-  // evm_action. Optional on the way in (null is 0), always given on the
-  // way out
-  evm_gas : opt nat64;
+  // the markup on a tenant's EVM gas, in basis points of what each
+  // transaction cost (docs/EVM_GAS.md); it replaces evm_gas. Optional on
+  // the way in (null keeps the default), always given on the way out
+  gas_markup_bps : opt nat32;
 };
 // The git canister's funding (docs/CANISTER_SPLIT.md, phase 3 step 12d).
 type TopUp = record { at_ns : nat64; cycles : nat64; balance_before : opt nat64 };
@@ -125,8 +125,32 @@ type GasAccount = record {
   deposited : nat;
   withdrawn : nat;
   created_ns : nat64;
+  "reserved" : nat;
+  spent : nat;
+  markup : nat;
 };
 type GasDirection = variant { Deposit; Withdrawal };
+type GasHold = record {
+  id : nat64;
+  who : principal;
+  ledger : principal;
+  amount : nat;
+  markup_bps : nat32;
+  tx_hash : opt text;
+  at_ns : nat64;
+};
+type GasCharge = record {
+  tx_hash : text;
+  gas_used : nat;
+  effective_gas_price : nat;
+  cost : nat;
+  markup : nat;
+  at_ns : nat64;
+};
+type GasTotals = record { spent : nat; markup : nat };
+type ResultGasCharges = variant { Ok : vec GasCharge; Err : text };
+type ResultGasTotals = variant { Ok : GasTotals; Err : text };
+type ResultGasHold = variant { Ok : GasHold; Err : text };
 type PendingGasTransfer = record {
   id : nat64;
   direction : GasDirection;
@@ -412,6 +436,10 @@ service : {
   finish_gas_transfer : (nat64) -> (ResultNat);
   get_gas_ledger : () -> (ResultPrincipal) query;
   get_gas_account : (principal) -> (ResultGasAccount) query;
+  get_gas_charges : (principal) -> (ResultGasCharges) query;
+  gas_holds : () -> (vec GasHold) query;
+  get_gas_totals : () -> (ResultGasTotals) query;
+  gas_release_hold : (nat64) -> (ResultGasHold);
   pending_gas_transfers : () -> (vec PendingGasTransfer) query;
   failed_gas_transfers : () -> (vec FailedGasTransfer) query;
   pending_icp_deposits : () -> (vec PendingIcpDeposit) query;

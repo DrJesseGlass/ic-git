@@ -594,6 +594,7 @@ async fn attempt_evm(
     cfg: &EvmDeployConfig,
     commit_oid: &Oid,
     artifact: Result<Artifact, String>,
+    payer: Option<Principal>,
 ) -> Result<(crate::evm::TxOutcome, [u8; 32]), evm::SendError> {
     // Chain-side preconditions first: an unconfigured canister or an unpayable
     // gas limit should say so before anything about the artifact.
@@ -608,14 +609,16 @@ async fn attempt_evm(
         bytecode,
         cfg.gas_limit,
         oid_hex(commit_oid),
+        payer,
     )
     .await?;
     Ok((out, bundle))
 }
 
-/// What a deploy's EVM leg is charged: the deploy, priced with the gas
-/// limit of the repo's config, and the registry record that follows it,
-/// priced with the registry write's, when a registry is set to publish to.
+/// What a deploy's EVM leg is charged in cycles: an EVM action for the
+/// deploy, and another for the registry record that follows it when a
+/// registry is set to publish to. Each pays its signature and outcalls;
+/// the gas of both is the payer's gas balance's (docs/EVM_GAS.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EvmPrices {
     deploy: u64,
@@ -623,10 +626,10 @@ struct EvmPrices {
 }
 
 impl EvmPrices {
-    fn of(pricing: &crate::tenancy::Pricing, gas_limit: u64, registry: bool) -> Self {
+    fn of(pricing: &crate::tenancy::Pricing, registry: bool) -> Self {
         EvmPrices {
-            deploy: pricing.evm_cost(gas_limit),
-            record: registry.then(|| pricing.evm_cost(evm::REGISTRY_SET_GAS)),
+            deploy: pricing.evm_action,
+            record: registry.then_some(pricing.evm_action),
         }
     }
 
@@ -660,6 +663,7 @@ async fn run_evm(
     artifact: Result<Artifact, String>,
     force: bool,
     prices: EvmPrices,
+    payer: Option<Principal>,
 ) -> (EvmDeployStatus, u64) {
     let EvmPrices { deploy: price, record: record_price } = prices;
     let commit = oid_hex(commit_oid);
@@ -695,7 +699,7 @@ async fn run_evm(
     }
     let mut unused = 0;
     crate::kv::set_json(&evm_status_key(repo), &st);
-    match attempt_evm(repo, cfg, commit_oid, artifact).await {
+    match attempt_evm(repo, cfg, commit_oid, artifact, payer).await {
         Ok((out, bundle)) => {
             st.ok = true;
             st.contract_address = out.contract_address.unwrap_or_default();
@@ -708,7 +712,7 @@ async fn run_evm(
                 // Publish the hash of the bytes this deploy actually sent, not
                 // a fresh resolve: re-reading the repo would both redo the tree
                 // walk and read the object store this leg never touches.
-                match crate::provenance::publish_commit(repo, commit_oid, bundle).await {
+                match crate::provenance::publish_commit(repo, commit_oid, bundle, payer).await {
                     Ok(reg) => {
                         st.message = format!("{}; registry publish {}", st.message, reg.tx_hash)
                     }
@@ -778,14 +782,14 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
     // with the deploy and refunded if the publish fails before broadcast.
     let app_record = wasm_cfg.as_ref().is_some_and(|cfg| crate::tenancy::governed_target(repo, &cfg.target))
         && crate::evm::get_registry().is_some();
-    // Each EVM action is priced with its transaction's gas limit
-    // (`Pricing::evm_cost`): the deploy's is the repo's config's, a
-    // record's the registry write's. The EVM leg is the deploy and, with
-    // a registry set, the record of it: two transactions, two actions.
+    // Each EVM action is charged its signature and outcalls in cycles;
+    // the gas is the payer's gas balance's, reserved as each is sent. The
+    // EVM leg is the deploy and, with a registry set, the record of it:
+    // two transactions, two actions.
     let evm_prices = evm_cfg
         .as_ref()
-        .map(|cfg| EvmPrices::of(&pricing, cfg.gas_limit, crate::evm::get_registry().is_some()));
-    let record_price = pricing.evm_cost(evm::REGISTRY_SET_GAS);
+        .map(|_| EvmPrices::of(&pricing, crate::evm::get_registry().is_some()));
+    let record_price = pricing.evm_action;
     let cost = wasm_cfg
         .as_ref()
         .map_or(0, |_| pricing.ic_deploy)
@@ -856,7 +860,7 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
             // await; annotate only while the status is still this one.
             let before = st.clone();
             let note = match crate::provenance::app_record(repo, &commit_oid, &st.wasm_sha256) {
-                Ok(rec) => match crate::provenance::publish(&rec).await {
+                Ok(rec) => match crate::provenance::publish(&rec, payer).await {
                     // Broadcast, not mined: the record exists once the
                     // chain includes the transaction (evm_receipt shows
                     // that), and only then does the backend check's read
@@ -882,7 +886,7 @@ async fn run(repo: &str, commit_oid: Oid, job: Job, force: bool) -> DeployStatus
     }
 
     if let (Some(cfg), Some(artifact), Some(prices)) = (evm_cfg, evm_artifact, evm_prices) {
-        let (evm_st, unused) = run_evm(repo, &cfg, &commit_oid, artifact, force, prices).await;
+        let (evm_st, unused) = run_evm(repo, &cfg, &commit_oid, artifact, force, prices, payer).await;
         crate::tenancy::refund_action(payer, unused);
         let leg = if evm_st.ok {
             format!("evm: {} ({})", evm_st.contract_address, evm_st.tx_hash)
@@ -1077,12 +1081,12 @@ mod tests {
     /// since nothing is published for a deploy that did not happen.
     #[test]
     fn the_evm_leg_is_charged_for_the_deploy_and_for_its_record() {
-        let pricing = crate::tenancy::Pricing { evm_gas: Some(2), ..crate::tenancy::pricing() };
-        let with = EvmPrices::of(&pricing, 500_000, true);
-        assert_eq!(with.deploy, pricing.evm_action + 1_000_000);
-        assert_eq!(with.record, Some(pricing.evm_action + 2 * evm::REGISTRY_SET_GAS));
+        let pricing = crate::tenancy::pricing();
+        let with = EvmPrices::of(&pricing, true);
+        assert_eq!(with.deploy, pricing.evm_action, "the gas is the gas balance's, not cycles");
+        assert_eq!(with.record, Some(pricing.evm_action));
         assert_eq!(with.total(), with.deploy + with.record.unwrap());
-        let without = EvmPrices::of(&pricing, 500_000, false);
+        let without = EvmPrices::of(&pricing, false);
         assert_eq!((without.record, without.total()), (None, without.deploy));
 
         // No EVM config on this canister: the deploy is refused before
@@ -1090,7 +1094,7 @@ mod tests {
         let cfg = EvmDeployConfig { source_path: "c.hex".into(), gas_limit: 500_000 };
         let commit = ic_git_types::oid::parse_oid("0123456789abcdef0123456789abcdef01234567").unwrap();
         for prices in [with, without] {
-            let (st, unused) = futures::executor::block_on(run_evm("evm-prices", &cfg, &commit, Err("no artifact".into()), false, prices));
+            let (st, unused) = futures::executor::block_on(run_evm("evm-prices", &cfg, &commit, Err("no artifact".into()), false, prices, None));
             assert!(!st.ok, "{}", st.message);
             assert_eq!(unused, prices.total());
         }

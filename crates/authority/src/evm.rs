@@ -986,23 +986,45 @@ impl Drop for SendLock {
 /// Build, sign, and broadcast one EIP-1559 transaction from the canister EOA.
 /// `to = None` deploys `data` as init bytecode (CREATE). One at a time: a
 /// concurrent call fails fast rather than racing on the nonce.
+///
+/// `payer` is whose gas balance pays the gas (docs/EVM_GAS.md, section 4):
+/// the most it may cost is reserved from it before the signature, kept
+/// while a provider may hold the transaction, settled by its receipt, and
+/// given back whole when no provider can. `None` is ic-git's own
+/// transaction, paid by the EOA's float alone.
 async fn send_tx(
     cfg: &EvmConfig,
     to: Option<[u8; 20]>,
     value: u128,
     data: Vec<u8>,
     gas_limit: u64,
+    payer: Option<Principal>,
 ) -> Result<TxOutcome, SendError> {
     let _lock = SendLock::acquire().map_err(SendError::before)?;
-    let meter = Meter::default();
-    // A definite failure: no provider holds the transaction.
-    let fail = |message: String| SendError {
-        message,
-        maybe_sent: false,
-        spent: meter.get(),
-        tx: None,
+    // The asset the payer's gas is held in, read with `cfg` and before any
+    // await: an operator changing the chain while this send waits must not
+    // move its charge to another chain's asset. No such asset is a refusal
+    // before any outcall.
+    let payer = match payer {
+        Some(who) => Some((who, crate::gas::ledger_for_chain(cfg.chain_id).map_err(SendError::before)?)),
+        None => None,
     };
-    let (tx_hash, raw, nonce, from) = sign_tx(cfg, to, value, data, gas_limit, &meter)
+    let meter = Meter::default();
+    // The hold sign_tx takes, once it has: a definite failure gives it back.
+    let hold: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
+    // A definite failure: no provider holds the transaction.
+    let fail = |message: String| {
+        if let Some(id) = hold.take() {
+            crate::gas::release(id);
+        }
+        SendError {
+            message,
+            maybe_sent: false,
+            spent: meter.get(),
+            tx: None,
+        }
+    };
+    let (tx_hash, raw, nonce, from) = sign_tx(cfg, to, value, data, gas_limit, payer, &hold, &meter)
         .await
         .map_err(fail)?;
     let from_hex = checksum_address(&from);
@@ -1099,15 +1121,20 @@ async fn send_tx(
     }
 }
 
-/// Everything before the broadcast: nonce, fees, signature. Returns (tx hash,
-/// raw signed tx, nonce, EOA). No side effects, so any error here means
-/// nothing was sent; `meter` counts what the outcalls cost.
+/// Everything before the broadcast: nonce, fees, the payer's reservation,
+/// signature. Returns (tx hash, raw signed tx, nonce, EOA). Its one side
+/// effect is the reservation, whose id it leaves in `hold` for the caller
+/// to give back on any failure; an error here means nothing was sent.
+/// `meter` counts what the outcalls cost.
+#[allow(clippy::too_many_arguments)]
 async fn sign_tx(
     cfg: &EvmConfig,
     to: Option<[u8; 20]>,
     value: u128,
     data: Vec<u8>,
     gas_limit: u64,
+    payer: Option<(Principal, Principal)>,
+    hold: &std::cell::Cell<Option<u64>>,
     meter: &Meter,
 ) -> Result<(String, Vec<u8>, u64, [u8; 20]), String> {
     let pk = public_key(cfg).await?;
@@ -1119,6 +1146,11 @@ async fn sign_tx(
     let stored = stored_next_nonce()?;
     let nonce = choose_nonce(stored.as_ref(), cfg.chain_id, &from_hex, confirmed?);
     let (max_fee, tip) = fee_pair?;
+    // Before the signature: a payer who cannot cover the most this may
+    // cost is refused for the price of the reads alone.
+    if let Some((who, ledger)) = payer {
+        hold.set(Some(crate::gas::reserve(&who, ledger, gas_limit, max_fee)?.id));
+    }
     let tx = Tx {
         chain_id: cfg.chain_id,
         nonce,
@@ -1134,6 +1166,11 @@ async fn sign_tx(
     let (parity, r, s) = recover_parity(&pk, &sighash, &sig)?;
     let raw = tx.raw_signed(parity, &r, &s);
     let tx_hash = format!("0x{}", hex::encode(keccak256(&raw)));
+    // Named before the broadcast, so a receipt finds the hold even if the
+    // reply to the broadcast is never handled.
+    if let Some(id) = hold.get() {
+        crate::gas::attach(id, &tx_hash);
+    }
     Ok((tx_hash, raw, nonce, from))
 }
 
@@ -1144,7 +1181,7 @@ pub async fn send_value(to: String, value_wei: String) -> Result<TxOutcome, Stri
     let value: u128 = value_wei
         .parse()
         .map_err(|e| format!("bad value_wei: {e}"))?;
-    Ok(send_tx(&cfg, Some(to), value, vec![], 21_000).await?)
+    Ok(send_tx(&cfg, Some(to), value, vec![], 21_000, None).await?)
 }
 
 // --- E1: contract deployment with provenance ---------------------------------
@@ -1472,6 +1509,7 @@ pub async fn deploy_bytecode(
     bytecode: Vec<u8>,
     gas_limit: u64,
     commit: String,
+    payer: Option<Principal>,
 ) -> Result<TxOutcome, SendError> {
     let cfg = deploy_target(gas_limit).map_err(SendError::before)?;
     check_initcode(&bytecode).map_err(SendError::before)?;
@@ -1482,7 +1520,7 @@ pub async fn deploy_bytecode(
     let len = bytecode.len() as u64;
     // Before spending gas: if the outcome cannot be recorded, do not broadcast.
     preflight_log(&repo).map_err(SendError::before)?;
-    let out = send_tx(&cfg, None, 0, bytecode, gas_limit).await;
+    let out = send_tx(&cfg, None, 0, bytecode, gas_limit, payer).await;
     // The transaction that is, or may be, live: an accepted one, or one whose
     // broadcast outcome is unknown. Either is logged with its hash and polled
     // for a receipt, so the same-commit dedupe (latest_deploy) sees it.
@@ -1602,10 +1640,37 @@ pub async fn registry_publish_record(
     record_key: &str,
     commit: &[u8; 20],
     bundle: &[u8; 32],
+    payer: Option<Principal>,
 ) -> Result<TxOutcome, SendError> {
     let (cfg, to) = publish_target().map_err(SendError::before)?;
     let data = abi_encode_set(record_key, commit, bundle);
-    send_tx(&cfg, Some(to), 0, data, REGISTRY_SET_GAS).await
+    let out = send_tx(&cfg, Some(to), 0, data, REGISTRY_SET_GAS, payer).await;
+    // A tenant's write holds their gas balance until its receipt is read,
+    // so it is polled for as a deploy is; ic-git's own writes are not.
+    if payer.is_some() {
+        let live = match &out {
+            Ok(o) => Some(o),
+            Err(e) if e.maybe_sent => e.tx.as_ref(),
+            Err(_) => None,
+        };
+        if let Some(o) = live {
+            schedule_receipt_poll(o.tx_hash.clone(), 0);
+        }
+    }
+    out
+}
+
+/// After an upgrade, which drops timers and any reply still awaited: a
+/// hold that never named its transaction was cut off before the signature
+/// came back, so nothing was broadcast and it goes back whole; every other
+/// hold has its receipt polled for again.
+pub fn resume_gas_holds() {
+    for h in crate::gas::holds() {
+        match h.tx_hash {
+            None => crate::gas::release(h.id),
+            Some(tx) => schedule_receipt_poll(tx, 0),
+        }
+    }
 }
 
 /// The canister-level preconditions for any registry write: a chain config and
@@ -1657,6 +1722,11 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
         &Meter::default(),
     )
     .await?;
+    // A found receipt settles what the transaction held of its payer's
+    // gas balance, if it held any; once, as the hold is taken.
+    if let Some(r) = &receipt {
+        crate::gas::settle_tx(&tx_hash, r.gas_used, r.effective_gas_price);
+    }
     let summary = receipt.map(|r| ReceiptSummary {
         status: match r.status {
             Some(1) => RECEIPT_SUCCESS.into(),
@@ -1679,6 +1749,21 @@ pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hold cut off by an upgrade before its transaction was signed
+    /// never went out, and the upgrade gives it back whole.
+    #[test]
+    fn an_upgrade_gives_back_a_hold_that_was_never_signed() {
+        let ck = Principal::from_slice(&[8; 29]);
+        let who = Principal::from_slice(&[7; 29]);
+        crate::gas::credit(&ck, &who, 1_000_000);
+        let h = crate::gas::reserve(&who, ck, 21_000, 10).unwrap();
+        assert_eq!(crate::gas::account_on(&ck, &who).reserved, h.amount);
+        resume_gas_holds();
+        let a = crate::gas::account_on(&ck, &who);
+        assert_eq!((a.available, a.reserved), (1_000_000, 0));
+        assert!(crate::gas::holds().iter().all(|x| x.id != h.id));
+    }
 
     /// The cap is three base fees above the window plus the median tip, the
     /// tip never under 1 gwei; an empty window is an error, not a zero fee.
@@ -1833,7 +1918,7 @@ mod tests {
 
         set_config("aaaaa-aa".into(), "k".into(), 11155111, vec![]).unwrap();
         let logged = history_of("big").len();
-        let e = futures::executor::block_on(deploy_bytecode("big".into(), vec![0x60; 3 << 20], 1_000_000, "c".into())).unwrap_err();
+        let e = futures::executor::block_on(deploy_bytecode("big".into(), vec![0x60; 3 << 20], 1_000_000, "c".into(), None)).unwrap_err();
         assert!(e.message.contains("EIP-3860") && e.message.contains("3145728 bytes"), "{}", e.message);
         assert!(!e.maybe_sent && e.tx.is_none());
         assert_eq!(e.refundable(50), 50, "nothing was spent");

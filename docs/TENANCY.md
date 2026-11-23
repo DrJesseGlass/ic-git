@@ -189,24 +189,28 @@ store refuses at that point is now that ref's refusal (`! [remote
 rejected]`), beside whatever else the push did.
 
 The gas of an EVM transaction is paid on the other chain by the
-canister's EOA, which the operators fund and every tenant's deploys draw
-on. Two things keep one tenant from spending it for the rest. A deploy's
-gas limit, which is its owner's to set (`set_evm_deploy`; on a governed
-repo the voters', `EvmDeploy`), is at least
-53,000 and at most 10,000,000: enough for a contract of the largest size
-the chain takes, with room for its constructor. And an EVM action costs
-`evm_action` plus `evm_gas` for each unit of its transaction's gas limit:
-the deploy's own limit, or the 1M a registry write carries. It is charged
-by the limit, which is what the EOA must hold at the send, and not by
-the gas used, which is known only once the transaction is mined: a
-tighter limit is a cheaper deploy. The rate is the operators' judgment
-of what that chain's gas is worth in cycles, and 0 by default, which is
-right on a testnet and wrong on a chain whose gas costs money. Until
-2026-11 the limit had a floor and no ceiling, and no rate existed.
+canister's EOA, and each tenant pays it back from a gas balance held in
+that chain's asset on the IC side (docs/EVM_GAS.md): ckETH for Ethereum,
+ckSepoliaETH for Sepolia, deposited with `deposit_gas`. Before a
+transaction is signed, the most it may cost, its gas limit at the fee
+cap with the markup (`gas_markup_bps`, 1% by default and at most 100%)
+on it, is reserved from the balance of the principal who pays the
+repo's cycles, and the send is refused if the balance is short. The receipt then charges the gas
+it used at the price it paid, with the markup, and gives back the rest. A
+deploy's gas limit, which is its owner's to set (`set_evm_deploy`; on a
+governed repo the voters', `EvmDeploy`), is at least 53,000 and at most
+10,000,000: enough for a contract of the largest size the chain takes,
+with room for its constructor. A tighter limit holds less of the balance
+while the transaction is out, and costs no less once it is mined. The
+cycles charge, `evm_action`, pays for the signature and the outcalls
+alone. Until 2026-11 the limit had a floor and no ceiling, and from then
+until the gas balance a cycles rate per unit of gas limit, `evm_gas`,
+stood for the gas; it defaulted to 0 and charged nothing.
 
 A deploy's EVM leg is two actions when a registry is set: the deploy,
 and the registry record of it that follows, each a signature and a
-transaction, each charged with its own gas limit. The record's charge
+transaction, each charged an `evm_action` and each holding the gas
+balance for its own gas limit. The record's charge
 comes back whole when the deploy is skipped or fails, since nothing is
 published then. Until 2026-11 the leg was charged the deploy alone and
 the record's transaction, a million gas of limit, came free with it.
@@ -217,15 +221,18 @@ not use:
 - **Failed before any outcall** (no config, no registry, send lock held,
   artifact would not decode, or is more init code than a chain takes:
   49,152 bytes) or a deploy skipped as already deployed: the
-  whole charge comes back, gas and all.
+  whole charge comes back, and nothing is held of the gas balance.
 - **No provider can hold the transaction** (a nonce or fee read failed, the
   signature failed, or a provider refused it: nonce too low or too high,
   insufficient funds, a JSON-RPC error, a 429): the owner pays the cycles
   attached to the outcalls made (3B per RPC call, 30B for the signature),
-  and gets the rest back. The worst case is 45B, under the price.
+  and gets the rest back. The worst case is 45B, under the price. The
+  hold on the gas balance comes back whole.
 - **A provider may hold it** (lost consensus on the broadcast reply, a 5xx,
   providers disagreeing, the call to the RPC canister failing): the full
-  charge stays, since the gas may be spent.
+  charge stays, and so does the hold on the gas balance, until a receipt
+  settles it or the operators release it (`gas_release_hold`) for a
+  transaction that never landed.
 
 Rent is charged on the bytes a repo's pushes ingested. Objects are
 content-addressed and shared, so two repos pushing the same blob are both

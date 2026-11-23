@@ -1,8 +1,22 @@
 //! Gas balances (docs/EVM_GAS.md, section 3): what a tenant holds of the
 //! EVM chain's asset on the IC side -- ckETH for Ethereum, ckSepoliaETH
 //! for Sepolia -- to pay for the gas of the transactions ic-git sends for
-//! them. This module holds the balance and moves the asset in and out;
-//! charging a transaction against it is a later leg.
+//! them. This module holds the balance, moves the asset in and out, and
+//! charges each transaction against it (section 4):
+//!
+//! - **Reserve before signing.** `reserve` takes `gas_limit * max_fee`,
+//!   with the markup on it, from what is available into what is reserved,
+//!   and refuses when it is short. The hold is stored at once, before any
+//!   await, so an upgrade between the reserve and the broadcast leaves it
+//!   on record rather than reserved and forgotten.
+//! - **Settle on the receipt.** `settle_tx` charges the receipt's
+//!   `gas_used * effective_gas_price` plus the markup, never more than the
+//!   hold, and makes the rest available again. A reverted transaction used
+//!   gas and is charged for it.
+//! - **Release what never went out.** A send refused before any provider
+//!   could hold it releases its hold whole; one whose outcome is unknown
+//!   keeps it until a receipt settles it, or the operators release it
+//!   (`release_hold`) for a transaction that never landed.
 //!
 //! - **One ledger at a time.** The asset is the ledger the operators set
 //!   (`set_gas_ledger`), or else the ck ledger of the chain the EVM config
@@ -74,12 +88,28 @@ pub fn default_ledger(chain_id: u64) -> Option<Principal> {
 /// The ledger gas is held on: the operators' choice, or the ck ledger of
 /// the configured chain.
 pub fn ledger() -> Result<Principal, String> {
-    if let Some(p) = crate::kv::get_json::<String>(LEDGER_KEY).and_then(|t| Principal::from_text(t).ok()) {
+    if let Some(p) = set_ledger_now() {
         return Ok(p);
     }
     let cfg = crate::evm::get_config().ok_or("no EVM config, so no chain whose gas to hold; call evm_set_config first")?;
-    default_ledger(cfg.chain_id)
-        .ok_or_else(|| format!("chain {} has no ck asset to hold its gas in; set one with set_gas_ledger", cfg.chain_id))
+    ledger_of(None, cfg.chain_id)
+}
+
+fn set_ledger_now() -> Option<Principal> {
+    crate::kv::get_json::<String>(LEDGER_KEY).and_then(|t| Principal::from_text(t).ok())
+}
+
+/// The ledger that holds the gas of a transaction on `chain_id`: the one
+/// the operators set, or the chain's own ck asset. A send reads it with
+/// the chain config it signs with, before any await, so a config changed
+/// while the send waits cannot charge one chain's gas in another's asset.
+pub fn ledger_for_chain(chain_id: u64) -> Result<Principal, String> {
+    ledger_of(set_ledger_now(), chain_id)
+}
+
+fn ledger_of(set: Option<Principal>, chain_id: u64) -> Result<Principal, String> {
+    set.or_else(|| default_ledger(chain_id))
+        .ok_or_else(|| format!("chain {chain_id} has no ck asset to hold its gas in; set one with set_gas_ledger"))
 }
 
 /// Set the ledger, or with `None` go back to the configured chain's own.
@@ -119,11 +149,19 @@ pub struct GasAccount {
     pub deposited: u128,
     pub withdrawn: u128,
     pub created_ns: u64,
+    /// Held for transactions sent and not yet settled.
+    #[serde(default)]
+    pub reserved: u128,
+    /// What settled transactions cost on the chain, and the markup on it.
+    #[serde(default)]
+    pub spent: u128,
+    #[serde(default)]
+    pub markup: u128,
 }
 
 impl Default for GasAccount {
     fn default() -> Self {
-        GasAccount { ledger: anonymous(), available: 0, deposited: 0, withdrawn: 0, created_ns: 0 }
+        GasAccount { ledger: anonymous(), available: 0, deposited: 0, withdrawn: 0, created_ns: 0, reserved: 0, spent: 0, markup: 0 }
     }
 }
 
@@ -151,7 +189,7 @@ fn save(ledger: &Principal, who: &Principal, a: &GasAccount) {
     crate::kv::set_json(&account_key(ledger, who), a);
 }
 
-fn credit(ledger: &Principal, who: &Principal, amount: u128) -> GasAccount {
+pub(crate) fn credit(ledger: &Principal, who: &Principal, amount: u128) -> GasAccount {
     let mut a = account_on(ledger, who);
     if a.created_ns == 0 {
         a.created_ns = crate::clock::now_ns();
@@ -191,6 +229,182 @@ fn undo_withdrawal(ledger: &Principal, who: &Principal, amount: u128) {
     a.available = a.available.saturating_add(amount);
     a.withdrawn = a.withdrawn.saturating_sub(amount);
     save(ledger, who, &a);
+}
+
+// --- reserving and settling transactions -----------------------------------------------
+
+const HOLDS_KEY: &str = "gas:holds";
+const LAST_HOLD_KEY: &str = "gas:last_hold";
+const TOTALS_PREFIX: &str = "gas:totals:";
+/// How many settled charges an account keeps, for the console.
+const CHARGES_KEEP: usize = 50;
+
+/// What a transaction holds of its payer's balance until it is settled.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GasHold {
+    pub id: u64,
+    pub who: Principal,
+    pub ledger: Principal,
+    /// `gas_limit * max_fee`, with the markup on it.
+    pub amount: u128,
+    /// The markup in force when it was reserved, which its settlement uses.
+    pub markup_bps: u32,
+    /// Set once the transaction is signed, before it is broadcast.
+    pub tx_hash: Option<String>,
+    pub at_ns: u64,
+}
+
+/// One settled transaction, as its payer's account keeps it.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GasCharge {
+    pub tx_hash: String,
+    pub gas_used: u128,
+    pub effective_gas_price: u128,
+    /// `gas_used * effective_gas_price`, and the markup on it: their sum is
+    /// what the balance paid.
+    pub cost: u128,
+    pub markup: u128,
+    pub at_ns: u64,
+}
+
+/// What every payer's settled transactions on one ledger came to: what
+/// the EOA spent for them, and what the markup collected toward refills.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct GasTotals {
+    pub spent: u128,
+    pub markup: u128,
+}
+
+/// The markup on `cost` at `bps` basis points, rounded up: it errs high,
+/// as an overcharge is the cheap one to put right.
+pub fn markup_of(cost: u128, bps: u32) -> u128 {
+    let m = cost.saturating_mul(bps as u128);
+    m / 10_000 + u128::from(!m.is_multiple_of(10_000))
+}
+
+pub fn holds() -> Vec<GasHold> {
+    crate::kv::get_json(HOLDS_KEY).unwrap_or_default()
+}
+
+fn save_holds(all: &[GasHold]) {
+    crate::kv::set_json(HOLDS_KEY, &all);
+}
+
+fn take_hold(pred: impl Fn(&GasHold) -> bool) -> Option<GasHold> {
+    let mut all = holds();
+    let i = all.iter().position(pred)?;
+    let h = all.remove(i);
+    save_holds(&all);
+    Some(h)
+}
+
+/// Reserve what a transaction of `gas_limit` gas at `max_fee` wei a unit
+/// may cost `who` on `ledger`, with the markup on it. The ledger is the
+/// caller's, read with the chain config the transaction is signed with
+/// (`ledger_for_chain`), not the one in force now. Stored before it
+/// returns.
+pub fn reserve(who: &Principal, ledger: Principal, gas_limit: u64, max_fee: u128) -> Result<GasHold, String> {
+    let bps = crate::tenancy::gas_markup_bps();
+    let cost = (gas_limit as u128).saturating_mul(max_fee);
+    let amount = cost.saturating_add(markup_of(cost, bps));
+    let mut a = account_on(&ledger, who);
+    if a.available < amount {
+        return Err(format!(
+            "the gas balance holds {}, less than the {} this transaction may cost ({gas_limit} gas \
+             at {max_fee} wei, with a {bps} basis point markup); deposit with deposit_gas",
+            amount_text(&ledger, a.available),
+            amount_text(&ledger, amount)
+        ));
+    }
+    a.available -= amount;
+    a.reserved = a.reserved.saturating_add(amount);
+    save(&ledger, who, &a);
+    let id = crate::clock::now_ns().max(crate::kv::get_json::<u64>(LAST_HOLD_KEY).unwrap_or(0).saturating_add(1));
+    crate::kv::set_json(LAST_HOLD_KEY, &id);
+    let hold = GasHold { id, who: *who, ledger, amount, markup_bps: bps, tx_hash: None, at_ns: crate::clock::now_ns() };
+    let mut all = holds();
+    all.push(hold.clone());
+    save_holds(&all);
+    Ok(hold)
+}
+
+/// Name the signed transaction a hold is for, before it is broadcast, so
+/// its receipt can find the hold.
+pub fn attach(hold_id: u64, tx_hash: &str) {
+    let mut all = holds();
+    if let Some(h) = all.iter_mut().find(|h| h.id == hold_id) {
+        h.tx_hash = Some(tx_hash.to_ascii_lowercase());
+        save_holds(&all);
+    }
+}
+
+fn give_back(h: &GasHold) {
+    let mut a = account_on(&h.ledger, &h.who);
+    a.reserved = a.reserved.saturating_sub(h.amount);
+    a.available = a.available.saturating_add(h.amount);
+    save(&h.ledger, &h.who, &a);
+}
+
+/// A send no provider can hold: its hold goes back whole.
+pub fn release(hold_id: u64) {
+    if let Some(h) = take_hold(|h| h.id == hold_id) {
+        give_back(&h);
+    }
+}
+
+/// The operators' release of a hold whose transaction never landed (it
+/// was dropped from every mempool), by the hold's id.
+pub fn release_hold(hold_id: u64) -> Result<GasHold, String> {
+    let h = take_hold(|h| h.id == hold_id).ok_or_else(|| format!("no gas hold {hold_id}"))?;
+    give_back(&h);
+    Ok(h)
+}
+
+pub fn totals(ledger: &Principal) -> GasTotals {
+    crate::kv::get_json(&format!("{TOTALS_PREFIX}{}", ledger.to_text())).unwrap_or_default()
+}
+
+fn charges_key(ledger: &Principal, who: &Principal) -> String {
+    format!("gas:charges:{}:{}", ledger.to_text(), who.to_text())
+}
+
+/// `who`'s most recent settled charges on the ledger in force, newest last.
+pub fn charges(who: &Principal) -> Result<Vec<GasCharge>, String> {
+    Ok(charges_on(&ledger()?, who))
+}
+
+pub fn charges_on(ledger: &Principal, who: &Principal) -> Vec<GasCharge> {
+    crate::kv::get_json(&charges_key(ledger, who)).unwrap_or_default()
+}
+
+/// Settle the transaction `tx_hash` on its receipt, if it holds any
+/// balance: charge what it cost and the markup, never more than its hold,
+/// and give the rest back. Once: a second receipt finds no hold.
+pub fn settle_tx(tx_hash: &str, gas_used: u128, effective_gas_price: u128) -> Option<GasCharge> {
+    let tx = tx_hash.to_ascii_lowercase();
+    let h = take_hold(|h| h.tx_hash.as_deref() == Some(tx.as_str()))?;
+    let cost = gas_used.saturating_mul(effective_gas_price).min(h.amount);
+    let markup = markup_of(cost, h.markup_bps).min(h.amount - cost);
+    let mut a = account_on(&h.ledger, &h.who);
+    a.reserved = a.reserved.saturating_sub(h.amount);
+    a.available = a.available.saturating_add(h.amount - cost - markup);
+    a.spent = a.spent.saturating_add(cost);
+    a.markup = a.markup.saturating_add(markup);
+    save(&h.ledger, &h.who, &a);
+    let mut t = totals(&h.ledger);
+    t.spent = t.spent.saturating_add(cost);
+    t.markup = t.markup.saturating_add(markup);
+    crate::kv::set_json(&format!("{TOTALS_PREFIX}{}", h.ledger.to_text()), &t);
+    let charge = GasCharge { tx_hash: tx, gas_used, effective_gas_price, cost, markup, at_ns: crate::clock::now_ns() };
+    let key = charges_key(&h.ledger, &h.who);
+    let mut list: Vec<GasCharge> = crate::kv::get_json(&key).unwrap_or_default();
+    list.push(charge.clone());
+    if list.len() > CHARGES_KEEP {
+        let drop = list.len() - CHARGES_KEEP;
+        list.drain(0..drop);
+    }
+    crate::kv::set_json(&key, &list);
+    Some(charge)
 }
 
 // --- transfers in flight -------------------------------------------------------------
@@ -763,6 +977,93 @@ mod tests {
         assert_eq!(account_on(&ck(), &who).available, 400);
     }
 
+    /// The ledger a send holds gas in is the one for the chain it signs
+    /// for, whatever chain the config says by the time it reserves; the
+    /// operators' choice of ledger wins over both.
+    #[test]
+    fn a_send_holds_gas_in_its_own_chains_asset() {
+        assert_eq!(ledger_of(None, 1).unwrap().to_text(), CKETH_LEDGER);
+        assert_eq!(ledger_of(None, 11155111).unwrap().to_text(), CKSEPOLIAETH_LEDGER);
+        assert!(ledger_of(None, 31337).unwrap_err().contains("no ck asset"));
+        assert_eq!(ledger_of(Some(p(40)), 11155111).unwrap(), p(40));
+    }
+
+    #[test]
+    fn the_markup_rounds_up() {
+        assert_eq!(markup_of(10_000, 100), 100);
+        assert_eq!(markup_of(10_001, 100), 101, "a part of a unit is a unit");
+        assert_eq!(markup_of(0, 100), 0);
+        assert_eq!(markup_of(123, 0), 0);
+        assert_eq!(markup_of(u128::MAX, 10_000), u128::MAX / 10_000 + 1, "saturates, never wraps");
+    }
+
+    /// A reservation of the whole limit at the max fee, with the markup;
+    /// the receipt charges what was used at the price paid, with the
+    /// markup, and the rest comes back.
+    #[test]
+    fn a_transaction_reserves_its_most_and_is_charged_what_it_used() {
+        let l = p(130);
+        let who = p(30);
+        credit(&l, &who, 10_000_000);
+        let h = reserve(&who, l, 100_000, 50).unwrap();
+        // The rate the hold took, as the pricing table may change under a
+        // test running beside this one.
+        let bps = h.markup_bps;
+        let most = 5_000_000 + markup_of(5_000_000, bps);
+        assert_eq!(h.amount, most);
+        let a = account_on(&l, &who);
+        assert_eq!((a.available, a.reserved), (10_000_000 - most, most));
+        attach(h.id, "0xABCD");
+        let c = settle_tx("0xabcd", 60_000, 40).unwrap();
+        assert_eq!((c.cost, c.markup), (2_400_000, markup_of(2_400_000, bps)));
+        let a = account_on(&l, &who);
+        assert_eq!(a.reserved, 0);
+        assert_eq!(a.available, 10_000_000 - c.cost - c.markup);
+        assert_eq!((a.spent, a.markup), (c.cost, c.markup));
+        assert!(settle_tx("0xabcd", 60_000, 40).is_none(), "settled once");
+        assert_eq!(charges_on(&l, &who), vec![c.clone()]);
+        assert_eq!(totals(&l).spent, c.cost);
+    }
+
+    #[test]
+    fn a_short_balance_reserves_nothing_and_a_release_gives_it_all_back() {
+        let l = p(131);
+        let who = p(31);
+        credit(&l, &who, 1_000);
+        let e = reserve(&who, l, 21_000, 1).unwrap_err();
+        assert!(e.contains("deposit with deposit_gas"), "{e}");
+        assert_eq!(account_on(&l, &who).reserved, 0);
+        assert!(holds().iter().all(|h| h.who != who));
+        credit(&l, &who, 100_000);
+        let h = reserve(&who, l, 21_000, 1).unwrap();
+        release(h.id);
+        let a = account_on(&l, &who);
+        assert_eq!((a.available, a.reserved), (101_000, 0));
+        // The operators' release, for a transaction that never landed.
+        let h = reserve(&who, l, 21_000, 1).unwrap();
+        attach(h.id, "0x01");
+        assert_eq!(release_hold(h.id).unwrap().id, h.id);
+        assert!(release_hold(h.id).is_err());
+        assert!(settle_tx("0x01", 1, 1).is_none(), "nothing left to settle");
+        assert_eq!(account_on(&l, &who).available, 101_000);
+    }
+
+    /// A receipt that says more than was reserved (the price above the cap
+    /// cannot happen on chain, but the arithmetic must not wrap) charges
+    /// the hold and no more.
+    #[test]
+    fn no_settlement_charges_more_than_its_hold() {
+        let l = p(132);
+        let who = p(32);
+        credit(&l, &who, 1_000_000);
+        let h = reserve(&who, l, 21_000, 10).unwrap();
+        attach(h.id, "0x02");
+        let c = settle_tx("0x02", 21_000, u128::MAX).unwrap();
+        assert_eq!(c.cost + c.markup, h.amount);
+        let a = account_on(&l, &who);
+        assert_eq!((a.available, a.reserved), (1_000_000 - h.amount, 0));
+    }
+
     #[test]
     fn ledger_replies_are_told_apart() {
         let n = |x: u64| Nat::from(x);
@@ -786,7 +1087,7 @@ mod tests {
 
     #[test]
     fn a_balance_round_trips_through_storage() {
-        let a = GasAccount { ledger: ck(), available: u128::MAX, deposited: 1, withdrawn: 2, created_ns: 3 };
+        let a = GasAccount { ledger: ck(), available: u128::MAX, deposited: 1, withdrawn: 2, created_ns: 3, reserved: 4, spent: 5, markup: 6 };
         save(&ck(), &p(16), &a);
         assert_eq!(account_on(&ck(), &p(16)), a);
         let bytes = candid::encode_one(&a).unwrap();
