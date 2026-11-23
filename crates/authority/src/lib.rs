@@ -20,6 +20,7 @@ pub mod feed;
 pub mod fleet;
 pub mod for_git;
 pub mod funding;
+pub mod gas;
 pub mod icp;
 pub mod ingress;
 pub mod ledger;
