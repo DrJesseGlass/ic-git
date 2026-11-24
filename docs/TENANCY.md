@@ -341,7 +341,9 @@ it.
   pulls the amount with `icrc2_transfer_from` and credits it whole. At
   least ten of the ledger's fees. `withdraw_gas(amount)` sends what is
   not held back to the caller's own account on the ledger, less one
-  fee. Each transfer is recorded in `pending_gas_transfers` before
+  fee; it is refused, costing nothing, during the few seconds an hour
+  ic-git reads its own balance there to refill its EOA (docs/EVM_GAS.md,
+  section 5), and goes through when asked again. Each transfer is recorded in `pending_gas_transfers` before
   anything moves, under an id that is also its `created_at_time`, and
   `finish_gas_transfer(id)` (the one it is for, or an operator) replays
   one whose outcome was unknown, which the ledger takes only once; past

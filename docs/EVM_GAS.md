@@ -134,9 +134,15 @@ later satoshis); there is no floating point anywhere in it.
   That leaves the gas tenants have paid for and the EOA has not been
   given back. The balance and what is owed are taken as of one moment:
   a withdrawal that settles while the balance is read would be in the
-  one and gone from the other, so a read during which a tenant's
-  transfer moved is made again. The ledger and the minter are asked
-  first, so a tick with nothing to refill from pays for no outcall.
+  one and gone from the other. So no withdrawal goes out while the
+  balance is read (one asked for meanwhile is refused, to be asked
+  again in a few seconds), and a read that one already out settled
+  during is made again, up to three times; the first none settled
+  during is taken. If every read was touched, the last is taken with
+  what those withdrawals took left out as well, which errs low for one
+  tick. Nothing a caller does makes the read fail or count a tenant's
+  balance as paid. The ledger and the minter are asked first, so a
+  tick with nothing to refill from pays for no outcall.
 - **The minter is the record of each refill.** A tick first reads ic-git's
   withdrawals from the minter (`withdrawal_status`), which also finds a
   refill whose reply an upgrade dropped. One not finished blocks the
