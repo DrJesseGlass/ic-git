@@ -49,8 +49,10 @@
 # instead: the git canister is governed before the authority names it (the
 # setter's rule), each side refuses the other's messages from anyone else,
 # a job larger than a message crosses in chunks, deploy_now's job comes back
-# staged, and each canister is upgraded in place (the git canister by its
-# governor). The freeze and the copy, the upgrade from BASE_REF and the
+# staged, each canister is upgraded in place (the git canister by its
+# governor), and a second authority is upgraded while a mirror write its
+# stopped git canister has not taken is still pending, which post_upgrade
+# leaves to the retry. The freeze and the copy, the upgrade from BASE_REF and the
 # governor's own section run only on the combined canister: the first two
 # are the cut's rehearsal, the third the governor's, and none changes
 # with the split.
@@ -213,7 +215,10 @@ cat > "$WORK/dfx.json" <<EOF
     "ruled": { "type": "custom", "wasm": "$GIT_WASM", "candid": "$DID", "build": [] },
     "copy": { "type": "custom", "wasm": "$GITC_WASM", "candid": "$GITC_DID", "build": [] },
     "copygov": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] },
-    "governor": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] }$NAMES_ENTRY
+    "governor": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] },
+    "pending-auth": { "type": "custom", "wasm": "$AUTH_WASM", "candid": "$AUTH_DID", "build": [] },
+    "pending-git": { "type": "custom", "wasm": "$GITC_WASM", "candid": "$GITC_DID", "build": [] },
+    "pending-gov": { "type": "custom", "wasm": "$GOV_WASM", "candid": "$ROOT/canisters/governor/governor.did", "build": [] }$NAMES_ENTRY
   },
   "networks": { "local": { "bind": "127.0.0.1:$PORT", "type": "ephemeral" } }
 }
@@ -1046,7 +1051,9 @@ fi
 section "upgrade in place (same build)"
 BEFORE=$(served)
 if [ "$SPLIT" = 1 ]; then
-  (cd "$WORK" && dfx canister install authority --mode upgrade --yes --identity "$OP" --wasm "$AUTH_WASM" >/dev/null 2>&1)
+  # --upgrade-unchanged: dfx skips a module it finds installed, and
+  # post_upgrade would never run.
+  expect "the authority upgrades in place" "$( (cd "$WORK" && dfx canister install authority --mode upgrade --upgrade-unchanged --yes --identity "$OP" --wasm "$AUTH_WASM" 2>&1) && echo '<upgraded>' || true)" '<upgraded>$'
   # The git canister is governed: its upgrade is a proposal (docs/GOVERNOR.md).
   GOVN=gitgov
   GITC_SHA=$(sha "$GITC_WASM")
@@ -1061,7 +1068,7 @@ if [ "$SPLIT" = 1 ]; then
   expect "  ...and the git canister's record went to the authority, which checked its module (no registry here)" "$UGOUT" 'record not published: no (EVM config|registry)'
   GOVN=governor
 else
-  (cd "$WORK" && dfx canister install git --mode upgrade --yes --identity "$OP" --wasm "$GIT_WASM" >/dev/null 2>&1)
+  expect "the canister upgrades in place" "$( (cd "$WORK" && dfx canister install git --mode upgrade --upgrade-unchanged --yes --identity "$OP" --wasm "$GIT_WASM" 2>&1) && echo '<upgraded>' || true)" '<upgraded>$'
 fi
 expect "site unchanged" "$(served)" "^${BEFORE%% *} ${BEFORE#* }"
 expect "  ...certified again, from stable memory" "$(nserved)" "^${BEFORE%% *} ${BEFORE#* }"
@@ -1071,6 +1078,46 @@ expect "balance kept" "$(ic "$TEN" get_account "(principal \"$T\")")" 'deposited
 expect "push-cert still offered (the seed survived)" "$(curl -s "http://ic:$BOUND@$HOST/e2e-app.git/info/refs?service=git-receive-pack" | tr '\0' ' ')" 'push-cert='
 commit site/e.txt e after-upgrade
 expect "signed push after upgrade" "$(signed "$URL")" 'main -> main'
+
+if [ "$SPLIT" = 1 ]; then
+  section "an upgrade while a mirror write is pending"
+  # A mirror write the git canister has not taken stays marked, and the
+  # authority's post_upgrade leaves it to a timer: a call is refused in
+  # post_upgrade, so writing it there would trap the upgrade, and any
+  # tenant can keep a mark pending. A second pair, so the first stays
+  # governed: its git canister is handed to the operator, who stops it.
+  (cd "$WORK" && dfx canister create pending-auth --identity "$OP" --no-wallet --with-cycles 20000000000000 >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister install pending-auth --identity "$OP" --wasm "$AUTH_WASM" >/dev/null 2>&1)
+  PA=$(cd "$WORK" && dfx canister id pending-auth)
+  (cd "$WORK" && dfx canister create pending-git --identity "$OP" --no-wallet --with-cycles 5000000000000 >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister install pending-git --identity "$OP" --wasm "$GITC_WASM" --argument "(record { authority = principal \"$PA\" })" >/dev/null 2>&1)
+  PG=$(cd "$WORK" && dfx canister id pending-git)
+  (cd "$WORK" && dfx canister create pending-gov --identity "$OP" --no-wallet --with-cycles 5000000000000 >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister install pending-gov --identity "$OP" --wasm "$GOV_WASM" \
+    --argument "(record { target = principal \"$PG\"; approvers = vec { principal \"$OPP\" }; threshold = 1 : nat32 })" >/dev/null 2>&1)
+  PGOV=$(cd "$WORK" && dfx canister id pending-gov)
+  (cd "$WORK" && dfx canister update-settings pending-gov --remove-controller "$OPP" --yes --identity "$OP" >/dev/null 2>&1)
+  (cd "$WORK" && dfx canister update-settings pending-git --set-controller "$PGOV" --yes --identity "$OP" >/dev/null 2>&1)
+  expect "a second authority names its git canister" "$(call "$OP" pending-auth set_git_canister "(principal \"$PG\")")" 'Ok'
+  expect "  ...and creates a repo there" "$(call "$OP" pending-auth create_repo '("pending-app")')" 'Ok'
+  PH=$(call "$OP" pending-gov propose "(variant { Handover = record { successor = principal \"$OPP\" } })" | id_of)
+  expect "  ...its git canister handed to the operator" "$(flat "$(call "$OP" pending-gov vote "($PH : nat64, variant { Approve }, null)")")" "is now controlled by $OPP alone"
+  (cd "$WORK" && dfx canister stop pending-git --identity "$OP" >/dev/null 2>&1)
+  call "$OP" pending-auth add_member "(\"pending-app\", principal \"$T\", \"writer\")" >/dev/null
+  expect "with the git canister stopped, a writer added leaves the push policy marked" "$(call "$OP" pending-auth get_mirrors_pending --query)" '"pending-app"'
+  PUP=$( (cd "$WORK" && dfx canister install pending-auth --mode upgrade --upgrade-unchanged --yes --identity "$OP" --wasm "$AUTH_WASM" 2>&1) && echo '<upgraded>' || true)
+  expect "the authority upgrades with the write still pending" "$PUP" '<upgraded>$'
+  expect "  ...and keeps the mark" "$(call "$OP" pending-auth get_mirrors_pending --query)" '"pending-app"'
+  (cd "$WORK" && dfx canister start pending-git --identity "$OP" >/dev/null 2>&1)
+  # The timer post_upgrade armed found the git canister stopped, so its
+  # retry comes RETRY_SECS (30) later.
+  for _ in $(seq 1 90); do
+    PM=$(call "$OP" pending-auth get_mirrors_pending --query)
+    printf '%s' "$PM" | grep -q 'vec {}' && break
+    sleep 1
+  done
+  expect "  ...which the retry writes once the git canister answers" "$PM" '\(vec \{\}\)'
+fi
 
 if [ -n "$BASE_WASM" ]; then
   section "upgrade from $BASE_REF"
@@ -1249,7 +1296,7 @@ expect "handover executed at the second approval" "$(flat "$(gov "$V2" vote "($H
 expect "  ...the target's only controller is the successor" "$(flat "$(cd "$WORK" && dfx canister info "$R" --identity "$OP" 2>&1)")" "Controllers: $OPP *Module"
 expect "  ...the governor says so" "$(flat "$(gov "$OP" info --query)")" "handed_over_to = opt principal \"$OPP\""
 expect "  ...and refuses anything further" "$(gov "$OP" propose "$(upgrade_to "$GZ_SHA")")" 'inert'
-expect "the successor can upgrade the target again" "$( (cd "$WORK" && dfx canister install ruled --mode upgrade --yes --identity "$OP" --wasm "$GZ" 2>&1) || true)" 'Upgraded|Installed|Module hash'
+expect "the successor can upgrade the target again" "$( (cd "$WORK" && dfx canister install ruled --mode upgrade --upgrade-unchanged --yes --identity "$OP" --wasm "$GZ" 2>&1) || true)" 'Upgraded|Installed|Module hash'
 fi
 
 section "console reads"

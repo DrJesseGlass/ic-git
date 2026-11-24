@@ -3311,6 +3311,38 @@ mod tests {
         crate::to_git::set_test_side(None);
     }
 
+    /// post_upgrade's `resume` writes nothing: a write is a call, which
+    /// the IC refuses in post_upgrade, so one there would trap the
+    /// upgrade. It arms the retry, which writes the marked mirrors once
+    /// the canister is idle; with nothing marked it arms nothing.
+    #[test]
+    fn resume_writes_nothing_and_leaves_the_marks_to_the_retry() {
+        use crate::mirrors::{self, Mirror};
+        let git = Rc::new(Flaky::new());
+        crate::to_git::set_test_side(Some(git.clone()));
+        let (alice, w) = (p(47), p(48));
+        credit(&alice, 10_000_000_000);
+        create_repo("t-resume", &alice, false).unwrap();
+        git.inject("set_push_policy", Inject::NotDelivered);
+        add_member("t-resume", &alice, false, w, Role::Writer).unwrap();
+        assert_eq!(mirrors::pending("t-resume"), vec![Mirror::PushPolicy]);
+        mirrors::take_retry_armed();
+
+        let calls = git.calls.borrow().len();
+        mirrors::resume();
+        assert_eq!(git.calls.borrow().len(), calls, "no call from post_upgrade");
+        assert_eq!(mirrors::pending("t-resume"), vec![Mirror::PushPolicy], "the mark kept");
+        assert!(mirrors::take_retry_armed(), "the retry armed");
+
+        // What the retry's timer runs.
+        run(mirrors::flush_all());
+        assert!(mirrors::pending("t-resume").is_empty());
+        assert!(crate::mirror::may_write("t-resume", &w, false).is_ok());
+        mirrors::resume();
+        assert!(!mirrors::take_retry_armed(), "nothing marked, nothing armed");
+        crate::to_git::set_test_side(None);
+    }
+
     /// The cut (docs/CANISTER_SPLIT.md, step 16.4): a git side holding the
     /// repos with none of their mirrors -- the git canister after the
     /// import -- serves none of the sites until `rewrite_all` has written

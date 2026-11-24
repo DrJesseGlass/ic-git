@@ -24,7 +24,6 @@ use ic_git_types::git_side::Retry;
 use ic_git_types::side::Reply;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
-use std::future::Future;
 
 thread_local! {
     /// True while a retry timer is armed, so an outage arms one, not one
@@ -264,18 +263,18 @@ pub fn mark_all() {
     }
 }
 
-/// For post_upgrade, after everything that marks: the marked mirrors are
-/// written before the upgrade's first message, as they were when the
-/// mirrors were filled in place, so no push finds them empty. In one
-/// canister the writes complete at once; a git side that answers later
-/// (step 12) is left to the timer, as timers do not survive an upgrade.
+/// For post_upgrade: timers do not survive an upgrade, so the marked
+/// mirrors are written again as soon as the canister is idle, as the git
+/// side's outbox is (outbox::resume). Never in post_upgrade itself: a
+/// write to the git canister is a call, which the IC refuses there, so
+/// the upgrade would trap; and any tenant can keep a mark pending (a
+/// ballot or a writer changed while the last write is out keeps it), so
+/// they could block every install. The combined canister loses nothing
+/// by the wait: its git side answers at once and never fails, so a mark
+/// there is cleared in the message that made it, and none is left for an
+/// upgrade to find.
 pub fn resume() {
-    if repos_pending().is_empty() {
-        return;
-    }
-    let mut flush = Box::pin(flush_all());
-    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    if flush.as_mut().poll(&mut cx).is_pending() {
+    if !repos_pending().is_empty() {
         arm_retry(std::time::Duration::ZERO);
     }
 }
@@ -295,4 +294,10 @@ fn arm_retry(delay: std::time::Duration) {
 #[cfg(any(test, feature = "testing"))]
 fn arm_retry(_delay: std::time::Duration) {
     RETRY_ARMED.with(|a| a.set(true));
+}
+
+/// Whether a retry was armed since the last ask, for tests.
+#[cfg(test)]
+pub fn take_retry_armed() -> bool {
+    RETRY_ARMED.with(|a| a.replace(false))
 }
