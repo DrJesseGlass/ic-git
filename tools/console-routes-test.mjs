@@ -62,7 +62,7 @@ console.log('PASS  the other canister\'s origin keeps the gateway and the port')
 // Every call the console makes on its own canisters lands on one that has
 // the method. Ledger calls name their canister and are not routed.
 const console_ = block('// === end routes ===', '// === end console ===');
-const LEDGER = new Set(['icrc2_approve', 'icrc1_balance_of', 'get_icp_xdr_conversion_rate']);
+const LEDGER = new Set(['icrc2_approve', 'icrc1_balance_of', 'icrc1_fee', 'icrc1_decimals', 'icrc1_symbol', 'get_icp_xdr_conversion_rate']);
 const called = new Set([...console_.matchAll(/\b(?:write|s)\('([a-z_0-9]+)'/g), ...console_.matchAll(/IC\.query\([A-Za-z_().']+, '([a-z_0-9]+)'/g)].map(m => m[1]).filter(m => !LEDGER.has(m)));
 const cfg = [...console_.matchAll(/cfg\('([a-z_0-9]+)'\)/g)].map(m => m[1]);
 // Every query names its canister through the routes (at(method)), a

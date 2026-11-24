@@ -1,12 +1,13 @@
 # EVM gas -- tenants pay in the chain's asset, held on the IC
 
 Status: **design, 2026-11-22. Built: leg 1, the balance (#197); leg 2,
-the reservation and settlement of each transaction (#198); and leg 3a,
-the float's measure and invariant; and leg 3b, the refill through the
-minter and its accounting. Not yet: leg 4 (the console).** It replaces a first draft the same
-day that gave each repo an EVM address of its own. That draft was
-dropped because it spread ic-git's ETH over one address per
-repo and ruled out putting many records in one transaction. Companion
+the reservation and settlement of each transaction (#198); leg 3a, the
+float's measure and invariant (#199); leg 3b, the refill through the
+minter and its accounting (#200); and leg 4, the console and
+docs/TENANCY.md.** It replaces a first draft the same day that gave
+each repo an EVM address of its own. That draft was dropped because it
+spread ic-git's ETH over one address per repo and ruled out putting many
+records in one transaction. Companion
 to docs/TENANCY.md (who pays, in cycles) and `crates/authority/src/evm.rs`
 (the signer).
 
@@ -151,8 +152,18 @@ later satoshis); there is no floating point anywhere in it.
   a lost reply included, since that refill's costs are not booked yet.
 - **The operators seed the first float**, and they fund the EOA for
   ic-git's own records.
-- **The watch** reads the EOA's balance, the target and floor, and the
-  sum of the holds, as it reads the canisters' cycles.
+- **The watch** (`tools/check-module-hash.sh`, every six hours) checks
+  the float as it checks the canisters' cycles. The floor, the target,
+  the margin and the sum of the holds come from `get_gas_float`. The
+  EOA's balance is read from the chain, since the canister's own read is
+  as old as the last send or refresh and a refill does not renew it: at
+  the finalized block, as the canister reads it at a send, through the
+  canister's own RPC URL or else the chain's public one, which must
+  answer for the float's chain. Under the floor, or under the open holds
+  and the margin, fails the watch, which emails the operators while
+  there is time to fund the EOA. Until the canister has read the balance
+  once (a tenant's send, or `gas_float_refresh` after the release that
+  brings this), the watch does not know the EOA's address, and notes it.
 
 ## 6. Many records in one transaction (later)
 
