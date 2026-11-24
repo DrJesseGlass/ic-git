@@ -1102,12 +1102,19 @@ const Console = (() => {
     // The gas balance (gas.rs; docs/EVM_GAS.md, section 3): the EVM chain's
     // own asset, ckETH or ckSepoliaETH, held here to pay the gas of your
     // repos' EVM transactions. With no chain configured the authority names
-    // no gas ledger, and none of it is drawn.
+    // no gas ledger (its Err), and an authority from before gas balances has
+    // no such method (IC0536, as in the routes): then none of it is drawn.
+    // Any other failure is said, so a tenant with a balance or a transfer to
+    // finish is not left without the section and no word why.
     const unwrap = r => { if (r && 'Err' in r) throw new Error(r.Err); return r && 'Ok' in r ? r.Ok : r; };
     async function drawGas() {
       const el = document.getElementById('gas'); if (!el) return;
-      let ledger;
-      try { ledger = unwrap((await IC.query(at('get_gas_ledger'), 'get_gas_ledger', [], []))[0]); } catch (e) { console.warn('get_gas_ledger: ' + e.message); return; }
+      const unread = e => { el.innerHTML = '<p class="bad">the gas balance could not be read: ' + esc(e.message) + '</p>'; };
+      let named;
+      try { named = (await IC.query(at('get_gas_ledger'), 'get_gas_ledger', [], []))[0]; }
+      catch (e) { if (e.errorCode !== 'IC0536' && !/no query method/i.test(e.message)) unread(e); return; }
+      if ('Err' in named) return;
+      const ledger = named.Ok;
       let acct, charges, fee, decimals, symbol;
       try {
         [acct, charges, fee, decimals, symbol] = await Promise.all([
@@ -1116,7 +1123,7 @@ const Console = (() => {
           IC.query(ledger, 'icrc1_fee', [], []).then(r => r[0]),
           IC.query(ledger, 'icrc1_decimals', [], []).then(r => r[0]),
           IC.query(ledger, 'icrc1_symbol', [], []).then(r => r[0])]);
-      } catch (e) { el.innerHTML = '<p class="bad">the gas balance could not be read: ' + esc(e.message) + '</p>'; return; }
+      } catch (e) { unread(e); return; }
       const amt = n => fmtUnits(n, decimals, symbol);
       const least = 10n * fee; // gas.rs MIN_DEPOSIT_FEES
       // Newest first; the canister keeps the last few.
@@ -1139,7 +1146,9 @@ const Console = (() => {
         const mine = r[0].filter(p => p.who === me), box = document.getElementById('gas-pending');
         if (!box) return;
         box.innerHTML = !mine.length ? '' : '<p class="bad">gas transfers not yet settled:</p><table>' + mine.map(p => '<tr><td>' + ('Deposit' in p.direction ? 'deposit' : 'withdrawal') + ' of ' + esc(amt(p.amount)) + '</td><td class="muted">' +
-          (p.uncertain ? 'outcome unknown' : 'not settled') + (p.last_error ? ': ' + esc(p.last_error) : '') + '</td><td><button class="gas-finish" type="button" data-id="' + esc(p.id) + '">finish</button></td></tr>').join('') + '</table><p id="gas-pending-st" class="status"></p>';
+          // An attempt under way keeps its button: the mark outlives an
+          // upgrade that dropped the reply, and finishing is what clears it.
+          (p.uncertain ? 'outcome unknown' : p.in_flight ? 'an attempt is under way, or was cut off' : 'not settled') + (p.last_error ? ': ' + esc(p.last_error) : '') + '</td><td><button class="gas-finish" type="button" data-id="' + esc(p.id) + '">finish</button></td></tr>').join('') + '</table><p id="gas-pending-st" class="status"></p>';
         box.querySelectorAll('button.gas-finish').forEach(b => { b.onclick = async () => {
           b.disabled = true;
           status('gas-pending-st', 'waiting for wallet...', true);

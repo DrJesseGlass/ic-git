@@ -154,12 +154,16 @@ later satoshis); there is no floating point anywhere in it.
   ic-git's own records.
 - **The watch** (`tools/check-module-hash.sh`, every six hours) checks
   the float as it checks the canisters' cycles. The floor, the target,
-  the margin and the sum of the holds come from `get_gas_float`; the
-  EOA's balance is read live from the chain, at the RPC URL the canister
-  is configured with, since the canister's own read is as old as the
-  last send or refresh and a refill does not renew it. Under the floor,
-  or under the open holds and the margin, fails the watch, which emails
-  the operators while there is time to fund the EOA.
+  the margin and the sum of the holds come from `get_gas_float`. The
+  EOA's balance is read from the chain, since the canister's own read is
+  as old as the last send or refresh and a refill does not renew it: at
+  the finalized block, as the canister reads it at a send, through the
+  canister's own RPC URL or else the chain's public one, which must
+  answer for the float's chain. Under the floor, or under the open holds
+  and the margin, fails the watch, which emails the operators while
+  there is time to fund the EOA. Until the canister has read the balance
+  once (a tenant's send, or `gas_float_refresh` after the release that
+  brings this), the watch does not know the EOA's address, and notes it.
 
 ## 6. Many records in one transaction (later)
 

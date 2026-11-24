@@ -886,13 +886,16 @@ the wallet signs, so the page never holds a key. It stays one self-contained
 file, so its attestation still covers every byte that runs.
 
 The panel also shows what the wallet holds on the ICP and cycles ledgers, and
-on the gas ledger, so a tenant can see what there is to deposit. The gas
-ledger's own `icrc1_decimals` and `icrc1_symbol` name its amounts, so
-the section reads the same for ckETH, ckSepoliaETH, or a local stand-in. Those two reads cannot go through
-`/api` (a query cannot make inter-canister calls), so the page posts anonymous
-`icrc1_balance_of` queries straight to the IC HTTP API at `icp-api.io` and
-takes the boundary node's reply as is. A ledger that does not answer shows as
-`?`; nothing else on the page depends on it.
+on the gas ledger, so a tenant can see what there is to deposit. These ledger
+reads cannot go through `/api` (a query cannot make inter-canister calls), so
+the page posts anonymous queries straight to the IC HTTP API at `icp-api.io`
+and takes the boundary node's reply as is: `icrc1_balance_of` on each ledger,
+and on the gas ledger also `icrc1_fee`, `icrc1_decimals` and `icrc1_symbol`,
+whose decimals and symbol name its amounts, so the gas section reads the same
+for ckETH, ckSepoliaETH, or a local stand-in. A balance that does not answer
+shows as `?`, and a gas ledger whose fee, decimals or symbol do not answer
+leaves the gas section saying it could not be read; nothing else on the page
+depends on them.
 
 ## Operator notes
 
@@ -952,8 +955,11 @@ takes the boundary node's reply as is. A ledger that does not answer shows as
   the EOA's balance as last read against its target, floor and margin,
   and the sum of open holds, with no outcall; `gas_float_refresh`
   (operators) reads it now. The six-hourly watch
-  (`tools/check-module-hash.sh`) reads the balance live from the chain
-  and fails under the floor, or under the open holds and the margin. The refill runs hourly; `gas_refill_now`
+  (`tools/check-module-hash.sh`) reads the balance from the chain at the
+  finalized block and fails under the floor, or under the open holds
+  and the margin. It learns the EOA's address from the canister's last
+  read, so after the release that brings it, one `gas_float_refresh`
+  lets it check. The refill runs hourly; `gas_refill_now`
   runs one on demand and `get_gas_refills` lists every refill as the
   minter reports it. `gas_credit_surplus` credits the markup's surplus
   back to the balances it came from, and is refused while a refill is

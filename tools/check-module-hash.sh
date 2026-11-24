@@ -182,21 +182,32 @@ eth() { local w f; w=$(dec_norm "$1"); while [ ${#w} -lt 19 ]; do w=0$w; done; f
 # nat_field <candid text> <name>: the value of a record field `name = 1_000 : nat`.
 nat_field() { printf '%s\n' "$1" | sed -n "s/.*[^a-z_]$2 = \([0-9_]*\) : nat.*/\1/p" | tr -d _; }
 
+# rpc <url> <method> <params>: a JSON-RPC call's hex result, empty when there is none.
+rpc() { curl -fsS --max-time 20 -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"'"$2"'","params":'"$3"'}' "$1" 2>"$info_err" | sed -n 's/.*"result" *: *"\(0x[0-9a-fA-F]*\)".*/\1/p'; }
+# The chain's public RPC, for a canister that names none of its own: it
+# then sends through the EVM RPC canister's presets, which only it reaches.
+default_rpc() { case $1 in 1) echo https://ethereum-rpc.publicnode.com ;; 11155111) echo https://ethereum-sepolia-rpc.publicnode.com ;; esac; }
+
 # gas_float <canister> <did>: ic-git's float (docs/EVM_GAS.md, section 5),
 # the ETH its EOA holds to pay for EVM transactions before tenants pay it
 # back. The canister's get_gas_float names the floor, the target, the
 # margin and what open transactions hold; its own balance read is as old
 # as the last send or refresh, and a refill does not renew it, so the
-# balance is read here, live, from the chain's RPC URL the canister is
-# configured with (evm_get_config; GAS_RPC_URL overrides it), at the
-# address of the canister's last read. Under the floor is status 1: the
-# hourly refill should have brought it back from what tenants paid
-# (get_gas_refills says why not), or the operators fund it. Under the
-# open holds and the margin, tenants' sends are refused, also status 1. A
-# module without the query, or a canister with no chain, is noted, not
-# failed; a read that fails otherwise is status 3, not a low balance.
+# balance is read here, from the chain, at the address and on the chain
+# of the canister's last read. The RPC URL is the canister's own
+# (evm_get_config), else the chain's public one; GAS_RPC_URL overrides
+# both, and an endpoint on another chain is refused. Like the canister at
+# a send, it reads the finalized block, whose balance has not yet paid for
+# a transaction mined since, and whose hold is still counted. Under the
+# floor is status 1: the hourly refill should have brought it back from
+# what tenants paid (get_gas_refills says why not), or the operators fund
+# it. Under the open holds and the margin, tenants' sends are refused,
+# also status 1. A module without the query, a canister with no chain,
+# and a balance never read are noted, not failed; a read that fails
+# otherwise is status 3, not a low balance. Only the URL's host is
+# printed: an override may carry a provider key.
 gas_float() {
-  local canister=$1 did=$2 out cfg addr url body hex wei floor target margin held need
+  local canister=$1 did=$2 out cfg addr chain url host cid hex wei floor target margin held need
   out=$(dfx canister --network ic --identity "${DFX_IDENTITY:-anonymous}" call "$canister" get_gas_float '()' --candid "$did" --query 2>"$info_err") || out=""
   if [ -z "$out" ]; then
     if grep -q "no query method" "$info_err"; then
@@ -213,10 +224,15 @@ gas_float() {
     return 0 ;;
   esac
   addr=$(printf '%s\n' "$out" | sed -n 's/.*address = "\(0x[0-9a-fA-F]\{40\}\)".*/\1/p')
+  chain=$(nat_field "$out" chain_id)
   floor=$(nat_field "$out" floor) target=$(nat_field "$out" target) margin=$(nat_field "$out" margin) held=$(nat_field "$out" held)
-  if [ -z "$addr" ] || [ -z "$floor" ] || [ -z "$target" ] || [ -z "$margin" ] || [ -z "$held" ]; then
-    echo "gas float           : <unread> -- the EOA's address is known once its balance has been read;" >&2
-    echo "  an operator's gas_float_refresh reads it. This is NOT a low balance." >&2
+  if [ -z "$addr" ] || [ -z "$chain" ]; then
+    echo "gas float           : not checked -- the canister has not read the EOA's balance yet, so"
+    echo "                      its address is not known here; an operator's gas_float_refresh reads it"
+    return 0
+  fi
+  if [ -z "$floor" ] || [ -z "$target" ] || [ -z "$margin" ] || [ -z "$held" ]; then
+    echo "gas float           : <unreadable> -- get_gas_float's answer lacks a size. This is NOT a low balance." >&2
     [ "$status" = 1 ] || status=3
     return 0
   fi
@@ -224,24 +240,33 @@ gas_float() {
   if [ -z "$url" ]; then
     cfg=$(dfx canister --network ic --identity "${DFX_IDENTITY:-anonymous}" call "$canister" evm_get_config '()' --candid "$did" --query 2>"$info_err") || cfg=""
     url=$(printf '%s\n' "$cfg" | tr -d '\n' | sed -n 's/.*rpc_urls = vec { *"\([^"]*\)".*/\1/p')
+    [ -n "$url" ] || url=$(default_rpc "$chain")
   fi
   if [ -z "$url" ]; then
-    echo "gas float           : <unread> -- the canister names no RPC URL to read the EOA's balance from;" >&2
+    echo "gas float           : <unread> -- chain $chain has no RPC URL to read the EOA's balance from;" >&2
     echo "  set GAS_RPC_URL. This is NOT a low balance." >&2
     [ "$status" = 1 ] || status=3
     return 0
   fi
-  body='{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["'"$addr"'","latest"]}'
-  hex=$(curl -fsS --max-time 20 -H 'content-type: application/json' --data "$body" "$url" 2>"$info_err" | sed -n 's/.*"result" *: *"\(0x[0-9a-fA-F]*\)".*/\1/p') || hex=""
+  host=${url#*://} host=${host%%/*} host=${host##*@}
+  cid=$(rpc "$url" eth_chainId '[]') || cid=""
+  if [ -n "$cid" ] && [ "$(hex_dec "$cid")" != "$chain" ]; then
+    echo "gas float           : <unread> -- the RPC at $host is on chain $(hex_dec "$cid"), not the float's chain $chain." >&2
+    echo "  This is NOT a low balance." >&2
+    [ "$status" = 1 ] || status=3
+    return 0
+  fi
+  hex=
+  [ -z "$cid" ] || hex=$(rpc "$url" eth_getBalance '["'"$addr"'","finalized"]') || hex=""
   if [ -z "$hex" ]; then
-    echo "gas float           : <unreadable> -- eth_getBalance at $url did not answer. This is NOT a low balance." >&2
+    echo "gas float           : <unreadable> -- the RPC at $host did not answer. This is NOT a low balance." >&2
     sed 's/^/  curl: /' "$info_err" >&2 || true
     [ "$status" = 1 ] || status=3
     return 0
   fi
   wei=$(hex_dec "$hex")
   need=$(dec_add "$held" "$margin")
-  echo "gas float           : EOA $addr holds $(eth "$wei") ($wei wei, from $url)"
+  echo "gas float           : EOA $addr holds $(eth "$wei") ($wei wei, finalized, chain $chain at $host)"
   echo "                      floor $(eth "$floor"), target $(eth "$target"); open holds $(eth "$held") + margin $(eth "$margin")"
   if dec_lt "$wei" "$floor"; then
     echo "LOW -- the EOA is under its floor; the hourly refill should bring it back to the"
