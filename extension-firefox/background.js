@@ -274,8 +274,13 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
     if (site.status === 'verified') policy = site.policy;
   }
   applied.set(d.requestId, policy);
-  const headers = d.responseHeaders.filter(h => h.name.toLowerCase() !== 'content-security-policy');
+  const headers = d.responseHeaders.filter(h => !['content-security-policy', 'content-type'].includes(h.name.toLowerCase()));
   headers.push({ name: 'Content-Security-Policy', value: policy });
+  // What the tab gets is HTML (decide): the recorded page, which check E
+  // read as UTF-8 HTML, or a document of ours. Typed as the response
+  // said, an XML type would have even the checked bytes parsed as XML,
+  // and another charset would have them read as other text.
+  headers.push({ name: 'Content-Type', value: 'text/html; charset=utf-8' });
   return { responseHeaders: headers };
 }, FILTER, ['blocking', 'responseHeaders']);
 

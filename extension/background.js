@@ -6,7 +6,10 @@
 //   aborts the delivered response at document_start, and the content
 //   script writes in the bytes this worker checked against the registry
 //   record (cached here, so a verified page needs no network at all), or a
-//   bare document under the stop page.
+//   bare document under the stop page. Only an HTML document can be
+//   aborted so, and rules.json types every page under /site/ as one,
+//   whatever the response said. The badge says OK only once the content
+//   script reports the checked bytes written.
 // - Every page under /site/ on an ic-git host is covered by the static
 //   rule in rules.json: a Content-Security-Policy that runs no script. Once
 //   a site's entrypoint verifies, this worker installs a higher-priority
@@ -254,18 +257,33 @@ function badge(tabId, state, site) {
 
 const tell = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg).catch(() => {});
 
+// Tabs that show a site's checked bytes, by the site's key: the badge says
+// OK only for these, once the content script has written the page.
+const shown = new Map();
+
 // A page under /site/ has started loading in `tabId` (its delivered bytes
 // already dropped by main.js). Answer at once with what the tab should show,
 // then check and tell the tab to reload if anything changes.
-async function visit(tabId, href, navStart) {
+async function visit(tabId, href, navStart, contentType) {
+  shown.delete(tabId);
   const at = siteOf(href);
   if (at === null) { badge(tabId, 'uncovered'); await tabRules(tabId, null, []); return { status: 'uncovered' }; }
   const { host, repo } = at, key = keyOf(host, repo);
+  // A document that is not HTML cannot be opened, so the checked bytes
+  // cannot replace it: main.js has stopped and emptied it. rules.json
+  // types every page here as text/html, so a response that still is not
+  // is this navigation's fault, not the site's, and is not remembered.
+  if (contentType !== 'text/html') {
+    const site = { repo, status: 'failed', checks: [{ id: 'X', ok: false, label: 'the page arrives as an HTML document', detail: 'it arrived as ' + contentType + ', which the checked page cannot replace' }] };
+    badge(tabId, 'failed', site);
+    await tabRules(tabId, null, []);
+    return { status: 'failed', site: summary(site) };
+  }
   if (await allowed(tabId, key)) {
     // "Open anyway": the bytes as served now, unchecked, as the user chose.
     badge(tabId, 'allowed', { repo });
     const res = await fetch(siteUrl(host, repo), { cache: 'no-store' });
-    return { status: 'allowed', text: await res.text() };
+    return { status: 'allowed', text: await res.text(), site: { repo } };
   }
   const sites = await load();
   const known = sites[key];
@@ -280,7 +298,8 @@ async function visit(tabId, href, navStart) {
   // now, and refresh behind them. A new record, or a page that no longer
   // verifies, reloads the tab, which then gets the new answer.
   if (known && known.status === 'verified' && known.pinnedAt <= navStart && known.text) {
-    badge(tabId, 'verified', known);
+    // Not OK yet: the tab is not showing the page until it is written.
+    badge(tabId, 'checking', known);
     // This tab's calls: the site's judged backends, before the page runs.
     await tabRules(tabId, key, known.allowedBackends || []);
     const fresh = Date.now() - known.checkedAt < REFRESH_MINUTES * 60_000;
@@ -288,7 +307,7 @@ async function visit(tabId, href, navStart) {
       if (site.status !== 'verified' || site.policy !== known.policy || site.bundleHash !== known.bundleHash) {
         tell(tabId, { type: 'result', status: site.status, reload: true, site: summary(site) });
       } else {
-        if (site.warning !== known.warning) badge(tabId, 'verified', site);
+        if (site.warning !== known.warning && shown.get(tabId) === key) badge(tabId, 'verified', site);
         if (JSON.stringify(site.allowedBackends) !== JSON.stringify(known.allowedBackends)) await tabRules(tabId, key, site.allowedBackends || []);
       }
     }, failSoft);
@@ -310,6 +329,25 @@ async function visit(tabId, href, navStart) {
     tell(tabId, { type: 'result', status: site.status, reload, site: summary(site) });
   }, failSoft);
   return { status: 'checking', site: { repo } };
+}
+
+// The content script has written what visit() gave the tab (`ok`), or found
+// it could not. Only now does a verified page's badge say OK, and only if
+// the site is still in the state that page was given under.
+async function written(tabId, host, repo, ok, navStart) {
+  const key = keyOf(host, repo);
+  if (!ok) {
+    shown.delete(tabId);
+    badge(tabId, 'failed', { repo });
+    return { ok: true };
+  }
+  if (await allowed(tabId, key)) return { ok: true }; // its badge already warns
+  const site = (await load())[key];
+  if (site && site.status === 'verified' && site.pinnedAt <= navStart) {
+    shown.set(tabId, key);
+    badge(tabId, 'verified', site);
+  }
+  return { ok: true };
 }
 
 // What the page needs to draw, and nothing it could misuse.
@@ -349,6 +387,7 @@ const allow = (tabId, host, repo) => exclusive(async () => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
+  shown.delete(tabId);
   tabRules(tabId, null, []);
   return exclusive(async () => {
     const { allowed = {} } = await chrome.storage.session.get('allowed');
@@ -363,12 +402,14 @@ chrome.tabs.onRemoved.addListener(tabId => {
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = sender.tab && sender.tab.id;
   if (tabId === undefined) return false;
-  // A visit names its site by URL; the other messages name a repo, on the
-  // host of the page that sends them.
-  const at = siteOf(msg.type === 'visit' ? msg.url : sender.url);
+  // A visit names its site by URL, and so does the report that its page
+  // was written (the page's code may since have changed the address); the
+  // other messages name a repo, on the host of the page that sends them.
+  const at = siteOf(msg.type === 'visit' || msg.type === 'written' ? msg.url : sender.url);
   const here = at && (msg.type === 'visit' || at.repo === msg.repo) ? at : null;
-  const work = msg.type === 'visit' ? visit(tabId, msg.url, msg.navStart)
+  const work = msg.type === 'visit' ? visit(tabId, msg.url, msg.navStart, msg.contentType)
     : !here ? Promise.reject(new Error('this page is no site\'s entrypoint'))
+    : msg.type === 'written' ? written(tabId, here.host, here.repo, msg.ok === true, msg.navStart)
     : msg.type === 'allow' ? allow(tabId, here.host, here.repo).then(() => ({ ok: true }))
     : msg.type === 'retry' ? verifySite(here.host, here.repo).then(site => ({ status: site.status, site: summary(site) }))
     : Promise.resolve({ error: 'unknown message' });

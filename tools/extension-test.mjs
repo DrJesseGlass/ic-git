@@ -35,7 +35,9 @@ const INJECT = '<script>window.__pwned = 1;</script><script src="' + GW + '/api/
 // to the real canister and passes responses through `rewrite`. Page and
 // extension alike fetch through it. Its certificate is self-signed, so the
 // browser runs with --ignore-certificate-errors -- as a machine that trusts
-// the proxy's root does.
+// the proxy's root does. `rewrite(path, text, headers)` returns the body to
+// serve instead, or { body, type } to serve it as another content type, or
+// null to pass the response through.
 async function proxy(dir, rewrite) {
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=proxy',
     '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
@@ -46,10 +48,11 @@ async function proxy(dir, rewrite) {
       const headers = Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'accept-encoding'].includes(k)));
       const up = await fetch(GW + req.url, { method: req.method, headers, body: chunks.length ? Buffer.concat(chunks) : undefined, redirect: 'manual' });
       let body = Buffer.from(await up.arrayBuffer());
-      const text = rewrite(req.url, body.toString('utf8'));
-      if (text !== null) body = Buffer.from(text);
+      const got = rewrite(req.url, body.toString('utf8'), req.headers);
+      if (got !== null) body = Buffer.from(typeof got === 'string' ? got : got.body);
       const out = {};
       up.headers.forEach((v, k) => { if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection'].includes(k)) out[k] = v; });
+      if (got !== null && typeof got !== 'string') out['content-type'] = got.type;
       res.writeHead(up.status, out);
       res.end(body);
     } catch (e) { res.writeHead(502); res.end(String(e)); }
@@ -264,6 +267,40 @@ const report = (name, ok, got) => {
     const s = await b.state();
     report('targeted markup tampering: the tab shows the checked page, not the delivered one',
       !/HACKED/.test(s.text) && /a git remote on the Internet Computer/.test(s.text) && /repositories/.test(s.text) && !s.overlay, s);
+  } finally { await b.close(); }
+}
+
+// 4c. Targeted, by type: the page's copy is another document, typed as XML,
+// XHTML or SVG -- which document.open() cannot replace. The static rule
+// types every page under /site/ as HTML, so the checked bytes are written
+// as ever. Then the same with the static rules off, which leaves what
+// stands behind that rule: main.js stops and empties the document, takes
+// no write, and the badge is never OK.
+{
+  const XML = '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>x</title></head><body><p>HACKED: send your keys here</p><script>window.__pwned = 1;</script></body></html>';
+  const TYPES = ['text/xml', 'application/xhtml+xml', 'image/svg+xml'];
+  let type = null;
+  // Only the tab's copy: the extension's own fetch of the page is honest.
+  const b = await open({ mitm: (url, t, h) => (type && url === '/site/ic-git/' && h['sec-fetch-dest'] === 'document' ? { body: XML, type } : null) });
+  try {
+    await b.go(CONSOLE, 20_000);
+    for (type of TYPES) {
+      await b.go(CONSOLE, 10_000);
+      const s = await b.state();
+      const ct = await b.evaluate('document.contentType');
+      report('the page\'s copy served as ' + type + ': typed as HTML, the checked page is written, badge OK',
+        ct === 'text/html' && !/HACKED/.test(s.text) && /repositories/.test(s.text) && !s.overlay && s.pwned === 0 && s.badge === 'OK', { ct, ...s });
+    }
+    await b.evaluate("chrome.declarativeNetRequest.updateEnabledRulesets({ disableRulesetIds: ['default'] })", b.sw);
+    for (type of TYPES) {
+      await b.go(CONSOLE, 10_000);
+      const s = await b.state();
+      const ct = await b.evaluate('document.contentType');
+      // Anywhere in the document, not only a body (an XML one may have none).
+      const all = await b.evaluate("document.documentElement ? document.documentElement.textContent : ''");
+      report('without the static rules, served as ' + type + ': stopped and emptied, stop page, badge !',
+        ct === type && !/HACKED/.test(all) && s.overlay && s.pwned === 0 && s.badge === '!', { ct, all: all.slice(0, 80), ...s });
+    }
   } finally { await b.close(); }
 }
 

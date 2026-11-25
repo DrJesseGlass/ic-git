@@ -181,14 +181,23 @@ the page the network delivered:
 1. A static rule (`extension/rules.json`) sets `script-src 'none'` on every
    page under `/site/`. Once a site verifies, a higher-priority session rule
    replaces it with the site's pinned policy. Unchecked or failed pages run
-   no script, and the static rule outlives a browser restart.
+   no script, and the static rule outlives a browser restart. The same rule
+   sets every such page's type to `text/html`, whatever the response said
+   (measurement 15).
 2. At `document_start`, `extension/main.js` (in the page's world) calls
    `document.open()`, which discards the delivered response unparsed; the
    content script then writes in the bytes the background checked against
    the record -- cached since the check, so a verified page needs no
    network -- or a bare page under the checking screen or the stop page.
    The document keeps its origin and the response's policy.
-3. A first visit loads under the static rule, so once the site verifies
+   `document.open()` throws on a document that is not HTML (one typed as
+   XML, XHTML or SVG), which would leave the delivered page to be parsed
+   and shown (measurement 16): hence the type in step 1. Should the type
+   still not be `text/html`, `main.js` stops the load and empties the
+   document instead, and the tab gets the stop page.
+3. The badge says OK only once the page is written: `main.js` acknowledges
+   the write, and the content script reports it to the background.
+4. A first visit loads under the static rule, so once the site verifies
    the tab reloads once under its pinned policy.
 
 What Chrome cannot stop: its preload scanner reads ahead in the delivered
@@ -197,6 +206,11 @@ any extension code runs. Nothing it fetches is shown or run, but a
 tampered page can make the browser send those GETs. Firefox has no such
 residue. (`chrome.debugger` could close it, at the cost of a permanent
 "is debugging this browser" bar; not built.)
+
+Firefox sets the type too, in the same listener as the policy: a held page
+goes out as `text/html; charset=utf-8`, which is how check E read it. Typed
+as the response said, even the recorded bytes could be parsed as XML, or
+decoded as other text.
 
 ### Both
 
@@ -273,7 +287,9 @@ residue. (`chrome.debugger` could close it, at the cost of a permanent
   the live canister and registry, with a real TLS-intercepting proxy as
   the man in the middle: first and second visits, the slash-less address,
   ic-vote, tampering of only the page's response (script injected, text
-  changed), tampering of everything, recovery once tampering stops,
+  changed), only the page's response typed as XML, XHTML or SVG (Chrome
+  also with its static rules off; Firefox also in another charset),
+  tampering of everything, recovery once tampering stops,
   "Open anyway" (Chrome), a page no record covers, and the same sites at
   the gateways' other hosts, which must not load. On Firefox the
   tampered page's injected script and image are shown never to be
@@ -359,6 +375,23 @@ Measured on 2026-11-18, in Chrome for Testing 158.0.8127 and Firefox 160:
     permission for it, which Chrome's package had; the tests load each
     package unpacked, so neither has shown how a store update that adds
     it is offered to the user.
+
+Measured on 2026-11-25, in Chrome for Testing 158.0.8127.88 and Firefox 160.0.1:
+
+15. A rule that sets a main-frame response's `Content-Type` decides the
+    document's type: a page served as `text/xml`, `application/xhtml+xml`
+    or `image/svg+xml` under a rule setting `text/html` is an HTML
+    document, which `document.open()` replaces. Firefox's
+    `onHeadersReceived` does the same for its type and charset; without
+    it, Firefox parsed even the recorded bytes as the response typed them:
+    as XML (the console came out blank) or in the charset it named
+    (ISO-2022-JP).
+16. Without that rule, in Chrome, such a response is an XML document:
+    `document.open()` throws, the page the network delivered is parsed
+    and shown, and the extension as it was before this measurement put
+    its green OK on it. `window.stop()` and `document.replaceChildren()`
+    at `document_start` leave it empty, and a stop page built of elements
+    in the HTML namespace shows there.
 
 ## The extension's own package, on chain
 

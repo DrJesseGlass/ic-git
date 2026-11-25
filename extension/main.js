@@ -9,10 +9,24 @@
 // page. The document keeps its origin and the Content-Security-Policy of
 // the response, so the pinned policy applies to what is written.
 (() => {
+  // Only an HTML document can be opened: on any other (a response typed as
+  // XML, XHTML or SVG) document.open() throws, and the delivered page would
+  // be parsed and shown. rules.json types every page under /site/ as
+  // text/html, so this is that rule not holding: stop the load, empty
+  // what was parsed, and take no write, so the content script finds its
+  // write refused and shows the stop page instead.
+  if (document.contentType !== 'text/html') {
+    window.stop();
+    document.replaceChildren();
+    return;
+  }
   document.open();
-  // After open(), which erases the document's listeners.
+  // After open(), which erases the document's listeners. The write is
+  // acknowledged by cancelling the event, once it is done: the content
+  // script reports the page shown only then.
   document.addEventListener('ic-git-verifier:write', e => {
     document.write(String(e.detail));
     document.close();
+    e.preventDefault();
   }, { once: true });
 })();

@@ -37,7 +37,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const INJECT = '<script>window.__pwned = 1;</script><script src="/site/ic-git/evil.js"></script><img src="/site/ic-git/tracker.png">';
 
 // The proxy. `rewrite(path, text, headers)` returns the body to serve instead,
-// or null to pass it through; `log` gets every path requested of the canister.
+// or { body, type } to serve it as another content type, or null to pass it
+// through; `log` gets every path requested of the canister.
 async function proxy(dir, rewrite, log) {
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=' + HOST,
     '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
@@ -49,10 +50,11 @@ async function proxy(dir, rewrite, log) {
       const headers = Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'accept-encoding'].includes(k)));
       const up = await fetch(GW + req.url, { method: req.method, headers, body: chunks.length ? Buffer.concat(chunks) : undefined, redirect: 'manual' });
       let body = Buffer.from(await up.arrayBuffer());
-      const text = rewrite(req.url, body.toString('utf8'), req.headers);
-      if (text !== null) body = Buffer.from(text);
+      const got = rewrite(req.url, body.toString('utf8'), req.headers);
+      if (got !== null) body = Buffer.from(typeof got === 'string' ? got : got.body);
       const out = {};
       up.headers.forEach((v, k) => { if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection'].includes(k)) out[k] = v; });
+      if (got !== null && typeof got !== 'string') out['content-type'] = got.type;
       res.writeHead(up.status, out);
       res.end(body);
     } catch (e) { res.writeHead(502); res.end(String(e)); }
@@ -220,6 +222,25 @@ const tamper = (only) => (path, text, headers) => {
     const s = await b.state();
     report('targeted tampering: the delivered page is stopped, never shown, and asks for nothing',
       s.overlay && s.pwned === 0 && !/HACKED/.test(s.text) && s.injected.length === 0, s);
+  } finally { await b.close(); }
+}
+
+// 4b. Targeted, by type: the navigation's bytes are the recorded page, but
+// typed as XML, XHTML or SVG, or as HTML in another charset. What check E
+// read was UTF-8 HTML, and that is how the tab parses it.
+{
+  let type = null;
+  const b = await open();
+  try {
+    await b.go(CONSOLE, 20_000);
+    b.rewrite = (path, text, headers) => (type && path === '/site/ic-git/' && headers['sec-fetch-dest'] === 'document' ? { body: text, type } : null);
+    for (type of ['text/xml', 'application/xhtml+xml', 'image/svg+xml', 'text/html; charset=iso-2022-jp']) {
+      await b.go(CONSOLE, 12_000);
+      const s = await b.state();
+      const as = await b.evaluate('document.contentType + " " + document.characterSet');
+      report('the recorded page served as ' + type + ': parsed as UTF-8 HTML, runs',
+        as === 'text/html UTF-8' && !s.overlay && /repositories/.test(s.text) && s.pwned === 0, { as, ...s });
+    }
   } finally { await b.close(); }
 }
 
