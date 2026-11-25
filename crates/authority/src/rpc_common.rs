@@ -74,7 +74,8 @@ pub struct RpcConfig {
 /// of all but one, so a single flaky provider (a failed outcall, a lagging
 /// node) cannot fail the whole call the way the default all-must-agree
 /// Equality strategy does. A single custom URL gets no strategy (nothing to
-/// vote).
+/// vote). Not for an EVM send (evm.rs), whose outcome must hear every
+/// provider: a threshold can outvote the one that took the transaction.
 pub fn all_but_one(rpc_urls: &[String]) -> Option<RpcConfig> {
     let n = if rpc_urls.is_empty() {
         DEFAULT_PROVIDERS

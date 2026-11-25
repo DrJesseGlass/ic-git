@@ -22,7 +22,7 @@
 
 use crate::kv;
 use crate::rpc_common::{
-    all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, RejectionCode, SIGN_CYCLES,
+    all_but_one, HttpHeader, HttpOutcallError, JsonRpcError, RejectionCode, RpcConfig, SIGN_CYCLES,
 };
 use candid::{CandidType, Principal};
 use ic_dev_kit_rs::intercanister;
@@ -731,7 +731,8 @@ impl Meter {
     }
 }
 
-/// One EVM RPC canister call, returning the raw multi-provider result.
+/// One EVM RPC canister call, returning the raw multi-provider result,
+/// under all-but-one consensus (`all_but_one`).
 async fn rpc_multi<A, T>(
     cfg: &EvmConfig,
     method: &str,
@@ -742,15 +743,25 @@ where
     A: CandidType,
     T: serde::de::DeserializeOwned + CandidType,
 {
+    rpc_multi_with(cfg, method, all_but_one(&cfg.rpc_urls), arg, meter).await
+}
+
+/// `rpc_multi` under `consensus`; `None` is the RPC canister's own rule,
+/// that every provider agree.
+async fn rpc_multi_with<A, T>(
+    cfg: &EvmConfig,
+    method: &str,
+    consensus: Option<RpcConfig>,
+    arg: A,
+    meter: &Meter,
+) -> Result<MultiResult<T>, String>
+where
+    A: CandidType,
+    T: serde::de::DeserializeOwned + CandidType,
+{
     let rpc = rpc_principal(cfg)?;
     meter.add(RPC_CYCLES);
-    intercanister::call_with_payment(
-        rpc,
-        method,
-        (services(cfg), all_but_one(&cfg.rpc_urls), arg),
-        RPC_CYCLES,
-    )
-    .await
+    intercanister::call_with_payment(rpc, method, (services(cfg), consensus, arg), RPC_CYCLES).await
 }
 
 async fn rpc_call<A, T>(
@@ -837,13 +848,13 @@ async fn eoa_balance(cfg: &EvmConfig, address: &[u8; 20], meter: &Meter) -> Resu
 /// and the outcall fails consensus. The confirmed count agrees everywhere;
 /// transactions sent but not yet mined are covered by the stored next nonce
 /// (see `next_nonce`), which is why that store must be durable.
-async fn nonce_of(cfg: &EvmConfig, address: &str, meter: &Meter) -> Result<u64, String> {
+async fn nonce_of(cfg: &EvmConfig, address: &str, block: BlockTag, meter: &Meter) -> Result<u64, String> {
     let count: u128 = rpc_read(
         cfg,
         "eth_getTransactionCount",
         GetTransactionCountArgs {
             address: address.to_string(),
-            block: BlockTag::Latest,
+            block,
         },
         "eth_getTransactionCount",
         meter,
@@ -1125,8 +1136,14 @@ async fn send_tx(
     };
 
     let what = "eth_sendRawTransaction";
+    // Every provider must agree, not all but one: under a threshold, two
+    // providers that refused would outvote a third that took it, and a
+    // live transaction would read as refused, its hold given back and its
+    // gas paid by the float alone. Any disagreement comes back
+    // `Inconsistent`, with each provider's answer, and one acceptance
+    // there is enough (below).
     let reply: Result<MultiResult<SendRawTransactionStatus>, String> =
-        rpc_multi(cfg, what, format!("0x{}", hex::encode(&raw)), &meter).await;
+        rpc_multi_with(cfg, what, None, format!("0x{}", hex::encode(&raw)), &meter).await;
     let status = match reply {
         Ok(MultiResult::Consistent(RpcResult::Ok(status))) => status,
         Ok(MultiResult::Consistent(RpcResult::Err(e))) => {
@@ -1188,6 +1205,35 @@ async fn send_tx(
     }
 }
 
+/// Holds past their receipt polls, looked at again only when they decide
+/// a send: when the payer's balance, or the float with every open hold,
+/// would refuse it with them counted. A found receipt settles its hold
+/// (`receipt`). One with no receipt goes back whole when every nonce
+/// ic-git has signed with is used by a finalized transaction: its
+/// transaction can then never be mined. At the finalized block, not the
+/// latest, so a transaction mined a moment ago, whose receipt a provider
+/// may not answer yet, is not taken for one dropped. Nothing is stored
+/// for it: the nonce store says what ic-git has signed, and the chain
+/// what it has used.
+async fn recheck_stale_holds(cfg: &EvmConfig, from: &str, who: &Principal, ledger: &Principal, meter: &Meter) {
+    let before = crate::clock::now_ns().saturating_sub(STALE_HOLD_NS);
+    let stale = crate::gas::stale_holds(ledger, who, before, STALE_RECHECKS);
+    if stale.is_empty() {
+        return;
+    }
+    let signed = stored_next_nonce().ok().flatten().filter(|n| n.chain_id == cfg.chain_id && n.from == from);
+    let all_final = match signed {
+        Some(n) => nonce_of(cfg, from, BlockTag::Finalized, meter).await.is_ok_and(|used| used >= n.next),
+        None => false,
+    };
+    for h in stale {
+        let Some(tx) = h.tx_hash else { continue };
+        if matches!(receipt_metered(tx, meter).await, Ok(None)) && all_final {
+            crate::gas::release(h.id);
+        }
+    }
+}
+
 /// Everything before the broadcast: nonce, fees, the payer's reservation,
 /// signature. Returns (tx hash, raw signed tx, nonce, EOA). Its one side
 /// effect is the reservation, whose id it leaves in `hold` for the caller
@@ -1216,7 +1262,7 @@ async fn sign_tx(
         }
     };
     let (confirmed, fee_pair, balance) =
-        futures::future::join3(nonce_of(cfg, &from_hex, meter), fees(cfg, meter), balance_read).await;
+        futures::future::join3(nonce_of(cfg, &from_hex, BlockTag::Latest, meter), fees(cfg, meter), balance_read).await;
     let stored = stored_next_nonce()?;
     let nonce = choose_nonce(stored.as_ref(), cfg.chain_id, &from_hex, confirmed?);
     let (max_fee, tip) = fee_pair?;
@@ -1232,9 +1278,15 @@ async fn sign_tx(
             max_fee,
             at_ns: crate::clock::now_ns(),
         });
-        hold.set(Some(crate::gas::reserve(&who, ledger, gas_limit, max_fee)?.id));
         let margin = crate::gas::unit_cost(cfg.chain_id, max_fee)
             .saturating_mul(crate::tenancy::pricing().float_margin_txs.unwrap_or(0) as u128);
+        let need = crate::gas::hold_amount(gas_limit, max_fee);
+        if crate::gas::account_on(&ledger, &who).available < need
+            || crate::gas::float_covers(balance, crate::gas::held_on(&ledger).saturating_add(need), margin).is_err()
+        {
+            recheck_stale_holds(cfg, &from_hex, &who, &ledger, meter).await;
+        }
+        hold.set(Some(crate::gas::reserve(&who, ledger, gas_limit, max_fee)?.id));
         crate::gas::float_covers(balance, crate::gas::held_on(&ledger), margin)?;
     }
     let tx = Tx {
@@ -1418,6 +1470,27 @@ fn mark_receipt(tx_hash: &str, status: &str) {
 const RECEIPT_POLL_BASE_SECS: u64 = 15;
 const RECEIPT_POLL_MAX_SECS: u64 = 240;
 const RECEIPT_POLL_ATTEMPTS: u32 = 10;
+
+/// How long a transaction's receipt polls run, from its broadcast.
+const fn receipt_poll_secs() -> u64 {
+    let mut total = 0;
+    let mut attempt = 0;
+    while attempt < RECEIPT_POLL_ATTEMPTS {
+        let secs = RECEIPT_POLL_BASE_SECS << attempt;
+        total += if secs < RECEIPT_POLL_MAX_SECS { secs } else { RECEIPT_POLL_MAX_SECS };
+        attempt += 1;
+    }
+    total
+}
+
+/// A hold this old has had its receipt polls (with a minute to spare):
+/// past them it is looked at again only when it decides a send
+/// (`recheck_stale_holds`).
+const STALE_HOLD_NS: u64 = (receipt_poll_secs() + 60) * 1_000_000_000;
+
+/// The most stale holds one send looks at again: each is a receipt read
+/// that send pays for.
+const STALE_RECHECKS: usize = 5;
 
 /// Arm the timer chain that closes the gap between broadcast-accepted (what
 /// a deploy record attests at write time) and mined: each poll asks for the
@@ -1799,13 +1872,18 @@ pub struct ReceiptSummary {
 /// manual evm_receipt call reconciles the provenance log the same way the
 /// post-broadcast poll does.
 pub async fn receipt(tx_hash: String) -> Result<Option<ReceiptSummary>, String> {
+    receipt_metered(tx_hash, &Meter::default()).await
+}
+
+/// `receipt`, its outcall counted in `meter`.
+async fn receipt_metered(tx_hash: String, meter: &Meter) -> Result<Option<ReceiptSummary>, String> {
     let cfg = require_config()?;
     let receipt: Option<TransactionReceipt> = rpc_call(
         &cfg,
         "eth_getTransactionReceipt",
         tx_hash.clone(),
         "eth_getTransactionReceipt",
-        &Meter::default(),
+        meter,
     )
     .await?;
     // A found receipt settles what the transaction held of its payer's
@@ -1907,6 +1985,14 @@ mod tests {
         let eoa = checksum_address(&eoa_of_pubkey(&pk).unwrap());
         assert_eq!(cached_eoa(&cfg("cached-eoa-test")), Some(eoa));
         assert_eq!(cached_eoa(&cfg("another-key")), None, "a key cached for another name is not this one's");
+    }
+
+    /// The receipt polls run about 28 minutes, and a hold is stale, to be
+    /// looked at again when it decides a send, only once they are done.
+    #[test]
+    fn a_hold_is_stale_only_past_its_receipt_polls() {
+        assert_eq!(receipt_poll_secs(), 15 + 30 + 60 + 120 + 6 * 240);
+        assert!(STALE_HOLD_NS > receipt_poll_secs() * 1_000_000_000);
     }
 
     #[test]

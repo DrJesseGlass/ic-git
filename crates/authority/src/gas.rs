@@ -329,8 +329,7 @@ fn take_hold(pred: impl Fn(&GasHold) -> bool) -> Option<GasHold> {
 /// returns.
 pub fn reserve(who: &Principal, ledger: Principal, gas_limit: u64, max_fee: u128) -> Result<GasHold, String> {
     let bps = crate::tenancy::gas_markup_bps();
-    let cost = (gas_limit as u128).saturating_mul(max_fee);
-    let amount = cost.saturating_add(markup_of(cost, bps));
+    let amount = hold_amount(gas_limit, max_fee);
     let mut a = account_on(&ledger, who);
     if a.available < amount {
         return Err(format!(
@@ -350,6 +349,26 @@ pub fn reserve(who: &Principal, ledger: Principal, gas_limit: u64, max_fee: u128
     all.push(hold.clone());
     save_holds(&all);
     Ok(hold)
+}
+
+/// What `reserve` holds for a transaction of `gas_limit` gas at `max_fee`
+/// wei a unit: the most it may cost, with the markup in force on it.
+pub fn hold_amount(gas_limit: u64, max_fee: u128) -> u128 {
+    let cost = (gas_limit as u128).saturating_mul(max_fee);
+    cost.saturating_add(markup_of(cost, crate::tenancy::gas_markup_bps()))
+}
+
+/// The holds on `ledger` that name their transaction and were made before
+/// `before_ns`: past their receipt polls (evm.rs). `who`'s come first,
+/// then the oldest, at most `max`.
+pub fn stale_holds(ledger: &Principal, who: &Principal, before_ns: u64, max: usize) -> Vec<GasHold> {
+    let mut out: Vec<GasHold> = holds()
+        .into_iter()
+        .filter(|h| h.ledger == *ledger && h.tx_hash.is_some() && h.at_ns < before_ns)
+        .collect();
+    out.sort_by_key(|h| (h.who != *who, h.at_ns));
+    out.truncate(max);
+    out
 }
 
 /// Name the signed transaction a hold is for, before it is broadcast, so
@@ -838,9 +857,9 @@ fn take_pending(id: u64) -> Option<PendingGasTransfer> {
     Some(p)
 }
 
-fn record_settled(p: &PendingGasTransfer) {
+fn record_settled(id: u64, who: Principal, ledger: Principal) {
     let mut all: Vec<Settled> = crate::kv::get_json(SETTLED_KEY).unwrap_or_default();
-    all.push(Settled { id: p.id, who: p.who, ledger: p.ledger });
+    all.push(Settled { id, who, ledger });
     if all.len() > SETTLED_KEEP {
         let drop = all.len() - SETTLED_KEEP;
         all.drain(0..drop);
@@ -866,6 +885,29 @@ fn fail(id: u64, error: &str) {
         });
         crate::kv::set_json(FAILED_KEY, &all);
     }
+}
+
+/// Settle failed transfer `id` (operators), once its ledger shows whether
+/// it happened: a transfer from or to its principal whose
+/// `created_at_time` is `id`. A deposit that happened is credited, and a
+/// withdrawal that did not is given back; a deposit that did not, or a
+/// withdrawal that did, only leaves the list, its balance already right.
+/// Either way it is settled from then on, so `finish_gas_transfer(id)`
+/// reports the balance. Returns the account it is for.
+pub fn resolve_failed(id: u64, happened: bool) -> Result<GasAccount, String> {
+    let mut all = failed();
+    let i = all.iter().position(|f| f.id == id).ok_or_else(|| format!("no failed gas transfer {id}"))?;
+    let f = all.remove(i);
+    crate::kv::set_json(FAILED_KEY, &all);
+    match (f.direction, happened) {
+        (GasDirection::Deposit, true) => {
+            credit(&f.ledger, &f.who, f.amount);
+        }
+        (GasDirection::Withdrawal, false) => undo_withdrawal(&f.ledger, &f.who, f.amount),
+        _ => {}
+    }
+    record_settled(f.id, f.who, f.ledger);
+    Ok(account_on(&f.ledger, &f.who))
 }
 
 // --- outcomes -------------------------------------------------------------------------
@@ -931,7 +973,7 @@ fn settle(id: u64, moved: Moved) -> Result<u128, String> {
     match moved {
         Moved::Block => match take_pending(id) {
             Some(p) => {
-                record_settled(&p);
+                record_settled(p.id, p.who, p.ledger);
                 Ok(match p.direction {
                     GasDirection::Deposit => credit(&p.ledger, &p.who, p.amount).available,
                     GasDirection::Withdrawal => {
@@ -1483,6 +1525,68 @@ mod tests {
         assert!(release_hold(h.id).is_err());
         assert!(settle_tx("0x01", 1, 1).is_none(), "nothing left to settle");
         assert_eq!(account_on(&l, &who).available, 101_000);
+    }
+
+    /// A hold is looked at again past its receipt polls only: one that
+    /// names its transaction and was made before the cut, on the ledger
+    /// asked about; the payer's own first, then the oldest, at most as
+    /// many as asked.
+    #[test]
+    fn the_stale_holds_are_the_payers_first_then_the_oldest() {
+        let l = p(135);
+        let (me, other) = (p(35), p(36));
+        credit(&l, &me, 1_000_000);
+        credit(&l, &other, 1_000_000);
+        let held = |who: &Principal, ns: u64, tx: Option<&str>| {
+            crate::clock::set_test_now(ns);
+            let h = reserve(who, l, 1_000, 1).unwrap();
+            if let Some(tx) = tx {
+                attach(h.id, tx);
+            }
+            h.id
+        };
+        let o1 = held(&other, 1_000, Some("0x01"));
+        let m1 = held(&me, 2_000, Some("0x02"));
+        held(&me, 3_000, None);
+        let o2 = held(&other, 3_000, Some("0x03"));
+        held(&me, 9_000, Some("0x04"));
+        let ids = |v: Vec<GasHold>| v.into_iter().map(|h| h.id).collect::<Vec<_>>();
+        assert_eq!(ids(stale_holds(&l, &me, 5_000, 10)), vec![m1, o1, o2], "unsigned and fresh ones left out");
+        assert_eq!(ids(stale_holds(&l, &me, 5_000, 2)), vec![m1, o1]);
+        assert_eq!(ids(stale_holds(&l, &other, 5_000, 10)), vec![o1, o2, m1]);
+        assert!(stale_holds(&p(136), &me, 5_000, 10).is_empty(), "another ledger's");
+    }
+
+    /// A failed transfer is the operators' to settle once its ledger shows
+    /// whether it happened: a deposit that did is credited, a withdrawal
+    /// that did not is given back, and the other two only leave the list.
+    /// Then it is settled: finish reports it, and it is not settled twice.
+    #[test]
+    fn the_operators_settle_a_failed_transfer_by_what_the_ledger_shows() {
+        let who = p(37);
+        credit(&ck(), &who, 1_000);
+        let lose = |id: u64, direction: GasDirection, amount: u128| {
+            if direction == GasDirection::Withdrawal {
+                debit_for_withdrawal(&ck(), &who, amount).unwrap();
+            }
+            pend(id, direction, who, amount);
+            settle(id, Moved::Lost("too old".into())).unwrap_err();
+        };
+        lose(701, GasDirection::Deposit, 100);
+        lose(702, GasDirection::Deposit, 200);
+        lose(703, GasDirection::Withdrawal, 300);
+        lose(704, GasDirection::Withdrawal, 400);
+        assert_eq!(failed().len(), 4);
+        assert_eq!(account_on(&ck(), &who).available, 300);
+        let owed = owed_on(&ck());
+        assert_eq!(resolve_failed(701, true).unwrap().available, 400, "a deposit that happened is credited");
+        assert_eq!(resolve_failed(702, false).unwrap().available, 400, "one that did not credits nothing");
+        assert_eq!(resolve_failed(703, false).unwrap().available, 700, "a withdrawal that did not is given back");
+        assert_eq!(resolve_failed(704, true).unwrap().available, 700, "one that did stays out");
+        assert!(failed().is_empty());
+        assert_eq!(owed_on(&ck()), owed - 200 - 400, "owed no more: what never came in, and what went out");
+        assert!(resolve_failed(701, true).unwrap_err().contains("no failed gas transfer 701"), "once");
+        assert_eq!(futures::executor::block_on(finish(who, false, 703)), Ok(700));
     }
 
     /// A receipt that says more than was reserved (the price above the cap
