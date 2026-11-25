@@ -182,8 +182,8 @@ the page the network delivered:
    page under `/site/`. Once a site verifies, a higher-priority session rule
    replaces it with the site's pinned policy. Unchecked or failed pages run
    no script, and the static rule outlives a browser restart. The same rule
-   sets every such page's type to `text/html`, whatever the response said
-   (measurement 15).
+   sets every such page's type to `text/html; charset=utf-8`, whatever the
+   response said (measurement 15).
 2. At `document_start`, `extension/main.js` (in the page's world) calls
    `document.open()`, which discards the delivered response unparsed; the
    content script then writes in the bytes the background checked against
@@ -192,9 +192,11 @@ the page the network delivered:
    The document keeps its origin and the response's policy.
    `document.open()` throws on a document that is not HTML (one typed as
    XML, XHTML or SVG), which would leave the delivered page to be parsed
-   and shown (measurement 16): hence the type in step 1. Should the type
-   still not be `text/html`, `main.js` stops the load and empties the
-   document instead, and the tab gets the stop page.
+   and shown, and keeps the delivered charset (measurement 16): hence the
+   type in step 1. Should the type still not be `text/html`, or `open()`
+   throw or do nothing, `main.js` stops the load and empties the document
+   instead, and the tab gets the stop page, with no "Open anyway": the
+   page it would open is gone.
 3. The badge says OK only once the page is written: `main.js` acknowledges
    the write, and the content script reports it to the background.
 4. A first visit loads under the static rule, so once the site verifies
@@ -379,9 +381,10 @@ Measured on 2026-11-18, in Chrome for Testing 158.0.8127 and Firefox 160:
 Measured on 2026-11-25, in Chrome for Testing 158.0.8127.88 and Firefox 160.0.1:
 
 15. A rule that sets a main-frame response's `Content-Type` decides the
-    document's type: a page served as `text/xml`, `application/xhtml+xml`
-    or `image/svg+xml` under a rule setting `text/html` is an HTML
-    document, which `document.open()` replaces. Firefox's
+    document's type and charset: a page served as `text/xml`,
+    `application/xhtml+xml`, `image/svg+xml` or `text/html;
+    charset=iso-2022-jp` under a rule setting `text/html; charset=utf-8`
+    is a UTF-8 HTML document, which `document.open()` replaces. Firefox's
     `onHeadersReceived` does the same for its type and charset; without
     it, Firefox parsed even the recorded bytes as the response typed them:
     as XML (the console came out blank) or in the charset it named
@@ -391,7 +394,9 @@ Measured on 2026-11-25, in Chrome for Testing 158.0.8127.88 and Firefox 160.0.1:
     and shown, and the extension as it was before this measurement put
     its green OK on it. `window.stop()` and `document.replaceChildren()`
     at `document_start` leave it empty, and a stop page built of elements
-    in the HTML namespace shows there.
+    in the HTML namespace shows there. And a page served as HTML in
+    another charset keeps it through `document.open()`: the checked page
+    was written into an ISO-2022-JP document.
 
 ## The extension's own package, on chain
 

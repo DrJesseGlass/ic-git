@@ -126,7 +126,7 @@
         ...(site.commit ? [document.createTextNode(', record at commit '), el('span', { className: 'mono', textContent: site.commit.slice(0, 12) })] : []),
         ...(site.via ? [document.createTextNode(', read via ' + site.via)] : [])),
       ...(rows.length ? [el('ul', {}, ...rows)] : []),
-      el('div', { className: 'actions' }, again, ...(site.repo ? [anyway] : []))));
+      el('div', { className: 'actions' }, again, ...(site.repo && site.openAnyway !== false ? [anyway] : []))));
   }
 
   // Later news for this tab, after the page is written.
@@ -150,7 +150,7 @@
       // The tab is said to show the page only once it does.
       const shown = write(res.text);
       chrome.runtime.sendMessage({ type: 'written', url, repo, ok: shown, navStart }, () => void chrome.runtime.lastError);
-      if (!shown) stop('failed', { repo, checks: [{ ok: false, label: 'show the checked page', detail: 'this document (' + document.contentType + ') could not be replaced with it' }] });
+      if (!shown) stop('failed', { repo, openAnyway: false, checks: [{ ok: false, label: 'show the checked page', detail: 'this document (' + document.contentType + ') could not be replaced with it' }] });
       return;
     }
     // Firefox holds the response itself: the page already is the checked
