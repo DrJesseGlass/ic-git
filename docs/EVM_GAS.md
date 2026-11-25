@@ -93,15 +93,22 @@ signature and the outcalls. `evm_gas` is retired.
    one: under a threshold two refusals would outvote a provider that
    took the transaction, and a live one would be read as refused and
    its hold given back. Any disagreement brings every answer, and one
-   acceptance is enough to keep the hold.
+   acceptance is enough to keep the hold. With none, a refusal all but
+   one gave (nonce too low or too high, insufficient funds) stands as
+   it did under the threshold: it is the chain's own state, which the
+   odd provider shares, so one provider timing out does not leave the
+   nonce taken by a transaction no node holds.
    The receipt polls run about 28 minutes. A hold still open after them
    is looked at again only when it decides a send: when the payer's
    balance, or the float with every hold, would refuse a new one with
-   it counted. That send reads the receipts of up to five such holds,
-   the payer's first, and a found receipt settles its hold. One with no
-   receipt is given back whole when every nonce ic-git has signed with
-   is used by a finalized transaction, since its own can then never be
-   mined. Nothing more is stored for this, and nothing runs on a timer.
+   it counted (only the payer's own holds when their balance alone is
+   short). That send reads the receipts of up to five such holds, the
+   payer's first, and a found receipt settles its hold. One with no
+   receipt is given back whole when a finalized transaction has used
+   its nonce, since its own can then never be mined. A hold keeps the
+   chain, address and nonce its transaction was signed with for this:
+   the nonce store lags what was signed after `evm_reset_nonce`, or an
+   upgrade that dropped a broadcast's reply. Nothing runs on a timer.
 4. **A small markup** is added to each settled charge, a rate the
    operators set: just enough to cover what turning ckETH back into ETH
    costs (section 5), so that ic-git does not pay for it. It is set to

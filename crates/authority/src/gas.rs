@@ -257,6 +257,21 @@ pub struct GasHold {
     /// Set once the transaction is signed, before it is broadcast.
     pub tx_hash: Option<String>,
     pub at_ns: u64,
+    /// What it was signed as; set with `tx_hash`.
+    #[serde(default)]
+    pub signed: Option<SignedTx>,
+}
+
+/// What a hold's transaction was signed as. Whether it can still be mined
+/// is a question about this chain, this address and this nonce
+/// (evm.rs, `recheck_stale_holds`), which the nonce store cannot answer:
+/// it lags what was signed after `evm_reset_nonce`, or an upgrade that
+/// dropped a broadcast's reply.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SignedTx {
+    pub chain_id: u64,
+    pub from: String,
+    pub nonce: u64,
 }
 
 /// One settled transaction, as its payer's account keeps it.
@@ -344,7 +359,7 @@ pub fn reserve(who: &Principal, ledger: Principal, gas_limit: u64, max_fee: u128
     save(&ledger, who, &a);
     let id = crate::clock::now_ns().max(crate::kv::get_json::<u64>(LAST_HOLD_KEY).unwrap_or(0).saturating_add(1));
     crate::kv::set_json(LAST_HOLD_KEY, &id);
-    let hold = GasHold { id, who: *who, ledger, amount, markup_bps: bps, tx_hash: None, at_ns: crate::clock::now_ns() };
+    let hold = GasHold { id, who: *who, ledger, amount, markup_bps: bps, tx_hash: None, at_ns: crate::clock::now_ns(), signed: None };
     let mut all = holds();
     all.push(hold.clone());
     save_holds(&all);
@@ -358,25 +373,25 @@ pub fn hold_amount(gas_limit: u64, max_fee: u128) -> u128 {
     cost.saturating_add(markup_of(cost, crate::tenancy::gas_markup_bps()))
 }
 
-/// The holds on `ledger` that name their transaction and were made before
-/// `before_ns`: past their receipt polls (evm.rs). `who`'s come first,
-/// then the oldest, at most `max`.
-pub fn stale_holds(ledger: &Principal, who: &Principal, before_ns: u64, max: usize) -> Vec<GasHold> {
+/// The holds on `ledger` whose transaction is signed and named, made
+/// before `before_ns`: past their receipt polls (evm.rs). `who`'s come
+/// first, then the oldest.
+pub fn stale_holds(ledger: &Principal, who: &Principal, before_ns: u64) -> Vec<GasHold> {
     let mut out: Vec<GasHold> = holds()
         .into_iter()
-        .filter(|h| h.ledger == *ledger && h.tx_hash.is_some() && h.at_ns < before_ns)
+        .filter(|h| h.ledger == *ledger && h.tx_hash.is_some() && h.signed.is_some() && h.at_ns < before_ns)
         .collect();
     out.sort_by_key(|h| (h.who != *who, h.at_ns));
-    out.truncate(max);
     out
 }
 
-/// Name the signed transaction a hold is for, before it is broadcast, so
-/// its receipt can find the hold.
-pub fn attach(hold_id: u64, tx_hash: &str) {
+/// Name the signed transaction a hold is for, and what it was signed as,
+/// before it is broadcast, so its receipt can find the hold.
+pub fn attach(hold_id: u64, tx_hash: &str, signed: SignedTx) {
     let mut all = holds();
     if let Some(h) = all.iter_mut().find(|h| h.id == hold_id) {
         h.tx_hash = Some(tx_hash.to_ascii_lowercase());
+        h.signed = Some(signed);
         save_holds(&all);
     }
 }
@@ -1188,6 +1203,10 @@ mod tests {
         Principal::from_text(CKSEPOLIAETH_LEDGER).unwrap()
     }
 
+    fn signed_as(nonce: u64) -> SignedTx {
+        SignedTx { chain_id: 11_155_111, from: "0xE0A".into(), nonce }
+    }
+
     fn pend(id: u64, direction: GasDirection, who: Principal, amount: u128) {
         add_pending(PendingGasTransfer { id, direction, who, amount, fee: 7, ledger: ck(), at_ns: 0, last_error: None, uncertain: false, in_flight: false });
     }
@@ -1492,7 +1511,7 @@ mod tests {
         assert_eq!(h.amount, most);
         let a = account_on(&l, &who);
         assert_eq!((a.available, a.reserved), (10_000_000 - most, most));
-        attach(h.id, "0xABCD");
+        attach(h.id, "0xABCD", signed_as(1));
         let c = settle_tx("0xabcd", 60_000, 40).unwrap();
         assert_eq!((c.cost, c.markup), (2_400_000, markup_of(2_400_000, bps)));
         let a = account_on(&l, &who);
@@ -1520,7 +1539,7 @@ mod tests {
         assert_eq!((a.available, a.reserved), (101_000, 0));
         // The operators' release, for a transaction that never landed.
         let h = reserve(&who, l, 21_000, 1).unwrap();
-        attach(h.id, "0x01");
+        attach(h.id, "0x01", signed_as(1));
         assert_eq!(release_hold(h.id).unwrap().id, h.id);
         assert!(release_hold(h.id).is_err());
         assert!(settle_tx("0x01", 1, 1).is_none(), "nothing left to settle");
@@ -1541,7 +1560,7 @@ mod tests {
             crate::clock::set_test_now(ns);
             let h = reserve(who, l, 1_000, 1).unwrap();
             if let Some(tx) = tx {
-                attach(h.id, tx);
+                attach(h.id, tx, signed_as(ns));
             }
             h.id
         };
@@ -1551,10 +1570,11 @@ mod tests {
         let o2 = held(&other, 3_000, Some("0x03"));
         held(&me, 9_000, Some("0x04"));
         let ids = |v: Vec<GasHold>| v.into_iter().map(|h| h.id).collect::<Vec<_>>();
-        assert_eq!(ids(stale_holds(&l, &me, 5_000, 10)), vec![m1, o1, o2], "unsigned and fresh ones left out");
-        assert_eq!(ids(stale_holds(&l, &me, 5_000, 2)), vec![m1, o1]);
-        assert_eq!(ids(stale_holds(&l, &other, 5_000, 10)), vec![o1, o2, m1]);
-        assert!(stale_holds(&p(136), &me, 5_000, 10).is_empty(), "another ledger's");
+        assert_eq!(ids(stale_holds(&l, &me, 5_000)), vec![m1, o1, o2], "unsigned and fresh ones left out");
+        assert_eq!(ids(stale_holds(&l, &other, 5_000)), vec![o1, o2, m1]);
+        assert!(stale_holds(&p(136), &me, 5_000).is_empty(), "another ledger's");
+        let h = holds().into_iter().find(|h| h.id == m1).unwrap();
+        assert_eq!(h.signed, Some(signed_as(2_000)), "what it was signed as, kept with its hash");
     }
 
     /// A failed transfer is the operators' to settle once its ledger shows
@@ -1598,7 +1618,7 @@ mod tests {
         let who = p(32);
         credit(&l, &who, 1_000_000);
         let h = reserve(&who, l, 21_000, 10).unwrap();
-        attach(h.id, "0x02");
+        attach(h.id, "0x02", signed_as(2));
         let c = settle_tx("0x02", 21_000, u128::MAX).unwrap();
         assert_eq!(c.cost + c.markup, h.amount);
         let a = account_on(&l, &who);

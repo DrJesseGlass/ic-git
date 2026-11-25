@@ -146,7 +146,9 @@ type GasHold = record {
   markup_bps : nat32;
   tx_hash : opt text;
   at_ns : nat64;
+  signed : opt SignedTx;
 };
+type SignedTx = record { chain_id : nat64; from : text; nonce : nat64 };
 type GasCharge = record {
   tx_hash : text;
   gas_used : nat;
