@@ -57,7 +57,8 @@ use crate::ledger::{Account, TransferFromArgs, TransferFromError};
 use candid::{CandidType, Nat, Principal};
 use ic_dev_kit_rs::intercanister;
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 
 /// The ckETH ledger on mainnet (fee 2,000,000,000,000 wei).
 pub const CKETH_LEDGER: &str = "ss2fx-dyaaa-aaaar-qacoq-cai";
@@ -716,21 +717,66 @@ pub fn failed() -> Vec<FailedGasTransfer> {
 }
 
 thread_local! {
-    /// Counts the changes to the transfers in progress, so a reader of
-    /// ic-git's ledger balance can tell whether one moved while it waited
-    /// (refill.rs). On the heap: an upgrade drops the reply such a reader
-    /// waits on, so no read spans one.
-    static MOVES: Cell<u64> = const { Cell::new(0) };
+    /// What the withdrawals settled on each ledger since this canister
+    /// started took, all told, so a reader of ic-git's balance on one can
+    /// leave out what those that settled while it waited took (refill.rs).
+    /// A settled withdrawal is the one change to the transfers in progress
+    /// that takes from what is owed (`owed_on`) an amount the ledger may
+    /// still have shown when the balance was read: a deposit is owed from
+    /// before its call (`in_flight`), and a refused or lost withdrawal
+    /// stays owed. Only a balance can raise it, by what it takes: a call
+    /// refused at once changes nothing. On the heap: an upgrade drops the
+    /// reply such a reader waits on, so no read spans one.
+    static WITHDRAWN: RefCell<BTreeMap<Principal, u128>> = const { RefCell::new(BTreeMap::new()) };
+    /// Set while the refill reads ic-git's ledger balance (`Reading`).
+    static READING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// How many times the transfers in progress have changed (`MOVES`).
-pub fn transfer_moves() -> u64 {
-    MOVES.with(|m| m.get())
+/// What withdrawals settled on `ledger` have taken since this canister
+/// started (`WITHDRAWN`). It wraps: readers take the difference of two.
+pub fn withdrawn(ledger: &Principal) -> u128 {
+    WITHDRAWN.with(|w| w.borrow().get(ledger).copied().unwrap_or(0))
+}
+
+fn count_withdrawn(ledger: &Principal, amount: u128) {
+    WITHDRAWN.with(|w| {
+        let mut w = w.borrow_mut();
+        let total = w.entry(*ledger).or_insert(0);
+        *total = total.wrapping_add(amount);
+    });
+}
+
+/// Held while the refill reads ic-git's ledger balance: no withdrawal
+/// sends its ledger call meanwhile (`not_while_reading`), so the only
+/// ones that can settle during the read are those already out when it
+/// began. A refused one costs its caller nothing but a retry.
+pub struct Reading(());
+
+impl Reading {
+    pub fn start() -> Reading {
+        READING.with(|r| r.set(true));
+        Reading(())
+    }
+}
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        READING.with(|r| r.set(false));
+    }
+}
+
+/// Refuse a withdrawal's ledger call while the refill reads the balance.
+/// Asked with no await between it and the call, so a withdrawal is either
+/// out before the read begins or refused.
+fn not_while_reading() -> Result<(), String> {
+    if READING.with(|r| r.get()) {
+        return Err("ic-git is reading its gas ledger balance to refill its EOA, which takes a few seconds; withdraw again then".into());
+    }
+    Ok(())
 }
 
 fn save_pending(all: &[PendingGasTransfer]) {
     crate::kv::set_json(PENDING_KEY, &all);
-    MOVES.with(|m| m.set(m.get().wrapping_add(1)));
 }
 
 /// A fresh id: now in ns, bumped past the last one, so two transfers never
@@ -888,7 +934,10 @@ fn settle(id: u64, moved: Moved) -> Result<u128, String> {
                 record_settled(&p);
                 Ok(match p.direction {
                     GasDirection::Deposit => credit(&p.ledger, &p.who, p.amount).available,
-                    GasDirection::Withdrawal => account_on(&p.ledger, &p.who).available,
+                    GasDirection::Withdrawal => {
+                        count_withdrawn(&p.ledger, p.amount);
+                        account_on(&p.ledger, &p.who).available
+                    }
                 })
             }
             None => settled(id).map(|s| account_on(&s.ledger, &s.who).available).ok_or_else(|| format!("no pending gas transfer {id}")),
@@ -1039,6 +1088,9 @@ pub async fn withdraw(who: Principal, amount: u128) -> Result<u128, String> {
     if amount <= fee {
         return Err(format!("withdraw more than the ledger's fee of {}", amount_text(&ledger, fee)));
     }
+    // After the last await before the ledger call, so the call is out
+    // before a balance read begins or not sent during one.
+    not_while_reading()?;
     // Debited before anything moves: the balance cannot be spent twice
     // while the transfer is out.
     debit_for_withdrawal(&ledger, &who, amount)?;
@@ -1062,7 +1114,12 @@ pub async fn withdraw(who: Principal, amount: u128) -> Result<u128, String> {
 /// is for, or an operator. Returns that principal's balance available.
 pub async fn finish(caller: Principal, operator: bool, id: u64) -> Result<u128, String> {
     match get_pending(id) {
-        Some(p) if p.who == caller || operator => advance(id).await,
+        Some(p) if p.who == caller || operator => {
+            if p.direction == GasDirection::Withdrawal {
+                not_while_reading()?;
+            }
+            advance(id).await
+        }
         Some(_) => Err("only the one this gas transfer is for, or an operator, may finish it".into()),
         None => match settled(id) {
             Some(s) if s.who == caller || operator => Ok(account_on(&s.ledger, &s.who).available),
@@ -1201,17 +1258,68 @@ mod tests {
         assert_eq!(settle(501, Moved::Block), Ok(450));
     }
 
-    /// Every change to the transfers in progress is counted: how the
-    /// refill tells that one moved while it read the ledger balance.
+    /// Only a settled withdrawal counts toward what the refill leaves out
+    /// of a balance read, by what it took and on its own ledger: a call
+    /// refused at once, a deposit, or a withdrawal still owed changes
+    /// nothing, so no caller can move it without spending a balance.
     #[test]
-    fn every_change_to_the_transfers_in_progress_is_counted() {
-        let m = transfer_moves();
-        pend(610, GasDirection::Withdrawal, p(44), 100);
-        assert_eq!(transfer_moves(), m + 1);
+    fn only_a_settled_withdrawal_counts_by_its_amount_on_its_ledger() {
+        let who = p(44);
+        credit(&ck(), &who, 1_000);
+        let w = withdrawn(&ck());
+        // A deposit with no allowance: added, attempted, refused.
+        pend(610, GasDirection::Deposit, who, 100);
         begin_attempt(610).unwrap();
-        settle(610, Moved::Block).unwrap();
-        assert_eq!(transfer_moves(), m + 3, "the attempt's mark, then the settlement");
+        settle(610, Moved::Refused("InsufficientAllowance".into())).unwrap_err();
         assert!(get_pending(610).is_none());
+        // A deposit that lands.
+        pend(611, GasDirection::Deposit, who, 100);
+        begin_attempt(611).unwrap();
+        settle(611, Moved::Block).unwrap();
+        assert_eq!(withdrawn(&ck()), w, "deposits are owed from before their call");
+        // A withdrawal refused, one whose outcome is unknown, one lost.
+        for (id, moved) in [
+            (612, Moved::Refused("TemporarilyUnavailable".into())),
+            (613, Moved::Unknown("reply lost".into())),
+            (614, Moved::Lost("too old".into())),
+        ] {
+            debit_for_withdrawal(&ck(), &who, 100).unwrap();
+            pend(id, GasDirection::Withdrawal, who, 100);
+            begin_attempt(id).unwrap();
+            settle(id, moved).unwrap_err();
+        }
+        assert_eq!(withdrawn(&ck()), w, "a withdrawal refused, unknown or lost is still owed");
+        // The unknown one settles: what it took counts.
+        settle(613, Moved::Block).unwrap();
+        assert_eq!(withdrawn(&ck()), w + 100);
+        // A replay that finds it settled already counts nothing more.
+        settle(613, Moved::Block).unwrap();
+        assert_eq!(withdrawn(&ck()), w + 100);
+        // One on another ledger counts there, not here.
+        let other = p(90);
+        credit(&other, &who, 500);
+        debit_for_withdrawal(&other, &who, 500).unwrap();
+        add_pending(PendingGasTransfer { id: 615, direction: GasDirection::Withdrawal, who, amount: 500, fee: 7, ledger: other, at_ns: 0, last_error: None, uncertain: false, in_flight: false });
+        settle(615, Moved::Block).unwrap();
+        assert_eq!((withdrawn(&ck()), withdrawn(&other)), (w + 100, 500));
+    }
+
+    /// While the refill reads the balance, no withdrawal sends its ledger
+    /// call, a replay included; a deposit may, since it errs only low.
+    #[test]
+    fn no_withdrawal_goes_out_while_the_balance_is_read() {
+        let who = p(46);
+        credit(&ck(), &who, 1_000);
+        debit_for_withdrawal(&ck(), &who, 100).unwrap();
+        pend(620, GasDirection::Withdrawal, who, 100);
+        let reading = Reading::start();
+        let e = futures::executor::block_on(finish(who, false, 620)).unwrap_err();
+        assert!(e.contains("reading its gas ledger balance"), "{e}");
+        let still = get_pending(620).unwrap();
+        assert!(!still.in_flight && !still.uncertain, "no attempt was made");
+        assert!(not_while_reading().is_err());
+        drop(reading);
+        assert_eq!(not_while_reading(), Ok(()));
     }
 
     /// An attempt whose reply was never handled (an upgrade dropped it)

@@ -12,7 +12,9 @@
 //!   credited back. What is left is gas tenants have paid for and the EOA
 //!   has not yet been given back. A refill never spends a tenant's
 //!   balance, held or not. The balance and what is owed are taken as of
-//!   one moment: a read during which a gas transfer moved is made again.
+//!   one moment: no withdrawal goes out while the balance is read, a
+//!   read one settled during is made again, and the last is taken with
+//!   what they took left out, which can only err low.
 //! - **The minter is the record of every refill.** Each tick first reads
 //!   the withdrawals of ic-git's account from the minter
 //!   (`withdrawal_status`), which finds a refill whose reply was lost to
@@ -179,31 +181,44 @@ pub fn busy(ledger: &Principal) -> Option<String> {
     unfinished(ledger).map(|id| format!("refill {id} is not finished"))
 }
 
-/// How many times a tick reads the balance before it leaves the refill to
-/// the next tick.
+/// How many times a tick reads the balance for a read no withdrawal
+/// settled during.
 const POOL_READS: u32 = 3;
 
 /// What may be refilled from, with the balance and what is owed of it as
 /// of one moment. What is owed is read when the balance comes back, so a
 /// tenant's withdrawal the ledger made after the balance was read, and
 /// that settled before the reply, would be in the one and gone from the
-/// other: a tenant's ckETH counted as paid for gas. A read during which
-/// any gas transfer moved is made again.
+/// other: a tenant's ckETH counted as paid for gas.
+///
+/// So no withdrawal goes out while the balance is read (`gas::Reading`),
+/// and only those already out when the reads began can settle during
+/// one, each once. A read one settled during is made again, up to
+/// `POOL_READS` times, and the first none settled during is taken. If
+/// each was touched, the last is taken with what those withdrawals took
+/// left out as well (`gas::withdrawn`), which errs low when the balance
+/// already showed them. Either way the read never counts a tenant's
+/// balance as paid, and never fails for anything a caller does.
 async fn read_pool(ledger: Principal) -> Result<u128, String> {
+    let _reading = crate::gas::Reading::start();
+    let mut read = 0;
     for _ in 0..POOL_READS {
-        let moves = crate::gas::transfer_moves();
+        let before = crate::gas::withdrawn(&ledger);
         let balance = balance_of(ledger).await?;
-        if crate::gas::transfer_moves() == moves {
-            return Ok(pool(balance, crate::gas::owed_on(&ledger), crate::gas::totals(&ledger).surplus()));
+        let during = crate::gas::withdrawn(&ledger).wrapping_sub(before);
+        read = pool(balance, crate::gas::owed_on(&ledger), crate::gas::totals(&ledger).surplus(), during);
+        if during == 0 {
+            break;
         }
     }
-    Err(format!("gas transfers moved during each of {POOL_READS} reads of the ledger balance; the next tick reads it again"))
+    Ok(read)
 }
 
-/// What may be refilled from: the ledger balance, less what is owed and
-/// the surplus kept to credit back.
-pub fn pool(balance: u128, owed: u128, surplus: u128) -> u128 {
-    balance.saturating_sub(owed).saturating_sub(surplus)
+/// What may be refilled from: the ledger balance, less what is owed, the
+/// surplus kept to credit back, and what withdrawals that settled while
+/// the balance was read took.
+pub fn pool(balance: u128, owed: u128, surplus: u128, withdrawn_during: u128) -> u128 {
+    balance.saturating_sub(owed).saturating_sub(surplus).saturating_sub(withdrawn_during)
 }
 
 /// The ledger fees a refill keeps aside: the approval's, and the burn's,
@@ -568,8 +583,23 @@ mod tests {
     /// hold or the surplus kept to credit back.
     #[test]
     fn the_pool_leaves_what_is_owed_and_the_surplus() {
-        assert_eq!(pool(1_000, 600, 100), 300);
-        assert_eq!(pool(500, 600, 100), 0, "owing more than is held refills nothing");
+        assert_eq!(pool(1_000, 600, 100, 0), 300);
+        assert_eq!(pool(500, 600, 100, 0), 0, "owing more than is held refills nothing");
+    }
+
+    /// A tenant's withdrawal that the ledger made after it answered the
+    /// balance, and that settled before the reply, is in the balance and
+    /// gone from what is owed. Left out as well, it is not counted as paid
+    /// for gas; one the balance did not show any more only errs low.
+    #[test]
+    fn a_withdrawal_settled_during_the_read_is_not_counted_as_paid() {
+        // 300 paid for gas; a tenant holds 600 and withdraws 200 of it.
+        let (paid, held, out) = (300u128, 600u128, 200u128);
+        // Moved after the balance was read: in it, and gone from what is owed.
+        assert_eq!(pool(paid + held, held - out, 0, out), paid);
+        // Moved before: gone from both, so leaving it out errs low.
+        assert_eq!(pool(paid + held - out, held - out, 0, out), paid - out);
+        assert_eq!(pool(100, 0, 0, 500), 0);
     }
 
     #[test]

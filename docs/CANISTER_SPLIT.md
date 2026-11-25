@@ -569,11 +569,17 @@ The steps in one canister:
      clears the mark on the answer. The git side (`mirror.rs`) ignores a
      write older than the newest it holds for that mirror, so a retry
      that lands late cannot roll it back. An unanswered write is retried
-     on one timer, armed once per outage; `post_upgrade` marks every
-     mirror and `mirrors::resume` writes them before the upgrade's first
-     message (in one canister the writes complete at once), so no push
-     finds a mirror empty; a legacy job is rebuilt there from the
-     authority's own configs (`jobs::resolve_with`).
+     on one timer, armed once per outage. At this step `post_upgrade`
+     marked every mirror and `mirrors::resume` wrote them before the
+     upgrade's first message (in one canister the writes complete at
+     once), so no push found a mirror empty; a legacy job was rebuilt
+     there from the authority's own configs (`jobs::resolve_with`).
+     Since 2026-11 `mirrors::resume` writes nothing: it arms the retry
+     timer at once, as `outbox::resume` does, and the marked mirrors are
+     written when the canister is idle. With the git canister apart, a
+     write is a call, which the IC refuses in post_upgrade, so a mark
+     still pending trapped the upgrade; in one canister a mark is
+     cleared in the message that made it, so none waits for an upgrade.
    - The outbox (`crates/git/src/outbox.rs`, stable map `MEM_OUTBOX`):
      `submit_job` and `notify` items, numbered, delivered oldest first
      and one at a time, retried on one timer, and `for_git` takes each
