@@ -1423,7 +1423,7 @@ fn step(
         }
     }
     let mut next = None;
-    fall_back(&stand.line, stand.cut, |c, _| {
+    fall_back(&stand.line, stand.cut, |c| {
         let hit = approved.contains(&c);
         next = next.or(hit.then_some(c));
         hit
@@ -1437,18 +1437,16 @@ fn step(
 /// before it on its first parents -- only when its first parents do lead
 /// to that one, since a merge's first parent is the pusher's to choose,
 /// and every commit on that path then descends from the older one. After
-/// the oldest, its own first parents, unless the line was cut. Each commit
-/// comes with its tier: the place on the line of the commit it follows.
+/// the oldest, its own first parents, unless the line was cut.
 ///
 /// The paths share one `APPROVAL_WALK`, each walking no more than its
 /// even share of what is left, so that a path a merge sends off down old
 /// history is given up without taking the walk the older ones need.
-fn fall_back(line: &[store::Oid], cut: bool, mut take: impl FnMut(store::Oid, u32) -> bool) {
+fn fall_back(line: &[store::Oid], cut: bool, mut take: impl FnMut(store::Oid) -> bool) {
     let mut left = APPROVAL_WALK;
     let mut paths = line.len().saturating_sub(usize::from(cut));
     for (i, &at) in line.iter().enumerate() {
-        let tier = i as u32;
-        if take(at, tier) {
+        if take(at) {
             return;
         }
         let before = line.get(i + 1);
@@ -1475,7 +1473,7 @@ fn fall_back(line: &[store::Oid], cut: bool, mut take: impl FnMut(store::Oid, u3
             continue;
         }
         for c in path {
-            if take(c, tier) {
+            if take(c) {
                 return;
             }
         }
@@ -1483,16 +1481,24 @@ fn fall_back(line: &[store::Oid], cut: bool, mut take: impl FnMut(store::Oid, u3
 }
 
 /// What a withdrawal on `repo` can fall back to, in the order it does and
-/// with the same walk (`fall_back`), each with its tier; nothing for a
-/// repo that requires no votes. What the authority keeps counted
-/// (graph.rs, `standings`).
-pub fn fallbacks(repo: &str, take: impl FnMut(store::Oid, u32) -> bool) {
-    if !gated(repo) {
-        return;
-    }
+/// with the same walk (`fall_back`), each with its rank: how many approved
+/// commits come before it in that order. What the site serves, or would
+/// fall back to first, is 0; no two approved commits share a rank, so no
+/// run of approvals behind it can outrank it, however the history between
+/// them is drawn. Nothing for a repo that requires no votes. What the
+/// authority keeps counted (graph.rs, `standings`).
+pub fn fallbacks(repo: &str, mut take: impl FnMut(store::Oid, u32) -> bool) {
+    let Some(approved) = crate::mirror::approved(repo) else { return };
     let Some(served) = crate::kv::get_json::<Served>(&served_key(repo)) else { return };
     let stand = Stand::of(&served);
-    fall_back(&stand.line, stand.cut, take);
+    let mut rank = 0u32;
+    fall_back(&stand.line, stand.cut, |c| {
+        let stop = take(c, rank);
+        if approved.contains(&c) {
+            rank += 1;
+        }
+        stop
+    });
 }
 
 fn recorded_if_approved(served: &Served, approved: &crate::mirror::Approved) -> Option<store::Oid> {
@@ -2131,14 +2137,13 @@ mod tests {
         assert_eq!(advance("rollback"), None, "nothing moves, nothing deploys");
         assert_eq!(serve("rollback", "").body, b"three");
         // The authority keeps counting the served line's approvals as on
-        // the branch, though the tip's first parents leave it: c3 and what
-        // falls back after it at c3's place on the line, c1 by its depth
-        // on the tip's line.
+        // the branch, though the tip's first parents leave it, each ranked
+        // by the approved commits a withdrawal would take before it.
         use ic_git_types::git_side::Standing;
         let key = |c: &store::Oid| crate::mirror::commit_key(c.as_slice());
         assert_eq!(
             crate::graph::standings("rollback", &[key(&c3), key(&c2), key(&c1)]),
-            [Standing::Deploy(0), Standing::Deploy(0), Standing::Deploy(1)]
+            [Standing::Deploy(0), Standing::Deploy(1), Standing::Deploy(2)]
         );
 
         // c3's approval withdrawn: back along c3's line to c2, not to c1.
@@ -2308,7 +2313,7 @@ mod tests {
         assert_eq!(advance("starve"), Some(d0));
         use ic_git_types::git_side::Standing;
         let key = |c: &store::Oid| crate::mirror::commit_key(c.as_slice());
-        assert_eq!(crate::graph::standings("starve", &[key(&c2)]), [Standing::Deploy(2)]);
+        assert_eq!(crate::graph::standings("starve", &[key(&c2)]), [Standing::Deploy(3)], "after d0, c3, half");
 
         // c1 approved, on the tip's first parents: no step forward.
         votes::vote("starve", &c1, true);
@@ -2318,6 +2323,49 @@ mod tests {
         }
         assert_eq!(advance("starve"), Some(half), "between c3 and c2, not c1, not nothing");
         assert_eq!(serve("starve", "").body, b"two and a half");
+    }
+
+    /// The authority keeps the served commit counted ahead of every approval
+    /// behind it: ranked 0, each approved commit it would fall back to after
+    /// it in its own place, whether the served commit is deep under pushes
+    /// on the tip's line or a merge has taken it off that line. (Ranked by
+    /// depth from the tip, or all at the served commit's place, enough
+    /// approvals behind it would put it past what the authority keeps
+    /// counted, and its approval would go without a ballot withdrawn.)
+    #[test]
+    fn the_served_commit_outranks_what_is_approved_behind_it() {
+        use ic_git_types::git_side::Standing;
+        let push = gated_repo("rank");
+        let root = push(b"root", None);
+        let mut behind = vec![root];
+        for i in 0..5 {
+            behind.push(push(format!("behind {i}").as_bytes(), behind.last().copied()));
+        }
+        let served = push(b"served", behind.last().copied());
+        votes::require("rank", 1);
+        votes::vote("rank", &served, true);
+        assert_eq!(advance("rank"), Some(served));
+        for c in &behind[1..] {
+            votes::vote("rank", c, true);
+        }
+        let mut tip = served;
+        for i in 0..3 {
+            tip = push(format!("on top {i}").as_bytes(), Some(tip));
+        }
+        assert_eq!(advance("rank"), None);
+        let key = |c: &store::Oid| crate::mirror::commit_key(c.as_slice());
+        let mut keys = vec![key(&served)];
+        keys.extend(behind[1..].iter().rev().map(key));
+        let ranked: Vec<Standing> = (0..6).map(Standing::Deploy).collect();
+        assert_eq!(crate::graph::standings("rank", &keys), ranked, "deep under pushes");
+
+        let tree = store::get_object_stored(&root).unwrap().content();
+        let tree = String::from_utf8_lossy(&tree).lines().next().unwrap().to_string();
+        let text = format!("{tree}\nparent {}\nparent {}\n\nmerge -s ours\n", store::oid_hex(&root), store::oid_hex(&tip));
+        let merge = store::put_object(ObjectType::Commit, text.as_bytes());
+        assert!(receive_push("rank", tip, merge));
+        assert_eq!(advance("rank"), None);
+        assert_eq!(crate::graph::standings("rank", &keys), ranked, "off the tip's line");
     }
 
     /// A record from before tips were kept, buried under more pushes than

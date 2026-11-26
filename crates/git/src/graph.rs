@@ -298,13 +298,13 @@ pub fn leads_to(from: Oid, to: &std::collections::BTreeSet<Oid>, budget: &mut us
 /// Two walks, each bounded as the question it answers already is: the
 /// deploy branch's first parents for as far as the served commit is looked
 /// for (`site::APPROVAL_WALK`), and every ref's history for as far as a
-/// ballot's commit is (`COMMIT_OF_WALK`). The first runs along the tip's
-/// line, its depth counted from the tip, and then through what a
+/// ballot's commit is (`COMMIT_OF_WALK`). The first runs through what a
 /// withdrawn approval falls back to (`site::fallbacks`), its depth the
-/// place on the site's line of the served commit it follows -- however
-/// long the history between them -- so that what the site stands on,
-/// which a merge can leave off the tip's line, stays counted whatever
-/// line a push draws.
+/// rank there, so the commit the site serves is 0 and every approved one
+/// behind it has its own place after it -- what the site stands on stays
+/// counted first, whatever line a push draws and however many commits
+/// are approved behind it -- and then along the tip's line, its depth
+/// counted from the tip, for what is not placed yet.
 /// Each walk stops once every key is placed. A key neither walk meets is
 /// `Gone`: past `MAX_STANDINGS` in the ask, no commit of the repo, or
 /// further back than a ballot is taken on.
@@ -326,6 +326,10 @@ pub fn standings(repo: &str, keys: &[String]) -> Vec<Standing> {
             }
         }
     };
+    crate::site::fallbacks(repo, |oid, rank| {
+        place(&oid, Standing::Deploy(rank), &mut left, &mut out);
+        left == 0
+    });
     let tip = store::head_target(repo).and_then(|branch| store::get_ref(repo, &branch));
     for (depth, oid) in tip.into_iter().flat_map(first_parents).take(crate::site::APPROVAL_WALK).enumerate() {
         if left == 0 {
@@ -333,10 +337,6 @@ pub fn standings(repo: &str, keys: &[String]) -> Vec<Standing> {
         }
         place(&oid, Standing::Deploy(depth as u32), &mut left, &mut out);
     }
-    crate::site::fallbacks(repo, |oid, depth| {
-        place(&oid, Standing::Deploy(depth), &mut left, &mut out);
-        left == 0
-    });
     let mut queue: VecDeque<Oid> = store::list_refs(repo).into_iter().map(|(_, tip)| tip).collect();
     let mut seen: BTreeSet<Oid> = BTreeSet::new();
     while let Some(at) = queue.pop_front() {
