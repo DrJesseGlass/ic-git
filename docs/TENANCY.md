@@ -470,12 +470,35 @@ deploy is queued. That holds whichever way it moves: approving a commit
 below the tip deploys and serves it, and withdrawing the approval on the
 served commit, or objecting to it, rolls both the site and the app back to
 the approved commit before it. An unapproved push is not served and does
-not deploy. Only a
-commit on the branch counts: deleting the branch, or replacing it with
-history nobody approved, serves nothing rather than leaving an old commit
-live, and burying an approved commit under 10,000 unapproved ones takes
-it down too. Every site request re-checks the recorded commit's ballots,
-so a site never serves a commit that is not approved now; with nothing
+not deploy.
+
+A push only ever moves the approved commit forward, to one that descends
+from it. The first-parent line is the pusher's to draw: a merge whose
+first parent is an old approved commit and whose second is the tip (`git
+merge -s ours`, from the old commit) is a fast-forward any writer may push,
+and the line then leads back to the old commit. Such a push moves nothing
+and deploys nothing; going back is the voters' to do, by withdrawing
+approvals. What a withdrawal falls back to is the site's own history, not
+the line a push draws. The site keeps the last 64 commits it moved forward
+to and falls back through them, newest first: each one still approved,
+and after each, an approved commit between it and the one before it on
+its first parents (only when its first parents do lead there). Before the
+oldest it falls back along that commit's own first parents, unless more
+than 64 moves have pushed older ones off, and then nothing older is
+served. Those commits keep their place while the site is down, so it
+comes back only forward of where it was. Forward is proven by the pushes
+themselves: each push to the deploy branch is a checked fast-forward, so
+the site knows the tips pushed since it last moved, each pushed from the
+one before (the last 64 of them), as coming after where it stands. An
+approval of one of them moves the site however far the pushes went; any
+other commit has to lead to one of them, or to the commit the site moved
+to, within 10,000 commits. A site from before this was kept starts with
+the tip of its branch at its first update. Only a commit on the
+branch counts: deleting the branch serves nothing, and replacing it with
+history nobody approved serves nothing rather than leaving an old commit
+live. Unapproved pushes never bury an approved commit: past 10,000 of
+them the site stays where it is. Every site request re-checks the
+recorded commit's ballots, so a site never serves a commit that is not approved now; with nothing
 approved it answers 404. Approvals on history a merge brought in through
 its second parent are not seen.
 

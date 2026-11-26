@@ -406,8 +406,8 @@ fn key_reaches(repo: &str, pol: &Policy, key: &str) -> bool {
 // the list keeps:
 //
 // - the approved commits on the deploy branch, the `COUNTED_APPROVED`
-//   nearest its tip: what is served, and what a withdrawn approval falls
-//   back to;
+//   nearest what is served, in the order a withdrawn approval falls back
+//   in (the served commit first), or nearest the tip;
 // - of every other commit (one still being voted on, one on another
 //   branch), the `COUNTED_OTHER` with the newest ballots.
 //
