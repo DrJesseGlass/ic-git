@@ -61,8 +61,9 @@ pub enum Standing {
     Held,
     /// On the deploy branch, this many first parents from its tip (the
     /// tip is 0), within the walk the served commit is looked for along;
-    /// or this many from a commit the site served, on the line it stands
-    /// on and falls back along, which a merge can leave off the tip's.
+    /// or what a withdrawal falls back to, which a merge can leave off the
+    /// tip's first parents: then the place, on the line of commits the
+    /// site moved forward to (newest 0), of the one it falls back after.
     Deploy(u32),
 }
 

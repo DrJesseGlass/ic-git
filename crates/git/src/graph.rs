@@ -301,8 +301,10 @@ pub fn leads_to(from: Oid, to: &std::collections::BTreeSet<Oid>, budget: &mut us
 /// ballot's commit is (`COMMIT_OF_WALK`). The first runs along the tip's
 /// line, its depth counted from the tip, and then through what a
 /// withdrawn approval falls back to (`site::fallbacks`), its depth the
-/// place in that order: what the site stands on, which a merge can leave
-/// off the tip's line, so it stays counted whatever line a push draws.
+/// place on the site's line of the served commit it follows -- however
+/// long the history between them -- so that what the site stands on,
+/// which a merge can leave off the tip's line, stays counted whatever
+/// line a push draws.
 /// Each walk stops once every key is placed. A key neither walk meets is
 /// `Gone`: past `MAX_STANDINGS` in the ask, no commit of the repo, or
 /// further back than a ballot is taken on.

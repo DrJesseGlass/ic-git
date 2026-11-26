@@ -488,9 +488,12 @@ than 64 moves have pushed older ones off, and then nothing older is
 served. Those commits keep their place while the site is down, so it
 comes back only forward of where it was. Forward is proven by the pushes
 themselves: each push to the deploy branch is a checked fast-forward, so
-an approval of one of the last 64 pushed tips moves the site however far
-the pushes went; any other commit has to lead to one of them, or to the
-commit the site moved to, within 10,000 commits. Only a commit on the
+the site knows the tips pushed since it last moved, each pushed from the
+one before (the last 64 of them), as coming after where it stands. An
+approval of one of them moves the site however far the pushes went; any
+other commit has to lead to one of them, or to the commit the site moved
+to, within 10,000 commits. A site from before this was kept starts with
+the tip of its branch at its first update. Only a commit on the
 branch counts: deleting the branch serves nothing, and replacing it with
 history nobody approved serves nothing rather than leaving an old commit
 live. Unapproved pushes never bury an approved commit: past 10,000 of
