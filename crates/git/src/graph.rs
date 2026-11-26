@@ -263,25 +263,27 @@ pub fn first_parents(tip: Oid) -> impl Iterator<Item = Oid> {
     })
 }
 
-/// Does `from`'s history hold `to`: is `to` the commit `from` or one of its
-/// ancestors? Every parent, nearest first, so a commit a few commits back
-/// is met after a few; a non-commit ends its branch of the walk, read off
-/// the stored type so it is not inflated to learn that. `None` when `cap`
-/// commits were loaded with no answer: past the bound there is no answer
-/// rather than a wrong one.
-pub fn reaches(from: Oid, to: &Oid, cap: usize) -> Option<bool> {
+/// Does `from`'s history meet any of `to`: is one of them `from` or an
+/// ancestor of it? Every parent, nearest first, so a commit a few commits
+/// back is met after a few; a non-commit ends its branch of the walk, read
+/// off the stored type so it is not inflated to learn that. Each commit
+/// loaded takes one from `budget`, which walks after it share; `None` when
+/// it ran out with no answer: past the bound there is no answer rather
+/// than a wrong one.
+pub fn leads_to(from: Oid, to: &std::collections::BTreeSet<Oid>, budget: &mut usize) -> Option<bool> {
     let mut queue: std::collections::VecDeque<Oid> = [from].into();
     let mut seen: std::collections::BTreeSet<Oid> = std::collections::BTreeSet::new();
     while let Some(at) = queue.pop_front() {
-        if at == *to {
+        if to.contains(&at) {
             return Some(true);
         }
         if !seen.insert(at) {
             continue;
         }
-        if seen.len() > cap {
+        if *budget == 0 {
             return None;
         }
+        *budget -= 1;
         if let Some(stored) = store::get_object_stored(&at).filter(|s| s.object_type == ObjectType::Commit) {
             if let Ok(refs) = object::commit_refs(&stored.content()) {
                 queue.extend(refs.parents);
@@ -297,15 +299,13 @@ pub fn reaches(from: Oid, to: &Oid, cap: usize) -> Option<bool> {
 /// deploy branch's first parents for as far as the served commit is looked
 /// for (`site::APPROVAL_WALK`), and every ref's history for as far as a
 /// ballot's commit is (`COMMIT_OF_WALK`). The first runs along the tip's
-/// line, and then along those of the commits the site served
-/// (`site::served_line`), which is what it stands on and what a withdrawn
-/// approval falls back to, and which a merge can leave off the tip's --
-/// so what the site stands on stays counted whatever line a push draws.
-/// Each of those stops at the first commit a line before it met, and
-/// together they walk no more than the tip's; a depth is counted from
-/// where its line starts. Each walk stops once every key is placed. A key
-/// neither walk meets is `Gone`: past `MAX_STANDINGS` in the ask, no
-/// commit of the repo, or further back than a ballot is taken on.
+/// line, its depth counted from the tip, and then through what a
+/// withdrawn approval falls back to (`site::fallbacks`), its depth the
+/// place in that order: what the site stands on, which a merge can leave
+/// off the tip's line, so it stays counted whatever line a push draws.
+/// Each walk stops once every key is placed. A key neither walk meets is
+/// `Gone`: past `MAX_STANDINGS` in the ask, no commit of the repo, or
+/// further back than a ballot is taken on.
 pub fn standings(repo: &str, keys: &[String]) -> Vec<Standing> {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     let mut out = vec![Standing::Gone; keys.len()];
@@ -325,27 +325,16 @@ pub fn standings(repo: &str, keys: &[String]) -> Vec<Standing> {
         }
     };
     let tip = store::head_target(repo).and_then(|branch| store::get_ref(repo, &branch));
-    let mut met: BTreeSet<Oid> = BTreeSet::new();
     for (depth, oid) in tip.into_iter().flat_map(first_parents).take(crate::site::APPROVAL_WALK).enumerate() {
         if left == 0 {
             return out;
         }
-        met.insert(oid);
         place(&oid, Standing::Deploy(depth as u32), &mut left, &mut out);
     }
-    let mut budget = crate::site::APPROVAL_WALK;
-    for served in crate::site::served_line(repo) {
-        for (depth, oid) in first_parents(served).enumerate() {
-            if left == 0 {
-                return out;
-            }
-            if budget == 0 || !met.insert(oid) {
-                break;
-            }
-            budget -= 1;
-            place(&oid, Standing::Deploy(depth as u32), &mut left, &mut out);
-        }
-    }
+    crate::site::fallbacks(repo, |oid, depth| {
+        place(&oid, Standing::Deploy(depth), &mut left, &mut out);
+        left == 0
+    });
     let mut queue: VecDeque<Oid> = store::list_refs(repo).into_iter().map(|(_, tip)| tip).collect();
     let mut seen: BTreeSet<Oid> = BTreeSet::new();
     while let Some(at) = queue.pop_front() {
@@ -424,20 +413,27 @@ mod tests {
         store::put_object(ObjectType::Commit, c.as_bytes())
     }
 
-    /// Whether a history holds a commit: by any parent, the second of a
-    /// merge included; never a descendant; and past the bound, no answer.
+    /// Whether a history meets a commit: by any parent, the second of a
+    /// merge included; never a descendant; past the bound, no answer; and
+    /// the bound shared by the walks that draw on it.
     #[test]
-    fn reaches_follows_every_parent_and_stops_at_the_bound() {
+    fn leads_to_follows_every_parent_and_stops_at_the_bound() {
         let a = commit("reach-a", &[], 1);
         let b = commit("reach-b", &[&a], 2);
         let side = commit("reach-side", &[&a], 2);
         let m = commit("reach-m", &[&b, &side], 3);
-        assert_eq!(reaches(m, &m, 0), Some(true), "a commit holds itself, for nothing");
-        assert_eq!(reaches(m, &side, 10), Some(true), "through the second parent");
-        assert_eq!(reaches(m, &a, 10), Some(true));
-        assert_eq!(reaches(a, &m, 10), Some(false), "never forward");
-        assert_eq!(reaches(b, &side, 10), Some(false), "nor aside");
-        assert_eq!(reaches(m, &a, 1), None, "past the bound");
+        let set = |c: &Oid| std::collections::BTreeSet::from([*c]);
+        let walk = |from: Oid, to: &Oid, mut budget: usize| leads_to(from, &set(to), &mut budget);
+        assert_eq!(walk(m, &m, 0), Some(true), "a commit holds itself, for nothing");
+        assert_eq!(walk(m, &side, 10), Some(true), "through the second parent");
+        assert_eq!(walk(m, &a, 10), Some(true));
+        assert_eq!(walk(a, &m, 10), Some(false), "never forward");
+        assert_eq!(walk(b, &side, 10), Some(false), "nor aside");
+        assert_eq!(walk(m, &a, 1), None, "past the bound");
+        let mut budget = 3;
+        assert_eq!(leads_to(m, &std::collections::BTreeSet::from([a, side]), &mut budget), Some(true));
+        assert_eq!(budget, 1, "m and b loaded; side is met, and ends the walk");
+        assert_eq!(leads_to(m, &set(&a), &mut budget), None, "what is left is all a later walk has");
     }
 
     fn cmp(base: &Oid, head: &Oid) -> Compared {

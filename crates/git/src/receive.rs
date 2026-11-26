@@ -306,8 +306,15 @@ pub fn handle(repo: &str, request: Request, prepared: Option<pack::Prepared>) ->
                 // If this push moved the deploy branch and a deploy is
                 // configured, hand the tip back for the caller to build
                 // and install (first slice of m4).
-                if set.is_some() && deploy_configured && deploy_branch.as_deref() == Some(cmd.refname.as_str()) {
+                let on_deploy = deploy_branch.as_deref() == Some(cmd.refname.as_str());
+                if set.is_some() && deploy_configured && on_deploy {
                     deploy_commit = set;
+                }
+                // A fast-forward of the deploy branch, which check_command
+                // proved: a votes-gated site learns the new tip descends
+                // from the old (site::pushed).
+                if let (true, Some(old), Some(new)) = (on_deploy, cmd.old, set) {
+                    crate::site::pushed(repo, &old, &new);
                 }
                 report.extend_from_slice(&pkt_line(format!("ok {}\n", cmd.refname).as_bytes()));
             }
