@@ -242,13 +242,18 @@ not use:
   attached to the outcalls made (3B per RPC call, 30B for the signature),
   and gets the rest back. The worst case is 45B, under the price; a
   tenant's send also reads the EOA's balance for the float, which can
-  bring it to 51B, and the owner pays at most the price, ic-git the rest.
-  The hold on the gas balance comes back whole.
+  bring it to 51B, and one that stale holds would refuse reads up to
+  seven more (21B, below), and the owner pays at most the price, ic-git
+  the rest. The hold on the gas balance comes back whole.
 - **A provider may hold it** (lost consensus on the broadcast reply, a 5xx,
   providers disagreeing, the call to the RPC canister failing): the full
   charge stays, and so does the hold on the gas balance, until a receipt
   settles it or the operators release it (`gas_release_hold`) for a
-  transaction that never landed.
+  transaction that never landed. A hold still open after its receipt
+  polls (about 28 minutes) is looked at again when it would refuse the
+  owner's next send, or anyone's for the float: a receipt found then
+  settles it, and one that can no longer be mined (a finalized
+  transaction has used its nonce) gives it back whole.
 
 Rent is charged on the bytes a repo's pushes ingested. Objects are
 content-addressed and shared, so two repos pushing the same blob are both
@@ -343,11 +348,15 @@ it.
   not held back to the caller's own account on the ledger, less one
   fee; it is refused, costing nothing, during the few seconds an hour
   ic-git reads its own balance there to refill its EOA (docs/EVM_GAS.md,
-  section 5), and goes through when asked again. Each transfer is recorded in `pending_gas_transfers` before
-  anything moves, under an id that is also its `created_at_time`, and
+  section 5), and goes through when asked again. Each transfer is
+  recorded in `pending_gas_transfers` before anything moves, under an
+  id that is also its `created_at_time`, and
   `finish_gas_transfer(id)` (the one it is for, or an operator) replays
   one whose outcome was unknown, which the ledger takes only once; past
-  its dedup window it goes to `failed_gas_transfers` for the operators.
+  its dedup window it goes to `failed_gas_transfers` for the operators,
+  who read the ledger for the transfer whose `created_at_time` is its id
+  and settle it with `gas_resolve_failed(id, happened)`: a deposit that
+  happened is credited, a withdrawal that did not is given back.
   `get_gas_account(p)` gives the balance (`available`, what open
   transactions hold as `reserved`, and what has gone in and out), and
   `get_gas_charges(p)` what each recent transaction cost on the chain,
@@ -966,9 +975,12 @@ depends on them.
   minter reports it. `gas_credit_surplus` credits the markup's surplus
   back to the balances it came from, and is refused while a refill is
   under way. `gas_release_hold(id)` gives back the hold of a
-  transaction that never landed. `set_gas_ledger` names a gas ledger
-  other than the chain's ck ledger (the local e2e names a stand-in);
-  a balance stays on the ledger it was deposited on.
+  transaction that never landed; a send that finds the hold blocking
+  it does so itself once a finalized transaction has used its nonce.
+  `gas_resolve_failed(id, happened)` settles a transfer in
+  `failed_gas_transfers` by what its ledger shows. `set_gas_ledger`
+  names a gas ledger other than the chain's ck ledger (the local e2e
+  names a stand-in); a balance stays on the ledger it was deposited on.
 - `charge_rent_now` runs a rent tick on demand; the timer runs hourly and is
   re-armed on every upgrade.
 - Existing repos (`evm-demo`, `registry`, `ic-git`) are ownerless and exempt.

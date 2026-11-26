@@ -910,6 +910,16 @@ fn gas_release_hold(id: u64) -> Result<gas::GasHold, String> {
     gas::release_hold(id)
 }
 
+/// Settle failed gas transfer `id` (see failed_gas_transfers) once its
+/// ledger shows whether it happened, by the transfer whose
+/// `created_at_time` is `id`: a deposit that did is credited, a withdrawal
+/// that did not is given back. Operators only. Returns the account it is
+/// for.
+#[ic_cdk::update(guard = "is_admin")]
+fn gas_resolve_failed(id: u64, happened: bool) -> Result<gas::GasAccount, String> {
+    gas::resolve_failed(id, happened)
+}
+
 /// ic-git's float on the chain (docs/EVM_GAS.md, section 5): the EOA's
 /// balance as last read, against the target, floor and margin in wei.
 #[ic_cdk::query]
@@ -951,7 +961,8 @@ fn pending_gas_transfers() -> Vec<gas::PendingGasTransfer> {
     gas::pending()
 }
 
-/// Gas transfers no replay can settle, for the operators to resolve.
+/// Gas transfers no replay can settle, for the operators to resolve
+/// (gas_resolve_failed).
 #[ic_cdk::query]
 fn failed_gas_transfers() -> Vec<gas::FailedGasTransfer> {
     gas::failed()

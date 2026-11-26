@@ -146,7 +146,9 @@ type GasHold = record {
   markup_bps : nat32;
   tx_hash : opt text;
   at_ns : nat64;
+  signed : opt SignedTx;
 };
+type SignedTx = record { chain_id : nat64; from : text; nonce : nat64 };
 type GasCharge = record {
   tx_hash : text;
   gas_used : nat;
@@ -506,6 +508,7 @@ service : {
   gas_credit_surplus : () -> (ResultNat);
   gas_float_refresh : () -> (ResultGasFloat);
   gas_release_hold : (nat64) -> (ResultGasHold);
+  gas_resolve_failed : (nat64, bool) -> (ResultGasAccount);
   pending_gas_transfers : () -> (vec PendingGasTransfer) query;
   failed_gas_transfers : () -> (vec FailedGasTransfer) query;
   pending_icp_deposits : () -> (vec PendingIcpDeposit) query;

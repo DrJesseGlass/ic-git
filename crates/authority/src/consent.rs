@@ -108,7 +108,7 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
                     other => format!("set the install mode to \"{other}\""),
                 },
                 PolicyChange::EvmDeploy { source_path, gas_limit } => {
-                    format!("deploy \"{source_path}\" as a contract on the EVM chain, with a gas limit of {gas_limit}")
+                    format!("deploy \"{source_path}\" as a contract on the EVM chain, with a gas limit of {gas_limit}, its gas paid from the owner's gas balance")
                 }
             };
             let because = match reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
@@ -144,8 +144,9 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
         "accept_transfer" => args::<(String,)>(arg, m).map(|(repo,)| {
             format!(
                 "Become the owner of \"{repo}\": its rent and its pushes and deploys are paid from \
-                 your ic-git balance, and its members keep their roles. Its deploy may install \
-                 into canisters you control."
+                 your ic-git balance, and the gas of its EVM transactions from your gas balance, \
+                 and its members keep their roles. Its deploy may install into canisters you \
+                 control."
             )
         }),
         "cancel_transfer" => args::<(String,)>(arg, m)
@@ -230,7 +231,8 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
                 "Deploy \"{repo}\" now, without a push: its newest approved commit, or its \
                  deploy-branch tip if it needs no votes. Each configured leg runs and is charged \
                  to your ic-git balance; an EVM leg deploys a NEW contract even if one is \
-                 already on chain."
+                 already on chain, and its gas is held from your gas balance until it is mined, \
+                 then what it cost, with ic-git's markup, is taken."
             )
         }),
         "set_site" => args::<(String, String)>(arg, m).map(|(repo, root)| {
@@ -268,7 +270,8 @@ pub fn describe(method: &str, arg: &[u8]) -> Option<Result<String, Icrc21Error>>
             format!(
                 "Publish a provenance record for the site of \"{repo}\" to the EVM registry: \
                  the commit and the hash of the page it serves. The EVM action fee is charged \
-                 to your ic-git balance."
+                 to your ic-git balance, and the transaction's gas, with ic-git's markup, to \
+                 your gas balance."
             )
         }),
         _ => return None,
@@ -365,7 +368,7 @@ mod tests {
             ("add_member", encode_args(("ic-vote", p, "voter")).unwrap(), &["Add 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe to", "voter", "approve, reject or object"]),
             ("remove_member", encode_args(("ic-vote", p)).unwrap(), &["Remove 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe from", "every role"]),
             ("transfer_repo", encode_args(("ic-vote", p)).unwrap(), &["Offer \"ic-vote\" to 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe.", "Nothing changes until"]),
-            ("accept_transfer", encode_args(("ic-vote",)).unwrap(), &["Become the owner", "your ic-git balance", "canisters you control"]),
+            ("accept_transfer", encode_args(("ic-vote",)).unwrap(), &["Become the owner", "your ic-git balance", "your gas balance", "canisters you control"]),
             ("cancel_transfer", encode_args(("ic-vote",)).unwrap(), &["Withdraw the offer"]),
             ("set_required_votes", encode_args(("ic-vote", 2u32)).unwrap(), &["Require 2 approvals"]),
             ("set_required_votes", encode_args(("ic-vote", 0u32)).unwrap(), &["without any approvals"]),
@@ -378,17 +381,17 @@ mod tests {
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::RequiredVotes { k: 2 }, Vote::Approve, None::<String>)).unwrap(), &["Approve a policy change", "require 2 approvals", "applies once"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::AddVoter { principal: p }, Vote::Object, Some("not reviewed yet"))).unwrap(), &["Object to the policy change", "add 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe as a voter", "Reason: not reviewed yet"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::DeployMode { mode: "reinstall".into() }, Vote::Approve, None::<String>)).unwrap(), &["REINSTALL", "WIPES ALL STATE"]),
-            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::EvmDeploy { source_path: "token.hex".into(), gas_limit: 3_000_000 }, Vote::Approve, None::<String>)).unwrap(), &["deploy \"token.hex\" as a contract on the EVM chain", "gas limit of 3000000"]),
+            ("propose_policy_change", encode_args(("ic-vote", PolicyChange::EvmDeploy { source_path: "token.hex".into(), gas_limit: 3_000_000 }, Vote::Approve, None::<String>)).unwrap(), &["deploy \"token.hex\" as a contract on the EVM chain", "gas limit of 3000000", "the owner's gas balance"]),
             ("propose_policy_change", encode_args(("ic-vote", PolicyChange::Transfer { new_owner: p }, Vote::Reject, None::<String>)).unwrap(), &["Reject the policy change", "offer the repository to 3kq6u-eptpm-egjdi-5qvjv-twk23-m4ymt-qqrcs-tdkvy-ob7zx-x6qq3-wqe as its new owner"]),
             ("set_wasm_deploy", encode_args(("ic-vote", "app", "app.wasm")).unwrap(), &["app.wasm", "its app canister"]),
             ("set_deploy_mode", encode_args(("ic-vote", "reinstall")).unwrap(), &["REINSTALL", "WIPE ALL STATE"]),
             ("set_deploy_mode", encode_args(("ic-vote", "upgrade")).unwrap(), &["keeps its state"]),
-            ("deploy_now", encode_args(("ic-vote",)).unwrap(), &["now, without a push", "newest approved commit", "NEW contract", "charged to your ic-git balance"]),
+            ("deploy_now", encode_args(("ic-vote",)).unwrap(), &["now, without a push", "newest approved commit", "NEW contract", "charged to your ic-git balance", "held from your gas balance"]),
             ("set_site", encode_args(("ic-vote", "site")).unwrap(), &["site/", "/site/ic-vote/"]),
             ("set_site", encode_args(("ic-vote", "")).unwrap(), &["repository root"]),
             ("set_site_domains", encode_args(("ic-vote", vec!["Vote.Example.", "www.vote.example"])).unwrap(), &["https://vote.example/, https://www.vote.example/", "as well as at /site/ic-vote/", "boundary nodes"]),
             ("set_site_domains", encode_args(("ic-vote", Vec::<String>::new())).unwrap(), &["no domain of its own", "only at /site/ic-vote/"]),
-            ("evm_registry_publish_site", encode_args(("ic-vote",)).unwrap(), &["provenance record", "EVM action fee"]),
+            ("evm_registry_publish_site", encode_args(("ic-vote",)).unwrap(), &["provenance record", "EVM action fee", "to your gas balance"]),
         ];
         for (method, arg, expect) in cases {
             let text = text(method, arg).unwrap_or_else(|e| panic!("{method}: {e:?}"));

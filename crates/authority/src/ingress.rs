@@ -35,6 +35,7 @@ pub const RULES: &[(&str, Rule)] = &[
     ("set_icp_ledgers", Operator),
     ("set_gas_ledger", Operator),
     ("gas_release_hold", Operator),
+    ("gas_resolve_failed", Operator),
     ("gas_float_refresh", Operator),
     ("gas_refill_now", Operator),
     ("gas_credit_surplus", Operator),
