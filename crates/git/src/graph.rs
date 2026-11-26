@@ -263,12 +263,44 @@ pub fn first_parents(tip: Oid) -> impl Iterator<Item = Oid> {
     })
 }
 
+/// Does `from`'s history hold `to`: is `to` the commit `from` or one of its
+/// ancestors? Every parent, nearest first, so a commit a few commits back
+/// is met after a few; a non-commit ends its branch of the walk, read off
+/// the stored type so it is not inflated to learn that. `None` when `cap`
+/// commits were loaded with no answer: past the bound there is no answer
+/// rather than a wrong one.
+pub fn reaches(from: Oid, to: &Oid, cap: usize) -> Option<bool> {
+    let mut queue: std::collections::VecDeque<Oid> = [from].into();
+    let mut seen: std::collections::BTreeSet<Oid> = std::collections::BTreeSet::new();
+    while let Some(at) = queue.pop_front() {
+        if at == *to {
+            return Some(true);
+        }
+        if !seen.insert(at) {
+            continue;
+        }
+        if seen.len() > cap {
+            return None;
+        }
+        if let Some(stored) = store::get_object_stored(&at).filter(|s| s.object_type == ObjectType::Commit) {
+            if let Ok(refs) = object::commit_refs(&stored.content()) {
+                queue.extend(refs.parents);
+            }
+        }
+    }
+    Some(false)
+}
+
 /// Where each of `keys` stands in `repo` (`GitSide::standings`), a key
 /// being the one a commit's ballots are stored under (`mirror::commit_key`).
 /// Two walks, each bounded as the question it answers already is: the
 /// deploy branch's first parents for as far as the served commit is looked
 /// for (`site::APPROVAL_WALK`), and every ref's history for as far as a
-/// ballot's commit is (`COMMIT_OF_WALK`). Each stops once every key is
+/// ballot's commit is (`COMMIT_OF_WALK`). The first runs along two lines:
+/// the tip's, and the served commit's own, which is where the site stands
+/// and a withdrawn approval falls back along (`site::advance`), and which
+/// a merge can leave off the tip's -- so what the site stands on stays
+/// counted whatever line a push draws. Each stops once every key is
 /// placed. A key neither walk meets is `Gone`: past `MAX_STANDINGS` in
 /// the ask, no commit of the repo, or further back than a ballot is
 /// taken on.
@@ -291,11 +323,14 @@ pub fn standings(repo: &str, keys: &[String]) -> Vec<Standing> {
         }
     };
     let tip = store::head_target(repo).and_then(|branch| store::get_ref(repo, &branch));
-    for (depth, oid) in tip.into_iter().flat_map(first_parents).take(crate::site::APPROVAL_WALK).enumerate() {
-        if left == 0 {
-            return out;
+    let served = crate::site::gated(repo).then(|| crate::site::served_commit(repo).ok()).flatten();
+    for line in [tip, served].into_iter().flatten() {
+        for (depth, oid) in first_parents(line).take(crate::site::APPROVAL_WALK).enumerate() {
+            if left == 0 {
+                return out;
+            }
+            place(&oid, Standing::Deploy(depth as u32), &mut left, &mut out);
         }
-        place(&oid, Standing::Deploy(depth as u32), &mut left, &mut out);
     }
     let mut queue: VecDeque<Oid> = store::list_refs(repo).into_iter().map(|(_, tip)| tip).collect();
     let mut seen: BTreeSet<Oid> = BTreeSet::new();
@@ -373,6 +408,22 @@ mod tests {
         }
         c.push_str(&format!("author a <a@a> {time} +0000\ncommitter a <a@a> {time} +0000\n\n{tag}\n"));
         store::put_object(ObjectType::Commit, c.as_bytes())
+    }
+
+    /// Whether a history holds a commit: by any parent, the second of a
+    /// merge included; never a descendant; and past the bound, no answer.
+    #[test]
+    fn reaches_follows_every_parent_and_stops_at_the_bound() {
+        let a = commit("reach-a", &[], 1);
+        let b = commit("reach-b", &[&a], 2);
+        let side = commit("reach-side", &[&a], 2);
+        let m = commit("reach-m", &[&b, &side], 3);
+        assert_eq!(reaches(m, &m, 0), Some(true), "a commit holds itself, for nothing");
+        assert_eq!(reaches(m, &side, 10), Some(true), "through the second parent");
+        assert_eq!(reaches(m, &a, 10), Some(true));
+        assert_eq!(reaches(a, &m, 10), Some(false), "never forward");
+        assert_eq!(reaches(b, &side, 10), Some(false), "nor aside");
+        assert_eq!(reaches(m, &a, 1), None, "past the bound");
     }
 
     fn cmp(base: &Oid, head: &Oid) -> Compared {

@@ -593,6 +593,15 @@ ic "$TEN" vote "(\"e2e-app\", \"$NEW\", false)" >/dev/null
 expect "approval withdrawn: rolled back" "$(served)" "^200 $TIP"
 expect "  ...certified, at the verifying gateway" "$(nserved)" "^200 $TIP"
 ic "$TEN" vote "(\"e2e-app\", \"$NEW\", true)" >/dev/null
+# A push never takes the site back: a merge whose first parent is the older
+# approved commit and whose second is the tip (git merge -s ours, from the
+# old commit) is a fast-forward, and its first parents lead back to $TIP.
+git -C "$W" checkout -q -b back "$TIP"
+git -C "$W" merge -q -s ours --no-edit main
+git -C "$W" checkout -q main
+git -C "$W" merge -q --ff-only back
+expect "a writer's merge -s ours back to the older approved commit: taken, a fast-forward" "$(signed "$URL")" 'main -> main'
+expect "  ...and the site stays on the newer one" "$(served)" "^200 $NEW"
 
 section "approval-gated deploy and announce"
 if [ -n "$NAMES_WASM" ]; then

@@ -1181,12 +1181,12 @@ fn walk_bundle(tree: &store::Oid, root: &str, prefix: &str, out: &mut Vec<Page>,
     Ok(())
 }
 
-/// How far back from the tip `advance` looks for the newest approved commit.
-/// It runs in update calls (a vote, a push, a policy change), never in a
-/// site request, so it can afford a long walk. Only commits the walk
-/// reaches can be served, so this bound is also what an approved site
-/// withstands: a writer would have to push this many unapproved commits on
-/// top of it, each charged as a push, to take it down.
+/// How far back from the tip `advance` looks for the newest approved commit,
+/// and how many commits each of its ancestry checks may load. It runs in
+/// update calls (a vote, a push, a policy change), never in a site
+/// request, so it can afford a long walk. Past it, what is served stays:
+/// unapproved pushes on top of an approved commit do not take it down,
+/// however many.
 pub const APPROVAL_WALK: usize = 10_000;
 
 /// What a votes-gated repo serves and deploys (META key `served:{repo}`).
@@ -1222,9 +1222,10 @@ fn tip_of(repo: &str) -> Result<store::Oid, &'static str> {
 /// queues its deploy and the app follows the site.
 ///
 /// With votes required: the newest commit within `APPROVAL_WALK` first
-/// parents of the tip that has reached the threshold, and otherwise
-/// nothing. Only a commit on the branch now qualifies: deleting the branch,
-/// or replacing it with history the voters never approved, takes the site
+/// parents of the tip that has reached the threshold -- but only forward
+/// (`forward_only`): a push never takes the site back to an older approved
+/// commit. Only a commit on the branch qualifies: deleting the branch, or
+/// replacing it with history the voters never approved, takes the site
 /// down rather than leaving an off-branch commit live. First parents only:
 /// approvals on history a merge brought in through its second parent are
 /// not seen.
@@ -1254,17 +1255,58 @@ fn advance_served(repo: &str) -> Option<store::Oid> {
         return (prev.commit != Some(store::oid_hex(&tip))).then_some(tip);
     };
     let prev = prev.unwrap_or_default();
-    let next = tip_of(repo).ok().and_then(|tip| {
-        crate::graph::first_parents(tip)
-            .take(APPROVAL_WALK)
-            .find(|c| approved.contains(c))
-    });
+    let tip = tip_of(repo).ok();
+    let found = tip.and_then(|tip| newest_approved(tip, &approved));
+    let next = match prev.commit.as_deref().and_then(|h| store::parse_oid(h).ok()) {
+        Some(was) => forward_only(was, found, tip, &approved),
+        None => found,
+    };
     let now = Served {
         commit: next.as_ref().map(store::oid_hex),
     };
     let moved = now.commit != prev.commit;
     crate::kv::set_json(&key, &Some(now));
     next.filter(|_| moved)
+}
+
+/// The newest approved commit among `from` and its first parents, within
+/// the walk.
+fn newest_approved(from: store::Oid, approved: &crate::mirror::Approved) -> Option<store::Oid> {
+    crate::graph::first_parents(from).take(APPROVAL_WALK).find(|c| approved.contains(c))
+}
+
+/// What a votes-gated repo serves next, when it served `was` and the tip's
+/// first parents lead to `found`. Forward only: `found` when it is `was` or
+/// descends from it. The tip's first parents are the pusher's to choose --
+/// a merge whose first parent is an old approved commit and whose second
+/// is the tip is a fast-forward any writer may push -- so a `found` behind
+/// `was`, or beside it, is no step the voters took. The site stays on its
+/// own line instead: `was` while it is approved, and when its approval is
+/// withdrawn (or the threshold or the voters change), the newest approved
+/// commit among `was`'s own first parents -- the line the voters approved
+/// along, whatever line the tip now draws. Only once the branch no longer
+/// holds `was` at all (history replaced other than by a push, which only
+/// fast-forwards it) does what the tip's walk found decide, as it does for
+/// a repo that served nothing. An ancestry check that runs out of walk
+/// counts as no move: the site stays where it is.
+fn forward_only(
+    was: store::Oid,
+    found: Option<store::Oid>,
+    tip: Option<store::Oid>,
+    approved: &crate::mirror::Approved,
+) -> Option<store::Oid> {
+    if let Some(c) = found {
+        // Behind `was` is checked first: it is the short walk when the tip
+        // leads back, and the long one (all of `c`'s past) is skipped.
+        let behind = c != was && crate::graph::reaches(was, &c, APPROVAL_WALK) == Some(true);
+        if c == was || (!behind && crate::graph::reaches(c, &was, APPROVAL_WALK) == Some(true)) {
+            return found;
+        }
+    }
+    if tip.is_none_or(|t| crate::graph::reaches(t, &was, APPROVAL_WALK) == Some(false)) {
+        return found;
+    }
+    newest_approved(was, approved)
 }
 
 fn recorded_if_approved(served: &Served, approved: &crate::mirror::Approved) -> Option<store::Oid> {
@@ -1818,11 +1860,11 @@ mod tests {
         assert_eq!(serve("recheck", "").status_code, 404);
     }
 
-    /// Unapproved pushes on top of an approved commit keep it served for as
-    /// long as the walk still reaches it: APPROVAL_WALK - 1 of them, and one
-    /// more takes the site down.
+    /// Unapproved pushes on top of an approved commit never take it down:
+    /// the walk finds it under APPROVAL_WALK - 1 of them, and past the walk
+    /// the site stays where it is. (Until 2026-11 one more took it down.)
     #[test]
-    fn unapproved_pushes_bury_the_served_commit_only_past_the_walk() {
+    fn unapproved_pushes_never_bury_the_served_commit() {
         let push = gated_repo("deep");
         let c1 = push(b"approved", None);
         votes::require("deep", 1);
@@ -1835,9 +1877,70 @@ mod tests {
         assert_eq!(advance("deep"), None);
         assert_eq!(served_commit("deep").unwrap(), c1);
         assert_eq!(serve("deep", "").body, b"approved");
-        push(b"one too many", Some(tip));
+        push(b"past the walk", Some(tip));
         assert_eq!(advance("deep"), None);
-        assert_eq!(serve("deep", "").status_code, 404);
+        assert_eq!(served_commit("deep").unwrap(), c1);
+        assert_eq!(serve("deep", "").body, b"approved");
+    }
+
+    /// A push never takes the site back. A merge whose first parent is an
+    /// old approved commit and whose second is the tip (`git merge -s ours`
+    /// from the old commit) is a fast-forward, which any writer may push,
+    /// and the tip's first parents then lead to the old commit: the site
+    /// stays, and nothing deploys. A withdrawn approval still falls back,
+    /// along the served commit's own line and not the one the merge drew;
+    /// and a commit on top that the voters approve moves the site forward.
+    #[test]
+    fn a_push_never_takes_the_served_commit_back() {
+        let push = gated_repo("rollback");
+        let c1 = push(b"one", None);
+        let c2 = push(b"two", Some(c1));
+        let c3 = push(b"three", Some(c2));
+        votes::require("rollback", 1);
+        for c in [&c1, &c2, &c3] {
+            votes::vote("rollback", c, true);
+        }
+        assert_eq!(advance("rollback"), Some(c3));
+
+        // The merge, pushed as a writer pushes it: taken as a fast-forward.
+        let index = store::put_object(ObjectType::Blob, b"one");
+        let mut root = b"100644 index.html\0".to_vec();
+        root.extend_from_slice(index.as_slice());
+        let tree = store::put_object(ObjectType::Tree, &root);
+        let text = format!("tree {}\nparent {}\nparent {}\n\nmerge -s ours\n", store::oid_hex(&tree), store::oid_hex(&c1), store::oid_hex(&c3));
+        let merge = store::put_object(ObjectType::Commit, text.as_bytes());
+        let branch = store::head_target("rollback").unwrap();
+        let line = format!("{} {} {branch}\0 report-status\n", store::oid_hex(&c3), store::oid_hex(&merge));
+        let mut body = crate::smart_http::pkt_line(line.as_bytes());
+        body.extend_from_slice(crate::smart_http::FLUSH_PKT);
+        let out = crate::receive::handle("rollback", crate::receive::parse_request(&body).unwrap(), None);
+        assert!(String::from_utf8_lossy(&out.report).contains(&format!("ok {branch}")));
+        assert_eq!(crate::graph::first_parents(merge).nth(1), Some(c1), "the tip's first parents lead to c1");
+
+        assert_eq!(advance("rollback"), None, "nothing moves, nothing deploys");
+        assert_eq!(serve("rollback", "").body, b"three");
+        // The authority keeps counting the served line's approvals as on
+        // the branch, though the tip's first parents leave it.
+        use ic_git_types::git_side::Standing;
+        let key = |c: &store::Oid| crate::mirror::commit_key(c.as_slice());
+        assert_eq!(
+            crate::graph::standings("rollback", &[key(&c3), key(&c2), key(&c1)]),
+            [Standing::Deploy(0), Standing::Deploy(1), Standing::Deploy(1)]
+        );
+
+        // c3's approval withdrawn: back along c3's line to c2, not to c1.
+        votes::vote("rollback", &c3, false);
+        assert_eq!(advance("rollback"), Some(c2));
+        assert_eq!(serve("rollback", "").body, b"two");
+
+        // On top of the merge: unapproved, nothing moves; approved, it
+        // descends from c2 (through the merge's second parent) and serves.
+        let c4 = push(b"four", Some(merge));
+        assert_eq!(advance("rollback"), None);
+        assert_eq!(serve("rollback", "").body, b"two");
+        votes::vote("rollback", &c4, true);
+        assert_eq!(advance("rollback"), Some(c4));
+        assert_eq!(serve("rollback", "").body, b"four");
     }
 
     /// The recorded commit must still be on the branch. Deleting the branch,

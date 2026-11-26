@@ -469,12 +469,20 @@ push -- and when it moves, `/site/<repo>/` serves it from then on and its
 deploy is queued. That holds whichever way it moves: approving a commit
 below the tip deploys and serves it, and withdrawing the approval on the
 served commit, or objecting to it, rolls both the site and the app back to
-the approved commit before it. An unapproved push is not served and does
-not deploy. Only a
-commit on the branch counts: deleting the branch, or replacing it with
-history nobody approved, serves nothing rather than leaving an old commit
-live, and burying an approved commit under 10,000 unapproved ones takes
-it down too. Every site request re-checks the recorded commit's ballots,
+the approved commit before it on the served commit's own first-parent
+line. An unapproved push is not served and does not deploy.
+
+A push only ever moves the approved commit forward, to one that descends
+from it. The first-parent line is the pusher's to draw: a merge whose
+first parent is an old approved commit and whose second is the tip (`git
+merge -s ours`, from the old commit) is a fast-forward any writer may push,
+and the line then leads back to the old commit. Such a push moves nothing
+and deploys nothing; going back is the voters' to do, by withdrawing
+approvals. Only a commit on the branch counts: deleting the branch, or
+replacing it with history nobody approved, serves nothing rather than
+leaving an old commit live. Unapproved pushes never bury an approved
+commit: past 10,000 of them the site stays where it is. Every site
+request re-checks the recorded commit's ballots,
 so a site never serves a commit that is not approved now; with nothing
 approved it answers 404. Approvals on history a merge brought in through
 its second parent are not seen.
