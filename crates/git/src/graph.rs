@@ -296,14 +296,16 @@ pub fn reaches(from: Oid, to: &Oid, cap: usize) -> Option<bool> {
 /// Two walks, each bounded as the question it answers already is: the
 /// deploy branch's first parents for as far as the served commit is looked
 /// for (`site::APPROVAL_WALK`), and every ref's history for as far as a
-/// ballot's commit is (`COMMIT_OF_WALK`). The first runs along two lines:
-/// the tip's, and the served commit's own, which is where the site stands
-/// and a withdrawn approval falls back along (`site::advance`), and which
-/// a merge can leave off the tip's -- so what the site stands on stays
-/// counted whatever line a push draws. Each stops once every key is
-/// placed. A key neither walk meets is `Gone`: past `MAX_STANDINGS` in
-/// the ask, no commit of the repo, or further back than a ballot is
-/// taken on.
+/// ballot's commit is (`COMMIT_OF_WALK`). The first runs along the tip's
+/// line, and then along those of the commits the site served
+/// (`site::served_line`), which is what it stands on and what a withdrawn
+/// approval falls back to, and which a merge can leave off the tip's --
+/// so what the site stands on stays counted whatever line a push draws.
+/// Each of those stops at the first commit a line before it met, and
+/// together they walk no more than the tip's; a depth is counted from
+/// where its line starts. Each walk stops once every key is placed. A key
+/// neither walk meets is `Gone`: past `MAX_STANDINGS` in the ask, no
+/// commit of the repo, or further back than a ballot is taken on.
 pub fn standings(repo: &str, keys: &[String]) -> Vec<Standing> {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     let mut out = vec![Standing::Gone; keys.len()];
@@ -323,12 +325,24 @@ pub fn standings(repo: &str, keys: &[String]) -> Vec<Standing> {
         }
     };
     let tip = store::head_target(repo).and_then(|branch| store::get_ref(repo, &branch));
-    let served = crate::site::gated(repo).then(|| crate::site::served_commit(repo).ok()).flatten();
-    for line in [tip, served].into_iter().flatten() {
-        for (depth, oid) in first_parents(line).take(crate::site::APPROVAL_WALK).enumerate() {
+    let mut met: BTreeSet<Oid> = BTreeSet::new();
+    for (depth, oid) in tip.into_iter().flat_map(first_parents).take(crate::site::APPROVAL_WALK).enumerate() {
+        if left == 0 {
+            return out;
+        }
+        met.insert(oid);
+        place(&oid, Standing::Deploy(depth as u32), &mut left, &mut out);
+    }
+    let mut budget = crate::site::APPROVAL_WALK;
+    for served in crate::site::served_line(repo) {
+        for (depth, oid) in first_parents(served).enumerate() {
             if left == 0 {
                 return out;
             }
+            if budget == 0 || !met.insert(oid) {
+                break;
+            }
+            budget -= 1;
             place(&oid, Standing::Deploy(depth as u32), &mut left, &mut out);
         }
     }
