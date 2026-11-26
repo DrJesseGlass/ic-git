@@ -17,6 +17,9 @@
   // Date.now() by minutes, and a load that began after the pin would then
   // look older than it, and be reloaded again and again.
   const navStart = Date.now() - performance.now();
+  // The page this navigation is for. Not read again later: the written
+  // page's own code may change the address (history.pushState).
+  const url = location.href.split('#')[0];
   let root = null;
   let repo = null; // the site this page is, once the background has said
 
@@ -42,28 +45,37 @@
     button.risk { border-color: #b3261e; color: #b3261e; }
   `;
 
+  // Elements in the HTML namespace whatever the document is: one main.js
+  // could not open (an XML response) is emptied, and the stop page is all
+  // it shows. createElement there would make elements no shadow root or
+  // style applies to.
+  const XHTML = 'http://www.w3.org/1999/xhtml';
+  const make = tag => document.createElementNS(XHTML, tag);
+
   function veil() {
     if (root) return root;
-    const host = document.createElement('ic-git-verifier');
+    const host = make('ic-git-verifier');
     const shadow = host.attachShadow({ mode: 'closed' });
     const sheet = new CSSStyleSheet();
     sheet.replaceSync(CSS);
     shadow.adoptedStyleSheets = [sheet];
-    const div = document.createElement('div');
+    const div = make('div');
     div.className = 'veil';
     shadow.append(div);
     (document.documentElement || document).append(host);
     root = { host, div };
     return root;
   }
-  // The one write main.js accepts: the document the tab shows.
-  const write = text => document.dispatchEvent(new CustomEvent('ic-git-verifier:write', { detail: text }));
+  // The one write main.js accepts: the document the tab shows. True once
+  // it is written: main.js cancels the event after the write, and takes
+  // none in a document it could not open.
+  const write = text => !document.dispatchEvent(new CustomEvent('ic-git-verifier:write', { detail: text, cancelable: true }));
   const BARE = '<!doctype html><html><head><meta charset="utf-8"><title>ic-git verifier</title></head><body></body></html>';
 
   // Built with DOM calls, never innerHTML: check details come from the
   // network (served hashes, error text) and are shown as text only.
   const el = (tag, props = {}, ...kids) => {
-    const e = document.createElement(tag);
+    const e = make(tag);
     Object.assign(e, props);
     e.append(...kids);
     return e;
@@ -114,7 +126,7 @@
         ...(site.commit ? [document.createTextNode(', record at commit '), el('span', { className: 'mono', textContent: site.commit.slice(0, 12) })] : []),
         ...(site.via ? [document.createTextNode(', read via ' + site.via)] : [])),
       ...(rows.length ? [el('ul', {}, ...rows)] : []),
-      el('div', { className: 'actions' }, again, ...(site.repo ? [anyway] : []))));
+      el('div', { className: 'actions' }, again, ...(site.repo && site.openAnyway !== false ? [anyway] : []))));
   }
 
   // Later news for this tab, after the page is written.
@@ -125,14 +137,22 @@
     if (msg.reload) location.reload();
     else if (msg.status !== 'verified') stop(msg.status, msg.site || {});
   });
-  chrome.runtime.sendMessage({ type: 'visit', url: location.href.split('#')[0], navStart }, res => {
+  // The document's type goes with the visit: only an HTML document can be
+  // replaced by the checked bytes.
+  chrome.runtime.sendMessage({ type: 'visit', url, navStart, contentType: document.contentType }, res => {
     if (chrome.runtime.lastError || !res) {
       write(BARE);
       stop('failed', { checks: [{ ok: false, label: 'reach the verifier', detail: chrome.runtime.lastError ? chrome.runtime.lastError.message : 'no answer' }] });
       return;
     }
     repo = res.site && res.site.repo || null;
-    if ((res.status === 'verified' || res.status === 'allowed') && typeof res.text === 'string') { write(res.text); return; }
+    if ((res.status === 'verified' || res.status === 'allowed') && typeof res.text === 'string') {
+      // The tab is said to show the page only once it does.
+      const shown = write(res.text);
+      chrome.runtime.sendMessage({ type: 'written', url, repo, ok: shown, navStart }, () => void chrome.runtime.lastError);
+      if (!shown) stop('failed', { repo, openAnyway: false, checks: [{ ok: false, label: 'show the checked page', detail: 'this document (' + document.contentType + ') could not be replaced with it' }] });
+      return;
+    }
     // Firefox holds the response itself: the page already is the checked
     // (or allowed) bytes, so there is nothing to write.
     if (res.status === 'verified' || res.status === 'allowed') return;

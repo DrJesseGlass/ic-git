@@ -9,6 +9,11 @@
           "header": "Content-Security-Policy",
           "operation": "set",
           "value": "script-src 'none'; object-src 'none'; base-uri 'none'"
+        },
+        {
+          "header": "Content-Type",
+          "operation": "set",
+          "value": "text/html; charset=utf-8"
         }
       ]
     },
@@ -62,6 +67,11 @@
           "header": "Content-Security-Policy",
           "operation": "set",
           "value": "script-src 'none'; object-src 'none'; base-uri 'none'"
+        },
+        {
+          "header": "Content-Type",
+          "operation": "set",
+          "value": "text/html; charset=utf-8"
         }
       ]
     },

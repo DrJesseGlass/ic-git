@@ -6,7 +6,10 @@
 //   aborts the delivered response at document_start, and the content
 //   script writes in the bytes this worker checked against the registry
 //   record (cached here, so a verified page needs no network at all), or a
-//   bare document under the stop page.
+//   bare document under the stop page. Only an HTML document can be
+//   aborted so, and rules.json types every page under /site/ as one,
+//   whatever the response said. The badge says OK only once the content
+//   script reports the checked bytes written.
 // - Every page under /site/ on an ic-git host is covered by the static
 //   rule in rules.json: a Content-Security-Policy that runs no script. Once
 //   a site's entrypoint verifies, this worker installs a higher-priority
@@ -254,24 +257,45 @@ function badge(tabId, state, site) {
 
 const tell = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg).catch(() => {});
 
+// What visit() gave each tab of a verified site's checked bytes, while it
+// is still the tab's answer: { key, navStart, written }. Set as the bytes
+// are handed out, marked written when the content script of that same
+// navigation reports them shown, and dropped the moment the tab is told
+// anything else (a failed refresh, a reload, another page), so a report
+// that comes later cannot put OK on a stop page or on another page.
+const given = new Map();
+
 // A page under /site/ has started loading in `tabId` (its delivered bytes
 // already dropped by main.js). Answer at once with what the tab should show,
 // then check and tell the tab to reload if anything changes.
-async function visit(tabId, href, navStart) {
+async function visit(tabId, href, navStart, contentType) {
+  given.delete(tabId);
   const at = siteOf(href);
   if (at === null) { badge(tabId, 'uncovered'); await tabRules(tabId, null, []); return { status: 'uncovered' }; }
   const { host, repo } = at, key = keyOf(host, repo);
+  // A document that is not HTML cannot be opened, so the checked bytes
+  // cannot replace it: main.js has stopped and emptied it. rules.json
+  // types every page here as text/html, so a response that still is not
+  // is this navigation's fault, not the site's, and is not remembered.
+  if (contentType !== 'text/html') {
+    // Not to be opened anyway either: main.js has emptied the document.
+    const site = { repo, status: 'failed', openAnyway: false, checks: [{ id: 'X', ok: false, label: 'the page arrives as an HTML document', detail: 'it arrived as ' + contentType + ', which the checked page cannot replace' }] };
+    badge(tabId, 'failed', site);
+    await tabRules(tabId, null, []);
+    return { status: 'failed', site: summary(site) };
+  }
   if (await allowed(tabId, key)) {
     // "Open anyway": the bytes as served now, unchecked, as the user chose.
     badge(tabId, 'allowed', { repo });
     const res = await fetch(siteUrl(host, repo), { cache: 'no-store' });
-    return { status: 'allowed', text: await res.text() };
+    return { status: 'allowed', text: await res.text(), site: { repo } };
   }
   const sites = await load();
   const known = sites[key];
 
   const failSoft = e => {
     const site = { repo, status: 'failed', checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message || String(e) }] };
+    given.delete(tabId);
     badge(tabId, 'failed', site);
     tell(tabId, { type: 'result', status: 'failed', reload: false, site: summary(site) });
   };
@@ -280,15 +304,19 @@ async function visit(tabId, href, navStart) {
   // now, and refresh behind them. A new record, or a page that no longer
   // verifies, reloads the tab, which then gets the new answer.
   if (known && known.status === 'verified' && known.pinnedAt <= navStart && known.text) {
-    badge(tabId, 'verified', known);
+    // Not OK yet: the tab is not showing the page until it is written.
+    badge(tabId, 'checking', known);
+    given.set(tabId, { key, navStart, written: false });
     // This tab's calls: the site's judged backends, before the page runs.
     await tabRules(tabId, key, known.allowedBackends || []);
     const fresh = Date.now() - known.checkedAt < REFRESH_MINUTES * 60_000;
     (fresh ? recheck(known) : verifySite(host, repo)).then(async site => {
+      const g = given.get(tabId);
       if (site.status !== 'verified' || site.policy !== known.policy || site.bundleHash !== known.bundleHash) {
+        given.delete(tabId);
         tell(tabId, { type: 'result', status: site.status, reload: true, site: summary(site) });
       } else {
-        if (site.warning !== known.warning) badge(tabId, 'verified', site);
+        if (site.warning !== known.warning && g && g.key === key && g.written) badge(tabId, 'verified', site);
         if (JSON.stringify(site.allowedBackends) !== JSON.stringify(known.allowedBackends)) await tabRules(tabId, key, site.allowedBackends || []);
       }
     }, failSoft);
@@ -312,11 +340,37 @@ async function visit(tabId, href, navStart) {
   return { status: 'checking', site: { repo } };
 }
 
+// The content script has written what visit() gave the tab (`ok`), or found
+// it could not. Only now does a verified page's badge say OK, and only if
+// those bytes are still the tab's answer and the site still in the state
+// they were given under.
+async function written(tabId, host, repo, ok, navStart) {
+  const key = keyOf(host, repo);
+  if (!ok) {
+    // The tab shows the stop page: it may call nothing.
+    given.delete(tabId);
+    badge(tabId, 'failed', { repo });
+    await tabRules(tabId, null, []);
+    return { ok: true };
+  }
+  if (await allowed(tabId, key)) return { ok: true }; // its badge already warns
+  const g = given.get(tabId);
+  if (!g || g.key !== key || g.navStart !== navStart) return { ok: true }; // told otherwise since
+  const site = (await load())[key];
+  // Read after an await: the tab may have been told otherwise meanwhile.
+  if (given.get(tabId) === g && site && site.status === 'verified' && site.pinnedAt <= navStart) {
+    g.written = true;
+    badge(tabId, 'verified', site);
+  }
+  return { ok: true };
+}
+
 // What the page needs to draw, and nothing it could misuse.
 const summary = site => ({
   repo: site.repo, commit: site.commit || null, checks: site.checks || [],
   via: site.via || null, policyError: site.policyError || null,
   backends: site.backends || [], warning: site.warning || '',
+  openAnyway: site.openAnyway !== false,
 });
 
 // "Open anyway": run this tab's copy of the site without the pinned
@@ -349,6 +403,7 @@ const allow = (tabId, host, repo) => exclusive(async () => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
+  given.delete(tabId);
   tabRules(tabId, null, []);
   return exclusive(async () => {
     const { allowed = {} } = await chrome.storage.session.get('allowed');
@@ -363,12 +418,14 @@ chrome.tabs.onRemoved.addListener(tabId => {
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = sender.tab && sender.tab.id;
   if (tabId === undefined) return false;
-  // A visit names its site by URL; the other messages name a repo, on the
-  // host of the page that sends them.
-  const at = siteOf(msg.type === 'visit' ? msg.url : sender.url);
+  // A visit names its site by URL, and so does the report that its page
+  // was written (the page's code may since have changed the address); the
+  // other messages name a repo, on the host of the page that sends them.
+  const at = siteOf(msg.type === 'visit' || msg.type === 'written' ? msg.url : sender.url);
   const here = at && (msg.type === 'visit' || at.repo === msg.repo) ? at : null;
-  const work = msg.type === 'visit' ? visit(tabId, msg.url, msg.navStart)
+  const work = msg.type === 'visit' ? visit(tabId, msg.url, msg.navStart, msg.contentType)
     : !here ? Promise.reject(new Error('this page is no site\'s entrypoint'))
+    : msg.type === 'written' ? written(tabId, here.host, here.repo, msg.ok === true, msg.navStart)
     : msg.type === 'allow' ? allow(tabId, here.host, here.repo).then(() => ({ ok: true }))
     : msg.type === 'retry' ? verifySite(here.host, here.repo).then(site => ({ status: site.status, site: summary(site) }))
     : Promise.resolve({ error: 'unknown message' });
