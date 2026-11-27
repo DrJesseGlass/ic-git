@@ -165,7 +165,9 @@ show the source and call `get` for the user.
    a GitHub release, or `git show <commit>:loader/index.html > loader.html`
    from a clone. Use `curl`, not a browser visit: the browser runs the page
    on the canister's origin (README: never open the loader from the
-   canister it checks) and saves it under another name.
+   canister it checks) and saves it under another name. Opened there, the
+   loader checks and runs nothing: every site on that host shares the
+   origin, so any of them could paint its verdict.
 2. **Hash it** with the operating system's own tool:
    - macOS, Linux: `shasum -a 256 loader.html`
    - Windows: `certutil -hashfile loader.html SHA256`

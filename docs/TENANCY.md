@@ -710,7 +710,8 @@ On the canister's own host every site shares one origin with every other
 site there, the console included: a page of one can script a page of
 another that the browser has open, and read what it keeps in the browser.
 A site that must be kept apart from the rest is served at a domain of its
-own. The shared host keeps one thing apart: `/site/<repo>` without the
+own, as the console is (see "Console" below). The shared host keeps one
+thing apart: `/site/<repo>` without the
 trailing slash answers with a redirect to `/site/<repo>/` (308), never
 with the root itself. That URL's directory is `/site/`, every site's, so
 a script answered there could be registered as a service worker for all of
@@ -790,7 +791,9 @@ step 16); a domain registered to umobs before it has to be registered
 again.
 There is no domain for the canister itself, only for sites: a domain a
 tenant names is that tenant's until an operator clears it, so an
-operator who wants one holds it on a repo of their own.
+operator who wants one holds it on a repo of their own. The console's
+domain, `ic-git.com`, is held that way, on the `ic-git` repo (see
+"Console").
 
 A custom domain is reached through the IC's verifying gateway alone
 (there is no `.raw` form of it), which passes a response only with the
@@ -882,25 +885,63 @@ deployed push needs dfx.
 After the canister split (docs/CANISTER_SPLIT.md, step 14c) the console
 talks to both canisters. The page is served by the git canister (by
 ic-git itself before the cut of 2026-11-16, whose host now redirects
-there). Git reads (`/api/repos`, refs, trees,
-blobs, commits) go to that canister's `/api` on the page's own origin;
-the tenancy reads (`/api/pricing`, `account`, a repo's `info`, `votes`,
-`proposals` and `deploys`) go to the authority's host, which the gateway
-serves with `access-control-allow-origin: *` (the IC's and the local
-replica's both; the e2e checks the header). Push tokens and the site
-config are the git canister's, by query and by signed call; every other
-call, and the spender a deposit approves on a ledger, is the authority's.
-On mainnet the console pins both ids, as the verifier core does: the
-canister a page approves as a spender is not learned from the canister
-that served the page. On a replica or another deployment it asks the
-serving canister (`get_authority`, the git canister's), and a canister
-without that method is the one-canister build and the authority itself.
-`tools/console-routes-test.mjs` checks the routing offline, against the
-two `.did` files, and the e2e runs it; the e2e's console reads learn the
-authority the same way on both the combined and the split network. At a
-host that is not a canister's own (a domain, a bare localhost) the
-console says it has no canister to talk to; the git browser above it
-needs none.
+there). Git reads (`/api/repos`, refs, trees, blobs, commits) go to that
+canister's `/api`: the page's own origin on the canister's host, its raw
+host from a domain; the tenancy reads (`/api/pricing`, `account`, a
+repo's `info`, `votes`, `proposals` and `deploys`) go to the authority's
+host, which the gateway serves with `access-control-allow-origin: *`
+(the IC's and the local replica's both; the e2e checks the header). Push
+tokens and the site config are the git canister's, by query and by
+signed call; every other call, and the spender a deposit approves on a
+ledger, is the authority's. On mainnet the console pins both ids, as the
+verifier core does: the canister a page approves as a spender is not
+learned from the canister that served the page. On a replica or another
+deployment it asks the serving canister (`get_authority`, the git
+canister's), and a canister without that method is the one-canister
+build and the authority itself. `tools/console-routes-test.mjs` checks
+the routing offline, against the two `.did` files, and the e2e runs it;
+the e2e's console reads learn the authority the same way on both the
+combined and the split network.
+
+Where the console signs. On a canister's own host the page shares its
+origin with every site that canister serves, and any of them can open
+it, script it, read what it keeps, and ask the wallet for a signature
+under the origin the user approved for the console. So the console asks
+a wallet to sign only at a domain of its own, where the whole origin is
+the `ic-git` repo's site: `https://ic-git.com` on mainnet. There it talks
+to the pinned canisters, the git reads crossing to the git canister's
+raw host. Cross-origin the gateway exposes none of the `X-Ic-Git-*`
+headers (its `access-control-expose-headers` is its own list), so the
+page takes the commit from the API's bodies: a file is read at the
+commit `/api/<repo>/commit/<rev>` names. On a canister's host -- mainnet's
+`/site/ic-git/`, a replica, another deployment -- the page browses and
+shows the panels' reads, holds no principal, and on mainnet's hosts
+points to `ic-git.com`. A page at neither (a bare localhost, a file, or
+plain http) has no canister to talk to and says so. A user who connected
+OISY to the console at `/site/ic-git/` before 2026-11 granted that
+origin, which every site there shares: any page there can ask OISY under
+it, so nothing OISY shows for that origin is the console's to approve.
+
+Putting the console at its domain (operator steps; the domain procedure
+is under "Custom domains"):
+
+1. `set_site_domains("ic-git", vec { "ic-git.com" })` as an operator, on
+   the authority; `GET /.well-known/ic-domains` on the git canister then
+   lists it. A domain is first-come (any site's config may name it), so
+   this comes before the DNS records.
+2. The three DNS records for `ic-git.com`, the `validate` request, and
+   the registration.
+3. The console that signs only there is what the `ic-git` repo serves:
+   push main to it and publish its record (README, the repo browser's
+   steps).
+4. `curl -s https://ic-git.com/ | shasum -a 256` is the record's
+   `bundleHash`, as `tools/verify.mjs ic-git index.html` finds it at
+   `/site/ic-git/`: the domain serves the same bytes, certified.
+
+The extensions check a site on the canisters' own hosts only, so the
+console at `ic-git.com` loads unchecked by them until they know the
+domain (docs/EXTENSION.md); its responses are certified, and the
+verifying gateway is the only way to the domain.
 
 A wallet that signs for its user asks this canister, before signing, for a
 readable description of the call (ICRC-21, `icrc21_canister_call_consent_
