@@ -5292,6 +5292,19 @@ function unverifiableSubresource(servedPath, body) {
   'use strict';
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // Never on a canister's own host (docs/LOADER.md, "What a user does"):
+  // every site that canister serves shares the origin, so any of them can
+  // reach this page, paint its verdict, and see the page it runs. There it
+  // checks and runs nothing, and says how to get a copy of its own. A host
+  // names a canister by a label that is its id, alone or after a "--"
+  // (a gateway drops what is before the last one), under any domain.
+  const namesCanister = host => host.split('.').some(l => /^([a-z0-9]{5}-)+[a-z0-9]{3}$/.test(l.split('--').pop()));
+  if (namesCanister(location.hostname)) {
+    $('f').hidden = true;
+    $('out').innerHTML = '<p class="fail">This copy is open on a canister\'s own host, which every site there shares, so it checks nothing here.</p>' +
+      '<p>Save it as a file (<code>curl -so loader.html ' + esc(location.origin + location.pathname) + '</code>), check its sha256 against the registry record <code>ic-git-loader#site</code>, and open the file.</p>';
+    return;
+  }
   const q = new URLSearchParams(location.search);
   // Only the repo comes from the query string (see the header): the
   // registry, the rpc and the canister start at the defaults and change

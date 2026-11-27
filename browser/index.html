@@ -8,11 +8,12 @@
   ic-git repo browser. One file, no external resources: every byte that runs
   is inside the blob the ProvenanceRegistry attests, so a verifier that
   matches this file's hash has covered the whole app (VISION.md section 2,
-  "SRI hashes"). Git reads go to the /api routes of the canister that serves
-  this page; the tenancy reads go to the authority's (the same canister until
-  the cut of docs/CANISTER_SPLIT.md, ic-git itself after it); the ledger
-  balances and a few config reads are anonymous queries to the IC HTTP API
-  (docs/TENANCY.md, "Console").
+  "SRI hashes"). Git reads go to the /api routes of the git canister, which
+  serves this page, at its own host or at the page's home, ic-git.com; the
+  tenancy reads go to the authority's (the same canister until the cut of
+  docs/CANISTER_SPLIT.md, ic-git itself after it); the ledger balances and a
+  few config reads are anonymous queries to the IC HTTP API. It asks a
+  wallet to sign only at its home (docs/TENANCY.md, "Console").
 -->
 <style>
   :root { --fg:#1c1c1c; --muted:#6b6b6b; --bg:#fafaf8; --line:#e2e0da; --link:#0b57a4; --code:#f1efe9; --plus:#1a7f37; --minus:#b3261e; --added:#dff3e2; --removed:#fbe3e1; }
@@ -445,6 +446,84 @@ const Diff = (() => {
 // === end diff ===
 </script>
 <script>
+// === routes ===
+// Where the page is, and which canister answers what (docs/TENANCY.md,
+// "Console"; docs/CANISTER_SPLIT.md, step 14c). A script of its own, ahead
+// of the git browser and the console, which both use it.
+//
+// The page is served by the git canister, in one of two places:
+// - on a canister's own host, <id>.raw.icp0.io (<id>.raw.localhost:4943 on
+//   a replica; any prefix up to a "--" and any of the gateways' domains
+//   name the same canister), which every site that canister serves
+//   shares: any of them can reach this page's window and storage, so the
+//   console asks no wallet to sign there;
+// - at its home, HOME, a domain where the whole origin is this page
+//   (docs/TENANCY.md, "Custom domains"). It is pinned as the ids are; a
+//   deployment of its own sets its own. The canisters are the pinned ones,
+//   and the git reads cross to the git canister's host. Only here does
+//   the console ask a wallet to sign, and not in a frame.
+// Reads go by the page's base URL, which is its address except when the
+// loader runs it (loader/index.html): then the base names the canister it
+// was read from, and the address is the loader's.
+// The git canister holds the objects, the refs, the sites and the push
+// tokens; the authority, ic-git, holds everything else -- accounts,
+// members, ballots, deploy configs, the registry writes -- and is what a
+// deposit approves on a ledger. On mainnet both ids are pinned, as
+// core/verifier.js pins them (tools/console-routes-test.mjs holds them to
+// canister_ids.json): the canister a page approves as a spender must not be
+// learned from the canister that served the page. On another canister's
+// host (a local replica, another deployment) the serving canister is
+// asked, through the git canister's get_authority; a canister without that
+// method is the one-canister build and is the authority itself.
+const Routes = (() => {
+  'use strict';
+  const AUTHORITY = 'umobs-yiaaa-aaaab-agyrq-cai', GIT = '34koz-jyaaa-aaaab-ahejq-cai';
+  const PINNED = new Set([AUTHORITY, GIT]);
+  // Where the console signs: the pinned hosts send a user there.
+  const HOME = 'https://ic-git.com';
+  // The git canister's methods the console calls. Every other call, query
+  // or write, is the authority's.
+  const GIT_METHODS = new Set(['create_push_token', 'revoke_push_token_id', 'list_push_tokens', 'get_site']);
+  const CANISTER_ID = /^([a-z0-9]{5}-)+[a-z0-9]{3}$/;
+  // The canister a host names: its first label, less anything up to the
+  // last "--", which a gateway drops (as site.rs check_domain has it).
+  const label = loc => loc.hostname.split('.')[0].split('--').pop();
+  // A canister's own host: the canister's id, then the gateway's domain.
+  const onCanister = loc => CANISTER_ID.test(label(loc)) && loc.hostname.includes('.');
+  // The page's home, exactly: no other domain, port or scheme is it.
+  const atHome = loc => loc.protocol + '//' + loc.host === HOME;
+  // The git canister serving the page.
+  const hostOf = loc => atHome(loc) ? GIT : label(loc);
+  // A canister's origin. From a canister's host the rest of the host
+  // carries over, so a replica's port does too; from home, mainnet's.
+  const originOf = (loc, id) => atHome(loc) ? 'https://' + id + '.raw.icp0.io' : loc.protocol + '//' + loc.host.replace(/^[^.]+/, id);
+  // Whether a wallet may be asked to sign at this address: only at home,
+  // where no other site's bytes are served.
+  const signs = loc => atHome(loc);
+  // Why a page has no canister to talk to, or null where it has one.
+  const nowhere = loc => atHome(loc) || onCanister(loc) ? null : 'this page is served at ' + loc.host + ', neither at a canister\'s own host nor at ' + HOME + ', so the console has no canister to talk to';
+  async function authorityOf(loc, query) {
+    if (atHome(loc)) return AUTHORITY;
+    const host = label(loc);
+    if (nowhere(loc)) throw new Error(nowhere(loc));
+    if (PINNED.has(host)) return AUTHORITY;
+    let named;
+    try { named = (await query(host, 'get_authority', [], []))[0]; }
+    catch (e) {
+      // No such method (IC0536, reject code 3): the one-canister build.
+      // Any other failure is reported, and asked again at the next mount.
+      if (e.errorCode === 'IC0536' || /no query method/i.test(e.message)) return host;
+      throw e;
+    }
+    if (!named) throw new Error('the serving canister names no authority yet');
+    return named;
+  }
+  const canisterFor = (host, authority, method) => GIT_METHODS.has(method) ? host : authority;
+  return { hostOf, originOf, authorityOf, canisterFor, signs, onCanister, nowhere, HOME, PINNED, GIT_METHODS };
+})();
+// === end routes ===
+</script>
+<script>
 (() => {
   'use strict';
   const main = document.getElementById('main');
@@ -458,8 +537,17 @@ const Diff = (() => {
   const H = (repo, kind, rev, path) => '#/' + enc(repo) + (kind ? '/' + kind + '/' + R(rev) : '') + (path ? '/' + enc(path) : '');
   const when = t => t ? new Date(t * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '';
 
+  // The git canister's origin, by the page's base URL (Routes): this
+  // page's on the canister's host, its raw host from home, whose /api is
+  // not the site's, and the one the loader read it from when it runs it.
+  const HERE = new URL(document.baseURI);
+  const GIT = Routes.originOf(HERE, Routes.hostOf(HERE));
+  // Its headers reach the page only from its own origin: cross-origin the
+  // gateway exposes none of ours (access-control-expose-headers is its
+  // own list), so there the commit comes from a body.
+  const SAME = GIT === location.origin;
   async function api(path) {
-    const r = await fetch('/api/' + path, { headers: { 'Accept': 'application/json' } });
+    const r = await fetch(GIT + '/api/' + path, { headers: { 'Accept': 'application/json' } });
     const ct = r.headers.get('content-type') || '';
     const commit = r.headers.get('x-ic-git-commit');
     if (!r.ok) {
@@ -528,15 +616,16 @@ const Diff = (() => {
     if (!data.length) return render('<p class="muted">no repositories yet</p>');
     render('<h2>repositories</h2><table><tr><th>name</th><th>default branch</th><th>site</th><th>clone</th></tr>' +
       data.map(r => '<tr><td><a href="' + esc(H(r.name)) + '">' + esc(r.name) + '</a></td><td class="muted">' + esc(r.head.replace(/^refs\/heads\//, '')) + '</td><td>' +
-        (r.site ? '<a href="/site/' + esc(enc(r.name)) + '/">/site/' + esc(r.name) + '/</a>' : '<span class="muted">&ndash;</span>') +
-        '</td><td><code>git clone ' + esc(location.origin) + '/' + esc(enc(r.name)) + '.git</code></td></tr>').join('') + '</table>');
+        (r.site ? '<a href="' + esc(GIT) + '/site/' + esc(enc(r.name)) + '/">/site/' + esc(r.name) + '/</a>' : '<span class="muted">&ndash;</span>') +
+        '</td><td><code>git clone ' + esc(GIT) + '/' + esc(enc(r.name)) + '.git</code></td></tr>').join('') + '</table>');
     Console.mount('repos');
   }
 
   async function showTree(repo, rev, path) {
     let refs, t, commit;
     try {
-      [{ data: refs }, { data: t, commit }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/tree/' + encodeURIComponent(rev) + (path ? '/' + enc(path) : ''))]);
+      [{ data: refs }, { data: t }] = await Promise.all([api(enc(repo) + '/refs'), api(enc(repo) + '/tree/' + encodeURIComponent(rev) + (path ? '/' + enc(path) : ''))]);
+      commit = t.commit;
     } catch (e) {
       // Only an unborn HEAD means "no commits yet". A stale rev, a bad path
       // or a failed /refs read is a real error and goes to route()'s fail().
@@ -567,14 +656,20 @@ const Diff = (() => {
   }
 
   async function showBlob(repo, rev, path) {
-    const { data, commit } = await api(enc(repo) + '/blob/' + encodeURIComponent(rev) + '/' + enc(path));
+    // A file is read at a commit. On the git canister's own origin its
+    // header names the one the rev resolved to; elsewhere the commit is
+    // asked for first (an annotated tag's id peels to it) and the file
+    // read at it, so the two agree.
+    const at = SAME ? rev : (await api(enc(repo) + '/commit/' + encodeURIComponent(rev))).data.oid;
+    const read = await api(enc(repo) + '/blob/' + encodeURIComponent(at) + '/' + enc(path));
+    const data = read.data, commit = read.commit || at;
     const binary = isBinary(data);
     const body = binary
       ? '<p class="muted">binary file, ' + data.length + ' bytes</p>'
       : '<pre class="src">' + data.split('\n').map(l => '<span class="l">' + esc(l) + '</span>').join('') + '</pre>';
     render(crumbs(repo, rev, 'blob', path) +
       '<div class="row"><span class="muted">' + data.length + ' bytes at <a class="oid" href=\"' + esc(H(repo, 'commit', commit)) + '\">' + esc(short(commit)) + '</a></span>' +
-      '<a href="/api/' + esc(enc(repo)) + '/blob/' + esc(encodeURIComponent(commit)) + '/' + esc(enc(path)) + '">raw</a>' +
+      '<a href="' + esc(GIT) + '/api/' + esc(enc(repo)) + '/blob/' + esc(encodeURIComponent(commit)) + '/' + esc(enc(path)) + '">raw</a>' +
       '<span class="muted"><code>git show ' + esc(short(commit)) + ':' + esc(path) + '</code> reproduces this</span></div>' + body);
   }
 
@@ -776,75 +871,36 @@ const Diff = (() => {
       throw new Error('unknown view: ' + kind);
     } catch (e) { fail(e); }
   }
+  // A page at neither place has no canister to read: said, nothing asked.
+  if (Routes.nowhere(HERE)) return fail(new Error(Routes.nowhere(HERE)));
   window.addEventListener('hashchange', route);
   route();
 })();
 </script>
 <script>
 // === console ===
-// Signed-in mode (docs/TENANCY.md, "Console"). Reads come from /api like the
-// rest of the page, except the wallet's ledger balances, which are anonymous
+// Signed-in mode (docs/TENANCY.md, "Console"), at the page's home
+// only (routes, above). Reads come from the canisters' /api like the rest of
+// the page, except the wallet's ledger balances, which are anonymous
 // queries to the IC HTTP API; every write is a canister call signed by the user's
 // wallet through the IC signer standards (ICRC-25/27/29/49), which OISY
 // implements. The page never holds a key: it encodes arguments, the wallet
 // signs and submits, and the page decodes the reply from the certificate the
 // wallet hands back.
-// === routes ===
-// Which canister answers what (docs/CANISTER_SPLIT.md, step 14c). The page
-// is served by one canister: ic-git itself until the cut, the git canister
-// after it. The git canister holds the objects, the refs, the sites and the
-// push tokens; the authority, ic-git, holds everything else -- accounts,
-// members, ballots, deploy configs, the registry writes -- and is what a
-// deposit approves on a ledger. On mainnet both ids are pinned, as
-// core/verifier.js pins them (tools/console-routes-test.mjs holds them to
-// canister_ids.json): the canister a page approves as a spender must not be
-// learned from the canister that served the page. Elsewhere (a local
-// replica, another deployment) the serving canister is asked, through the
-// git canister's get_authority; a canister without that method is the
-// one-canister build and is the authority itself.
-const Routes = (() => {
-  'use strict';
-  const AUTHORITY = 'umobs-yiaaa-aaaab-agyrq-cai', GIT = '34koz-jyaaa-aaaab-ahejq-cai';
-  const PINNED = new Set([AUTHORITY, GIT]);
-  // The git canister's methods the console calls. Every other call, query
-  // or write, is the authority's.
-  const GIT_METHODS = new Set(['create_push_token', 'revoke_push_token_id', 'list_push_tokens', 'get_site']);
-  // The host's first label is the canister: <id>.raw.icp0.io, or
-  // <id>.raw.localhost:4943 on a replica; the rest of the host carries
-  // over to the other canister's origin, so a replica's port does too.
-  // The console is served on a canister's own host only: at any other
-  // (a domain, a bare localhost) it has no canister to talk to, and says so.
-  const CANISTER_ID = /^([a-z0-9]{5}-)+[a-z0-9]{3}$/;
-  const hostOf = loc => loc.hostname.split('.')[0];
-  const originOf = (loc, id) => loc.protocol + '//' + loc.host.replace(/^[^.]+/, id);
-  async function authorityOf(loc, query) {
-    const host = hostOf(loc);
-    if (!CANISTER_ID.test(host) || !loc.hostname.includes('.')) throw new Error('this page is served at ' + loc.host + ', not at a canister\'s own host, so the console has no canister to talk to');
-    if (PINNED.has(host)) return AUTHORITY;
-    let named;
-    try { named = (await query(host, 'get_authority', [], []))[0]; }
-    catch (e) {
-      // No such method (IC0536, reject code 3): the one-canister build.
-      // Any other failure is reported, and asked again at the next mount.
-      if (e.errorCode === 'IC0536' || /no query method/i.test(e.message)) return host;
-      throw e;
-    }
-    if (!named) throw new Error('the serving canister names no authority yet');
-    return named;
-  }
-  const canisterFor = (host, authority, method) => GIT_METHODS.has(method) ? host : authority;
-  return { hostOf, originOf, authorityOf, canisterFor, GIT_METHODS };
-})();
-// === end routes ===
 const Console = (() => {
   'use strict';
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   // The canister serving this page, and the authority: known once ready()
   // resolves, which mount() waits for before any panel. A lookup that
   // failed is made again at the next mount, not held against the page.
-  const HOST = Routes.hostOf(location);
+  // Reads by the base URL, signing by the address (routes, above); not in
+  // a frame, whose buttons another page could steer.
+  const HERE = new URL(document.baseURI);
+  const HOST = Routes.hostOf(HERE);
+  const FRAMED = window.top !== window.self;
+  const SIGNS = Routes.signs(location) && !FRAMED;
   let AUTHORITY = null, lookup = null;
-  const ready = () => lookup ||= Routes.authorityOf(location, IC.query).then(a => { AUTHORITY = a; }, e => { lookup = null; throw e; });
+  const ready = () => lookup ||= Routes.authorityOf(HERE, IC.query).then(a => { AUTHORITY = a; }, e => { lookup = null; throw e; });
   const at = method => Routes.canisterFor(HOST, AUTHORITY, method);
   const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
   const ICP_LEDGER = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
@@ -931,11 +987,20 @@ const Console = (() => {
 
   // --- session ---
   let me = null;
-  try { me = localStorage.getItem('ic-git.principal'); } catch (_) {}
+  // Where it may not sign, a principal stored before it stopped is
+  // dropped: every page of that origin can read it.
+  try { if (SIGNS) me = localStorage.getItem('ic-git.principal'); else localStorage.removeItem('ic-git.principal'); } catch (_) {}
+  // Where the page may not sign: why, and where it does.
+  const home = '<a href="' + esc(Routes.HOME) + '/" target="_blank" rel="noopener">' + esc(Routes.HOME.replace(/^https:\/\//, '')) + '</a>';
+  const elsewhere = () => FRAMED ? 'in a frame this page signs nothing: to sign in, open the console at ' + home
+    : Routes.PINNED.has(HOST) ? 'to sign in, open the console at ' + home
+    : Routes.onCanister(HERE) ? 'this copy signs nothing: every site on this canister\'s host shares its origin'
+    : 'this copy signs nothing here';
   const walletEl = () => document.getElementById('wallet');
   function paintWallet() {
     const el = walletEl(); if (!el) return;
-    el.innerHTML = me
+    el.innerHTML = !SIGNS ? '<span class="muted">' + elsewhere() + '</span>'
+      : me
       ? '<span class="muted">signed in as</span> <span class="oid" title="' + esc(me) + '">' + esc(short(me)) + '</span> <button id="signout">sign out</button>'
       : '<button id="signin">connect wallet</button>';
     const si = document.getElementById('signin'), so = document.getElementById('signout');
@@ -943,6 +1008,7 @@ const Console = (() => {
     if (so) so.onclick = () => { me = null; try { localStorage.removeItem('ic-git.principal'); } catch (_) {} signer.disconnect(); paintWallet(); location.reload(); };
   }
   async function signIn() {
+    if (!SIGNS) return;
     const el = walletEl();
     const say = msg => { if (el) el.innerHTML = '<span class="muted">' + esc(msg) + '</span>'; };
     try {
@@ -973,6 +1039,7 @@ const Console = (() => {
   // popup the second one is waiting on.
   let sessions = 0;
   async function session(fn) {
+    if (!SIGNS) throw new Error('this copy of the console signs nothing here');
     if (!me) throw new Error('connect a wallet first');
     sessions++;
     try { await signer.connect(null); return await fn(sign); }
@@ -990,12 +1057,13 @@ const Console = (() => {
 
   // --- panels ---
   // The tenancy reads (api_authority.rs: pricing, account, info, votes,
-  // proposals, deploys) are the authority's; the git reads above (api(),
-  // same origin) are the serving canister's. Cross-origin after the cut:
-  // the gateway answers a canister's responses with
-  // access-control-allow-origin: *, and a plain GET needs no preflight.
+  // proposals, deploys) are the authority's; the git reads above (api())
+  // are the serving canister's. Both are cross-origin from home, and
+  // the tenancy reads from the git canister's host too: the gateway answers
+  // a canister's responses with access-control-allow-origin: *, and a
+  // plain GET needs no preflight.
   const get = async path => {
-    const r = await fetch(Routes.originOf(location, AUTHORITY) + '/api/' + path);
+    const r = await fetch(Routes.originOf(HERE, AUTHORITY) + '/api/' + path);
     if (!r.ok) {
       let msg = r.status + ' ' + r.statusText;
       if ((r.headers.get('content-type') || '').includes('json')) { try { msg = (await r.json()).error || msg; } catch (_) {} }
@@ -1015,10 +1083,10 @@ const Console = (() => {
 
   async function reposPanel() {
     let html = '<div class="panel"><h3>console</h3>';
-    if (!me) { html += '<p class="muted">Connect a wallet to create repositories, mint push tokens, manage members and votes, deposit cycles, and hold gas for EVM transactions. Reads need no sign-in.</p></div>'; return html; }
+    if (!me) { html += '<p class="muted">' + (SIGNS ? 'Connect a wallet' : 'Sign in') + ' to create repositories, mint push tokens, manage members and votes, deposit cycles, and hold gas for EVM transactions. Reads need no sign-in.' + (SIGNS ? '' : ' Here, ' + elsewhere() + '.') + '</p></div>'; return html; }
     // What the wallet holds on the ledgers, read anonymously; null when a ledger did not answer.
     // They start now and land in the panel when they answer; the controls
-    // below wait only for the same-origin reads.
+    // below wait only for the canister's reads.
     const held = ledger => IC.query(ledger, 'icrc1_balance_of', [ACCOUNT], [{ owner: me, subaccount: null }]).then(r => r[0], e => { console.warn('ledger ' + ledger + ': ' + e.message); return undefined; });
     const icp = held(ICP_LEDGER), cyc = held(CYCLES_LEDGER);
     const [pricing, acct] = await Promise.all([
@@ -1246,7 +1314,7 @@ const Console = (() => {
           '<div id="box-reinstall" class="confirm" hidden><p id="reinstall-what" class="bad"></p>' +
           '<p>Type the repository name <b>' + esc(repo) + '</b> to confirm: <input id="in-reinstall" autocomplete="off"> <button id="go-reinstall" class="danger" type="button" disabled>reinstall now</button> <button id="cancel-reinstall" type="button">cancel</button></p><p id="reinstall-st" class="status"></p></div>'
         : '');
-    if (!me) html += '<p class="muted">connect a wallet to manage this repo.</p>';
+    if (!me) html += '<p class="muted">' + (SIGNS ? 'connect a wallet to manage this repo.' : elsewhere() + '.') + '</p>';
     html += '</div>';
     html += await governancePanel(repo, info, isOwner);
     setTimeout(() => {
@@ -1298,7 +1366,7 @@ const Console = (() => {
           const id = IC.hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))).slice(0, 8));
           mine = ((await tokens()) || []).find(t => t.id === id);
         } catch (e) { console.warn('push token list: ' + e.message); }
-        return 'token (shown once' + (mine ? ', valid until ' + nsDate(mine.expires_ns) : '') + '): ' + token + '  -> git push https://ic:<token>@' + location.host + '/' + repo + '.git main' +
+        return 'token (shown once' + (mine ? ', valid until ' + nsDate(mine.expires_ns) : '') + '): ' + token + '  -> git push https://ic:<token>@' + Routes.originOf(HERE, HOST).replace(/^https?:\/\//, '') + '/' + repo + '.git main' +
           (key ? '  -- bound to that key, so sign pushes with it: git config gpg.format ssh; git config user.signingkey <path to that .pub>; git config push.gpgSign if-asked' : '');
       });
       onsubmit('f-transfer', async v => { await write('transfer_repo', ['text', 'principal'], [repo, v.principal.trim()]); setTimeout(() => location.reload(), 800); return 'offered: it is theirs once they accept'; });

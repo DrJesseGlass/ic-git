@@ -173,7 +173,10 @@ node tools/verify.mjs ic-git index.html
 ```
 
 The page is then at `https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/ic-git/`
-and browses, among other things, its own source.
+and browses, among other things, its own source. There it only reads: every
+site on that host shares its origin, so it asks no wallet to sign. The same
+page signs at its home, `https://ic-git.com`, a domain whose whole origin is
+this site (docs/TENANCY.md, "Console").
 
 ## Verifying a site in the browser
 
@@ -217,8 +220,9 @@ cycles and are charged for creation, each push, storage rent, and each
 deploy action; an action that would overdraw is refused first. Apps deployed
 to the IC run in a canister the owner controls, created from their balance.
 
-From the browser: open `/site/ic-git/` on the git canister's host, connect
-a wallet (OISY), and use the console panels; the panel shows the wallet's
+From the browser: open `https://ic-git.com`, connect a wallet (OISY), and
+use the console panels (the copy at `/site/ic-git/` on the git canister's
+host reads but signs nothing); the panel shows the wallet's
 ICP and cycles ledger balances next to its ic-git balance. From the command
 line, the same calls through dfx; the push tokens are the git canister's,
 everything else the authority's:
