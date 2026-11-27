@@ -434,13 +434,27 @@ const report = (name, ok, got) => {
     const s = await b.state();
     report('the checked host over http: upgraded, checked, runs', at === CONSOLE && !s.overlay && s.badge === 'OK', { at, ...s });
     // In a frame, inside a page of anyone's: the canister's index at
-    // that host loads there, a page under /site/ does not.
+    // that host loads there, a page under /site/ does not. Nor does one of
+    // the checked host, in a frame or an object: it would run there as
+    // that host, unchecked, and could reach a checked page of it.
     await b.send('Page.navigate', { url: 'https://example.com/' }, b.page);
     await sleep(3_000);
     await b.evaluate(`for (const path of ['/', '/site/ic-git/']) {
       const f = document.createElement('iframe');
       f.src = 'https://${ID}.icp0.io' + path;
       document.body.append(f);
+    }
+    for (const src of ['${GW}/site/ic-vote/', '${GW.replace('//', '//x@')}/site/ic-vote/']) {
+      const f = document.createElement('iframe');
+      f.src = src;
+      document.body.append(f);
+    }
+    // An object of another host that loads, so the check sees objects.
+    for (const data of ['https://${ID}.icp0.io/?object', '${GW}/site/ic-git/']) {
+      const o = document.createElement('object');
+      o.type = 'text/html';
+      o.data = data;
+      document.body.append(o);
     }`);
     await sleep(8_000);
     // A frame of another site is a target of its own, and keeps the
@@ -448,9 +462,13 @@ const report = (name, ok, got) => {
     const frames = {};
     for (const t of (await b.send('Target.getTargets')).targetInfos.filter(t => t.type === 'iframe')) {
       const { sessionId } = await b.send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
-      frames[new URL(t.url).pathname] = await b.evaluate('location.href', sessionId);
+      frames[t.url] = await b.evaluate('location.href', sessionId);
     }
-    report('blocked in a frame', frames['/'] === `https://${ID}.icp0.io/` && frames['/site/ic-git/'] === 'chrome-error://chromewebdata/', frames);
+    const hostOf = url => { try { return new URL(url).host; } catch { return ''; } };
+    report('blocked in a frame', frames[`https://${ID}.icp0.io/`] === `https://${ID}.icp0.io/` && frames[`https://${ID}.icp0.io/site/ic-git/`] === 'chrome-error://chromewebdata/', frames);
+    report('the checked host blocked in a frame and in an object, with a user name too',
+      frames[`https://${ID}.icp0.io/?object`] === `https://${ID}.icp0.io/?object` && frames[GW + '/site/ic-vote/'] === 'chrome-error://chromewebdata/' &&
+      !Object.values(frames).some(u => hostOf(u) === hostOf(GW)), frames);
   } finally { await b.close(); }
 }
 

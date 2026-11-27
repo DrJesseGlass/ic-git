@@ -1567,6 +1567,38 @@ pub fn serve(repo: &str, path: &str) -> HttpResponse {
     served(repo, path).0
 }
 
+/// The answer at a URL of the canister host's `/site` family: `serve`'s,
+/// except at `/site/<repo>` itself, the root with no trailing slash
+/// (`serve_bare`).
+pub fn serve_url(path: &str) -> Option<HttpResponse> {
+    let (repo, sub) = site_path(path)?;
+    Some(if sub.is_empty() && !path.ends_with('/') { serve_bare(repo) } else { serve(repo, sub) })
+}
+
+/// GET /site/<repo>, no trailing slash: wherever the site's root answers
+/// with a blob of its bundle, a redirect to `/site/<repo>/`, and the miss
+/// (or the refusal) the root has otherwise. The root is never answered
+/// at the bare URL, whose directory is `/site/`, the directory of every
+/// site here: a script served there could be registered as a service
+/// worker for all of them (a site whose root is `sw.js`), and a page's
+/// relative URLs would name other repos' sites (`app.js` resolves to
+/// `/site/app.js`, the root of a repo by that name). A browser does not
+/// register a service worker from behind a redirect.
+pub fn serve_bare(repo: &str) -> HttpResponse {
+    match served(repo, "") {
+        (_, Some(_)) => to_root(repo),
+        (res, None) => res,
+    }
+}
+
+/// The redirect from `/site/<repo>` to its root, as certified there.
+pub(crate) fn to_root(repo: &str) -> HttpResponse {
+    let to = format!("/site/{repo}/");
+    let mut res = crate::git_response(308, "text/plain; charset=utf-8", format!("{to}\n").into_bytes());
+    res.headers.push(("Location".to_string(), to));
+    expressed(res)
+}
+
 /// `serve`, and the blob it answered with, for the certifier's body
 /// hashes (certify.rs).
 pub(crate) fn served(repo: &str, path: &str) -> (HttpResponse, Option<store::Oid>) {
@@ -2866,6 +2898,38 @@ mod tests {
         assert_eq!(body, b"<h1>site2</h1>");
         // The attested bytes are exactly what the network serves.
         assert_eq!(serve("site2", "").body, body);
+    }
+
+    /// The root is never answered at the bare `/site/<repo>`, whose
+    /// directory is every site's: a root that is a script is served as
+    /// one at `/site/<repo>/`, where a service worker registered from it
+    /// reaches that site alone, and the bare URL redirects there. A repo
+    /// with nothing served has its miss at the bare URL, as before.
+    #[test]
+    fn the_bare_site_url_redirects_to_the_root() {
+        store::create_repo("sw").unwrap();
+        crate::mirror::ungated_for_tests("sw");
+        let js = store::put_object(ObjectType::Blob, b"self.onfetch = () => {}");
+        let mut root = b"100644 sw.js\0".to_vec();
+        root.extend_from_slice(js.as_slice());
+        let tree = store::put_object(ObjectType::Tree, &root);
+        let text = format!("tree {}\n\nsw\n", store::oid_hex(&tree));
+        let commit = store::put_object(ObjectType::Commit, text.as_bytes());
+        store::set_ref("sw", &store::head_target("sw").unwrap(), commit).unwrap();
+        assert_eq!(serve_url("/site/sw").unwrap().status_code, 404, "nothing served yet");
+        set_config("sw", "sw.js".to_string()).unwrap();
+
+        let root = serve_url("/site/sw/").unwrap();
+        assert_eq!(root.status_code, 200);
+        assert_eq!(root.body, b"self.onfetch = () => {}");
+        assert!(root.headers.iter().any(|(k, v)| k == "Content-Type" && v.starts_with("text/javascript")));
+        let bare = serve_url("/site/sw").unwrap();
+        assert_eq!(bare.status_code, 308);
+        assert!(bare.headers.iter().any(|(k, v)| k == "Location" && v == "/site/sw/"));
+        assert!(!bare.headers.iter().any(|(k, _)| k == "X-Ic-Git-Commit"), "no page's provenance on the redirect");
+        assert_eq!(serve_url("/site").unwrap().status_code, 404);
+        assert_eq!(serve_url("/site/").unwrap().status_code, 404);
+        assert!(serve_url("/elsewhere").is_none());
     }
 
     #[test]

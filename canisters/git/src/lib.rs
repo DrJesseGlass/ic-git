@@ -244,6 +244,9 @@ enum Route {
     /// GET /site/<repo>/<path>: a committed static bundle (see site.rs);
     /// or GET /<path> with a site's own domain as the Host.
     Site { repo: String, path: String },
+    /// GET /site/<repo> and the rest of the `/site` family on the
+    /// canister's own host (`site::serve_url`).
+    SiteUrl { path: String },
     /// GET /.well-known/ic-domains: the domains the sites here are served
     /// at, for the boundary nodes (docs/TENANCY.md, "Custom domains").
     Domains,
@@ -290,14 +293,11 @@ fn route(req: &HttpRequest) -> Route {
     // included when it is empty: the answer for no such site is one
     // certified 404 (certify.rs), and the gateway holds that path family
     // to it.
-    if let Some((repo, sub)) = site::site_path(path) {
+    if site::site_path(path).is_some() {
         if !read {
             return Route::NotFound;
         }
-        return Route::Site {
-            repo: repo.to_string(),
-            path: sub.to_string(),
-        };
+        return Route::SiteUrl { path: path.to_string() };
     }
     let Some((repo, rest)) = path
         .strip_prefix('/')
@@ -391,6 +391,7 @@ fn routed(req: &HttpRequest) -> HttpResponse {
         } => http::upgrade_response(),
         Route::Rpc { repo, .. } => upload_pack(&repo, &req.body),
         Route::Site { repo, path } => site::serve(&repo, &path),
+        Route::SiteUrl { path } => site::serve_url(&path).unwrap_or_else(site::not_found),
         Route::Domains => site::domains_response(),
         Route::Api { url } => api_route(&url),
         Route::Index => site::index_response(),

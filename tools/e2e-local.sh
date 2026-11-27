@@ -518,6 +518,13 @@ expect "  ...and HEAD, which is the same answer" "$(curl -s -I -o /dev/null -w '
 expect "  ...its miss" "$(at_gateway /site/e2e-app/nope)" '^not found in site bundle +404$'
 expect "  ...a slash after a file is a miss" "$(at_gateway /site/e2e-app/b.txt/)" '^not found in site bundle +404$'
 expect "  ...a repo with no site" "$(at_gateway /site/nope/)" '^no site configured for repo +404$'
+# Without the slash, a site's address is a redirect to its root, never the
+# root itself: that URL's directory is every site's (docs/TENANCY.md,
+# "Custom domains"). Certified as a redirect, so the query is dropped.
+redirect_at() { curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$1" || true; }
+expect "without the slash: a redirect to the site's root" "$(redirect_at "http://$HOST/site/e2e-app?x=1")" "^308 http://$HOST/site/e2e-app/\$"
+expect "  ...certified: the verifying gateway passes it" "$(redirect_at "http://$NHOST/site/e2e-app")" "^308 http://$NHOST/site/e2e-app/\$"
+expect "  ...a repo with no site is still a miss" "$(at_gateway /site/nope)" '^no site configured for repo +404$'
 expect "  ...the API, declared uncertified" "$(at_gateway /api/repos)" 'e2e-app.* 200$'
 expect "  ...and a clone over it" "$(git clone -q "http://$NHOST/e2e-app.git" "$WORK/nclone" 2>&1; git -C "$WORK/nclone" rev-parse HEAD)" "^$TIP$"
 # The diff of the tip (crates/git/src/diff.rs) is against its parent and

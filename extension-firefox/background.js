@@ -37,7 +37,7 @@ const originOf = host => 'https://' + host + '.raw.icp0.io';
 // The registry is read through both; they must return the same answer.
 const RPCS = ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'];
 const REFRESH_MINUTES = 10;
-const BLOCK = "script-src 'none'; object-src 'none'; base-uri 'none'";
+const BLOCK = "script-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'";
 const BARE = '<!doctype html><html><head><meta charset="utf-8"><title>ic-git verifier</title></head><body></body></html>';
 const REFRESH = '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0"><title>ic-git verifier</title></head><body></body></html>';
 const FILTER = { urls: HOSTS.map(h => originOf(h) + '/site/*'), types: ['main_frame'] };
@@ -286,9 +286,9 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
 
 // --- the body: held until it is known to be the recorded page ---
 browser.webRequest.onBeforeRequest.addListener(d => {
-  // /site/<repo> without the slash: the canister serves the entrypoint
-  // there too, but relative URLs then resolve one level up and no record's
-  // rule matches it. Send it to the canonical /site/<repo>/ first.
+  // /site/<repo> without the slash: relative URLs resolve one level up
+  // there and no record's rule matches it. The canister redirects it to
+  // /site/<repo>/, without the query; sending it there first keeps it.
   const u = new URL(d.url);
   if (/^\/site\/[^/]+$/.test(u.pathname)) { u.pathname += '/'; return { redirectUrl: u.href }; }
   latest.set(d.tabId, d.requestId);
