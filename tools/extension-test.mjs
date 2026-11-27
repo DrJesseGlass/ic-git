@@ -444,13 +444,18 @@ const report = (name, ok, got) => {
       f.src = 'https://${ID}.icp0.io' + path;
       document.body.append(f);
     }
-    const f = document.createElement('iframe');
-    f.src = '${GW}/site/ic-vote/';
-    document.body.append(f);
-    const o = document.createElement('object');
-    o.type = 'text/html';
-    o.data = '${GW}/site/ic-git/';
-    document.body.append(o);`);
+    for (const src of ['${GW}/site/ic-vote/', '${GW.replace('//', '//x@')}/site/ic-vote/']) {
+      const f = document.createElement('iframe');
+      f.src = src;
+      document.body.append(f);
+    }
+    // An object of another host that loads, so the check sees objects.
+    for (const data of ['https://${ID}.icp0.io/?object', '${GW}/site/ic-git/']) {
+      const o = document.createElement('object');
+      o.type = 'text/html';
+      o.data = data;
+      document.body.append(o);
+    }`);
     await sleep(8_000);
     // A frame of another site is a target of its own, and keeps the
     // address it was given: where it is says whether it loaded.
@@ -459,9 +464,11 @@ const report = (name, ok, got) => {
       const { sessionId } = await b.send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
       frames[t.url] = await b.evaluate('location.href', sessionId);
     }
+    const hostOf = url => { try { return new URL(url).host; } catch { return ''; } };
     report('blocked in a frame', frames[`https://${ID}.icp0.io/`] === `https://${ID}.icp0.io/` && frames[`https://${ID}.icp0.io/site/ic-git/`] === 'chrome-error://chromewebdata/', frames);
-    report('the checked host blocked in a frame and in an object',
-      frames[GW + '/site/ic-vote/'] === 'chrome-error://chromewebdata/' && !Object.values(frames).some(at => at.startsWith(GW)), frames);
+    report('the checked host blocked in a frame and in an object, with a user name too',
+      frames[`https://${ID}.icp0.io/?object`] === `https://${ID}.icp0.io/?object` && frames[GW + '/site/ic-vote/'] === 'chrome-error://chromewebdata/' &&
+      !Object.values(frames).some(u => hostOf(u) === hostOf(GW)), frames);
   } finally { await b.close(); }
 }
 

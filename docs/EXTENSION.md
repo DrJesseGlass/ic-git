@@ -219,8 +219,9 @@ decoded as other text.
 - Verified state is refreshed every ten minutes and rechecked on each
   visit; a failure is never reused -- the next visit checks again.
 - `/site/<repo>` (no slash) is redirected to `/site/<repo>/` before it
-  loads: the canister serves the page at both, but relative URLs only
-  resolve at the second.
+  loads, query and fragment kept. The canister redirects it too, since
+  relative URLs only resolve at the second (docs/TENANCY.md, "Custom
+  domains"), but its redirect is certified and so drops the query.
 - A site is checked at one host, `<canister>.raw.icp0.io`, and the
   gateways serve the same canister at others: the certified host
   (`<canister>.icp0.io`), every other domain of theirs (`ic0.app`,
@@ -240,12 +241,12 @@ decoded as other text.
   `https` by the same means. What the rule leaves alone at those hosts
   is what is not under `/site`: the canister's index, its API, the git
   protocol, none of them a site's page. The checked host itself is
-  blocked in a frame and in an object, at any page's (a static rule, in
-  both packages): a page of it there is no tab's page, so neither
-  extension checks it, and it would run as that host -- the origin of
-  every checked page, which it could then reach, by `window.open` or as
-  a checked page's opener. A checked page frames nothing
-  (`frame-src 'none'`). A site at a domain of its own
+  blocked in a frame and in an object, at any page's, with or without a
+  user name in the URL (a static rule, in both packages): a page of it
+  there is no tab's page, so neither extension checks it, and it would
+  run as that host -- the origin of every checked page, which it could
+  then reach, by `window.open` or as a checked page's opener. A checked
+  page frames nothing (`frame-src 'none'`). A site at a domain of its own
   (docs/TENANCY.md, "Custom domains") has no canister id in its host
   and is not covered: it loads unchecked, at that domain, until the
   extensions know the domain.

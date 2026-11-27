@@ -286,9 +286,9 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
 
 // --- the body: held until it is known to be the recorded page ---
 browser.webRequest.onBeforeRequest.addListener(d => {
-  // /site/<repo> without the slash: the canister serves the entrypoint
-  // there too, but relative URLs then resolve one level up and no record's
-  // rule matches it. Send it to the canonical /site/<repo>/ first.
+  // /site/<repo> without the slash: relative URLs resolve one level up
+  // there and no record's rule matches it. The canister redirects it to
+  // /site/<repo>/, without the query; sending it there first keeps it.
   const u = new URL(d.url);
   if (/^\/site\/[^/]+$/.test(u.pathname)) { u.pathname += '/'; return { redirectUrl: u.href }; }
   latest.set(d.tabId, d.requestId);

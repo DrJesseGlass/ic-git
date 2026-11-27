@@ -160,8 +160,10 @@ async function open({ rewrite = () => null } = {}) {
     const { contexts: [top] } = await send('browsingContext.getTree', { root: context });
     const out = [];
     for (const c of top.children || []) {
-      try { out.push((await send('script.evaluate', { expression: 'document.documentURI', target: { context: c.context }, awaitPromise: false })).result.value); }
-      catch (e) { out.push('error: ' + e.message); }
+      let uri = '';
+      try { uri = (await send('script.evaluate', { expression: 'document.documentURI', target: { context: c.context }, awaitPromise: false })).result.value; }
+      catch (e) { uri = 'error: ' + e.message; }
+      out.push({ url: c.url, uri });
     }
     return out;
   };
@@ -328,27 +330,37 @@ const tamper = (only) => (path, text, headers) => {
 
 // 9. The checked host in a frame or an object of anyone's page: nothing of
 // it loads there, since a page of it would run there as that host,
-// unchecked, and could reach a checked page of it. A frame of another
-// site loads, so the check sees frames at all.
+// unchecked, and could reach a checked page of it. A frame and an object
+// of the page's own site load, so the check sees both at all.
 {
   const b = await open();
   try {
     await b.go('https://example.com/', 4_000);
     await b.evaluate(`(() => {
-      for (const src of ['https://example.com/?framed', '${GW}/site/ic-vote/']) {
+      for (const src of ['https://example.com/?framed', '${GW}/site/ic-vote/', '${GW.replace('//', '//x@')}/site/ic-vote/']) {
         const f = document.createElement('iframe');
         f.src = src;
         document.body.append(f);
       }
-      const o = document.createElement('object');
-      o.type = 'text/html';
-      o.data = '${GW}/site/ic-git/';
-      document.body.append(o);
+      for (const data of ['https://example.com/?object', '${GW}/site/ic-git/']) {
+        const o = document.createElement('object');
+        o.type = 'text/html';
+        o.data = data;
+        document.body.append(o);
+      }
     })()`);
     await sleep(8_000);
-    const uris = await b.frames();
-    report('the checked host blocked in a frame and in an object',
-      uris.some(u => u.startsWith('https://example.com/')) && uris.every(u => !u.startsWith(GW)), uris);
+    // Each frame's document, read in it: a frame that cannot be read is
+    // not taken to be blocked, so every one must be readable, the two of
+    // another site loaded (so frames and objects are seen at all), and
+    // none of them a document of the checked host. A blocked object may
+    // have no frame.
+    const frames = await b.frames();
+    const hostOf = url => { try { return new URL(url).host; } catch { return ''; } };
+    report('the checked host blocked in a frame and in an object, with a user name too',
+      frames.every(f => !f.uri.startsWith('error: ')) &&
+      ['https://example.com/?framed', 'https://example.com/?object'].every(u => frames.some(f => f.uri === u)) &&
+      frames.every(f => hostOf(f.uri) !== hostOf(GW)), frames);
   } finally { await b.close(); }
 }
 

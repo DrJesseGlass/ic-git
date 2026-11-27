@@ -10,19 +10,20 @@
 //!
 //! What is certified, at the canister's own host: every URL a site
 //! answers (`/site/<repo>`, `/site/<repo>/`, and each file and directory
-//! of the bundle under them, as site.rs `serve` answers them), the 404
-//! for any other URL under a site, the 404 for a repo with no site, and
-//! `/.well-known/ic-domains`. At a site's own domains (docs/TENANCY.md,
-//! "Custom domains"): every URL of the site, `/` and `/<path>`, and its
-//! 404 for the rest, each certified with the request's Host and method
-//! (GET and HEAD), since the tree is one tree for every host and the
-//! gateway matches it by the path: a domain's `/` is told from another's,
-//! and from the canister host's own index at `/`, by the Host the
-//! certificate covers. Everything else is declared uncertified (the
-//! protocol's "no certification" expression, which the gateway passes as
-//! it passes the raw host): the git protocol, whose answers depend on the
-//! request body and are checked by the client against its refs
-//! (ARCHITECTURE.md, "Trust model"), and `/api`. A site of more than
+//! of the bundle under them, as site.rs `serve_url` answers them: the
+//! bare `/site/<repo>` with a redirect to the root, when there is one),
+//! the 404 for any other URL under a site, the 404 for a repo with no
+//! site, and `/.well-known/ic-domains`. At a site's own domains
+//! (docs/TENANCY.md, "Custom domains"): every URL of the site, `/` and
+//! `/<path>`, and its 404 for the rest, each certified with the request's
+//! Host and method (GET and HEAD), since the tree is one tree for every
+//! host and the gateway matches it by the path: a domain's `/` is told
+//! from another's, and from the canister host's own index at `/`, by the
+//! Host the certificate covers. Everything else is declared uncertified
+//! (the protocol's "no certification" expression, which the gateway
+//! passes as it passes the raw host): the git protocol, whose answers
+//! depend on the request body and are checked by the client against its
+//! refs (ARCHITECTURE.md, "Trust model"), and `/api`. A site of more than
 //! `SITE_FILE_CAP` files is declared uncertified as a whole rather than
 //! certified in part.
 //!
@@ -744,8 +745,8 @@ fn canister_host_answer(path: &str) -> Option<HttpResponse> {
     if path.starts_with("/api/") || path == "/feed" || path.starts_with("/feed/") || path.contains(".git/") {
         return None;
     }
-    if let Some((repo, sub)) = site::site_path(path) {
-        return Some(site::serve(repo, sub));
+    if let Some(res) = site::serve_url(path) {
+        return Some(res);
     }
     Some(site::not_found())
 }
@@ -1671,8 +1672,12 @@ mod tests {
         pages_a_step(5);
         super::rebuild(IN_UPDATE);
         assert_eq!(sites_to_certify(), 1);
-        assert!(STATE.with(|s| s.borrow().shadow.contains_key("/site/b/index.html")));
-        assert!(most_specific("/site/b/index.html", None, "GET") && served_as_certified("/site/b/index.html"));
+        // Every URL of b that a's site has a page at, the bare one too,
+        // which the canister host answers with the redirect to b's root.
+        for url in ["/site/b", "/site/b/", "/site/b/index.html"] {
+            assert!(STATE.with(|s| s.borrow().shadow.contains_key(url)), "{url}");
+            assert!(most_specific(url, None, "GET") && served_as_certified(url), "{url}");
+        }
         assert!(!step(IN_UPDATE));
         assert!(STATE.with(|s| !s.borrow().shadow.contains_key("/site/b/index.html")));
         for url in ["/site/b", "/site/b/", "/site/b/index.html"] {
@@ -1687,6 +1692,9 @@ mod tests {
         set_cap_for_tests(0);
         site_changed("b");
         assert!(STATE.with(|s| s.borrow().shadow.contains_key("/site/b/index.html")));
+        for url in ["/site/b", "/site/b/", "/site/b/index.html"] {
+            assert!(served_as_certified(url), "{url}");
+        }
         set_cap_for_tests(SITE_FILE_CAP);
         site_changed("b");
         assert_eq!(held(), whole);
