@@ -127,7 +127,7 @@ pub const CROSS_CAP: usize = 4_000;
 
 /// The response headers the certificate covers: what a client reads. The
 /// body and the status are always covered.
-const CERTIFIED_HEADERS: [&str; 5] = ["Content-Type", "Cache-Control", "X-Ic-Git-Repo", "X-Ic-Git-Commit", "X-Ic-Git-Path"];
+const CERTIFIED_HEADERS: [&str; 6] = ["Content-Type", "Cache-Control", "Location", "X-Ic-Git-Repo", "X-Ic-Git-Commit", "X-Ic-Git-Path"];
 
 /// The methods a domain's entries are made for: the request's method is
 /// in its hash.
@@ -562,13 +562,15 @@ fn domains_entry() {
     });
 }
 
-/// The URLs of a site at the canister host, from the sub-paths `serve`
-/// takes: "" is the root, at both `/site/<repo>` and `/site/<repo>/`.
-fn urls(repo: &str, sub: &str) -> Vec<String> {
-    if sub.is_empty() {
-        vec![format!("/site/{repo}"), format!("/site/{repo}/")]
-    } else {
-        vec![format!("/site/{repo}/{sub}")]
+/// The URLs of a site at the canister host that answer as `serve` does
+/// for a sub-path: "" is the root, at `/site/<repo>/`, and at the bare
+/// `/site/<repo>` too unless the root is a blob of the bundle, which the
+/// bare URL redirects from (`site::serve_bare`).
+fn urls(repo: &str, sub: &str, moves: bool) -> Vec<String> {
+    match (sub.is_empty(), moves) {
+        (true, true) => vec![format!("/site/{repo}/")],
+        (true, false) => vec![format!("/site/{repo}"), format!("/site/{repo}/")],
+        (false, _) => vec![format!("/site/{repo}/{sub}")],
     }
 }
 
@@ -665,8 +667,16 @@ fn advance(s: &mut State, work: &mut Work, meter: &Meter) -> bool {
         let sub = &page.sub;
         let (mut res, blob) = work.bundle.answer(repo, page);
         let hash = blob.map(|oid| body_hash(s, &oid, &res.body));
+        let moves = sub.is_empty() && blob.is_some();
+        if moves {
+            if let Some(c) = certify(&site::to_root(repo), None) {
+                let url = format!("/site/{repo}");
+                insert(&HttpCertificationPath::exact(url.clone()), &c);
+                s.exact.insert(url, c);
+            }
+        }
         if let Some(c) = certify(&res, hash) {
-            for url in urls(repo, sub) {
+            for url in urls(repo, sub, moves) {
                 insert(&HttpCertificationPath::exact(url.clone()), &c);
                 s.exact.insert(url, c);
             }
@@ -1104,8 +1114,7 @@ mod tests {
     /// The response the canister gives at `url` on its own host is the
     /// one certified there: its certification, recomputed, is the entry's.
     fn served_as_certified(url: &str) -> bool {
-        let (repo, sub) = site::site_path(url).expect("a site URL");
-        let res = site::serve(repo, sub);
+        let res = site::serve_url(url).expect("a site URL");
         let hash = Some(Sha256::digest(&res.body).into());
         let (_, c, _) = lookup(url, None, "GET");
         certify(&res, hash) == Some(c)
@@ -1138,6 +1147,10 @@ mod tests {
             assert!(proves(url, &expr), "{url}");
             assert!(served_as_certified(url), "{url}");
         }
+        // The bare URL is the redirect to the root, certified as one.
+        let bare = site::serve_url("/site/web").unwrap();
+        assert_eq!(bare.status_code, 308);
+        assert!(bare.headers.iter().any(|(k, v)| k == "Location" && v == "/site/web/"));
         // A directory without an index, a slash after a file, an empty
         // component: misses, certified as the site's one miss.
         for url in ["/site/web/app", "/site/web/app/", "/site/web/index.html/", "/site/web/app//main.js", "/site/web/nope"] {

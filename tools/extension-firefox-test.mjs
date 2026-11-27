@@ -154,7 +154,18 @@ async function open({ rewrite = () => null } = {}) {
   const nav = async url => {
     try { await send('browsingContext.navigate', { context, url, wait: 'complete' }); return 'loaded'; } catch (e) { return String(e.message); }
   };
-  return { go, nav, state, evaluate, log, close, call, set rewrite(f) { rewrite = f; } };
+  // What each frame of the page holds, by its document's address: a page
+  // the extension's rule cancels is an error page, and says so.
+  const frames = async () => {
+    const { contexts: [top] } = await send('browsingContext.getTree', { root: context });
+    const out = [];
+    for (const c of top.children || []) {
+      try { out.push((await send('script.evaluate', { expression: 'document.documentURI', target: { context: c.context }, awaitPromise: false })).result.value); }
+      catch (e) { out.push('error: ' + e.message); }
+    }
+    return out;
+  };
+  return { go, nav, state, evaluate, log, close, call, frames, set rewrite(f) { rewrite = f; } };
 }
 
 let failed = 0;
@@ -312,6 +323,32 @@ const tamper = (only) => (path, text, headers) => {
     const at = await b.evaluate('location.href');
     const s = await b.state();
     report('the checked host over http: upgraded, checked, runs', at === CONSOLE && !s.overlay && /repositories/.test(s.text), { at, ...s });
+  } finally { await b.close(); }
+}
+
+// 9. The checked host in a frame or an object of anyone's page: nothing of
+// it loads there, since a page of it would run there as that host,
+// unchecked, and could reach a checked page of it. A frame of another
+// site loads, so the check sees frames at all.
+{
+  const b = await open();
+  try {
+    await b.go('https://example.com/', 4_000);
+    await b.evaluate(`(() => {
+      for (const src of ['https://example.com/?framed', '${GW}/site/ic-vote/']) {
+        const f = document.createElement('iframe');
+        f.src = src;
+        document.body.append(f);
+      }
+      const o = document.createElement('object');
+      o.type = 'text/html';
+      o.data = '${GW}/site/ic-git/';
+      document.body.append(o);
+    })()`);
+    await sleep(8_000);
+    const uris = await b.frames();
+    report('the checked host blocked in a frame and in an object',
+      uris.some(u => u.startsWith('https://example.com/')) && uris.every(u => !u.startsWith(GW)), uris);
   } finally { await b.close(); }
 }
 

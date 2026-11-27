@@ -178,8 +178,8 @@ and makes no requests.
 Chrome gives an extension no access to response bodies, so it never uses
 the page the network delivered:
 
-1. A static rule (`extension/rules.json`) sets `script-src 'none'` on every
-   page under `/site/`. Once a site verifies, a higher-priority session rule
+1. A static rule (`extension/rules.json`) sets `script-src 'none'` and
+   `frame-src 'none'` on every page under `/site/`. Once a site verifies, a higher-priority session rule
    replaces it with the site's pinned policy. Unchecked or failed pages run
    no script, and the static rule outlives a browser restart. The same rule
    sets every such page's type to `text/html; charset=utf-8`, whatever the
@@ -239,7 +239,13 @@ decoded as other text.
   run on that host. The checked host over `http` is asked for over
   `https` by the same means. What the rule leaves alone at those hosts
   is what is not under `/site`: the canister's index, its API, the git
-  protocol, none of them a site's page. A site at a domain of its own
+  protocol, none of them a site's page. The checked host itself is
+  blocked in a frame and in an object, at any page's (a static rule, in
+  both packages): a page of it there is no tab's page, so neither
+  extension checks it, and it would run as that host -- the origin of
+  every checked page, which it could then reach, by `window.open` or as
+  a checked page's opener. A checked page frames nothing
+  (`frame-src 'none'`). A site at a domain of its own
   (docs/TENANCY.md, "Custom domains") has no canister id in its host
   and is not covered: it loads unchecked, at that domain, until the
   extensions know the domain.

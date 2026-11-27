@@ -706,6 +706,21 @@ path, and nothing else of the canister (no git, no `/api/`, no other
 site) is reached there. The bytes, and the `X-Ic-Git-*` headers that bind
 them to their commit, are the same as at `/site/<repo>/`.
 
+On the canister's own host every site shares one origin with every other
+site there, the console included: a page of one can script a page of
+another that the browser has open, and read what it keeps in the browser.
+A site that must be kept apart from the rest is served at a domain of its
+own. The shared host keeps one thing apart: `/site/<repo>` without the
+trailing slash answers with a redirect to `/site/<repo>/` (308), never
+with the root itself. That URL's directory is `/site/`, every site's, so
+a script answered there could be registered as a service worker for all of
+them (a site whose root is `sw.js`), and a page answered there would
+resolve its relative URLs against other repos' sites (`app.js` is
+`/site/app.js`, the root of a repo by that name). A browser registers no
+service worker from behind a redirect. The redirect is certified as one,
+so it is the same for every query: the query is dropped, the fragment
+kept.
+
 `set_site_domains(repo, domains)` names them: owner or operator, the whole
 list each time (empty takes the site off every domain). The git side
 checks each name and keeps the list in the site config, which `get_site`

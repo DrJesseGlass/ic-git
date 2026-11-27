@@ -37,7 +37,7 @@ const originOf = host => 'https://' + host + '.raw.icp0.io';
 // The registry is read through both; they must return the same answer.
 const RPCS = ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'];
 const REFRESH_MINUTES = 10;
-const BLOCK = "script-src 'none'; object-src 'none'; base-uri 'none'";
+const BLOCK = "script-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'";
 const BARE = '<!doctype html><html><head><meta charset="utf-8"><title>ic-git verifier</title></head><body></body></html>';
 const REFRESH = '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0"><title>ic-git verifier</title></head><body></body></html>';
 const FILTER = { urls: HOSTS.map(h => originOf(h) + '/site/*'), types: ['main_frame'] };

@@ -48,5 +48,19 @@
         "sub_frame"
       ]
     }
+  },
+  {
+    "id": 4,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://(umobs-yiaaa-aaaab-agyrq-cai|34koz-jyaaa-aaaab-ahejq-cai)\\.raw\\.icp0\\.io(:[0-9]+)?/site([/?#]|$)",
+      "resourceTypes": [
+        "sub_frame",
+        "object"
+      ]
+    }
   }
 ]
