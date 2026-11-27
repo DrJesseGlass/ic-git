@@ -47,6 +47,23 @@ console.log('PASS  shared scanner block is identical to tools/verify.mjs');
   console.log('PASS  tools/verify.mjs recognises a serving host as the core does');
 }
 
+// The loader runs nowhere a canister is named in the host: every spelling
+// a gateway serves a canister's sites at, which every site there shares.
+{
+  const src = /const namesCanister = (host => [^\n]+);\n/.exec(html);
+  assert.ok(src, 'loader/index.html namesCanister not found');
+  const namesCanister = new Function('return ' + src[1])();
+  const ID = '34koz-jyaaa-aaaab-ahejq-cai';
+  for (const h of [ID + '.raw.icp0.io', ID + '.icp0.io', ID + '.icp1.io', ID + '.raw.ic0.app', 'x--' + ID + '.raw.icp0.io', 'a--b--' + ID + '.icp0.io',
+    'ic-git--' + ID + '.icp.net', 'bkyz2-fmaaa-aaaaa-qaaaq-cai.raw.localhost', 'www.' + ID + '.example']) {
+    assert.equal(namesCanister(h), true, h);
+  }
+  for (const h of ['', 'localhost', '127.0.0.1', 'ic-git.com', 'example.org', 'x--y.icp0.io', 'icp0.io']) {
+    assert.equal(namesCanister(h), false, h);
+  }
+  console.log('PASS  the loader refuses to run at every host that names a canister, and only there');
+}
+
 // Each <script> element must end where its source ends. The HTML parser ends
 // one at the first end tag it meets, and after a "<!--" in its text a later
 // "<script" defers even that (the script-escaped state) -- either way the

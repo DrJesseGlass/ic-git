@@ -175,8 +175,8 @@ node tools/verify.mjs ic-git index.html
 The page is then at `https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/ic-git/`
 and browses, among other things, its own source. There it only reads: every
 site on that host shares its origin, so it asks no wallet to sign. The same
-page signs at a domain of its own, `https://ic-git.com` (docs/TENANCY.md,
-"Console").
+page signs at its home, `https://ic-git.com`, a domain whose whole origin is
+this site (docs/TENANCY.md, "Console").
 
 ## Verifying a site in the browser
 

@@ -906,18 +906,26 @@ combined and the split network.
 Where the console signs. On a canister's own host the page shares its
 origin with every site that canister serves, and any of them can open
 it, script it, read what it keeps, and ask the wallet for a signature
-under the origin the user approved for the console. So the console asks
-a wallet to sign only at a domain of its own, where the whole origin is
-the `ic-git` repo's site: `https://ic-git.com` on mainnet. There it talks
+under the origin the user approved for the console. A canister has many
+such hosts: every gateway domain (`icp0.io`, `ic0.app`, `icp1.io`,
+`icp.net`, ...), raw or not, and any prefix up to a `--`
+(`x--<id>.icp0.io`), which a gateway drops. So the console asks a wallet
+to sign only at its home, exactly: `https://ic-git.com`, a domain whose
+whole origin is the `ic-git` repo's site, pinned in the page as the
+canister ids are (a deployment of its own sets its own). Not in a frame
+there either, whose buttons another page could steer. At home it talks
 to the pinned canisters, the git reads crossing to the git canister's
 raw host. Cross-origin the gateway exposes none of the `X-Ic-Git-*`
 headers (its `access-control-expose-headers` is its own list), so the
 page takes the commit from the API's bodies: a file is read at the
-commit `/api/<repo>/commit/<rev>` names. On a canister's host -- mainnet's
-`/site/ic-git/`, a replica, another deployment -- the page browses and
-shows the panels' reads, holds no principal, and on mainnet's hosts
-points to `ic-git.com`. A page at neither (a bare localhost, a file, or
-plain http) has no canister to talk to and says so. A user who connected
+commit `/api/<repo>/commit/<rev>` names. On a canister's host -- any
+spelling of mainnet's `/site/ic-git/`, a replica, another deployment --
+the page browses and shows the panels' reads, drops a principal stored
+there before, and on mainnet's hosts points to `ic-git.com`. The page
+reads by its base URL, so when the loader runs it from a file (its
+`<base>` naming the canister) it reads that canister, and signs
+nothing. Anywhere else -- another domain, a bare localhost, plain http
+-- it has no canister to talk to and says so. A user who connected
 OISY to the console at `/site/ic-git/` before 2026-11 granted that
 origin, which every site there shares: any page there can ask OISY under
 it, so nothing OISY shows for that origin is the console's to approve.

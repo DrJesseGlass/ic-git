@@ -7,9 +7,11 @@
 //     canister's host it is the serving canister's get_authority, a
 //     canister without that method is the authority itself, and one naming
 //     none is refused;
-//   - at a domain of its own the canisters are the pinned ones, at their
-//     raw hosts, and only there does the console sign; a page that is at
-//     neither has no canister to talk to;
+//   - at its home (ic-git.com, exactly) the canisters are the pinned ones,
+//     at their raw hosts, and only there does the console sign; every
+//     spelling of a canister's host is one, a prefix up to "--" included;
+//     a page that is at neither has no canister to talk to;
+//   - reads go by the page's base URL, signing by its address;
 //   - the other canister's origin keeps the host's gateway and port;
 //   - the routes run before the git browser, which reads through them;
 //   - every method the console signs or queries on its own canisters is
@@ -51,38 +53,57 @@ await assert.rejects(Routes.authorityOf(local, asks(() => { throw new Error('get
 await assert.rejects(Routes.authorityOf(local, asks(reject('get_authority rejected: canister trapped', 'IC0503'))), /trapped/);
 console.log('PASS  elsewhere: the serving canister is asked; no method means one canister; no answer is refused');
 
-// At a domain of its own: the pinned canisters, nothing asked, and the
-// only place the console signs.
-for (const h of ['ic-git.com', 'git.example.org', 'constructor.example']) {
-  assert.equal(await Routes.authorityOf(loc(h), never), AUTH, h);
-  assert.equal(Routes.hostOf(loc(h)), GIT, h);
-  assert.equal(Routes.originOf(loc(h), GIT), 'https://' + GIT + '.raw.icp0.io', h);
-  assert.equal(Routes.originOf(loc(h), AUTH), 'https://' + AUTH + '.raw.icp0.io', h);
-  assert.equal(Routes.signs(loc(h)), true, h);
-}
+// At home: the pinned canisters, nothing asked, and the only place the
+// console signs.
+const home = loc('ic-git.com');
 assert.equal(Routes.HOME, 'https://ic-git.com');
-console.log('PASS  at a domain: the pinned canisters at their raw hosts, and a wallet may be asked to sign');
+assert.equal(await Routes.authorityOf(home, never), AUTH);
+assert.equal(Routes.hostOf(home), GIT);
+assert.equal(Routes.originOf(home, GIT), 'https://' + GIT + '.raw.icp0.io');
+assert.equal(Routes.originOf(home, AUTH), 'https://' + AUTH + '.raw.icp0.io');
+assert.equal(Routes.signs(home), true);
+console.log('PASS  at home: the pinned canisters at their raw hosts, and a wallet may be asked to sign');
 
-// On a canister's own host, which every site there shares: no signing.
-for (const l of [loc(GIT + '.raw.icp0.io'), loc(GIT + '.icp0.io'), loc(AUTH + '.raw.icp0.io'), local]) {
+// On a canister's own host, which every site there shares, in any of the
+// spellings a gateway serves it at: the canister it names, no signing.
+for (const h of [GIT + '.raw.icp0.io', GIT + '.icp0.io', GIT + '.icp1.io', GIT + '.raw.ic0.app', 'x--' + GIT + '.raw.icp0.io', 'a--b--' + GIT + '.icp0.io', 'ic-git--' + GIT + '.icp.net']) {
+  assert.equal(Routes.signs(loc(h)), false, h);
+  assert.equal(Routes.hostOf(loc(h)), GIT, h);
+  assert.equal(await Routes.authorityOf(loc(h), never), AUTH, h);
+  assert.equal(Routes.originOf(loc(h), AUTH), 'https://' + h.replace(/^[^.]+/, AUTH), h);
+}
+for (const l of [loc(AUTH + '.raw.icp0.io'), local, loc('x--bkyz2-fmaaa-aaaaa-qaaaq-cai.raw.localhost:4943', 'http:')]) {
   assert.equal(Routes.signs(l), false, l.host);
 }
-console.log('PASS  on a canister\'s own host the console signs nothing');
+console.log('PASS  on a canister\'s own host, a gateway\'s prefix and domain included, the console signs nothing');
 
-// Neither: said plainly, nothing asked, nothing signed.
-for (const l of [loc('localhost:4943', 'http:'), loc('x.localhost:4943', 'http:'), loc('umobs-yiaaa-aaaab-agyrq-cai'), loc('ic-git.com', 'http:'), loc('', 'file:')]) {
-  await assert.rejects(Routes.authorityOf(l, never), /neither at a canister's own host nor at a domain/, l.host);
+// Neither: said plainly, nothing asked, nothing signed. Another domain is
+// not home, whoever serves the page there.
+for (const l of [loc('git.example.org'), loc('constructor.example'), loc('www.ic-git.com'), loc('ic-git.com.'), loc('ic-git.com:8443'), loc('ic-git.com', 'http:'),
+  loc('localhost:4943', 'http:'), loc('x.localhost:4943', 'http:'), loc('umobs-yiaaa-aaaab-agyrq-cai'), loc('x--y.icp0.io'), loc('', 'file:')]) {
+  await assert.rejects(Routes.authorityOf(l, never), /neither at a canister's own host nor at https:\/\/ic-git\.com/, l.host);
+  assert.match(Routes.nowhere(l), /no canister to talk to/, l.host);
   assert.equal(Routes.signs(l), false, l.host);
 }
-console.log('PASS  a page at a bare localhost, over http or from a file says it has no canister to talk to');
+for (const l of [home, loc(GIT + '.raw.icp0.io'), loc('x--' + GIT + '.icp0.io'), local]) assert.equal(Routes.nowhere(l), null, l.host);
+console.log('PASS  another domain, a bare localhost, plain http or a file: no canister to talk to, nothing signed');
 
 // The git browser reads through the routes as it starts, so they must be
 // defined by then: a script of their own, ahead of it.
-assert.ok(html.indexOf('// === end routes ===') < html.indexOf('const GIT = Routes.originOf(location, Routes.hostOf(location));'), 'the routes are defined after the git browser that uses them');
-// And the console holds no principal and opens no wallet where it may not sign.
+// Both read by the page's base URL (where the loader's run of the page
+// reads too) and sign by its address.
+const browserSrc = block('// === end diff ===', '// === console ===');
+const firstRead = html.indexOf('const GIT = Routes.originOf(HERE, Routes.hostOf(HERE));');
+assert.ok(firstRead > 0 && html.indexOf('// === end routes ===') < firstRead, 'the routes are defined after the git browser that uses them');
+assert.match(browserSrc, /const HERE = new URL\(document\.baseURI\);\n  const GIT = Routes\.originOf\(HERE, Routes\.hostOf\(HERE\)\);/);
+// And the console holds no principal and opens no wallet where it may not
+// sign, nor in a frame, and drops one stored there before.
 const consoleSrc = block('// === console ===', '// === end console ===');
-assert.match(consoleSrc, /const SIGNS = Routes\.signs\(location\);/);
-assert.match(consoleSrc, /if \(SIGNS\) me = localStorage\.getItem\('ic-git\.principal'\)/);
+assert.match(consoleSrc, /const HERE = new URL\(document\.baseURI\);\n  const HOST = Routes\.hostOf\(HERE\);/);
+assert.match(consoleSrc, /Routes\.authorityOf\(HERE, IC\.query\)/);
+assert.doesNotMatch(consoleSrc, /Routes\.(hostOf|originOf|authorityOf)\(location/);
+assert.match(consoleSrc, /const FRAMED = window\.top !== window\.self;\n  const SIGNS = Routes\.signs\(location\) && !FRAMED;/);
+assert.match(consoleSrc, /if \(SIGNS\) me = localStorage\.getItem\('ic-git\.principal'\); else localStorage\.removeItem\('ic-git\.principal'\);/);
 assert.match(consoleSrc, /async function session\(fn\) \{\n    if \(!SIGNS\) throw/);
 assert.match(consoleSrc, /async function signIn\(\) \{\n    if \(!SIGNS\) return;/);
 console.log('PASS  the routes run before the git browser; the console signs only where they say');
