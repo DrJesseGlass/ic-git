@@ -14,6 +14,42 @@
           "header": "Content-Type",
           "operation": "set",
           "value": "text/html; charset=utf-8"
+        },
+        {
+          "header": "Refresh",
+          "operation": "remove"
+        },
+        {
+          "header": "Link",
+          "operation": "remove"
+        },
+        {
+          "header": "Speculation-Rules",
+          "operation": "remove"
+        },
+        {
+          "header": "Set-Cookie",
+          "operation": "remove"
+        },
+        {
+          "header": "Clear-Site-Data",
+          "operation": "remove"
+        },
+        {
+          "header": "NEL",
+          "operation": "remove"
+        },
+        {
+          "header": "Report-To",
+          "operation": "remove"
+        },
+        {
+          "header": "Reporting-Endpoints",
+          "operation": "remove"
+        },
+        {
+          "header": "Content-Disposition",
+          "operation": "remove"
         }
       ]
     },
@@ -50,7 +86,8 @@
       "regexFilter": "^https://([a-z0-9-]+\\.)*(icp-api\\.io|icp0\\.io|ic0\\.app)/api/v[0-9]+/(canister/|subnet/|status)",
       "initiatorDomains": [
         "umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io",
-        "34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io"
+        "34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io",
+        "ic-git.com"
       ],
       "resourceTypes": [
         "xmlhttprequest"
@@ -72,6 +109,42 @@
           "header": "Content-Type",
           "operation": "set",
           "value": "text/html; charset=utf-8"
+        },
+        {
+          "header": "Refresh",
+          "operation": "remove"
+        },
+        {
+          "header": "Link",
+          "operation": "remove"
+        },
+        {
+          "header": "Speculation-Rules",
+          "operation": "remove"
+        },
+        {
+          "header": "Set-Cookie",
+          "operation": "remove"
+        },
+        {
+          "header": "Clear-Site-Data",
+          "operation": "remove"
+        },
+        {
+          "header": "NEL",
+          "operation": "remove"
+        },
+        {
+          "header": "Report-To",
+          "operation": "remove"
+        },
+        {
+          "header": "Reporting-Endpoints",
+          "operation": "remove"
+        },
+        {
+          "header": "Content-Disposition",
+          "operation": "remove"
         }
       ]
     },
@@ -159,6 +232,174 @@
       "resourceTypes": [
         "sub_frame",
         "object"
+      ]
+    }
+  },
+  {
+    "id": 10,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        {
+          "header": "Content-Security-Policy",
+          "operation": "set",
+          "value": "script-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'"
+        },
+        {
+          "header": "Content-Type",
+          "operation": "set",
+          "value": "text/html; charset=utf-8"
+        },
+        {
+          "header": "Refresh",
+          "operation": "remove"
+        },
+        {
+          "header": "Link",
+          "operation": "remove"
+        },
+        {
+          "header": "Speculation-Rules",
+          "operation": "remove"
+        },
+        {
+          "header": "Set-Cookie",
+          "operation": "remove"
+        },
+        {
+          "header": "Clear-Site-Data",
+          "operation": "remove"
+        },
+        {
+          "header": "NEL",
+          "operation": "remove"
+        },
+        {
+          "header": "Report-To",
+          "operation": "remove"
+        },
+        {
+          "header": "Reporting-Endpoints",
+          "operation": "remove"
+        },
+        {
+          "header": "Content-Disposition",
+          "operation": "remove"
+        }
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https://([^/?#@]*@)?ic-git\\.com/",
+      "resourceTypes": [
+        "main_frame"
+      ]
+    }
+  },
+  {
+    "id": 11,
+    "priority": 4,
+    "action": {
+      "type": "upgradeScheme"
+    },
+    "condition": {
+      "regexFilter": "^http://([^/?#@]*@)?ic-git\\.com(:[0-9]+)?([/?#]|$)",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 12,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?ic-git\\.com(\\.|\\.?:[0-9]+)([/?#]|$)",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 13,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?ic-git\\.com\\.?(:[0-9]+)?([/?#]|$)",
+      "resourceTypes": [
+        "sub_frame",
+        "object"
+      ]
+    }
+  },
+  {
+    "id": 14,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?([^/?#@.:]+\\.)+ic-git\\.com\\.?(:[0-9]+)?([/?#]|$)",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 15,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        {
+          "header": "Refresh",
+          "operation": "remove"
+        },
+        {
+          "header": "Link",
+          "operation": "remove"
+        },
+        {
+          "header": "Speculation-Rules",
+          "operation": "remove"
+        },
+        {
+          "header": "Set-Cookie",
+          "operation": "remove"
+        },
+        {
+          "header": "Clear-Site-Data",
+          "operation": "remove"
+        },
+        {
+          "header": "NEL",
+          "operation": "remove"
+        },
+        {
+          "header": "Report-To",
+          "operation": "remove"
+        },
+        {
+          "header": "Reporting-Endpoints",
+          "operation": "remove"
+        },
+        {
+          "header": "Content-Disposition",
+          "operation": "remove"
+        }
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https://([^/?#@]*@)?ic-git\\.com/",
+      "excludedResourceTypes": [
+        "main_frame"
       ]
     }
   }
