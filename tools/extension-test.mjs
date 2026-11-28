@@ -3,7 +3,10 @@
 // the Sepolia registry, playing a man in the middle with the DevTools Fetch
 // domain where a case needs one.
 //
-//   node tools/extension-test.mjs --browser "/path/to/Chrome for Testing"
+//   node tools/extension-test.mjs --browser "/path/to/Chrome for Testing" [--strict]
+//
+// --strict: a case that cannot run against what is live (SKIP) fails;
+// before a release, every case must run.
 //
 // It needs a Chromium that loads unpacked extensions from the command line
 // (Chrome for Testing does; branded Chrome no longer does), and the network.
@@ -64,21 +67,26 @@ async function proxy(dir, rewrite) {
 }
 
 // The console's home as whoever holds its DNS serves it: `serve(path,
-// headers)` answers { status, type, body }. The domain resolves to this
+// headers)` answers { status, type, body, headers }. The domain resolves to this
 // server, with a self-signed certificate, as a hijacker's would. So does
 // FRAMER, anyone's page, which a frame case frames the domain in: on this
 // server too, since Chrome lets no public page frame a loopback address
 // (Private Network Access), with or without the extension.
 const FRAMER = 'https://framer.example/';
-async function domain(dir, serve) {
+// And the domain's subdomain, which the same DNS answers: a hijacker's page.
+const WWW = 'https://www.ic-git.com/';
+async function domain(dir, serve, log) {
   if (!existsSync(join(dir, 'key.pem'))) execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=domain',
     '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
   const server = createServer({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) }, async (req, res) => {
+    log.push(req.headers.host + req.url);
     try {
-      const { status, type, body } = req.headers.host === new URL(FRAMER).host
+      const { status, type, body, headers = {} } = req.headers.host === new URL(FRAMER).host
         ? { status: 200, type: 'text/html', body: '<!doctype html><title>framer</title><p>anyone\'s page</p>' }
-        : await serve(req.url, req.headers);
-      res.writeHead(status, { 'content-type': type });
+        : req.headers.host === new URL(WWW).host
+          ? { status: 200, type: 'text/html', body: '<!doctype html><title>ic-git</title><script>window.__pwned = 9;</script><p>HACKED at www</p>' }
+          : await serve(req.url, req.headers);
+      res.writeHead(status, { 'content-type': type, ...headers });
       res.end(body);
     } catch (e) { res.writeHead(502); res.end(String(e)); }
   });
@@ -93,20 +101,27 @@ const honest = async path => {
   return { status: r.status, type: r.headers.get('content-type'), body: Buffer.from(await r.arrayBuffer()) };
 };
 
-async function open({ mitm, home } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'ext-test-'));
+// What the console's wallet box says: its own code fills it, so an empty
+// one is a console that did not run.
+const wallet = b => b.evaluate("(document.getElementById('wallet') || {}).innerText || ''");
+
+// `profile`: a profile directory to use, and keep, instead of a fresh one;
+// `extension: false`: the browser without the extension.
+async function open({ mitm, home, profile, extension = true } = {}) {
+  const dir = profile || mkdtempSync(join(tmpdir(), 'ext-test-'));
   const server = mitm ? await proxy(dir, mitm) : null;
-  const homeServer = home ? await domain(dir, home) : null;
+  const homeLog = [];
+  const homeServer = home ? await domain(dir, home, homeLog) : null;
   const maps = [
     ...(server ? [`MAP ${new URL(GW).host}:443 127.0.0.1:${server.address().port}`] : []),
-    ...(homeServer ? [HOME, FRAMER].map(u => `MAP ${new URL(u).host}:443 127.0.0.1:${homeServer.address().port}`) : []),
+    ...(homeServer ? [HOME, FRAMER, WWW].map(u => `MAP ${new URL(u).host}:443 127.0.0.1:${homeServer.address().port}`) : []),
   ];
   const net = maps.length ? [`--host-resolver-rules=${maps.join(', ')}`, '--ignore-certificate-errors'] : [];
   const port = 9600 + Math.floor(Math.random() * 300);
   // --use-mock-keychain: a fresh profile otherwise asks the macOS keychain
   // for a password at every launch.
   const chrome = spawn(bin, ['--headless=new', '--window-size=1280,900', '--use-mock-keychain', '--password-store=basic', ...net, `--remote-debugging-port=${port}`, `--user-data-dir=${dir}`,
-    `--load-extension=${EXT}`, `--disable-extensions-except=${EXT}`, 'about:blank'], { stdio: 'ignore' });
+    ...(extension ? [`--load-extension=${EXT}`, `--disable-extensions-except=${EXT}`] : []), 'about:blank'], { stdio: 'ignore' });
   let version;
   for (let i = 0; i < 60 && !version; i++) {
     await sleep(200);
@@ -132,7 +147,7 @@ async function open({ mitm, home } = {}) {
   // extensions of its own, some with a background.js too, so it is picked
   // by its manifest's name.
   let sw;
-  for (let i = 0; i < 50 && !sw; i++) {
+  for (let i = 0; i < 50 && !sw && extension; i++) {
     const { targetInfos } = await send('Target.getTargets');
     for (const t of targetInfos.filter(t => t.type === 'service_worker' && t.url.startsWith('chrome-extension://'))) {
       const { sessionId } = await send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
@@ -142,7 +157,7 @@ async function open({ mitm, home } = {}) {
     }
     if (!sw) await sleep(200);
   }
-  if (!sw) throw new Error('the extension did not load');
+  if (!sw && extension) throw new Error('the extension did not load');
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId: page } = await send('Target.attachToTarget', { targetId, flatten: true });
   await send('Page.enable', {}, page);
@@ -229,9 +244,9 @@ async function open({ mitm, home } = {}) {
     await exited;
     if (server) server.close();
     if (homeServer) homeServer.close();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+    if (!profile) rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
   };
-  return { send, page, sw, go, state, intercept, evaluate, refused, buttons, press, close, call };
+  return { send, page, sw, go, state, intercept, evaluate, refused, buttons, press, close, call, homeLog };
 }
 
 let failed = 0;
@@ -239,8 +254,14 @@ const report = (name, ok, got) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '\n        got ' + JSON.stringify(got)}`);
   if (!ok) failed++;
 };
-// A case that cannot run against what is live, and why.
-const skip = (name, why) => console.log(`SKIP  ${name}\n        ${why}`);
+// A case that cannot run against what is live, and why; with --strict, a
+// failure.
+let skipped = 0;
+const skip = (name, why) => {
+  if (process.argv.includes('--strict')) return report(name + ' (--strict: it must run)', false, why);
+  skipped++;
+  console.log(`SKIP  ${name}\n        ${why}`);
+};
 // Whether the console the registry records knows its home: one published
 // before it did reads its /api on its own origin, which at the domain is
 // the domain's, so only its being written there can be checked.
@@ -523,16 +544,17 @@ const homeAware = async () => (await (await fetch(CONSOLE)).text()).includes("co
 // is covered by no record, and the domain loads in no frame and under no
 // other spelling.
 {
-  const wallet = b => b.evaluate("(document.getElementById('wallet') || {}).innerText || ''");
   const aware = await homeAware();
   const b = await open({ home: honest });
   try {
     await b.go(HOME, 20_000);
     let s = await b.state();
     const at = await b.evaluate('location.href');
-    report('at home: checked, reloaded once under the pinned policy, the checked page written, badge OK',
-      at === HOME && !s.overlay && /a git remote on the Internet Computer/.test(s.text) && s.badge === 'OK' && s.loads === 2, { at, ...s });
+    // The console's own code ran (it fills #wallet), so the pinned policy,
+    // not the static no-script one, is what the page got.
     const w = await wallet(b);
+    report('at home: checked, reloaded once under the pinned policy, the checked page written and its code run, badge OK',
+      at === HOME && !s.overlay && /a git remote on the Internet Computer/.test(s.text) && w !== '' && b.refused.length === 0 && s.badge === 'OK' && s.loads === 2, { at, wallet: w, refused: b.refused.slice(0, 2), ...s });
     if (aware) report('at home the console offers a wallet, and reads the git canister across origins', /connect/i.test(w) && /ic-vote/.test(await b.evaluate('document.body.innerText')), w);
     else skip('at home the console offers a wallet, and reads the git canister across origins', 'the recorded ic-git#site predates its home (docs/TENANCY.md, "Putting the console at its domain", step 3)');
     const calls = {
@@ -558,8 +580,8 @@ const homeAware = async () => (await (await fetch(CONSOLE)).text()).includes("co
   try {
     await b.go(HOME, 20_000);
     let s = await b.state();
-    report('hijacked home: the tab shows the checked console, the domain\'s page never runs, badge OK',
-      !/HACKED/.test(s.text) && /a git remote on the Internet Computer/.test(s.text) && !s.overlay && s.pwned === 0 && s.badge === 'OK', s);
+    report('hijacked home: the tab shows the checked console and runs it, the domain\'s page never runs, badge OK',
+      !/HACKED/.test(s.text) && /a git remote on the Internet Computer/.test(s.text) && await wallet(b) !== '' && !s.overlay && s.pwned === 0 && s.badge === 'OK', s);
     type = 'text/xml';
     await b.go(HOME, 10_000);
     s = await b.state();
@@ -614,5 +636,108 @@ const homeAware = async () => (await (await fetch(CONSOLE)).text()).includes("co
   } finally { await b.close(); }
 }
 
-console.log(failed ? `\n${failed} failed` : '\nall passed');
+// 8b. Hijacked, subtler: the recorded bytes, with headers that act after
+// the check (a move elsewhere, a cookie, a preload); then a redirect to a
+// subdomain, which the same DNS answers. And the root with a user name.
+{
+  let mode = 'headers';
+  const b = await open({ home: async (path, h) => {
+    if (mode === 'redirect' && /^\/(\?|$)/.test(path)) return { status: 302, type: 'text/plain', body: '', headers: { location: WWW } };
+    const r = await honest(path, h);
+    if (mode === 'headers' && r.status === 200) r.headers = { refresh: '3; url=' + FRAMER + 'moved', 'set-cookie': 'planted=1; Path=/; Secure', link: '</evil.css>; rel=preload; as=style' };
+    return r;
+  } });
+  try {
+    await b.go(HOME, 20_000);
+    await sleep(6_000);
+    const at = await b.evaluate('location.href'), cookie = await b.evaluate('document.cookie');
+    let s = await b.state();
+    report('hijacked home\'s headers: no move after the check, no cookie, no preload, the console runs, badge OK',
+      at === HOME && !/planted/.test(cookie) && !b.homeLog.some(u => /evil\.css/.test(u)) && await wallet(b) !== '' && s.badge === 'OK', { at, cookie, log: b.homeLog.slice(-4), ...s });
+    mode = 'redirect';
+    const r = await b.send('Page.navigate', { url: HOME }, b.page);
+    await sleep(4_000);
+    const to = await b.evaluate('location.href');
+    s = await b.state();
+    report('hijacked home redirecting to its subdomain: blocked, nothing there runs', r.errorText === 'net::ERR_BLOCKED_BY_CLIENT' && !to.startsWith(WWW) && s.pwned === 0, { errorText: r.errorText, to, ...s });
+    mode = 'honest';
+    await b.go('https://u@ic-git.com/', 12_000);
+    s = await b.state();
+    report('home with a user name in the URL: the checked console runs under its pinned policy', !s.overlay && await wallet(b) !== '' && s.badge === 'OK', s);
+  } finally { await b.close(); }
+}
+
+// 8c. A failed check at home offers no "open anyway": that would run, at
+// the origin a wallet signs at, what no record attests. On the git
+// canister's host it still does.
+{
+  const b = await open({ home: honest, mitm: (url, t) => (url === '/site/ic-git/' ? t.replace('</head>', INJECT + '</head>') : null) });
+  try {
+    await b.go(HOME, 20_000);
+    let s = await b.state();
+    const atHome = await b.buttons();
+    report('a failed check at home: stop page, "check again" only', s.overlay && s.pwned === 0 && atHome.length === 1 && atHome[0] === 'Check again', { atHome, ...s });
+    await b.go(CONSOLE, 15_000);
+    s = await b.state();
+    const onHost = await b.buttons();
+    report('the same failure on the git canister\'s host: "open anyway" offered', s.overlay && onHost.includes('Open anyway'), { onHost, ...s });
+  } finally { await b.close(); }
+}
+
+// 8d. A service worker at home. One registered before this package covered
+// the domain answers a navigation itself, where no rule applies, and the
+// page's requests too. Found on a visit, it is removed and the tab loads
+// again from the network; and at install, every pinned domain's are.
+{
+  const SW = `self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(clients.claim()));
+self.addEventListener('fetch', e => {
+  const u = new URL(e.request.url);
+  if (u.hostname === 'icp-api.io') return e.respondWith(new Response('forged', { status: 299 }));
+  if (u.pathname === '/sw-ping') return e.respondWith(new Response('sw alive'));
+  if (e.request.mode === 'navigate') e.respondWith(new Response('<!doctype html><title>ic-git</title><script>window.__pwned = 1;</script><p>HACKED by a worker</p>', { headers: { 'content-type': 'text/html' } }));
+});`;
+  const REG = "<!doctype html><title>reg</title><script>navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(() => navigator.serviceWorker.ready).then(() => { document.title = 'registered'; }, e => { document.title = 'failed: ' + e.message; });</script>";
+  const swHome = async (path, h) => path === '/sw.js' ? { status: 200, type: 'text/javascript', body: SW } : path === '/reg.html' ? { status: 200, type: 'text/html', body: REG } : honest(path, h);
+  const after = async (b, name) => {
+    const s = await b.state();
+    const controller = await b.evaluate('navigator.serviceWorker.controller ? navigator.serviceWorker.controller.scriptURL : "none"');
+    const ping = await b.evaluate("fetch('/sw-ping').then(r => r.text(), () => 'err')");
+    const call = await b.call('https://icp-api.io/api/v2/canister/aaaaa-aa/query');
+    report(name, controller === 'none' && ping !== 'sw alive' && call === 'blocked' && s.pwned === 0 && !/HACKED/.test(s.text) && await wallet(b) !== '' && s.badge === 'OK', { controller, ping, call, ...s });
+  };
+  // On a visit: planted with the extension on, as no page at the domain
+  // could (its policy refuses a worker), through DevTools.
+  {
+    const b = await open({ home: swHome });
+    try {
+      await b.send('Page.setBypassCSP', { enabled: true }, b.page);
+      await b.go(new URL('/login.html', HOME).href, 4_000);
+      const planted = await b.evaluate("navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(() => navigator.serviceWorker.ready).then(() => 'registered', e => 'failed: ' + e.message)");
+      await b.send('Page.setBypassCSP', { enabled: false }, b.page);
+      await b.go(HOME, 25_000);
+      report('a worker planted at home through DevTools, the extension installed', planted === 'registered', planted);
+      await after(b, '...is found on the next visit and removed: the checked console from the network, its calls judged, badge OK');
+    } finally { await b.close(); }
+  }
+  // At install: planted with no extension, then the extension loaded into
+  // the same profile.
+  {
+    const profile = mkdtempSync(join(tmpdir(), 'ext-test-'));
+    try {
+      let b = await open({ home: swHome, profile, extension: false });
+      await b.go(new URL('/reg.html', HOME).href, 5_000);
+      const planted = await b.evaluate('document.title');
+      await b.close();
+      b = await open({ home: swHome, profile });
+      try {
+        await b.go(HOME, 25_000);
+        report('a worker planted at home before the extension was installed', planted === 'registered', planted);
+        await after(b, '...is gone once it is: the checked console from the network, its calls judged, badge OK');
+      } finally { await b.close(); }
+    } finally { rmSync(profile, { recursive: true, force: true, maxRetries: 5 }); }
+  }
+}
+
+console.log(failed ? `\n${failed} failed` : '\nall passed' + (skipped ? ` (${skipped} skipped; --strict, before a release, runs them or fails)` : ''));
 process.exit(failed ? 1 : 0);

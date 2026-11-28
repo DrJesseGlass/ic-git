@@ -2,7 +2,10 @@
 // Drives extension-firefox/ in headless Firefox against the live ic-git
 // canister and the Sepolia registry, over WebDriver BiDi.
 //
-//   node tools/extension-firefox-test.mjs [--firefox /path/to/firefox]
+//   node tools/extension-firefox-test.mjs [--firefox /path/to/firefox] [--strict]
+//
+// --strict: a case that cannot run against what is live (SKIP) fails;
+// before a release, every case must run.
 //
 // Every request goes through a local HTTPS proxy, set by Firefox's proxy
 // preferences: it tunnels other hosts untouched, and for the canister's host
@@ -19,6 +22,7 @@ import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inflateSync } from 'node:zlib';
 
 const FIREFOX = process.argv.includes('--firefox')
   ? process.argv[process.argv.indexOf('--firefox') + 1]
@@ -32,6 +36,9 @@ const VOTE = GW + '/site/ic-vote/';
 const CONSOLE = GW + '/site/ic-git/';
 // The console's home, a domain the core pins (Verifier.DEFAULTS.domains).
 const HOME = 'https://ic-git.com/';
+// Its subdomain, which the same DNS answers: the stand-in serves a page of
+// its own there, so no case reaches the real one.
+const WWW = 'https://www.ic-git.com/';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // What a tampering case injects: a script that marks the page, a script and
 // an image from the same host. None may run, and on Firefox none may even be
@@ -41,8 +48,9 @@ const INJECT = '<script>window.__pwned = 1;</script><script src="/site/ic-git/ev
 // The proxy. `rewrite(path, text, headers)` returns the body to serve instead,
 // or { body, type } to serve it as another content type, or null to pass it
 // through; `log` gets every path requested of the canister. The console's
-// home is answered by `home(path, headers)` -- { status, type, body } --
-// as whoever holds its DNS serves it, and logged too.
+// home is answered by `home(path, headers)` -- { status, type, body,
+// headers } -- as whoever holds its DNS serves it, and logged too; its
+// subdomain www answers a page of its own.
 async function proxy(dir, rewrite, log, home) {
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=' + HOST,
     '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
@@ -64,10 +72,13 @@ async function proxy(dir, rewrite, log, home) {
     } catch (e) { res.writeHead(502); res.end(String(e)); }
   });
   const domain = createHttps({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) }, async (req, res) => {
-    log.push({ path: req.url, dest: req.headers['sec-fetch-dest'] || '', home: true });
+    const www = (req.headers.host || '').split(':')[0] === new URL(WWW).hostname;
+    log.push({ path: req.url, dest: req.headers['sec-fetch-dest'] || '', home: true, www });
     try {
-      const { status, type, body } = await home(req.url, req.headers);
-      res.writeHead(status, { 'content-type': type });
+      const { status, type, body, headers = {} } = www
+        ? { status: 200, type: 'text/html', body: '<!doctype html><title>ic-git</title><script>window.__pwned = 9;</script><p>HACKED at www</p>' }
+        : await home(req.url, req.headers);
+      res.writeHead(status, { 'content-type': type, ...headers });
       res.end(body);
     } catch (e) { res.writeHead(502); res.end(String(e)); }
   });
@@ -77,7 +88,7 @@ async function proxy(dir, rewrite, log, home) {
   const server = createHttp((req, res) => { res.writeHead(502, { 'content-type': 'text/plain' }); res.end('plain http reached the proxy'); });
   server.on('connect', (req, socket, head) => {
     const [host, port] = req.url.split(':');
-    const to = host === HOST ? tls : host === new URL(HOME).host && home ? domain : null;
+    const to = host === HOST ? tls : [new URL(HOME).host, new URL(WWW).host].includes(host) && home ? domain : null;
     if (to) {
       socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head && head.length) socket.unshift(head);
@@ -97,8 +108,8 @@ async function proxy(dir, rewrite, log, home) {
 }
 
 // A Firefox with the extension, all traffic through the proxy, and a BiDi
-// session on its one tab.
-async function open({ rewrite = () => null, home = null } = {}) {
+// session on its one tab. `extension: false`: without it, until install().
+async function open({ rewrite = () => null, home = null, extension = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ff-ext-test-'));
   const log = [];
   const server = await proxy(dir, (...a) => rewrite(...a), log, home);
@@ -109,6 +120,9 @@ async function open({ rewrite = () => null, home = null } = {}) {
     ['browser.shell.checkDefaultBrowser', false], ['app.update.enabled', false], ['network.captive-portal-service.enabled', false],
     ['browser.safebrowsing.malware.enabled', false], ['browser.safebrowsing.phishing.enabled', false],
     ['datareporting.policy.dataSubmissionEnabled', false], ['toolkit.telemetry.enabled', false],
+    // A service worker from a host whose certificate the session accepts
+    // (the stand-in's), as one from a trusted host is.
+    ['dom.serviceWorkers.testing.enabled', true],
   ].map(([k, v]) => `user_pref("${k}", ${v});`).join('\n') + '\n');
   const port = 9800 + Math.floor(Math.random() * 150);
   const ff = spawn(FIREFOX, ['--headless', '--no-remote', '--profile', dir, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
@@ -136,7 +150,8 @@ async function open({ rewrite = () => null, home = null } = {}) {
     ws.send(JSON.stringify({ id, method, params }));
   });
   await send('session.new', { capabilities: { alwaysMatch: { acceptInsecureCerts: true } } });
-  await send('webExtension.install', { extensionData: { type: 'path', path: EXT } });
+  const install = () => send('webExtension.install', { extensionData: { type: 'path', path: EXT } });
+  if (extension) await install();
   await send('session.subscribe', { events: ['browsingContext.load'] });
   const { contexts } = await send('browsingContext.getTree', {});
   const context = contexts[0].context;
@@ -186,7 +201,59 @@ async function open({ rewrite = () => null, home = null } = {}) {
     }
     return out;
   };
-  return { go, nav, state, evaluate, log, close, call, frames, set rewrite(f) { rewrite = f; } };
+  // The stop page's "Open anyway", pressed twice as a user would: found
+  // in a screenshot (its closed shadow root is out of a page script's
+  // reach) as the lowest band of its red. Where there is no such button
+  // the press lands on red text, and does nothing.
+  const pressRisk = async () => {
+    for (let i = 0; i < 2; i++) {
+      const at = riskButton(Buffer.from((await send('browsingContext.captureScreenshot', { context })).data, 'base64'));
+      if (!at) return 'no red on the page';
+      await send('input.performActions', { context, actions: [{ type: 'pointer', id: 'm', parameters: { pointerType: 'mouse' },
+        actions: [{ type: 'pointerMove', x: at.x, y: at.y }, { type: 'pointerDown', button: 0 }, { type: 'pointerUp', button: 0 }] }] });
+      await sleep(1_500);
+    }
+    return 'pressed';
+  };
+  return { go, nav, state, evaluate, log, close, call, frames, install, pressRisk, set rewrite(f) { rewrite = f; } };
+}
+
+// A screenshot's pixels (8-bit RGB or RGBA PNG, not interlaced).
+function png(buf) {
+  let o = 8, w, h, ct;
+  const idat = [];
+  while (o < buf.length) {
+    const len = buf.readUInt32BE(o), type = buf.toString('ascii', o + 4, o + 8), data = buf.subarray(o + 8, o + 8 + len);
+    if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); ct = data[9]; }
+    if (type === 'IDAT') idat.push(data);
+    o += 12 + len;
+  }
+  const bpp = ct === 6 ? 4 : 3, raw = inflateSync(Buffer.concat(idat)), stride = w * bpp, px = Buffer.alloc(h * stride);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)], line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let x = 0; x < stride; x++) {
+      const a = x >= bpp ? px[y * stride + x - bpp] : 0, b = y ? px[(y - 1) * stride + x] : 0, c = x >= bpp && y ? px[(y - 1) * stride + x - bpp] : 0;
+      let v = line[x];
+      if (f === 1) v += a; else if (f === 2) v += b; else if (f === 3) v += (a + b) >> 1;
+      else if (f === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
+      px[y * stride + x] = v & 255;
+    }
+  }
+  return { w, h, at: (x, y) => [px[y * stride + x * bpp], px[y * stride + x * bpp + 1], px[y * stride + x * bpp + 2]] };
+}
+// Where the stop page's lowest red (#b3261e) is: "Open anyway" when it is
+// offered, last on the page.
+function riskButton(buf) {
+  const im = png(buf), red = [];
+  for (let y = 0; y < im.h; y++) for (let x = 0; x < im.w; x++) {
+    const [r, g, b] = im.at(x, y);
+    if (Math.abs(r - 179) < 20 && Math.abs(g - 38) < 20 && Math.abs(b - 30) < 20) red.push([x, y]);
+  }
+  if (!red.length) return null;
+  const maxY = Math.max(...red.map(p => p[1]));
+  const band = red.filter(p => p[1] > maxY - 34);
+  const xs = band.map(p => p[0]), ys = band.map(p => p[1]);
+  return { x: Math.round((Math.min(...xs) + Math.max(...xs)) / 2), y: Math.round((Math.min(...ys) + Math.max(...ys)) / 2) };
 }
 
 let failed = 0;
@@ -194,8 +261,14 @@ const report = (name, ok, got) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '\n        got ' + JSON.stringify(got)}`);
   if (!ok) failed++;
 };
-// A case that cannot run against what is live, and why.
-const skip = (name, why) => console.log(`SKIP  ${name}\n        ${why}`);
+// A case that cannot run against what is live, and why; with --strict, a
+// failure.
+let skipped = 0;
+const skip = (name, why) => {
+  if (process.argv.includes('--strict')) return report(name + ' (--strict: it must run)', false, why);
+  skipped++;
+  console.log(`SKIP  ${name}\n        ${why}`);
+};
 // Whether the console the registry records knows its home: one published
 // before it did reads its /api on its own origin, which at the domain is
 // the domain's, so only its being written there can be checked.
@@ -389,6 +462,17 @@ const tamper = (only) => (path, text, headers) => {
   } finally { await b.close(); }
 }
 
+// What the canister serves at the domain: the site's root at /, the same
+// bytes as at /site/ic-git/ (docs/TENANCY.md, "Custom domains").
+const honest = async path => {
+  if (!/^\/(index\.html)?(\?|$)/.test(path)) return { status: 404, type: 'text/plain', body: 'not found' };
+  const r = await fetch(CONSOLE);
+  return { status: r.status, type: r.headers.get('content-type'), body: Buffer.from(await r.arrayBuffer()) };
+};
+// A hijacker's page there: it marks the page, and names a script and an
+// image at the domain, which must never be requested.
+const EVIL = '<!doctype html><html><head><title>ic-git</title><script>window.__pwned = 1;</script><script src="/evil.js"></script></head><body><p>HACKED: send your keys here</p><img src="/tracker.png"></body></html>';
+
 // 10. The console's home, ic-git.com, a domain the core pins: its root is
 // the ic-git site's entrypoint, held until what arrived is checked against
 // the site's record as the git canister serves it on its own host. An
@@ -396,14 +480,6 @@ const tamper = (only) => (path, text, headers) => {
 // asks for nothing. Every other page there is covered by no record, and
 // the domain loads in no frame and under no other spelling.
 {
-  // What the canister serves at the domain: the site's root at /, the same
-  // bytes as at /site/ic-git/ (docs/TENANCY.md, "Custom domains").
-  const honest = async path => {
-    if (!/^\/(index\.html)?(\?|$)/.test(path)) return { status: 404, type: 'text/plain', body: 'not found' };
-    const r = await fetch(CONSOLE);
-    return { status: r.status, type: r.headers.get('content-type'), body: Buffer.from(await r.arrayBuffer()) };
-  };
-  const EVIL = '<!doctype html><html><head><title>ic-git</title><script>window.__pwned = 1;</script><script src="/evil.js"></script></head><body><p>HACKED: send your keys here</p><img src="/tracker.png"></body></html>';
   let hijacked = false;
   const b = await open({ home: async (path, headers) => (hijacked ? { status: 200, type: 'text/html', body: EVIL } : honest(path, headers)) });
   const wallet = () => b.evaluate("(document.getElementById('wallet') || {}).innerText || ''");
@@ -463,5 +539,88 @@ const tamper = (only) => (path, text, headers) => {
   } finally { await b.close(); }
 }
 
-console.log(failed ? `\n${failed} failed` : '\nall passed');
+// 10b. Hijacked, subtler: the recorded bytes, with headers that act after
+// the check (a move elsewhere, a cookie, a preload); then a redirect to a
+// subdomain, which the same DNS answers.
+{
+  let mode = 'headers';
+  const b = await open({ home: async (path, h) => {
+    if (mode === 'redirect' && /^\/(\?|$)/.test(path)) return { status: 302, type: 'text/plain', body: '', headers: { location: WWW } };
+    const r = await honest(path, h);
+    if (mode === 'headers' && r.status === 200) r.headers = { refresh: '3; url=https://example.com/moved', 'set-cookie': 'planted=1; Path=/; Secure', link: '</evil.css>; rel=preload; as=style' };
+    return r;
+  } });
+  try {
+    await b.go(HOME, 20_000);
+    await sleep(6_000);
+    const at = await b.evaluate('location.href'), cookie = await b.evaluate('document.cookie');
+    let s = await b.state();
+    const asked = b.log.filter(r => /evil\.css/.test(r.path)).map(r => r.path);
+    report('hijacked home\'s headers: no move after the check, no cookie, no preload, the page loads',
+      at === HOME && !/planted/.test(cookie) && asked.length === 0 && !s.overlay && /a git remote on the Internet Computer/.test(s.text), { at, cookie, asked, ...s });
+    mode = 'redirect';
+    const got = await b.nav(HOME);
+    const to = await b.evaluate('location.href');
+    s = await b.state();
+    const www = b.log.filter(r => r.www).map(r => r.path);
+    report('hijacked home redirecting to its subdomain: stopped, nothing there is asked for or runs', !String(to).startsWith(WWW) && www.length === 0 && s.pwned === 0, { got, to, www, ...s });
+  } finally { await b.close(); }
+}
+
+// 10c. "Open anyway" never at home: a failed check there offers none, and
+// one given on the git canister's host does not carry to the domain.
+{
+  let hijacked = true;
+  const b = await open({ home: async (path, h) => (hijacked ? { status: 200, type: 'text/html', body: EVIL } : honest(path, h)), rewrite: tamper() });
+  try {
+    await b.go(HOME, 15_000);
+    const pressed = await b.pressRisk();
+    await sleep(10_000);
+    let s = await b.state();
+    report('a failed check at home: no "open anyway" to press, the domain\'s page never runs', s.overlay && s.pwned === 0 && !/HACKED/.test(s.text), { pressed, ...s });
+    await b.go(CONSOLE, 20_000);
+    const control = await b.pressRisk();
+    await sleep(12_000);
+    s = await b.state();
+    report('...while on the git canister\'s host the same failure offers it, and it runs the page as served', control === 'pressed' && !s.overlay && s.pwned === 1, { control, ...s });
+    await b.go(HOME, 15_000);
+    s = await b.state();
+    report('...and that tab\'s exception does not open the hijacked domain', s.overlay && s.pwned === 0 && !/HACKED/.test(s.text), s);
+  } finally { await b.close(); }
+}
+
+// 10d. A service worker at home, registered before the extension was
+// installed: it would answer the navigation itself, where no listener
+// holds it, and the page's requests too. At install every pinned domain's
+// workers are removed.
+{
+  const SW = `self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(clients.claim()));
+self.addEventListener('fetch', e => {
+  const u = new URL(e.request.url);
+  if (u.hostname === 'icp-api.io') return e.respondWith(new Response('forged', { status: 299 }));
+  if (u.pathname === '/sw-ping') return e.respondWith(new Response('sw alive'));
+  if (e.request.mode === 'navigate') e.respondWith(new Response('<!doctype html><title>ic-git</title><script>window.__pwned = 1;</script><p>HACKED by a worker</p>', { headers: { 'content-type': 'text/html' } }));
+});`;
+  const REG = "<!doctype html><title>reg</title><script>navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(() => navigator.serviceWorker.ready).then(() => { document.title = 'registered'; }, e => { document.title = 'failed: ' + e.message; });</script>";
+  const b = await open({ extension: false, home: async (path, h) => path === '/sw.js' ? { status: 200, type: 'text/javascript', body: SW } : path === '/reg.html' ? { status: 200, type: 'text/html', body: REG } : honest(path, h) });
+  try {
+    await b.go(new URL('/reg.html', HOME).href, 5_000);
+    const planted = await b.evaluate('document.title');
+    await b.go(HOME, 4_000);
+    const before = await b.state();
+    await b.install();
+    await sleep(3_000);
+    await b.go(HOME, 25_000);
+    const s = await b.state();
+    const controller = await b.evaluate('navigator.serviceWorker.controller ? navigator.serviceWorker.controller.scriptURL : "none"');
+    const ping = await b.evaluate("fetch('/sw-ping').then(r => r.text(), () => 'err')");
+    const call = await b.call('https://icp-api.io/api/v2/canister/aaaaa-aa/query');
+    report('a worker planted at home before the extension was installed answers for the page', planted === 'registered' && before.pwned === 1, { planted, before });
+    report('...and is gone once it is: the checked console from the network, its calls judged',
+      controller === 'none' && ping !== 'sw alive' && call === 'blocked' && s.pwned === 0 && !s.overlay && /a git remote on the Internet Computer/.test(s.text), { controller, ping, call, ...s });
+  } finally { await b.close(); }
+}
+
+console.log(failed ? `\n${failed} failed` : '\nall passed' + (skipped ? ` (${skipped} skipped; --strict, before a release, runs them or fails)` : ''));
 process.exit(failed ? 1 : 0);

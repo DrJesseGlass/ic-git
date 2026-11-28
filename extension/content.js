@@ -130,6 +130,27 @@
       el('div', { className: 'actions' }, again, ...(site.repo && site.openAnyway !== false ? [anyway] : []))));
   }
 
+  // Whether a service worker answered for this page, and answers its
+  // requests: then none of it is taken, whatever it holds -- the
+  // background says what happens next. Read now, before any of the
+  // page's code runs: in this script's view of the page, in the page's own
+  // objects (Firefox gives a content script a view of its own), and from
+  // main.js in Chrome, which runs in the page's world and says so by
+  // cancelling the event.
+  const controlled = (() => {
+    const has = n => { try { return Boolean(n && n.serviceWorker && n.serviceWorker.controller); } catch (_) { return false; } };
+    if (has(navigator)) return true;
+    try { if (window.wrappedJSObject && has(window.wrappedJSObject.navigator)) return true; } catch (_) { /* no page view */ }
+    return !document.dispatchEvent(new CustomEvent('ic-git-verifier:controlled', { cancelable: true }));
+  })();
+  // A controlled page is emptied at once. In Chrome main.js has dropped it
+  // already, and this is the one write it takes; Firefox did not hold it
+  // (a worker's answer never reaches the network), so it stops here.
+  if (controlled && !write(BARE)) {
+    try { window.stop(); } catch (_) { /* already stopped */ }
+    document.replaceChildren();
+  }
+
   // Later news for this tab, after the page is written.
   chrome.runtime.onMessage.addListener(msg => {
     if (!msg || msg.type !== 'result') return;
@@ -140,13 +161,15 @@
   });
   // The document's type goes with the visit: only an HTML document can be
   // replaced by the checked bytes.
-  chrome.runtime.sendMessage({ type: 'visit', url, navStart, contentType: document.contentType }, res => {
+  chrome.runtime.sendMessage({ type: 'visit', url, navStart, contentType: document.contentType, controlled }, res => {
     if (chrome.runtime.lastError || !res) {
       write(BARE);
       stop('failed', { checks: [{ ok: false, label: 'reach the verifier', detail: chrome.runtime.lastError ? chrome.runtime.lastError.message : 'no answer' }] });
       return;
     }
     repo = res.site && res.site.repo || null;
+    // Load again from the network: what answered for this page is gone.
+    if (res.reload) { write(BARE); location.reload(); return; }
     if ((res.status === 'verified' || res.status === 'allowed') && typeof res.text === 'string') {
       // The tab is said to show the page only once it does.
       const shown = write(res.text);

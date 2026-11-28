@@ -35,4 +35,10 @@
     document.close();
     e.preventDefault();
   }, { once: true });
+  // Whether a service worker answered for this page and answers its
+  // requests, as the page's world sees it: said to the content script by
+  // cancelling its event.
+  document.addEventListener('ic-git-verifier:controlled', e => {
+    if (navigator.serviceWorker && navigator.serviceWorker.controller) e.preventDefault();
+  });
 })();

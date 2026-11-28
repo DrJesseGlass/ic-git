@@ -37,7 +37,10 @@
 // hosts are: a pinned domain's entrypoint is that site's, held and checked
 // against the site's record as the git canister serves it on its own host,
 // whose DNS no one can point elsewhere; every other page at the domain is
-// covered by no record.
+// covered by no record. Never taken from the domain: a service worker
+// there (one registered before this package covered the domain answers a
+// navigation itself, which no filter holds), "open anyway", the headers
+// STRIP names, and a redirect off the domain.
 
 const HOSTS = [Verifier.DEFAULTS.canister, Verifier.DEFAULTS.git];
 const originOf = host => 'https://' + host + '.raw.icp0.io';
@@ -50,9 +53,20 @@ const SITE_ORIGINS = [...HOSTS.map(originOf), ...DOMAINS.map(domainOrigin)];
 const RPCS = ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'];
 const REFRESH_MINUTES = 10;
 const BLOCK = "script-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'";
+// Response headers no page under /site/ or at a pinned domain is given,
+// nor any other response from a pinned domain:
+// each acts after the page is checked, as the network says -- moves the
+// tab (refresh), fetches or prefetches (link, speculation-rules), keeps
+// state or reports at the origin (set-cookie, clear-site-data, nel,
+// report-to, reporting-endpoints), or saves the body as a file of the
+// origin (content-disposition). Chrome's static rules strip the same.
+const STRIP = ['refresh', 'link', 'speculation-rules', 'set-cookie', 'clear-site-data', 'nel', 'report-to', 'reporting-endpoints', 'content-disposition'];
 const BARE = '<!doctype html><html><head><meta charset="utf-8"><title>ic-git verifier</title></head><body></body></html>';
 const REFRESH = '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0"><title>ic-git verifier</title></head><body></body></html>';
 const FILTER = { urls: [...HOSTS.map(h => originOf(h) + '/site/*'), ...DOMAINS.map(d => domainOrigin(d) + '/*')], types: ['main_frame'] };
+// Every response from a pinned domain: the page's own requests there are
+// answered by the domain too, and lose the same headers (STRIP).
+const DOMAIN_FILTER = { urls: DOMAINS.map(d => domainOrigin(d) + '/*') };
 // The IC's API, on every host that serves it; pages use icp-api.io. The
 // others need host permissions MV3 Firefox grants on install but not on
 // an update, so whether a call through them can be cancelled is checked
@@ -114,20 +128,23 @@ const entryUrl = (host, repo) => originOf(host) + '/site/' + encodeURIComponent(
 // A site's key in state: its host and repo.
 const keyOf = (host, repo) => host + '/' + repo;
 
-// Which site a URL is the entrypoint of -- { host, repo } -- or null. A
-// pinned domain's root is its site's entrypoint, the same site as on the
-// git canister's host, with the same checked state.
+// Which site a URL is the entrypoint of -- { host, repo, domain } -- or
+// null. A pinned domain's root is its site's entrypoint, the same site as
+// on the git canister's host, with the same checked state; `domain` says
+// the page is at the domain.
 function siteOf(href) {
   try {
     const u = new URL(href);
     const d = DOMAINS.find(d => u.origin === domainOrigin(d));
-    if (d) return /^\/(index\.html)?$/.test(u.pathname) ? { host: d.host, repo: d.repo } : null;
+    if (d) return /^\/(index\.html)?$/.test(u.pathname) ? { host: d.host, repo: d.repo, domain: d.domain } : null;
     const host = HOSTS.find(h => u.origin === originOf(h));
     if (!host) return null;
     const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
     return m ? { host, repo: decodeURIComponent(m[1]) } : null;
   } catch (_) { return null; } // not a URL, or a malformed escape
 }
+// The pinned domain a URL is at, or undefined.
+const domainAt = href => { try { const o = new URL(href).origin; return (DOMAINS.find(d => domainOrigin(d) === o) || {}).domain; } catch (_) { return undefined; } };
 // Whether a URL is a page under /site/ on one of the hosts, or any page at
 // a pinned domain.
 const onSiteHost = href => {
@@ -220,6 +237,26 @@ const failedSite = (host, repo, e) => ({
   checks: [{ id: 'X', ok: false, label: 'check the site', detail: e.message || String(e) }],
 });
 
+// A pinned domain's service workers, removed: one there answers a page's
+// requests itself, where no listener of this extension holds them, and it
+// can only have been registered before the package covered the domain
+// (every page there runs no script but the checked page's, which
+// registers none). Done at install and at every start, for every pinned
+// domain, and again whenever a page there is found controlled.
+const clearWorkers = domains => browser.browsingData.remove({ hostnames: domains }, { serviceWorkers: true });
+// When each tab last had them removed, so a page that is still controlled
+// after that is stopped, not reloaded again; and when each was last
+// reloaded for a page at a pinned domain that arrived unheld.
+const clearedFor = new Map(), unheld = new Map();
+async function clearAll() {
+  await clearWorkers(DOMAINS.map(d => d.domain)).catch(() => {});
+  // A tab already at a pinned domain was loaded before this package ran
+  // there (at install, or by a worker since removed): it loads again.
+  for (const d of DOMAINS) for (const t of await browser.tabs.query({ url: domainOrigin(d) + '/*' }).catch(() => [])) browser.tabs.reload(t.id).catch(() => {});
+}
+browser.runtime.onInstalled.addListener(clearAll);
+browser.runtime.onStartup.addListener(clearAll);
+
 // --- tabs ---
 const allowedKey = (tabId, key) => tabId + ':' + key;
 async function allowed(tabId, key) {
@@ -240,6 +277,7 @@ function badge(tabId, state, site) {
     allowed: ['!', '#b35c00', 'NOT verified -- running anyway, as you chose'],
     uncovered: ['', '#6b6b6b', 'this page is covered by no record; its scripts are blocked'],
     unreachable: ['!', '#b3261e', 'moved to a site this extension has no permission for -- grant it in the extension\'s permissions; the page was not loaded'],
+    movedAway: ['!', '#b3261e', 'its domain answered with a move to another site, which was stopped: the site there never sends one'],
   }[state];
   // A tab's own values override the defaults checkHosts sets, so a missing
   // site host is said here too. Firefox resets them when the tab navigates,
@@ -257,14 +295,17 @@ function badge(tabId, state, site) {
 // left as if it were the page it is on.
 const latest = new Map();  // tabId -> requestId of its latest navigation
 const results = new Map(); // tabId -> { url, status, site } of that navigation
-const summary = site => ({
+// What the page needs to draw. At a pinned domain (`domain`) no "open
+// anyway", which would run there what no record attests.
+const summary = (site, domain) => ({
   repo: site.repo, commit: site.commit || null, checks: site.checks || [],
   via: site.via || null, policyError: site.policyError || null,
   backends: site.backends || [], warning: site.warning || '',
+  openAnyway: !domain && site.openAnyway !== false,
 });
 function settle(d, status, site) {
   if (latest.get(d.tabId) !== d.requestId) return;
-  results.set(d.tabId, { url: d.url, status, site: site ? summary(site) : undefined });
+  results.set(d.tabId, { url: d.url, status, site: site ? summary(site, Boolean(domainAt(d.url))) : undefined });
   badge(d.tabId, status, site);
 }
 
@@ -282,13 +323,18 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
     let to = null;
     try { to = new URL(loc, d.url).origin; } catch (_) { /* no usable Location: nothing to follow */ }
     if (to && missingOrigins.has(to)) { badge(d.tabId, 'unreachable', { repo: (siteOf(d.url) || {}).repo || '' }); return { cancel: true }; }
+    // ...or that leaves a pinned domain: the site there never sends one
+    // elsewhere, and a hijacked one would take the tab where nothing of
+    // this extension runs.
+    const from = domainAt(d.url);
+    if (from && to !== 'https://' + from) { badge(d.tabId, 'movedAway', { repo: (siteOf(d.url) || {}).repo || '' }); return { cancel: true }; }
     return {};
   }
   const at = siteOf(d.url);
   let policy = BLOCK;
   if (at !== null) {
     const { host, repo } = at;
-    if (await allowed(d.tabId, keyOf(host, repo))) { applied.set(d.requestId, null); return {}; }
+    if (!at.domain && await allowed(d.tabId, keyOf(host, repo))) { applied.set(d.requestId, null); return {}; }
     let site = (await load())[keyOf(host, repo)];
     if (!site || site.status !== 'verified' || Date.now() - site.checkedAt > REFRESH_MINUTES * 60_000) {
       badge(d.tabId, 'checking', { repo });
@@ -297,7 +343,7 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
     if (site.status === 'verified') policy = site.policy;
   }
   applied.set(d.requestId, policy);
-  const headers = d.responseHeaders.filter(h => !['content-security-policy', 'content-type'].includes(h.name.toLowerCase()));
+  const headers = d.responseHeaders.filter(h => !['content-security-policy', 'content-type', ...STRIP].includes(h.name.toLowerCase()));
   headers.push({ name: 'Content-Security-Policy', value: policy });
   // What the tab gets is HTML (decide): the recorded page, which check E
   // read as UTF-8 HTML, or a document of ours. Typed as the response
@@ -306,6 +352,14 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
   headers.push({ name: 'Content-Type', value: 'text/html; charset=utf-8' });
   return { responseHeaders: headers };
 }, FILTER, ['blocking', 'responseHeaders']);
+
+// The rest of a pinned domain's responses (the page's are above): the same
+// headers stripped, so that nothing the domain answers keeps state, reports
+// or moves the tab.
+browser.webRequest.onHeadersReceived.addListener(d => {
+  if (d.type === 'main_frame') return {};
+  return { responseHeaders: d.responseHeaders.filter(h => !STRIP.includes(h.name.toLowerCase())) };
+}, DOMAIN_FILTER, ['blocking', 'responseHeaders']);
 
 // --- the body: held until it is known to be the recorded page ---
 browser.webRequest.onBeforeRequest.addListener(d => {
@@ -338,7 +392,7 @@ async function decide(d, bytes) {
   const at = siteOf(d.url);
   if (at === null) { settle(d, 'uncovered'); return BARE; }
   const { host, repo } = at;
-  if (await allowed(d.tabId, keyOf(host, repo))) { settle(d, 'allowed', { repo }); return bytes; }
+  if (!at.domain && await allowed(d.tabId, keyOf(host, repo))) { settle(d, 'allowed', { repo }); return bytes; }
   const site = (await load())[keyOf(host, repo)];
   const policy = applied.get(d.requestId);
   if (site && site.status === 'verified' && await sha256(bytes) === site.bundleHash) {
@@ -371,7 +425,7 @@ browser.webRequest.onBeforeRequest.addListener(async d => {
   // The gateway hosts serve other things too (a canister's own
   // /api/<repo>/... routes, say), which are not ours.
   if (!API_PATH.test(u.pathname)) return {};
-  if (await allowed(d.tabId, key)) return {};
+  if (!at.domain && await allowed(d.tabId, key)) return {};
   const m = CANISTER_PATH.exec(u.pathname);
   // Only the one host pages are expected to use, and only canister calls:
   // anything else of the IC's API is cancelled unjudged.
@@ -392,19 +446,46 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
   const tabId = sender.tab && sender.tab.id;
   if (tabId === undefined) return { error: 'no tab' };
   if (msg.type === 'visit') {
+    // A page a service worker answered for: no filter held it, and
+    // content.js has emptied it. At a pinned domain the domain's workers
+    // are removed and the tab loads again from the network -- once; still
+    // controlled, it is stopped. Elsewhere (a canister's host, which every
+    // site there shares) nothing is removed: the page is stopped.
+    if (msg.controlled === true) {
+      const at = siteOf(msg.url), domain = domainAt(msg.url);
+      const again = domain && Date.now() - (clearedFor.get(tabId) || 0) < 60_000;
+      const cleared = domain && !again && await clearWorkers([domain]).then(() => true, () => false);
+      const site = { repo: at ? at.repo : '', status: 'failed', openAnyway: false, checks: [{ id: 'W', ok: false, label: 'the page comes from the network, not a service worker',
+        detail: cleared ? 'a service worker at ' + domain + ' answered for it; it has been removed, and the page loads again'
+          : domain ? 'a service worker at ' + domain + ' still answers for it after it was removed'
+          : 'a service worker answers for it, which this extension cannot check: no page it may hold registers one, so it was put there some other way; remove this site\'s data in the browser\'s settings' }] };
+      if (cleared) { clearedFor.set(tabId, Date.now()); badge(tabId, 'checking', site); return { status: 'checking', reload: true, site: summary(site, true) }; }
+      badge(tabId, 'failed', site);
+      return { status: 'failed', site: summary(site, true) };
+    }
     const r = results.get(tabId);
     if (r && r.url === msg.url) return { status: r.status, site: r.site };
     // No held response for this page (one restored from history, say):
     // say what the site's state is, and let a reload settle the rest.
     const at = siteOf(msg.url);
     if (at === null) return { status: 'uncovered' };
+    // At a pinned domain what arrives unheld is the domain's, unchecked:
+    // never "verified". Loaded again, it is held; unheld once more, it is
+    // stopped.
+    if (at.domain) {
+      if (Date.now() - (unheld.get(tabId) || 0) > 60_000) { unheld.set(tabId, Date.now()); return { status: 'checking', reload: true, site: { repo: at.repo } }; }
+      const site = { repo: at.repo, status: 'failed', openAnyway: false, checks: [{ id: 'H', ok: false, label: 'the page is held until it is checked', detail: 'it reached the tab without passing the hold, twice: what it holds was not checked' }] };
+      badge(tabId, 'failed', site);
+      return { status: 'failed', site: summary(site, true) };
+    }
     const site = (await load())[keyOf(at.host, at.repo)];
-    return site && site.status === 'verified' ? { status: 'verified', site: summary(site) } : { status: 'checking', site: { repo: at.repo } };
+    return site && site.status === 'verified' ? { status: 'verified', site: summary(site, Boolean(at.domain)) } : { status: 'checking', site: { repo: at.repo } };
   }
   // The other messages name a repo, on the host of the page that sends them.
   const at = siteOf(sender.url);
   if (!at || at.repo !== msg.repo) return { error: 'this page is no site\'s entrypoint' };
   if (msg.type === 'allow') {
+    if (at.domain) return { error: 'no page at ' + at.domain + ' is opened unchecked' };
     await exclusive(async () => {
       const { allowed = {} } = await browser.storage.session.get('allowed');
       allowed[allowedKey(tabId, keyOf(at.host, at.repo))] = true;
@@ -414,7 +495,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
   }
   if (msg.type === 'retry') {
     const site = await verifySite(at.host, at.repo).catch(e => failedSite(at.host, at.repo, e));
-    return { status: site.status, site: summary(site) };
+    return { status: site.status, site: summary(site, Boolean(at.domain)) };
   }
   return { error: 'unknown message' };
 });

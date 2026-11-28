@@ -5,6 +5,7 @@
   "description": "Checks ic-git sites against their on-chain record, runs only their verified scripts, and lets them call only approved canisters.",
   "permissions": [
     "declarativeNetRequest",
+    "browsingData",
     "storage",
     "alarms"
   ],

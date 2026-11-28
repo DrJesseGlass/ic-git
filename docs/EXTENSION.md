@@ -36,15 +36,46 @@ with the repo whose site it serves (`DEFAULTS.domains`: `ic-git.com` is
 entrypoint: the same site, with the same checked state, as at
 `/site/<repo>/` on the git canister's host, and checked there, where no
 DNS can point elsewhere. Chrome writes into the tab the bytes it checked
-there, never the domain's; Firefox holds what the domain delivered and
-releases it only if it is those bytes. So a hijacked domain's page is
-never shown or run: Chrome shows the recorded page in its place, at the
+there, never the body the domain delivered; Firefox holds that body and
+releases it only if it is those bytes. A hijacked domain's page is not
+shown or run: Chrome shows the recorded page in its place, at the
 domain, and Firefox stops it. Every other page at the domain is covered by
-no record, and stopped. A domain that is not pinned is not covered:
-nothing of the extension runs there. Adding one takes a package release
-(the manifest's host permission and content scripts, and the static
-rules below, which `tools/extension-domains-test.mjs` holds to the
-core's list).
+no record, and stopped. What else the domain sends is not the record's
+either, so it is held to less than a page on the git canister's host:
+
+- The response's headers are the domain's. Those that act after the
+  check are stripped from every page there, as from every page under
+  `/site/` -- `Refresh` (a move elsewhere), `Link` and
+  `Speculation-Rules` (fetches), `Set-Cookie`, `Clear-Site-Data`, `NEL`,
+  `Report-To`, `Reporting-Endpoints` and `Content-Disposition` -- and
+  the policy and type are the extension's. The rest (caching, say) stay.
+  The page's own requests at the domain (the console reads its
+  provenance there) are answered by the domain as well, and lose the
+  same headers; what they answer is the domain's (Next).
+- A service worker at the domain would answer the tab's navigation
+  itself, where no rule of Chrome's applies and no listener of Firefox's
+  holds it, and the page's requests too. No page the extension lets run
+  there can register one (the pinned policy names scripts by hash, which
+  a worker's URL never matches), so one there was registered before the
+  package covered the domain. Each pinned domain's workers (and, in
+  Chrome, their caches) are removed at install and at every start, and
+  again when a page there is found controlled by one, which then loads
+  again from the network; a page still controlled after that is stopped.
+  This is the `browsingData` permission. A page under `/site/` found
+  controlled is stopped too, unremoved, since every site on that host
+  shares it.
+- No "open anyway" at a domain: it is the origin a wallet signs at, and
+  the bytes it would run are what no record attests. One given in a tab
+  on the git canister's host does not carry to the domain.
+- A redirect that leaves the domain is cancelled by Firefox. Chrome blocks
+  one to the domain's subdomains or other spellings (below), but not one
+  to another site: that takes the tab off the domain, where nothing of
+  the extension runs, and the address bar shows where it went.
+
+A domain that is not pinned is not covered: nothing of the extension
+runs there. Adding one takes a package release (the manifest's host
+permission and content scripts, and the static rules below, which
+`tools/extension-domains-test.mjs` holds to the core's list).
 
 ## What it checks
 
@@ -154,11 +185,16 @@ Enforcement:
   there, so a page on it would load unchecked: the badge says on every
   tab which site host is missing, and a redirect to that host from
   ic-git's (every site's old URL after the cut) is cancelled, with the
-  tab's badge saying why, until the user grants it. Chrome instead holds
-  an update that asks for a new host until the user accepts it. A pinned
-  domain is a new host in the same way: the first package to pin
-  `ic-git.com` asks for it, and until the user grants it the console
-  there loads unchecked in Firefox, which every tab's badge says.
+  tab's badge saying why, until the user grants it. Chrome instead
+  disables an extension whose update asks for a new host, until the user
+  accepts the new permission: nothing is checked anywhere meanwhile, and
+  the toolbar says the extension is off. A pinned domain is a new host in
+  the same way: the first package to pin `ic-git.com` asks for it, and
+  until the user grants it the console there loads unchecked in Firefox,
+  which every tab's badge says. The same package adds `browsingData`
+  (service workers at a pinned domain, above): Firefox holds an update
+  that adds it until the user accepts it; Chrome's waits for the user
+  anyway, for the host.
 
 Two edges. A page run through the loader (`/site/ic-git-loader/`) under
 an extension calls as the loader's site, whose own list has no app
@@ -275,13 +311,17 @@ decoded as other text.
   another origin (the root's trailing dot, a port) it is blocked; and it
   is blocked in a frame and in an object, at any page's, with or without
   a user name, for the same reason as the host. Chrome's no-script policy
-  and HTML type cover every page there, and its pages' calls to the IC's
-  API are blocked but for what the tab's rules open (Firefox sets both in
-  its listeners, which hold the domain's pages as they hold `/site/`'s).
-  What the rules do not cover: a subdomain (`www.`) is another name, not
-  pinned; and a hijacked domain that answers with a redirect elsewhere
-  takes the tab off the domain, where nothing of the extension runs and
-  the address bar shows where it went.
+  and HTML type cover every page there; the headers above are stripped
+  from those pages and from every other response there; and its pages'
+  calls to the IC's API are blocked but for what the tab's rules open
+  (Firefox does all of this in its listeners, which hold the domain's
+  pages as they hold `/site/`'s). Its subdomains (`www.`, any
+  depth) are blocked as pages and frames: the same DNS answers there, a
+  hijacked domain could send the tab there, and nothing of the extension
+  runs there. A site is never served at a pinned domain's subdomain; one
+  that is to be is pinned itself. A user name in the URL
+  (`https://u@ic-git.com/`) is no part of the origin, and the page is the
+  entrypoint all the same.
 - Check E refuses what the pinned policy would refuse or could not pin:
   inline event handlers (any `on...` attribute), `style=` attributes,
   `javascript:` URLs, external stylesheets, `@import` in an inline
@@ -339,15 +379,29 @@ decoded as other text.
   serves there (the checked page is written and its calls are judged;
   and, once the recorded `ic-git#site` is a console that knows its home,
   it offers a wallet and reads the git canister across origins -- a
-  case said as SKIP until then), and hijacked, serving a page
-  of its own at the root, at another path and (Chrome) typed as XML --
-  never shown or run. Both also check the domain over `http`, under
-  other spellings, and in a frame and an object.
+  case said as SKIP until then), and hijacked: serving a page of its own
+  at the root, at another path and (Chrome) typed as XML -- never shown
+  or run; the recorded bytes with headers that act after the check (a
+  `Refresh` elsewhere, a cookie, a preload) -- none of them acts; a
+  redirect to `www.` -- stopped; a failed check -- no "open anyway", and
+  one from the git canister's host does not carry over (Firefox presses
+  the button where the stop page draws it); and a service worker
+  registered before the extension was installed (and, in Chrome, after,
+  through DevTools) -- removed, and the page loaded from the network.
+  Both also check the domain over `http`, under other spellings, in a
+  frame and an object, and (Chrome) with a user name. The domain's
+  stand-in answers for `www.` too, so no case reaches the real host.
+- `--strict` makes a SKIP a failure; the last line counts the SKIPs.
+  Before a release, both suites run with `--strict`.
 - `node tools/extension-domains-test.mjs` holds both packages to the
   core's domains, offline: host permissions, content scripts, and every
-  static rule above, which it matches as the browsers do against each
-  spelling of each domain; and the console's home to the domain pinned
-  to `ic-git`.
+  static rule above, which it matches as the browsers do (case-insensitive
+  unless a rule says otherwise, against the URL as the browser presents
+  it) against each spelling of each domain and its subdomains; the
+  stripped headers, in Chrome's rules and Firefox's listeners alike, on
+  pages and on every other response at each domain; each
+  worker's own `siteOf`, run against Chrome's entrypoint rule; and the
+  console's home to the domain pinned to `ic-git`.
 - `node tools/loader-test.mjs` covers the core, check E and `derivePolicy`
   on fixed pages (the canister's test cases, mirrored), that the two agree
   on every one, and that every copy of the core is in step with
@@ -501,6 +555,10 @@ PKG=extension; REPO=ic-git-extension
 
 # the listing is current
 node tools/extension-sums.mjs --check $PKG
+# and every browser case ran against what is live (no SKIP): Chrome for
+# Testing and Firefox, docs/EXTENSION.md, "Testing"
+node tools/extension-test.mjs --browser "$CHROME_FOR_TESTING" --strict
+node tools/extension-firefox-test.mjs --strict
 
 # First time only: the repo, with its site root at the listing.
 dfx canister --network ic call $C create_repo "(\"$REPO\")"
@@ -588,3 +646,14 @@ accepts it ("The git canister's host, on an update").
   are, never what a canister's `/.well-known/ic-domains` says, which the
   canister answers. The loader needs no list: it reads a site by its
   repo, from the pinned host.
+- At a pinned domain, Chrome cannot cancel a redirect to another site by
+  where it leads (a rule sees the request it leads to, not the redirect),
+  and keeps the domain's headers but those it strips. Writing the
+  recorded page's headers in place of the domain's would take the git
+  canister's response headers into the check.
+- The console at its home trusts what its origin keeps (the principal in
+  `localStorage`) and reads its provenance from its own origin: at the
+  domain both are the domain's. A hijacked domain never runs the console
+  under the extension, but one the user ran it at without the extension
+  could have left a principal there. The console should keep nothing at
+  its home it does not check again.

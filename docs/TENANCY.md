@@ -947,9 +947,10 @@ is under "Custom domains"):
    `/site/ic-git/`: the domain serves the same bytes, certified.
 
 The extensions check the console at `ic-git.com` as at `/site/ic-git/`:
-the core pins the domain to the `ic-git` repo, and what a tab there may
-show is the page as the git canister serves it on its own host
-(docs/EXTENSION.md). That takes the release of a package that carries
+the core pins the domain to the `ic-git` repo, and the page a tab there
+may show is the page as the git canister serves it on its own host. The
+domain's headers, a service worker there and a redirect away are held to
+less (docs/EXTENSION.md, the pinned domains). That takes the release of a package that carries
 the pin; until users have it, the console at `ic-git.com` loads
 unchecked by the extensions. Its responses are certified, and the
 verifying gateway is the only way to the domain.

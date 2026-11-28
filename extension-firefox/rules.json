@@ -104,5 +104,19 @@
         "object"
       ]
     }
+  },
+  {
+    "id": 8,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?([^/?#@.:]+\\.)+ic-git\\.com\\.?(:[0-9]+)?([/?#]|$)",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
   }
 ]
