@@ -13,8 +13,9 @@ origin, cannot offer. This is the F2 rung of VISION.md.
 
 Scope: pages under `/site/` on `umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io`
 (ic-git) and `34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io` (its git canister),
-which covers the console (`ic-git`) and ic-vote. Nothing to do when a page
-verifies; an unmissable stop when it does not.
+which covers the console (`ic-git`) and ic-vote, and every page at the
+domains the core pins: `ic-git.com`, the console's home. Nothing to do
+when a page verifies; an unmissable stop when it does not.
 
 Two hosts because of the canister split (docs/CANISTER_SPLIT.md): ic-git
 serves the sites until the cut, the git canister after, and ic-git then
@@ -25,6 +26,25 @@ its objects are read from that host. With no host (the loader), `verify`
 fetches ic-git's URL and takes the host from where the page came from, one
 of the two pinned ids or the check fails. Both ids are pinned in the core
 (`DEFAULTS.canister`, `DEFAULTS.git`); a redirect cannot add a third.
+
+A site may also be served at a domain of its own, a whole origin
+(docs/TENANCY.md, "Custom domains"). Whoever holds a domain's DNS can
+serve anything there, with a certificate of its own -- as the Curve
+frontend's hijack of 2022 did -- so a domain is pinned in the core too,
+with the repo whose site it serves (`DEFAULTS.domains`: `ic-git.com` is
+`ic-git`'s). A pinned domain's root (`/` or `/index.html`) is that site's
+entrypoint: the same site, with the same checked state, as at
+`/site/<repo>/` on the git canister's host, and checked there, where no
+DNS can point elsewhere. Chrome writes into the tab the bytes it checked
+there, never the domain's; Firefox holds what the domain delivered and
+releases it only if it is those bytes. So a hijacked domain's page is
+never shown or run: Chrome shows the recorded page in its place, at the
+domain, and Firefox stops it. Every other page at the domain is covered by
+no record, and stopped. A domain that is not pinned is not covered:
+nothing of the extension runs there. Adding one takes a package release
+(the manifest's host permission and content scripts, and the static
+rules below, which `tools/extension-domains-test.mjs` holds to the
+core's list).
 
 ## What it checks
 
@@ -135,7 +155,10 @@ Enforcement:
   tab which site host is missing, and a redirect to that host from
   ic-git's (every site's old URL after the cut) is cancelled, with the
   tab's badge saying why, until the user grants it. Chrome instead holds
-  an update that asks for a new host until the user accepts it.
+  an update that asks for a new host until the user accepts it. A pinned
+  domain is a new host in the same way: the first package to pin
+  `ic-git.com` asks for it, and until the user grants it the console
+  there loads unchecked in Firefox, which every tab's badge says.
 
 Two edges. A page run through the loader (`/site/ic-git-loader/`) under
 an extension calls as the loader's site, whose own list has no app
@@ -246,10 +269,19 @@ decoded as other text.
   there is no tab's page, so neither extension checks it, and it would
   run as that host -- the origin of every checked page, which it could
   then reach, by `window.open` or as a checked page's opener. A checked
-  page frames nothing (`frame-src 'none'`). A site at a domain of its own
-  (docs/TENANCY.md, "Custom domains") has no canister id in its host
-  and is not covered: it loads unchecked, at that domain, until the
-  extensions know the domain.
+  page frames nothing (`frame-src 'none'`).
+- A pinned domain is covered as the checked host is, by static rules in
+  both packages: over `http` it is asked for over `https`; spelled as
+  another origin (the root's trailing dot, a port) it is blocked; and it
+  is blocked in a frame and in an object, at any page's, with or without
+  a user name, for the same reason as the host. Chrome's no-script policy
+  and HTML type cover every page there, and its pages' calls to the IC's
+  API are blocked but for what the tab's rules open (Firefox sets both in
+  its listeners, which hold the domain's pages as they hold `/site/`'s).
+  What the rules do not cover: a subdomain (`www.`) is another name, not
+  pinned; and a hijacked domain that answers with a redirect elsewhere
+  takes the tab off the domain, where nothing of the extension runs and
+  the address bar shows where it went.
 - Check E refuses what the pinned policy would refuse or could not pin:
   inline event handlers (any `on...` attribute), `style=` attributes,
   `javascript:` URLs, external stylesheets, `@import` in an inline
@@ -286,8 +318,8 @@ decoded as other text.
   tab only, with the badge still warning.
 - Not yet checked (Chrome's first visit): a neutral "Checking" screen for
   a few seconds, then the page. Firefox simply waits.
-- A page no record covers (anything under `/site/` but an entrypoint):
-  stopped.
+- A page no record covers (anything under `/site/` but an entrypoint,
+  anything at a pinned domain but its root): stopped.
 
 ## Testing
 
@@ -302,7 +334,20 @@ decoded as other text.
   "Open anyway" (Chrome), a page no record covers, and the same sites at
   the gateways' other hosts, which must not load. On Firefox the
   tampered page's injected script and image are shown never to be
-  requested.
+  requested. The console's home, `ic-git.com`, is played by a local
+  server the domain resolves to: honest, serving what the canister
+  serves there (the checked page is written and its calls are judged;
+  and, once the recorded `ic-git#site` is a console that knows its home,
+  it offers a wallet and reads the git canister across origins -- a
+  case said as SKIP until then), and hijacked, serving a page
+  of its own at the root, at another path and (Chrome) typed as XML --
+  never shown or run. Both also check the domain over `http`, under
+  other spellings, and in a frame and an object.
+- `node tools/extension-domains-test.mjs` holds both packages to the
+  core's domains, offline: host permissions, content scripts, and every
+  static rule above, which it matches as the browsers do against each
+  spelling of each domain; and the console's home to the domain pinned
+  to `ic-git`.
 - `node tools/loader-test.mjs` covers the core, check E and `derivePolicy`
   on fixed pages (the canister's test cases, mirrored), that the two agree
   on every one, and that every copy of the core is in step with
@@ -536,13 +581,10 @@ accepts it ("The git canister's host, on an update").
 - The K-of-N attestations (docs/ATTESTATION.md) behind the same stop page.
 - Safari (no `filterResponseData`; CSP injection unexamined), other
   hosting, and pages outside `/site/`.
-- A site at a tenant's own domain (docs/TENANCY.md, "Custom domains") is
-  loaded unchecked by both browsers and the loader: the extension acts on
-  the two pinned hosts only, so a hijacked domain shows no badge at all,
-  which is what the Curve frontend's DNS hijack of 2022 looked like to its
-  users.
-  The next leg pins a list of domain to repo in the core, like the
-  canister ids: a listed domain gets the same hold, check against the
-  record and block, and the record's bytes are fetched from the pinned
-  host, never from the domain, so a hijacked one fails closed. An
-  unlisted domain stays as it is.
+- A tenant's own domain (docs/TENANCY.md, "Custom domains") is covered
+  once the core pins it and a package carries it; until then it loads
+  unchecked, and a hijacked one shows no badge at all. Pinning is a
+  release for every domain added: the list is the core's, as the ids
+  are, never what a canister's `/.well-known/ic-domains` says, which the
+  canister answers. The loader needs no list: it reads a site by its
+  repo, from the pinned host.

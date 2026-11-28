@@ -25,6 +25,7 @@
   "host_permissions": [
     "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/*",
     "https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/*",
+    "https://ic-git.com/*",
     "https://icp-api.io/*",
     "https://ethereum-sepolia-rpc.publicnode.com/*",
     "https://sepolia.gateway.tenderly.co/*",
@@ -44,7 +45,8 @@
     {
       "matches": [
         "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/*",
-        "https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/*"
+        "https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io/site/*",
+        "https://ic-git.com/*"
       ],
       "js": [
         "content.js"

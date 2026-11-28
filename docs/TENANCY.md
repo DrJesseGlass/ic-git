@@ -946,9 +946,12 @@ is under "Custom domains"):
    `bundleHash`, as `tools/verify.mjs ic-git index.html` finds it at
    `/site/ic-git/`: the domain serves the same bytes, certified.
 
-The extensions check a site on the canisters' own hosts only, so the
-console at `ic-git.com` loads unchecked by them until they know the
-domain (docs/EXTENSION.md); its responses are certified, and the
+The extensions check the console at `ic-git.com` as at `/site/ic-git/`:
+the core pins the domain to the `ic-git` repo, and what a tab there may
+show is the page as the git canister serves it on its own host
+(docs/EXTENSION.md). That takes the release of a package that carries
+the pin; until users have it, the console at `ic-git.com` loads
+unchecked by the extensions. Its responses are certified, and the
 verifying gateway is the only way to the domain.
 
 A wallet that signs for its user asks this canister, before signing, for a

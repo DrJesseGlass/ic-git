@@ -9,7 +9,7 @@
 // (Chrome for Testing does; branded Chrome no longer does), and the network.
 // Every case starts from a fresh profile, so each first visit is a first.
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +28,8 @@ const VOTE = GW + '/site/ic-vote/';
 const CONSOLE = GW + '/site/ic-git/';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const INJECT = '<script>window.__pwned = 1;</script><script src="' + GW + '/api/repos"></script>';
+// The console's home, a domain the core pins (Verifier.DEFAULTS.domains).
+const HOME = 'https://ic-git.com/';
 
 // A browser with the extension, one page, and a flat-session CDP client.
 // A man in the middle on the network, as a TLS-inspecting proxy is: the
@@ -61,10 +63,45 @@ async function proxy(dir, rewrite) {
   return server;
 }
 
-async function open({ mitm } = {}) {
+// The console's home as whoever holds its DNS serves it: `serve(path,
+// headers)` answers { status, type, body }. The domain resolves to this
+// server, with a self-signed certificate, as a hijacker's would. So does
+// FRAMER, anyone's page, which a frame case frames the domain in: on this
+// server too, since Chrome lets no public page frame a loopback address
+// (Private Network Access), with or without the extension.
+const FRAMER = 'https://framer.example/';
+async function domain(dir, serve) {
+  if (!existsSync(join(dir, 'key.pem'))) execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=domain',
+    '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
+  const server = createServer({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) }, async (req, res) => {
+    try {
+      const { status, type, body } = req.headers.host === new URL(FRAMER).host
+        ? { status: 200, type: 'text/html', body: '<!doctype html><title>framer</title><p>anyone\'s page</p>' }
+        : await serve(req.url, req.headers);
+      res.writeHead(status, { 'content-type': type });
+      res.end(body);
+    } catch (e) { res.writeHead(502); res.end(String(e)); }
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  return server;
+}
+// What the canister serves at the domain: the site's root at /, the same
+// bytes as at /site/ic-git/ (docs/TENANCY.md, "Custom domains").
+const honest = async path => {
+  if (!/^\/(index\.html)?(\?|$)/.test(path)) return { status: 404, type: 'text/plain', body: 'not found' };
+  const r = await fetch(CONSOLE);
+  return { status: r.status, type: r.headers.get('content-type'), body: Buffer.from(await r.arrayBuffer()) };
+};
+
+async function open({ mitm, home } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ext-test-'));
   const server = mitm ? await proxy(dir, mitm) : null;
-  const net = server ? [`--host-resolver-rules=MAP ${new URL(GW).host}:443 127.0.0.1:${server.address().port}`, '--ignore-certificate-errors'] : [];
+  const homeServer = home ? await domain(dir, home) : null;
+  const maps = [
+    ...(server ? [`MAP ${new URL(GW).host}:443 127.0.0.1:${server.address().port}`] : []),
+    ...(homeServer ? [HOME, FRAMER].map(u => `MAP ${new URL(u).host}:443 127.0.0.1:${homeServer.address().port}`) : []),
+  ];
+  const net = maps.length ? [`--host-resolver-rules=${maps.join(', ')}`, '--ignore-certificate-errors'] : [];
   const port = 9600 + Math.floor(Math.random() * 300);
   // --use-mock-keychain: a fresh profile otherwise asks the macOS keychain
   // for a password at every launch.
@@ -191,6 +228,7 @@ async function open({ mitm } = {}) {
     chrome.kill();
     await exited;
     if (server) server.close();
+    if (homeServer) homeServer.close();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
   };
   return { send, page, sw, go, state, intercept, evaluate, refused, buttons, press, close, call };
@@ -201,6 +239,12 @@ const report = (name, ok, got) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '\n        got ' + JSON.stringify(got)}`);
   if (!ok) failed++;
 };
+// A case that cannot run against what is live, and why.
+const skip = (name, why) => console.log(`SKIP  ${name}\n        ${why}`);
+// Whether the console the registry records knows its home: one published
+// before it did reads its /api on its own origin, which at the domain is
+// the domain's, so only its being written there can be checked.
+const homeAware = async () => (await (await fetch(CONSOLE)).text()).includes("const HOME = '" + new URL(HOME).origin + "';");
 
 // 1-3. First and second visit to the console, then ic-vote.
 {
@@ -469,6 +513,104 @@ const report = (name, ok, got) => {
     report('the checked host blocked in a frame and in an object, with a user name too',
       frames[`https://${ID}.icp0.io/?object`] === `https://${ID}.icp0.io/?object` && frames[GW + '/site/ic-vote/'] === 'chrome-error://chromewebdata/' &&
       !Object.values(frames).some(u => hostOf(u) === hostOf(GW)), frames);
+  } finally { await b.close(); }
+}
+
+// 8. The console's home, ic-git.com, a domain the core pins: its root is
+// the ic-git site's entrypoint, checked as the git canister serves it on
+// its own host, and the tab shows those checked bytes whatever the domain
+// served -- so a hijacked domain's page never runs. Every other page there
+// is covered by no record, and the domain loads in no frame and under no
+// other spelling.
+{
+  const wallet = b => b.evaluate("(document.getElementById('wallet') || {}).innerText || ''");
+  const aware = await homeAware();
+  const b = await open({ home: honest });
+  try {
+    await b.go(HOME, 20_000);
+    let s = await b.state();
+    const at = await b.evaluate('location.href');
+    report('at home: checked, reloaded once under the pinned policy, the checked page written, badge OK',
+      at === HOME && !s.overlay && /a git remote on the Internet Computer/.test(s.text) && s.badge === 'OK' && s.loads === 2, { at, ...s });
+    const w = await wallet(b);
+    if (aware) report('at home the console offers a wallet, and reads the git canister across origins', /connect/i.test(w) && /ic-vote/.test(await b.evaluate('document.body.innerText')), w);
+    else skip('at home the console offers a wallet, and reads the git canister across origins', 'the recorded ic-git#site predates its home (docs/TENANCY.md, "Putting the console at its domain", step 3)');
+    const calls = {
+      ledger: await b.call('https://icp-api.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
+      icgit: await b.call('https://icp-api.io/api/v2/canister/umobs-yiaaa-aaaab-agyrq-cai/query'),
+      unknown: await b.call('https://icp-api.io/api/v2/canister/aaaaa-aa/query'),
+      otherHost: await b.call('https://icp0.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
+    };
+    report('at home: calls to judged canisters go through, a canister nobody judged or another IC host is blocked',
+      /^http/.test(calls.ledger) && /^http/.test(calls.icgit) && calls.unknown === 'blocked' && calls.otherHost === 'blocked', calls);
+    // The same site as on the git canister's host: checked once for both.
+    await b.go(CONSOLE, 8_000);
+    s = await b.state();
+    report('the same site on the git canister\'s host: no new check, no reload', !s.overlay && /repositories/.test(s.text) && s.badge === 'OK' && s.loads === 1, s);
+  } finally { await b.close(); }
+}
+{
+  // Hijacked: the domain serves a page of its own at the root and at
+  // another path, and the root once more typed as XML.
+  const EVIL = '<!doctype html><html><head><title>ic-git</title><script>window.__pwned = 1;</script></head><body><p>HACKED: send your keys here</p></body></html>';
+  let type = 'text/html';
+  const b = await open({ home: async () => ({ status: 200, type, body: EVIL }) });
+  try {
+    await b.go(HOME, 20_000);
+    let s = await b.state();
+    report('hijacked home: the tab shows the checked console, the domain\'s page never runs, badge OK',
+      !/HACKED/.test(s.text) && /a git remote on the Internet Computer/.test(s.text) && !s.overlay && s.pwned === 0 && s.badge === 'OK', s);
+    type = 'text/xml';
+    await b.go(HOME, 10_000);
+    s = await b.state();
+    const ct = await b.evaluate('document.contentType');
+    report('hijacked home served as XML: typed as HTML, the checked console is written',
+      ct === 'text/html' && !/HACKED/.test(s.text) && /a git remote on the Internet Computer/.test(s.text) && s.pwned === 0 && s.badge === 'OK', { ct, ...s });
+    type = 'text/html';
+    await b.go(new URL('/login.html', HOME).href, 8_000);
+    s = await b.state();
+    report('hijacked home, another page there: covered by no record, stop page, nothing runs', s.overlay && s.pwned === 0 && !/HACKED/.test(s.text), s);
+  } finally { await b.close(); }
+}
+{
+  const b = await open({ home: honest });
+  const nav = async url => {
+    const r = await b.send('Page.navigate', { url }, b.page);
+    await sleep(300);
+    return r.errorText === 'net::ERR_BLOCKED_BY_CLIENT' ? 'blocked' : r.errorText || 'loaded';
+  };
+  try {
+    for (const url of ['https://ic-git.com./', 'https://ic-git.com:8443/', 'https://user@ic-git.com./']) {
+      const got = await nav(url);
+      report('blocked: ' + url, got === 'blocked', got);
+    }
+    await b.send('Page.navigate', { url: 'http://ic-git.com/' }, b.page);
+    await sleep(20_000);
+    const at = await b.evaluate('location.href');
+    const s = await b.state();
+    report('home over http: upgraded, checked, the checked page written', at === HOME && !s.overlay && /a git remote on the Internet Computer/.test(s.text) && s.badge === 'OK', { at, ...s });
+    await b.send('Page.navigate', { url: FRAMER }, b.page);
+    await sleep(3_000);
+    // The control is of another site, so that it is a target of its own.
+    const control = 'https://34koz-jyaaa-aaaab-ahejq-cai.icp0.io/?framed';
+    await b.evaluate(`for (const src of ['${control}', '${HOME}', 'https://x@ic-git.com/']) {
+      const f = document.createElement('iframe');
+      f.src = src;
+      document.body.append(f);
+    }
+    const o = document.createElement('object');
+    o.type = 'text/html';
+    o.data = '${HOME}';
+    document.body.append(o);`);
+    await sleep(8_000);
+    const frames = {};
+    for (const t of (await b.send('Target.getTargets')).targetInfos.filter(t => t.type === 'iframe')) {
+      const { sessionId } = await b.send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
+      frames[t.url] = await b.evaluate('location.href', sessionId);
+    }
+    const hostOf = url => { try { return new URL(url).host; } catch { return ''; } };
+    report('home blocked in a frame and in an object, with a user name too',
+      frames[control] === control && !Object.values(frames).some(u => hostOf(u) === 'ic-git.com'), frames);
   } finally { await b.close(); }
 }
 

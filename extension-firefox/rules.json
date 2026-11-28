@@ -62,5 +62,47 @@
         "object"
       ]
     }
+  },
+  {
+    "id": 5,
+    "priority": 4,
+    "action": {
+      "type": "upgradeScheme"
+    },
+    "condition": {
+      "regexFilter": "^http://([^/?#@]*@)?ic-git\\.com(:[0-9]+)?([/?#]|$)",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 6,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?ic-git\\.com(\\.|\\.?:[0-9]+)([/?#]|$)",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 7,
+    "priority": 4,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/?#@]*@)?ic-git\\.com\\.?(:[0-9]+)?([/?#]|$)",
+      "resourceTypes": [
+        "sub_frame",
+        "object"
+      ]
+    }
   }
 ]

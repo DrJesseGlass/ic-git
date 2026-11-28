@@ -1,4 +1,5 @@
-// ic-git verifier -- content script, at document_start on /site/ pages.
+// ic-git verifier -- content script, at document_start on /site/ pages
+// and on every page of a domain the core pins.
 // Shared by the Chrome and Firefox extensions (tools/sync-core.mjs copies
 // it into extension-firefox/); what differs is who replaces the page.
 //

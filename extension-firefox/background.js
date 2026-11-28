@@ -31,16 +31,28 @@
 // A site is a repo on one host, checked as that host serves it. The
 // gateways serve the same canisters at other hosts, where nothing here
 // runs: rules.json blocks every navigation to a page under /site there.
+//
+// A site may also be served at a domain of its own, a whole origin. The
+// domains the core pins (Verifier.DEFAULTS.domains) are covered as the
+// hosts are: a pinned domain's entrypoint is that site's, held and checked
+// against the site's record as the git canister serves it on its own host,
+// whose DNS no one can point elsewhere; every other page at the domain is
+// covered by no record.
 
 const HOSTS = [Verifier.DEFAULTS.canister, Verifier.DEFAULTS.git];
 const originOf = host => 'https://' + host + '.raw.icp0.io';
+// The pinned domains, each the site of one repo on the git canister.
+const DOMAINS = Object.entries(Verifier.DEFAULTS.domains).map(([domain, repo]) => ({ domain, repo, host: Verifier.DEFAULTS.git }));
+const domainOrigin = d => 'https://' + d.domain;
+// Every origin a site's page can be at.
+const SITE_ORIGINS = [...HOSTS.map(originOf), ...DOMAINS.map(domainOrigin)];
 // The registry is read through both; they must return the same answer.
 const RPCS = ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'];
 const REFRESH_MINUTES = 10;
 const BLOCK = "script-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'";
 const BARE = '<!doctype html><html><head><meta charset="utf-8"><title>ic-git verifier</title></head><body></body></html>';
 const REFRESH = '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0"><title>ic-git verifier</title></head><body></body></html>';
-const FILTER = { urls: HOSTS.map(h => originOf(h) + '/site/*'), types: ['main_frame'] };
+const FILTER = { urls: [...HOSTS.map(h => originOf(h) + '/site/*'), ...DOMAINS.map(d => domainOrigin(d) + '/*')], types: ['main_frame'] };
 // The IC's API, on every host that serves it; pages use icp-api.io. The
 // others need host permissions MV3 Firefox grants on install but not on
 // an update, so whether a call through them can be cancelled is checked
@@ -55,22 +67,23 @@ let hostsNote = '';
 browser.permissions.contains({ origins: ['https://*.icp0.io/*', 'https://*.ic0.app/*'] }).then(ok => {
   if (!ok) hostsNote = ' (calls through icp0.io or ic0.app cannot be cancelled: grant the extension those sites in its permissions)';
 }).catch(() => {});
-// The site hosts this extension may not act on. On a host it lacks, none
-// of its listeners or its content script run, so a page there would load
-// unchecked; an update does not grant the git canister's host, which only
-// 0.3.0 asks for. So a missing one is said on every tab's badge, and a
-// redirect to it from a host it holds is cancelled (onHeadersReceived).
-const missingHosts = new Set();
+// The site origins this extension may not act on. On an origin it lacks,
+// none of its listeners or its content script run, so a page there would
+// load unchecked; an update does not grant an origin a package newly asks
+// for (the git canister's host, which 0.3.0 asks for; a pinned domain).
+// So a missing one is said on every tab's badge, and a redirect to it from
+// an origin it holds is cancelled (onHeadersReceived).
+const missingOrigins = new Set();
 async function checkHosts() {
-  for (const h of HOSTS) {
-    const ok = await browser.permissions.contains({ origins: [originOf(h) + '/*'] }).catch(() => false);
-    if (ok) missingHosts.delete(h); else missingHosts.add(h);
+  for (const o of SITE_ORIGINS) {
+    const ok = await browser.permissions.contains({ origins: [o + '/*'] }).catch(() => false);
+    if (ok) missingOrigins.delete(o); else missingOrigins.add(o);
   }
-  const text = missingHosts.size ? '!' : '';
+  const text = missingOrigins.size ? '!' : '';
   browser.action.setBadgeText({ text }).catch(() => {});
-  if (missingHosts.size) {
+  if (missingOrigins.size) {
     browser.action.setBadgeBackgroundColor({ color: '#b3261e' }).catch(() => {});
-    browser.action.setTitle({ title: 'ic-git verifier: it cannot check sites on ' + [...missingHosts].map(h => originOf(h)).join(', ') + ' -- grant it that site in its permissions; until then, a redirect there is stopped' }).catch(() => {});
+    browser.action.setTitle({ title: 'ic-git verifier: it cannot check sites on ' + [...missingOrigins].join(', ') + ' -- grant it that site in its permissions; until then, a redirect there is stopped' }).catch(() => {});
   }
 }
 const hostsChecked = checkHosts();
@@ -101,18 +114,28 @@ const entryUrl = (host, repo) => originOf(host) + '/site/' + encodeURIComponent(
 // A site's key in state: its host and repo.
 const keyOf = (host, repo) => host + '/' + repo;
 
-// Which site a URL is the entrypoint of -- { host, repo } -- or null.
+// Which site a URL is the entrypoint of -- { host, repo } -- or null. A
+// pinned domain's root is its site's entrypoint, the same site as on the
+// git canister's host, with the same checked state.
 function siteOf(href) {
   try {
     const u = new URL(href);
+    const d = DOMAINS.find(d => u.origin === domainOrigin(d));
+    if (d) return /^\/(index\.html)?$/.test(u.pathname) ? { host: d.host, repo: d.repo } : null;
     const host = HOSTS.find(h => u.origin === originOf(h));
     if (!host) return null;
     const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
     return m ? { host, repo: decodeURIComponent(m[1]) } : null;
   } catch (_) { return null; } // not a URL, or a malformed escape
 }
-// Whether a URL is a page under /site/ on one of the hosts.
-const onSiteHost = href => { try { const u = new URL(href); return HOSTS.some(h => u.origin === originOf(h)) && u.pathname.startsWith('/site/'); } catch (_) { return false; } };
+// Whether a URL is a page under /site/ on one of the hosts, or any page at
+// a pinned domain.
+const onSiteHost = href => {
+  try {
+    const u = new URL(href);
+    return HOSTS.some(h => u.origin === originOf(h)) && u.pathname.startsWith('/site/') || DOMAINS.some(d => u.origin === domainOrigin(d));
+  } catch (_) { return false; }
+};
 
 // --- state (storage.session: it outlives this event page, not the browser) ---
 // Each read-modify-write of stored state runs alone: two that overlapped
@@ -222,7 +245,7 @@ function badge(tabId, state, site) {
   // site host is said here too. Firefox resets them when the tab navigates,
   // so a page on a host this extension cannot see shows the defaults, not
   // the verdict of the page before it.
-  const missing = missingHosts.size ? '; and it cannot check sites on ' + [...missingHosts].map(h => originOf(h)).join(', ') + ' until you grant it that site in its permissions' : '';
+  const missing = missingOrigins.size ? '; and it cannot check sites on ' + [...missingOrigins].join(', ') + ' until you grant it that site in its permissions' : '';
   browser.action.setBadgeText({ tabId, text: look[0] }).catch(() => {});
   browser.action.setBadgeBackgroundColor({ tabId, color: look[1] }).catch(() => {});
   browser.action.setTitle({ tabId, title: 'ic-git verifier: ' + (site ? site.repo + ' ' : '') + look[2] + missing }).catch(() => {});
@@ -258,7 +281,7 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
     const loc = (d.responseHeaders.find(h => h.name.toLowerCase() === 'location') || {}).value;
     let to = null;
     try { to = new URL(loc, d.url).origin; } catch (_) { /* no usable Location: nothing to follow */ }
-    if (to && [...missingHosts].some(h => originOf(h) === to)) { badge(d.tabId, 'unreachable', { repo: (siteOf(d.url) || {}).repo || '' }); return { cancel: true }; }
+    if (to && missingOrigins.has(to)) { badge(d.tabId, 'unreachable', { repo: (siteOf(d.url) || {}).repo || '' }); return { cancel: true }; }
     return {};
   }
   const at = siteOf(d.url);
@@ -286,11 +309,12 @@ browser.webRequest.onHeadersReceived.addListener(async d => {
 
 // --- the body: held until it is known to be the recorded page ---
 browser.webRequest.onBeforeRequest.addListener(d => {
-  // /site/<repo> without the slash: relative URLs resolve one level up
-  // there and no record's rule matches it. The canister redirects it to
-  // /site/<repo>/, without the query; sending it there first keeps it.
+  // /site/<repo> without the slash, on a canister's host: relative URLs
+  // resolve one level up there and no record's rule matches it. The
+  // canister redirects it to /site/<repo>/, without the query; sending it
+  // there first keeps it.
   const u = new URL(d.url);
-  if (/^\/site\/[^/]+$/.test(u.pathname)) { u.pathname += '/'; return { redirectUrl: u.href }; }
+  if (HOSTS.some(h => u.origin === originOf(h)) && /^\/site\/[^/]+$/.test(u.pathname)) { u.pathname += '/'; return { redirectUrl: u.href }; }
   latest.set(d.tabId, d.requestId);
   const filter = browser.webRequest.filterResponseData(d.requestId);
   const chunks = [];

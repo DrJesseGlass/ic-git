@@ -33,10 +33,20 @@
 // A site is a repo on one host, checked as that host serves it. The
 // gateways serve the same canisters at other hosts, where nothing here
 // runs: rules.json blocks every navigation to a page under /site there.
+//
+// A site may also be served at a domain of its own, a whole origin. The
+// domains the core pins (Verifier.DEFAULTS.domains) are covered as the
+// hosts are: a pinned domain's entrypoint is that site's, checked as the
+// git canister serves it on its own host, and what the tab shows comes
+// from there, never from the domain, whose DNS anyone who holds it can
+// point anywhere. Every other page at the domain is covered by no record.
 importScripts('bls12-381.js', 'verifier.js');
 
 const HOSTS = [Verifier.DEFAULTS.canister, Verifier.DEFAULTS.git];
 const originOf = host => 'https://' + host + '.raw.icp0.io';
+// The pinned domains, each the site of one repo on the git canister.
+const DOMAINS = Object.entries(Verifier.DEFAULTS.domains).map(([domain, repo]) => ({ domain, repo, host: Verifier.DEFAULTS.git }));
+const domainsOf = (host, repo) => DOMAINS.filter(d => d.host === host && d.repo === repo).map(d => d.domain);
 // The registry is read through both; they must return the same answer.
 const RPCS = ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co'];
 const REFRESH_MINUTES = 10;
@@ -49,7 +59,8 @@ const BACKEND_RULE_BASE = 10_000, ALLOW_BASE = 50_000, TAB_CALLS_BASE = 60_000;
 // and the status endpoint, under /api/vN/. Not a canister's own /api/
 // routes on the gateway (ic-git's JSON API, whatever a repo is named).
 const API_HOSTS = '^https://([a-z0-9-]+\\.)*(icp-api\\.io|icp0\\.io|ic0\\.app)/api/v[0-9]+/(canister/|subnet/|status)';
-const SITE_DOMAINS = HOSTS.map(h => h + '.raw.icp0.io');
+// Where a site's page can be: the hosts and the pinned domains.
+const SITE_DOMAINS = [...HOSTS.map(h => h + '.raw.icp0.io'), ...DOMAINS.map(d => d.domain)];
 
 const twoRpcs = {
   async request({ method, params = [] }) {
@@ -74,22 +85,27 @@ const load = async () => (await chrome.storage.session.get('sites')).sites || {}
 const save = async sites => chrome.storage.session.set({ sites });
 
 // The entrypoint of a repo's site, as a DNR regex: /site/<repo>/ or its
-// index.html, with any query and fragment (a navigation's URL is matched
-// with its fragment on). Other paths under /site/ are covered by no record
-// and keep the static policy.
+// index.html, and the root of each domain pinned to it, with any query and
+// fragment (a navigation's URL is matched with its fragment on). Other
+// paths under /site/, and at a domain, are covered by no record and keep
+// the static policy.
 const escape = s => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 const siteUrl = (host, repo) => originOf(host) + '/site/' + encodeURIComponent(repo) + '/';
-const entryRegex = (host, repo) => '^' + escape(siteUrl(host, repo)) + '(index\\.html)?(\\?[^#]*)?(#.*)?$';
+const entryRegex = (host, repo) => '^(' + [siteUrl(host, repo), ...domainsOf(host, repo).map(d => 'https://' + d + '/')].map(escape).join('|') + ')(index\\.html)?(\\?[^#]*)?(#.*)?$';
 // A rule for one site's entrypoint. Case matters (DNR's default is that it
 // does not): /site/Foo/ and /site/foo/ are different sites to siteOf.
 const entryCondition = (host, repo) => ({ regexFilter: entryRegex(host, repo), isUrlFilterCaseSensitive: true, resourceTypes: ['main_frame'] });
 // A site's key in state: its host and repo.
 const keyOf = (host, repo) => host + '/' + repo;
 
-// Which site a URL is the entrypoint of -- { host, repo } -- or null.
+// Which site a URL is the entrypoint of -- { host, repo } -- or null. A
+// pinned domain's root is its site's entrypoint, the same site as on the
+// git canister's host, with the same checked state.
 function siteOf(href) {
   try {
     const u = new URL(href);
+    const d = DOMAINS.find(d => u.origin === 'https://' + d.domain);
+    if (d) return /^\/(index\.html)?$/.test(u.pathname) ? { host: d.host, repo: d.repo } : null;
     const host = HOSTS.find(h => u.origin === originOf(h));
     if (!host) return null;
     const m = /^\/site\/([^/]+)\/(index\.html)?$/.exec(u.pathname);
@@ -385,8 +401,8 @@ const allow = (tabId, host, repo) => exclusive(async () => {
   allowed[key] = id;
   await chrome.storage.session.set({ allowed });
   // Its calls too: a page run unverified is run as it is, backends included
-  // -- from its own host only, so the tab moving on to a site on the other
-  // host does not take this exception with it.
+  // -- from its own host (and its domains) only, so the tab moving on to a
+  // site on the other host does not take this exception with it.
   const calls = id - ALLOW_BASE + TAB_CALLS_BASE;
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [id, calls],
@@ -397,7 +413,7 @@ const allow = (tabId, host, repo) => exclusive(async () => {
     }, {
       id: calls, priority: ALLOW_PRIORITY,
       action: { type: 'allow' },
-      condition: { regexFilter: API_HOSTS, initiatorDomains: [host + '.raw.icp0.io'], resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
+      condition: { regexFilter: API_HOSTS, initiatorDomains: [host + '.raw.icp0.io', ...domainsOf(host, repo)], resourceTypes: ['xmlhttprequest'], tabIds: [tabId] },
     }],
   });
 });

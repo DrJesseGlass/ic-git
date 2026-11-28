@@ -63,6 +63,15 @@ const Verifier = (() => {
     // canister's only controller, with no controllers of its own; recorded
     // in verified.json under git_canister.governor.
     gitGovernor: { id: '3hps4-taaaa-aaaab-ahela-cai', module: 'a71ff65df07a3d3b79e383f7bf8b7bf912fd0bac5135936ed2c4cd90b68a641f' },
+    // The domains a site is served at as a whole origin (docs/TENANCY.md,
+    // "Custom domains"), each with the repo whose site the git canister
+    // serves there: pinned as the ids are, since whoever holds a domain's
+    // DNS can serve anything at it. An extension takes a listed domain's
+    // entrypoint for that site's, and checks it, and what the tab shows
+    // comes from the git canister's own host, never from the domain. A
+    // domain set on a site later is checked once it is listed here and a
+    // package carries it.
+    domains: { 'ic-git.com': 'ic-git' },
   };
   const GET_SELECTOR = '693ec85e'; // keccak256("get(string)")[..4], as in tools/verify.mjs
   const SITE_SUFFIX = '#site'; // provenance.rs::SITE_KEY_SUFFIX

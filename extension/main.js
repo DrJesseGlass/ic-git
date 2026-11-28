@@ -1,5 +1,6 @@
 // ic-git verifier -- page (main world) script, at document_start on /site/
-// pages. Runs before the page's own markup is parsed.
+// pages and on every page of a domain the core pins. Runs before the
+// page's own markup is parsed.
 //
 // document.open() here aborts the delivered response: its parser is
 // dropped, so none of the page the network delivered is parsed or run. (Not
@@ -11,12 +12,12 @@
 (() => {
   // Only an HTML document can be opened: on any other (a response typed as
   // XML, XHTML or SVG) document.open() throws, and the delivered page would
-  // be parsed and shown. rules.json types every page under /site/ as
-  // text/html, so this is that rule not holding -- or open() failing in
-  // some other way: throwing, or doing nothing, which leaves the document
-  // its nodes where an open one has none. Then stop the load, empty what
-  // was parsed, and take no write, so the content script finds its write
-  // refused and shows the stop page instead.
+  // be parsed and shown. rules.json types every page under /site/ (and at a
+  // pinned domain) as text/html, so this is that rule not holding -- or
+  // open() failing in some other way: throwing, or doing nothing, which
+  // leaves the document its nodes where an open one has none. Then stop
+  // the load, empty what was parsed, and take no write, so the content
+  // script finds its write refused and shows the stop page instead.
   const opened = document.contentType === 'text/html' && (() => {
     try { document.open(); } catch (_) { return false; }
     return document.firstChild === null;

@@ -30,6 +30,8 @@ const GW = 'https://34koz-jyaaa-aaaab-ahejq-cai.raw.icp0.io';
 const HOST = new URL(GW).host;
 const VOTE = GW + '/site/ic-vote/';
 const CONSOLE = GW + '/site/ic-git/';
+// The console's home, a domain the core pins (Verifier.DEFAULTS.domains).
+const HOME = 'https://ic-git.com/';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // What a tampering case injects: a script that marks the page, a script and
 // an image from the same host. None may run, and on Firefox none may even be
@@ -38,8 +40,10 @@ const INJECT = '<script>window.__pwned = 1;</script><script src="/site/ic-git/ev
 
 // The proxy. `rewrite(path, text, headers)` returns the body to serve instead,
 // or { body, type } to serve it as another content type, or null to pass it
-// through; `log` gets every path requested of the canister.
-async function proxy(dir, rewrite, log) {
+// through; `log` gets every path requested of the canister. The console's
+// home is answered by `home(path, headers)` -- { status, type, body } --
+// as whoever holds its DNS serves it, and logged too.
+async function proxy(dir, rewrite, log, home) {
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=' + HOST,
     '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
   const tls = createHttps({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) }, async (req, res) => {
@@ -59,13 +63,25 @@ async function proxy(dir, rewrite, log) {
       res.end(body);
     } catch (e) { res.writeHead(502); res.end(String(e)); }
   });
-  const server = createHttp();
+  const domain = createHttps({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) }, async (req, res) => {
+    log.push({ path: req.url, dest: req.headers['sec-fetch-dest'] || '', home: true });
+    try {
+      const { status, type, body } = await home(req.url, req.headers);
+      res.writeHead(status, { 'content-type': type });
+      res.end(body);
+    } catch (e) { res.writeHead(502); res.end(String(e)); }
+  });
+  // Plain http is the extension's to upgrade before it leaves (rules.json):
+  // what still reaches the proxy is refused at once, so a case that it
+  // reaches fails rather than waits.
+  const server = createHttp((req, res) => { res.writeHead(502, { 'content-type': 'text/plain' }); res.end('plain http reached the proxy'); });
   server.on('connect', (req, socket, head) => {
     const [host, port] = req.url.split(':');
-    if (host === HOST) {
+    const to = host === HOST ? tls : host === new URL(HOME).host && home ? domain : null;
+    if (to) {
       socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head && head.length) socket.unshift(head);
-      tls.emit('connection', socket);
+      to.emit('connection', socket);
       return;
     }
     const upstream = connect(Number(port) || 443, host, () => {
@@ -82,10 +98,10 @@ async function proxy(dir, rewrite, log) {
 
 // A Firefox with the extension, all traffic through the proxy, and a BiDi
 // session on its one tab.
-async function open({ rewrite = () => null } = {}) {
+async function open({ rewrite = () => null, home = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ff-ext-test-'));
   const log = [];
-  const server = await proxy(dir, (...a) => rewrite(...a), log);
+  const server = await proxy(dir, (...a) => rewrite(...a), log, home);
   const p = server.address().port;
   writeFileSync(join(dir, 'user.js'), [
     ['network.proxy.type', 1], ['network.proxy.ssl', '"127.0.0.1"'], ['network.proxy.ssl_port', p],
@@ -150,10 +166,13 @@ async function open({ rewrite = () => null } = {}) {
   // What a call from the page to the IC's API comes to: an HTTP status, or
   // "blocked" when the extension's listener cancels it.
   const call = url => evaluate(`fetch(${JSON.stringify(url)}, { method: 'POST', headers: { 'content-type': 'application/cbor' }, body: new Uint8Array([0]) }).then(r => 'http ' + r.status, e => 'blocked')`);
-  // What a navigation comes to: 'loaded', or the error it ended in.
-  const nav = async url => {
-    try { await send('browsingContext.navigate', { context, url, wait: 'complete' }); return 'loaded'; } catch (e) { return String(e.message); }
-  };
+  // What a navigation comes to: 'loaded', or the error it ended in, or
+  // that it had not ended in 20 s -- as a page left to load at a host no
+  // rule stops may not, and a case must fail then, not wait forever.
+  const nav = url => Promise.race([
+    send('browsingContext.navigate', { context, url, wait: 'complete' }).then(() => 'loaded', e => String(e.message)),
+    sleep(20_000).then(() => 'still loading after 20 s'),
+  ]);
   // What each frame of the page holds, by its document's address: a page
   // the extension's rule cancels is an error page, and says so.
   const frames = async () => {
@@ -175,6 +194,12 @@ const report = (name, ok, got) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '\n        got ' + JSON.stringify(got)}`);
   if (!ok) failed++;
 };
+// A case that cannot run against what is live, and why.
+const skip = (name, why) => console.log(`SKIP  ${name}\n        ${why}`);
+// Whether the console the registry records knows its home: one published
+// before it did reads its /api on its own origin, which at the domain is
+// the domain's, so only its being written there can be checked.
+const homeAware = async () => (await (await fetch(CONSOLE)).text()).includes("const HOME = '" + new URL(HOME).origin + "';");
 const tamper = (only) => (path, text, headers) => {
   if (path !== '/site/ic-git/') return null;
   if (only && headers['sec-fetch-dest'] !== only) return null;
@@ -361,6 +386,80 @@ const tamper = (only) => (path, text, headers) => {
       frames.every(f => !f.uri.startsWith('error: ')) &&
       ['https://example.com/?framed', 'https://example.com/?object'].every(u => frames.some(f => f.uri === u)) &&
       frames.every(f => hostOf(f.uri) !== hostOf(GW)), frames);
+  } finally { await b.close(); }
+}
+
+// 10. The console's home, ic-git.com, a domain the core pins: its root is
+// the ic-git site's entrypoint, held until what arrived is checked against
+// the site's record as the git canister serves it on its own host. An
+// honest domain's page loads; a hijacked one's is never shown or run, and
+// asks for nothing. Every other page there is covered by no record, and
+// the domain loads in no frame and under no other spelling.
+{
+  // What the canister serves at the domain: the site's root at /, the same
+  // bytes as at /site/ic-git/ (docs/TENANCY.md, "Custom domains").
+  const honest = async path => {
+    if (!/^\/(index\.html)?(\?|$)/.test(path)) return { status: 404, type: 'text/plain', body: 'not found' };
+    const r = await fetch(CONSOLE);
+    return { status: r.status, type: r.headers.get('content-type'), body: Buffer.from(await r.arrayBuffer()) };
+  };
+  const EVIL = '<!doctype html><html><head><title>ic-git</title><script>window.__pwned = 1;</script><script src="/evil.js"></script></head><body><p>HACKED: send your keys here</p><img src="/tracker.png"></body></html>';
+  let hijacked = false;
+  const b = await open({ home: async (path, headers) => (hijacked ? { status: 200, type: 'text/html', body: EVIL } : honest(path, headers)) });
+  const wallet = () => b.evaluate("(document.getElementById('wallet') || {}).innerText || ''");
+  const aware = await homeAware();
+  try {
+    await b.go(HOME, 20_000);
+    let s = await b.state();
+    const at = await b.evaluate('location.href');
+    report('at home: held until verified, loads, no reload', at === HOME && !s.overlay && /a git remote on the Internet Computer/.test(s.text) && s.loads === 1, { at, ...s });
+    const w = await wallet();
+    if (aware) report('at home the console offers a wallet, and reads the git canister across origins', /connect/i.test(w) && /ic-vote/.test(await b.evaluate('document.body.innerText')), w);
+    else skip('at home the console offers a wallet, and reads the git canister across origins', 'the recorded ic-git#site predates its home (docs/TENANCY.md, "Putting the console at its domain", step 3)');
+    const calls = {
+      ledger: await b.call('https://icp-api.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
+      icgit: await b.call('https://icp-api.io/api/v2/canister/umobs-yiaaa-aaaab-agyrq-cai/query'),
+      unknown: await b.call('https://icp-api.io/api/v2/canister/aaaaa-aa/query'),
+      otherHost: await b.call('https://icp0.io/api/v2/canister/ryjl3-tyaaa-aaaaa-aaaba-cai/query'),
+    };
+    report('at home: calls to judged canisters go through, a canister nobody judged or another IC host is blocked',
+      /^http/.test(calls.ledger) && /^http/.test(calls.icgit) && calls.unknown === 'blocked' && calls.otherHost === 'blocked', calls);
+    hijacked = true;
+    await b.go(HOME, 15_000);
+    s = await b.state();
+    const asked = b.log.filter(r => r.home && /evil\.js|tracker\.png/.test(r.path)).map(r => r.path);
+    report('hijacked home: stop page, the domain\'s page never shown or run, and asks for nothing',
+      s.overlay && s.pwned === 0 && !/HACKED/.test(s.text) && asked.length === 0, { asked, ...s });
+    await b.go(new URL('/login.html', HOME).href, 10_000);
+    s = await b.state();
+    report('hijacked home, another page there: covered by no record, stop page, nothing runs', s.overlay && s.pwned === 0 && !/HACKED/.test(s.text), s);
+    hijacked = false;
+    for (const url of ['https://ic-git.com./', 'https://ic-git.com:8443/', 'https://user@ic-git.com./']) {
+      const got = await b.nav(url);
+      report('blocked: ' + url, /NS_ERROR_ABORT/.test(got), got);
+    }
+    await b.go('http://ic-git.com/', 20_000);
+    const up = await b.evaluate('location.href');
+    s = await b.state();
+    report('home over http: upgraded, checked, loads', up === HOME && !s.overlay && /a git remote on the Internet Computer/.test(s.text), { at: up, ...s });
+    await b.go('https://example.com/', 4_000);
+    await b.evaluate(`(() => {
+      for (const src of ['https://example.com/?framed', '${HOME}', 'https://x@ic-git.com/']) {
+        const f = document.createElement('iframe');
+        f.src = src;
+        document.body.append(f);
+      }
+      const o = document.createElement('object');
+      o.type = 'text/html';
+      o.data = '${HOME}';
+      document.body.append(o);
+    })()`);
+    await sleep(8_000);
+    const frames = await b.frames();
+    const hostOf = url => { try { return new URL(url).host; } catch { return ''; } };
+    report('home blocked in a frame and in an object, with a user name too',
+      frames.every(f => !f.uri.startsWith('error: ')) && frames.some(f => f.uri === 'https://example.com/?framed') &&
+      frames.every(f => hostOf(f.uri) !== 'ic-git.com'), frames);
   } finally { await b.close(); }
 }
 
